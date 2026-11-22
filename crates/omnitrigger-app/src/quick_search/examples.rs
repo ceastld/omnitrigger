@@ -2333,6 +2333,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "先按地区文本再按金额排列 CSV",
+        query: "CSV: 多列排序 [[\"地区\",\"文本升序\"],[3,\"数值降序\"]] 编号,地区,金额\n001,区域10,1\n002,区域2,1.50\n003,区域2,2e0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定列数值降序排列 CSV 行",
         query: "CSV: 数值降序 2 编号,金额\n001,12.50\n002,-2.75\n003,3/2",
     },

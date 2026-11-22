@@ -2,6 +2,30 @@ use std::cmp::Ordering;
 
 use super::calculator::CalculationError;
 
+pub(super) const MAX_SORT_FIELDS: usize = 8;
+
+#[derive(Clone, Copy, serde::Deserialize)]
+pub(super) enum FieldSortOrder {
+    #[serde(rename = "文本升序", alias = "text-asc")]
+    TextAscending,
+    #[serde(rename = "文本降序", alias = "text-desc")]
+    TextDescending,
+    #[serde(rename = "数值升序", alias = "numeric-asc")]
+    NumberAscending,
+    #[serde(rename = "数值降序", alias = "numeric-desc")]
+    NumberDescending,
+}
+
+impl FieldSortOrder {
+    pub(super) fn descending(self) -> bool {
+        matches!(self, Self::TextDescending | Self::NumberDescending)
+    }
+
+    pub(super) fn numeric(self) -> bool {
+        matches!(self, Self::NumberAscending | Self::NumberDescending)
+    }
+}
+
 pub(super) enum IndexRangeError {
     Invalid,
     OutOfBounds,

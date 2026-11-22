@@ -19,7 +19,9 @@ use super::{
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal, FractionError,
     },
-    operators::{select_index_ranges, IndexRangeError, NumberComparison},
+    operators::{
+        select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
+    },
     statistics::{summarize_unweighted, StatisticsError},
     text_tools::{compare_natural, compile_regex, newline_pattern, TextError},
 };
@@ -74,6 +76,7 @@ pub(super) enum CsvError {
     StatisticsColumn,
     AggregateColumn,
     GroupingColumns,
+    SortFields,
     PivotColumns,
     UnpivotArguments,
     UnpivotColumns,
@@ -133,6 +136,9 @@ impl CsvError {
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
+            Self::SortFields => {
+                "填写 1 至 8 个 [列,排序方式]，例如 [[\"地区\",\"文本升序\"],[2,\"数值降序\"]]"
+            }
             Self::PivotColumns => {
                 "用 JSON 数组填写互不重复的行、列和数值列，例如 [\"地区\",\"状态\",\"金额\"]"
             }
@@ -204,6 +210,7 @@ enum Operation {
         descending: bool,
         numeric: bool,
     },
+    SortWithOrders(Vec<(ColumnReference, FieldSortOrder)>),
 }
 
 #[derive(Deserialize)]
@@ -493,6 +500,17 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             input = data;
             Operation::Unpivot(columns, [label, value])
         }
+        "多列排序" | "sort-by-fields" => {
+            let (rules, data) = json_argument_and_data::<Vec<(ColumnReference, FieldSortOrder)>>(
+                input,
+                CsvError::SortFields,
+            )?;
+            if !(1..=MAX_SORT_FIELDS).contains(&rules.len()) {
+                return Err(CsvError::SortFields);
+            }
+            input = data;
+            Operation::SortWithOrders(rules)
+        }
         "排序" | "sort-columns" | "降序" | "sort-columns-desc" | "数值排序" | "sort-numeric"
         | "数值降序" | "sort-numeric-desc" => {
             let (columns, data) =
@@ -604,6 +622,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             descending,
             numeric,
         } => sort_by_columns(&rows, &columns, descending, numeric),
+        Operation::SortWithOrders(rules) => sort_with_orders(&rows, rules),
     }
 }
 
@@ -1326,6 +1345,45 @@ fn sort_by_columns(
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let ordered = order_records(records.iter(), &columns, descending, numeric)?;
+    Ok(write_rows(std::iter::once(header).chain(ordered), ','))
+}
+
+fn sort_with_orders(
+    rows: &[Vec<String>],
+    rules: Vec<(ColumnReference, FieldSortOrder)>,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let mut seen = HashSet::new();
+    let fields = rules
+        .into_iter()
+        .map(|(reference, order)| {
+            let column = reference.resolve(header)?;
+            validate_column_width(&[column], header.len())?;
+            if !seen.insert(column) {
+                return Err(CsvError::SortFields);
+            }
+            Ok((column, order))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut ordered: Vec<_> = records.iter().collect();
+    for (column, order) in fields.into_iter().rev() {
+        ordered = order_records(
+            ordered.into_iter(),
+            &[column],
+            order.descending(),
+            order.numeric(),
+        )?;
+    }
+    Ok(write_rows(std::iter::once(header).chain(ordered), ','))
+}
+
+fn order_records<'a>(
+    records: impl Iterator<Item = &'a Vec<String>>,
+    columns: &[usize],
+    descending: bool,
+    numeric: bool,
+) -> Result<Vec<&'a Vec<String>>, CsvError> {
     let direction = |order: Ordering| {
         if descending {
             order.reverse()
@@ -1335,7 +1393,6 @@ fn sort_by_columns(
     };
     let ordered = if numeric {
         let mut keyed = records
-            .iter()
             .map(|row| {
                 let key = columns
                     .iter()
@@ -1349,7 +1406,7 @@ fn sort_by_columns(
         keyed.sort_by(|(left, _), (right, _)| direction(left.cmp(right)));
         keyed.into_iter().map(|(_, row)| row).collect::<Vec<_>>()
     } else {
-        let mut ordered: Vec<_> = records.iter().collect();
+        let mut ordered: Vec<_> = records.collect();
         ordered.sort_by(|left, right| {
             let order = columns
                 .iter()
@@ -1360,7 +1417,7 @@ fn sort_by_columns(
         });
         ordered
     };
-    Ok(write_rows(std::iter::once(header).chain(ordered), ','))
+    Ok(ordered)
 }
 
 fn summarize_column(
@@ -2222,6 +2279,24 @@ mod tests {
         assert_eq!(
             transform_csv("按列去重 1,1 编号"),
             Err(CsvError::InvalidColumns)
+        );
+    }
+
+    #[test]
+    fn stably_sorts_csv_using_mixed_column_directions_and_types() {
+        let data = "编号,地区,金额\n001,区域10,1\n002,区域2,1.50\n003,区域2,2e0\n004,区域2,1.500";
+        assert_eq!(
+            transform_csv(&format!("多列排序 [[\"地区\",\"文本升序\"],[3,\"数值降序\"]] {data}"))
+                .as_deref(),
+            Ok("编号,地区,金额\r\n003,区域2,2e0\r\n002,区域2,1.50\r\n004,区域2,1.500\r\n001,区域10,1")
+        );
+        assert_eq!(
+            transform_csv(r#"多列排序 [["地区","文本升序"],[2,"数值降序"]] 编号,地区"#),
+            Err(CsvError::SortFields)
+        );
+        assert_eq!(
+            transform_csv("sort-by-fields [[2,\"numeric-asc\"]] 地区,金额\n东,"),
+            Err(CsvError::InvalidNumber)
         );
     }
 

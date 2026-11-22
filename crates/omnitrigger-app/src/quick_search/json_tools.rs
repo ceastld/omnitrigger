@@ -13,13 +13,12 @@ use serde_json::value::RawValue;
 
 use super::csv_tools::csv_cell;
 use super::fraction::{ensure_exact_size, parse_fraction_literal};
-use super::operators::NumberComparison;
+use super::operators::{FieldSortOrder, NumberComparison, MAX_SORT_FIELDS};
 use super::text_tools::compare_natural;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
 const MAX_FILTER_CONDITIONS: usize = 16;
-const MAX_SORT_FIELDS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JsonError {
@@ -928,21 +927,9 @@ fn json_sort_text(value: &RawValue) -> Result<String, JsonError> {
     }
 }
 
-#[derive(Clone, Copy, serde::Deserialize)]
-enum JsonSortOrder {
-    #[serde(rename = "文本升序", alias = "text-asc")]
-    TextAscending,
-    #[serde(rename = "文本降序", alias = "text-desc")]
-    TextDescending,
-    #[serde(rename = "数值升序", alias = "numeric-asc")]
-    NumberAscending,
-    #[serde(rename = "数值降序", alias = "numeric-desc")]
-    NumberDescending,
-}
-
 fn sort_json_by_pointers(query: &str) -> Result<String, JsonError> {
     let (input, source) = json_value_and_source(query, JsonError::SortFields)?;
-    let rules = serde_json::from_str::<Vec<(String, JsonSortOrder)>>(input.get())
+    let rules = serde_json::from_str::<Vec<(String, FieldSortOrder)>>(input.get())
         .map_err(|_| JsonError::SortFields)?;
     if !(1..=MAX_SORT_FIELDS).contains(&rules.len()) {
         return Err(JsonError::SortFields);
@@ -961,23 +948,19 @@ fn sort_json_by_pointers(query: &str) -> Result<String, JsonError> {
     let mut items = read_json_array(source)?;
     // 稳定排序先处理低优先级路径，再处理高优先级路径。
     for (keys, order) in fields.into_iter().rev() {
-        let descending = matches!(
-            order,
-            JsonSortOrder::TextDescending | JsonSortOrder::NumberDescending
-        );
-        items = match order {
-            JsonSortOrder::TextAscending | JsonSortOrder::TextDescending => {
-                sort_json_items(items, &keys, descending, json_sort_text, |left, right| {
-                    compare_natural(left, right)
-                })?
-            }
-            JsonSortOrder::NumberAscending | JsonSortOrder::NumberDescending => sort_json_items(
+        let descending = order.descending();
+        items = if order.numeric() {
+            sort_json_items(
                 items,
                 &keys,
                 descending,
                 json_sort_number,
                 JsonNumber::compare,
-            )?,
+            )?
+        } else {
+            sort_json_items(items, &keys, descending, json_sort_text, |left, right| {
+                compare_natural(left, right)
+            })?
         };
     }
     Ok(serde_json::to_string(&items).expect("有效的原始 JSON 值可以直接序列化"))
