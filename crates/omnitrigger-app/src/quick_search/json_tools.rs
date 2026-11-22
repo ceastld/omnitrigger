@@ -178,6 +178,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "去注释" | "strip-comments" => return format_json(&strip_json_comments(source)?, true),
         "键排序" | "sort-keys" => return rewrite_object_keys(source, ObjectKeyMode::Sort),
         "取值" | "get" | "pointer" => return select_json_value(source),
+        "类型" | "type" => return json_value_type(source),
         "取多路径" | "get-paths" => return select_json_paths(source),
         "取列" | "column" => return select_json_column(source),
         "合并子数组" | "flatten-arrays" => return flatten_json_arrays(source),
@@ -388,6 +389,21 @@ fn select_json_value(query: &str) -> Result<String, JsonError> {
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let value = select_json_path(root, &pointer)?;
     Ok(value.get().to_owned())
+}
+
+fn json_value_type(query: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let value = select_json_path(root, &pointer)?;
+    let kind = match value.get().as_bytes()[0] {
+        b'{' => "object",
+        b'[' => "array",
+        b'"' => "string",
+        b't' | b'f' => "boolean",
+        b'n' => "null",
+        _ => "number",
+    };
+    serde_json::to_string(kind).map_err(json_parse_error)
 }
 
 fn select_json_paths(query: &str) -> Result<String, JsonError> {
@@ -3169,6 +3185,36 @@ mod tests {
             Err(JsonError::DuplicateKey)
         );
         assert_eq!(transform_json("递归去空字段 null").as_deref(), Ok("null"));
+    }
+
+    #[test]
+    fn reports_the_type_at_a_json_pointer_without_rewriting_values() {
+        let source = r#"{"a/b":[9007199254740993,1e100000000000000000000,true,null,"1",{},[]]}"#;
+        for (pointer, wanted) in [
+            ("/a~1b", r#""array""#),
+            ("/a~1b/0", r#""number""#),
+            ("/a~1b/1", r#""number""#),
+            ("/a~1b/2", r#""boolean""#),
+            ("/a~1b/3", r#""null""#),
+            ("/a~1b/4", r#""string""#),
+            ("/a~1b/5", r#""object""#),
+            ("/a~1b/6", r#""array""#),
+        ] {
+            let query = format!("类型 {pointer} {source}");
+            assert_eq!(transform_json(&query).as_deref(), Ok(wanted), "{query}");
+        }
+        assert_eq!(
+            transform_json(r#"type "" false"#).as_deref(),
+            Ok(r#""boolean""#)
+        );
+        assert_eq!(
+            transform_json("类型 /缺少 {}"),
+            Err(JsonError::MissingValue)
+        );
+        assert_eq!(
+            transform_json(r#"类型 /a {"a":null,"a":1}"#),
+            Err(JsonError::DuplicateKey)
+        );
     }
 
     #[test]
