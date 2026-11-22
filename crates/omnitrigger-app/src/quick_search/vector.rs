@@ -60,6 +60,8 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
             | "distance"
             | "投影"
             | "project"
+            | "分解"
+            | "decompose"
             | "夹角余弦"
             | "余弦相似度"
             | "cosine"
@@ -72,13 +74,19 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
     match operation.as_str() {
         "叉积" | "cross" => cross_product(&left, &right),
         _ if left.len() != right.len() => Err(VectorError::Dimensions),
-        "投影" | "project" => project_vector(&left, &right),
+        "投影" | "project" => Ok(format_vector(&project_vector(&left, &right)?)),
+        "分解" | "decompose" => {
+            let parallel = project_vector(&left, &right)?;
+            let perpendicular = vector_difference(&left, &parallel)?;
+            Ok(format!(
+                "平行 {}\n垂直 {}",
+                format_vector(&parallel),
+                format_vector(&perpendicular),
+            ))
+        }
         "夹角余弦" | "余弦相似度" | "cosine" => vector_cosine(&left, &right),
         "距离" | "distance" => {
-            let differences: Vec<_> = left.iter().zip(&right).map(|(a, b)| a - b).collect();
-            for value in &differences {
-                ensure_exact_size(value).map_err(VectorError::Evaluation)?;
-            }
+            let differences = vector_difference(&left, &right)?;
             Ok(format_square_root(&dot_product(
                 &differences,
                 &differences,
@@ -113,22 +121,43 @@ fn dot_product(left: &[BigRational], right: &[BigRational]) -> Result<BigRationa
 fn project_vector(
     vector: &[BigRational],
     direction: &[BigRational],
-) -> Result<String, VectorError> {
+) -> Result<Vec<BigRational>, VectorError> {
     let squared_length = dot_product(direction, direction)?;
     if squared_length == BigRational::default() {
         return Err(VectorError::ZeroDirection);
     }
     let scale = dot_product(vector, direction)? / squared_length;
     ensure_exact_size(&scale).map_err(VectorError::Evaluation)?;
-    let components = direction
+    direction
         .iter()
         .map(|component| {
             let value = component * &scale;
             ensure_exact_size(&value).map_err(VectorError::Evaluation)?;
-            Ok(value.to_string())
+            Ok(value)
         })
-        .collect::<Result<Vec<_>, VectorError>>()?;
-    Ok(components.join(", "))
+        .collect()
+}
+
+fn vector_difference(
+    left: &[BigRational],
+    right: &[BigRational],
+) -> Result<Vec<BigRational>, VectorError> {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| {
+            let value = a - b;
+            ensure_exact_size(&value).map_err(VectorError::Evaluation)?;
+            Ok(value)
+        })
+        .collect()
+}
+
+fn format_vector(values: &[BigRational]) -> String {
+    values
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn vector_cosine(left: &[BigRational], right: &[BigRational]) -> Result<String, VectorError> {
@@ -156,6 +185,26 @@ fn cross_product(left: &[BigRational], right: &[BigRational]) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decomposes_a_vector_into_exact_parallel_and_perpendicular_components() {
+        for (query, expected) in [
+            ("分解 2,1; 1,1", "平行 3/2, 3/2\n垂直 1/2, -1/2"),
+            ("decompose 1,2,3; 0,-1,0", "平行 0, 2, 0\n垂直 1, 0, 3"),
+            ("分解 2,0; -1,0", "平行 2, 0\n垂直 0, 0"),
+            ("分解 0,0; 1,0", "平行 0, 0\n垂直 0, 0"),
+        ] {
+            assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_vector("分解 1,2; 0,0"),
+            Err(VectorError::ZeroDirection)
+        );
+        assert_eq!(
+            calculate_vector("分解 1; 1,2"),
+            Err(VectorError::Dimensions)
+        );
+    }
 
     #[test]
     fn computes_exact_vector_products_norms_and_distances() {

@@ -171,6 +171,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "将向量分解成平行和垂直分量",
+        query: "向量: 分解 2,1; 1,1",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "求两个向量的精确夹角余弦",
         query: "向量: 夹角余弦 1,1; -1,0",
     },
