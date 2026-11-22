@@ -1838,6 +1838,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "从基准目录计算到目标的相对路径",
+        query: r#"路径: 相对路径 ["C:\\工作\\资料","C:\\工作\\发布\\2026.txt"]"#,
+    },
+    Example {
+        icon: Icon::Layers,
         title: "把绝对路径转换为可复制的文件网址",
         query: r"路径: 转文件网址 C:\docs\report 2026.txt",
     },

@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix, MAIN_SEPARATOR_STR};
 
 use url::Url;
 
@@ -13,6 +13,8 @@ pub(super) enum PathError {
     InvalidFileUrl,
     JoinArguments,
     RelativePartRequired,
+    RelativeArguments,
+    RelativeDifferentRoot,
     ExtensionArguments,
     InvalidExtension,
     MissingPart,
@@ -28,6 +30,10 @@ impl PathError {
             Self::InvalidFileUrl => "请填写能转换为绝对路径的 file:// 网址，省略查询串和片段",
             Self::JoinArguments => "用 JSON 字符串数组填写起始路径和至少一条相对路径",
             Self::RelativePartRequired => "起始路径后的每一条路径须为相对路径",
+            Self::RelativeArguments => {
+                "用 JSON 数组填写普通盘符或共享目录下的两个绝对路径，路径里省略 .."
+            }
+            Self::RelativeDifferentRoot => "基准目录和目标须在同一盘符或同一共享根目录下",
             Self::ExtensionArguments => "用 JSON 字符串数组填写路径和新扩展名",
             Self::InvalidExtension => "扩展名须为文件名后缀，可用空字符串删除",
             Self::MissingPart => "这条路径没有所选部分",
@@ -43,6 +49,7 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
     match operation.as_str() {
         "换扩展名" | "replace-extension" => return replace_extension(input.trim()),
         "拼接" | "join" => return join_paths(input.trim()),
+        "相对路径" | "relative" => return relative_path(input.trim()),
         _ => {}
     }
     let input = strip_path_quotes(input.trim());
@@ -119,6 +126,59 @@ fn join_paths(input: &str) -> Result<String, PathError> {
         .map_err(|_| PathError::InvalidPath)
 }
 
+fn relative_path(input: &str) -> Result<String, PathError> {
+    let paths = serde_json::from_str::<[String; 2]>(input).map_err(|error| {
+        if error.is_eof() {
+            PathError::Incomplete
+        } else {
+            PathError::RelativeArguments
+        }
+    })?;
+    for input in &paths {
+        let path = Path::new(input);
+        if input.contains(INVALID_PATH_TEXT)
+            || !path.is_absolute()
+            || path.components().any(|part| match part {
+                Component::ParentDir => true,
+                Component::Prefix(prefix) => {
+                    !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+                }
+                _ => false,
+            })
+        {
+            return Err(PathError::RelativeArguments);
+        }
+    }
+    let [base, target] = paths.each_ref().map(Path::new);
+    let mut base = base.components().peekable();
+    let mut target = target.components().peekable();
+    if base.next() != target.next() {
+        return Err(PathError::RelativeDifferentRoot);
+    }
+    while base.peek().is_some() && base.peek() == target.peek() {
+        base.next();
+        target.next();
+    }
+    let mut parts = vec![".."; base.count()];
+    for part in target {
+        let Component::Normal(name) = part else {
+            return Err(PathError::RelativeArguments);
+        };
+        parts.push(name.to_str().ok_or(PathError::InvalidPath)?);
+    }
+    if parts.is_empty() {
+        return Ok(".".to_owned());
+    }
+    let result = parts.join(MAIN_SEPARATOR_STR);
+    if matches!(
+        Path::new(&result).components().next(),
+        Some(Component::Prefix(_))
+    ) {
+        return Ok(format!(".{MAIN_SEPARATOR_STR}{result}"));
+    }
+    Ok(result)
+}
+
 fn replace_extension(input: &str) -> Result<String, PathError> {
     let [source, extension] = serde_json::from_str::<[String; 2]>(input).map_err(|error| {
         if error.is_eof() {
@@ -163,6 +223,55 @@ pub(super) fn strip_path_quotes(input: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requires_absolute_paths_without_parent_components_for_relative_calculation() {
+        for input in [r#"相对路径 ["工作","结果.txt"]"#, r#"相对路径 ["工作"]"#] {
+            assert_eq!(path_component(input), Err(PathError::RelativeArguments));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn finds_relative_paths_within_one_drive_or_unc_share() {
+        for (input, expected) in [
+            (
+                r#"相对路径 ["C:\\工作\\资料","C:\\工作\\发布\\2026.txt"]"#,
+                r"..\发布\2026.txt",
+            ),
+            (
+                r#"relative ["C:/工作","C:\\工作\\发布\\2026.txt"]"#,
+                r"发布\2026.txt",
+            ),
+            (r#"relative ["C:\\docs","C:\\docs"]"#, "."),
+            (
+                r#"relative ["\\\\server\\share\\a","\\\\server\\share\\b.txt"]"#,
+                r"..\b.txt",
+            ),
+        ] {
+            assert_eq!(path_component(input).as_deref(), Ok(expected), "{input}");
+        }
+        for (input, expected) in [
+            (
+                r#"relative ["C:\\docs","D:\\docs"]"#,
+                PathError::RelativeDifferentRoot,
+            ),
+            (
+                r#"relative ["\\\\server\\a","\\\\server\\b"]"#,
+                PathError::RelativeDifferentRoot,
+            ),
+            (
+                r#"relative ["C:\\docs","C:\\docs\\..\\a"]"#,
+                PathError::RelativeArguments,
+            ),
+            (
+                r#"relative ["\\\\?\\C:\\docs","\\\\?\\C:\\a"]"#,
+                PathError::RelativeArguments,
+            ),
+        ] {
+            assert_eq!(path_component(input), Err(expected), "{input}");
+        }
+    }
 
     #[test]
     fn rejects_relative_paths_and_file_urls_that_do_not_identify_plain_paths() {
