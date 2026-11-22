@@ -1789,6 +1789,7 @@ fn json_csv_cell(value: &RawValue) -> Result<String, JsonError> {
 pub(super) enum JsonCellContent {
     Value,
     Type,
+    Length,
 }
 
 pub(super) fn json_cell_at_pointer<'a>(
@@ -1804,6 +1805,10 @@ pub(super) fn json_cell_at_pointer<'a>(
         Ok(value) => match content {
             JsonCellContent::Value => json_csv_text(value),
             JsonCellContent::Type => Ok(Cow::Borrowed(json_type_name(value))),
+            JsonCellContent::Length => match value.get().as_bytes()[0] {
+                b'{' | b'[' => json_length(value.get()).map(Cow::Owned),
+                _ => Ok(Cow::Borrowed("")),
+            },
         },
         Err(JsonError::MissingValue) => Ok(Cow::Borrowed("")),
         Err(error) => Err(error),

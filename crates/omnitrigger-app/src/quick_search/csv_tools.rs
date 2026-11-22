@@ -929,7 +929,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::TextColumn(name, source, TextColumnComputation::RegexCount(pattern))
         }
-        kind @ ("json取值列" | "json-pointer-column" | "json类型列" | "json-type-column") => {
+        kind @ ("json取值列"
+        | "json-pointer-column"
+        | "json类型列"
+        | "json-type-column"
+        | "json长度列"
+        | "json-length-column") => {
             let ((name, source, pointer), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
                     input,
@@ -942,6 +947,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             let content = match kind {
                 "json类型列" | "json-type-column" => JsonCellContent::Type,
+                "json长度列" | "json-length-column" => JsonCellContent::Length,
                 _ => JsonCellContent::Value,
             };
             Operation::JsonPointerColumn(name, source, keys, content)
@@ -5408,6 +5414,40 @@ mod tests {
             "a".repeat(1100)
         );
         assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
+    }
+
+    #[test]
+    fn counts_array_elements_and_object_entries_in_json_pointer_cells() {
+        let query = r#"JSON长度列 ["项数","数据","/商品"]
+编号,数据
+1,"{""商品"":[""茶"",{""名称"":""梨""}]}"
+2,"{""商品"":{""茶"":1,""茶"":2,""梨"":3}}"
+3,"{""商品"":[]}"
+4,"{""商品"":""茶""}"
+5,{}
+6,"{""商品"":null}"
+7,"{""商品"":{}}""#;
+        let expected = [
+            "编号,数据,项数",
+            r#"1,"{""商品"":[""茶"",{""名称"":""梨""}]}",2"#,
+            r#"2,"{""商品"":{""茶"":1,""茶"":2,""梨"":3}}",3"#,
+            r#"3,"{""商品"":[]}",0"#,
+            r#"4,"{""商品"":""茶""}","""#,
+            r#"5,{},"""#,
+            r#"6,"{""商品"":null}","""#,
+            r#"7,"{""商品"":{}}",0"#,
+        ]
+        .join("\r\n");
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected.as_str()));
+        assert_eq!(
+            transform_csv(
+                r#"json-length-column ["项数",1,""] 原列
+[]
+[1]"#
+            )
+            .as_deref(),
+            Ok("原列,项数\r\n[],0\r\n[1],1")
+        );
     }
 
     #[test]
