@@ -14,6 +14,7 @@ const FORM_VALUE: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
     .remove(b'_');
+const MAX_QUERY_PARAMETER_UPDATES: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UrlEncodingError {
@@ -31,6 +32,7 @@ pub(super) enum UrlEncodingError {
     RelativeUrlUnavailable,
     InvalidParameterPair,
     InvalidParameterList,
+    InvalidParameterUpdates,
     InvalidParameterNames,
     ParameterLookupArguments,
     InvalidFilePath,
@@ -59,6 +61,9 @@ impl UrlEncodingError {
             Self::RelativeUrlUnavailable => "无法用该基准网址生成可还原的相对链接",
             Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
             Self::InvalidParameterList => "用 JSON 数组填写多组名称和值，例如 [[\"tag\",\"茶\"]]",
+            Self::InvalidParameterUpdates => {
+                "用 JSON 数组填写 1 至 16 组名称和值，再输入 URL。设置时名称须互不重复"
+            }
             Self::InvalidParameterNames => "用 JSON 字符串数组填写参数名，再输入 URL",
             Self::ParameterLookupArguments => "用双引号填写参数名，再输入 URL 或查询串",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
@@ -139,6 +144,8 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "去重参数" | "unique-params" => deduplicate_query_parameters(value),
         "加参数" | "append-param" => write_parameter(value, false),
         "设参数" | "set-param" => write_parameter(value, true),
+        "加参数组" | "append-params" => write_parameter_group(value, false),
+        "设参数组" | "set-params" => write_parameter_group(value, true),
         "文件链接" | "file-url" => encode_file_path(value),
         "文件路径" | "file-path" => decode_file_path(value),
         _ => Err(UrlEncodingError::InvalidOperation),
@@ -435,29 +442,56 @@ fn parameter_argument<T: DeserializeOwned>(
 }
 
 fn write_parameter(input: &str, replace_existing: bool) -> Result<String, UrlEncodingError> {
-    let ([name, value], address) =
+    let (pair, address) =
         parameter_argument::<[String; 2]>(input, UrlEncodingError::InvalidParameterPair)?;
+    write_query_parameters(address, [pair], replace_existing)
+}
+
+fn write_parameter_group(input: &str, replace_existing: bool) -> Result<String, UrlEncodingError> {
+    let (pairs, address) =
+        parameter_argument::<Vec<[String; 2]>>(input, UrlEncodingError::InvalidParameterUpdates)?;
+    let mut names = HashSet::new();
+    if !(1..=MAX_QUERY_PARAMETER_UPDATES).contains(&pairs.len())
+        || (replace_existing && pairs.iter().any(|[name, _]| !names.insert(name)))
+    {
+        return Err(UrlEncodingError::InvalidParameterUpdates);
+    }
+    write_query_parameters(address, pairs, replace_existing)
+}
+
+fn write_query_parameters(
+    address: &str,
+    pairs: impl IntoIterator<Item = [String; 2]>,
+    replace_existing: bool,
+) -> Result<String, UrlEncodingError> {
     let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair(&name, &value);
-    let pair = serializer.finish();
-    let mut parts: Vec<&str> = Vec::new();
-    let mut inserted = false;
+    let mut pairs: Vec<_> = pairs
+        .into_iter()
+        .map(|[name, value]| {
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            serializer.append_pair(&name, &value);
+            (name, Some(serializer.finish()))
+        })
+        .collect();
+    let mut parts = Vec::new();
     if let Some(query) = url.query().filter(|query| !query.is_empty()) {
         for part in query.split('&') {
-            if replace_existing && parameter_name(part).is_some_and(|key| key == name) {
-                if !inserted {
-                    parts.push(&pair);
-                    inserted = true;
-                }
+            let replacement = replace_existing
+                .then(|| parameter_name(part))
+                .flatten()
+                .and_then(|name| pairs.iter_mut().find(|pair| pair.0 == name));
+            if let Some((_, replacement)) = replacement {
+                parts.extend(replacement.take().map(Cow::Owned));
             } else {
-                parts.push(part);
+                parts.push(Cow::Borrowed(part));
             }
         }
     }
-    if !inserted {
-        parts.push(&pair);
-    }
+    parts.extend(
+        pairs
+            .into_iter()
+            .filter_map(|(_, pair)| pair.map(Cow::Owned)),
+    );
     url.set_query(Some(&parts.join("&")));
     Ok(url.into())
 }
@@ -687,6 +721,43 @@ mod tests {
         assert_eq!(
             convert_url_component(r#"set-param ["tag"] https://example.invalid/"#),
             Err(UrlEncodingError::InvalidParameterPair)
+        );
+    }
+
+    #[test]
+    fn sets_and_appends_parameter_groups_in_order_without_reencoding_unrelated_fields() {
+        for (query, expected) in [
+            (
+                r#"设参数组 [["lang","zh"],["q","新 +"],["tag","茶"],["page","2"]] https://example.invalid/doc?page=1&raw=a%20b&q=first&%70age=3&Q=stay#x"#,
+                "https://example.invalid/doc?page=2&raw=a%20b&q=%E6%96%B0+%2B&Q=stay&lang=zh&tag=%E8%8C%B6#x",
+            ),
+            (
+                r#"append-params [["tag","a +"],["tag",""],["","v"]] https://example.invalid/?tag=first#x"#,
+                "https://example.invalid/?tag=first&tag=a+%2B&tag=&=v#x",
+            ),
+            (
+                r#"set-params [["","v"],["a +","b"]] https://example.invalid/?=0&&a%20%2b=1&%FF=2#x"#,
+                "https://example.invalid/?=v&&a+%2B=b&%FF=2#x",
+            ),
+        ] {
+            assert_eq!(convert_url_component(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            r#"设参数组 [["tag","a"],["tag","b"]] https://example.invalid/"#,
+            r#"加参数组 [] https://example.invalid/"#,
+            r#"设参数组 [["tag"]] https://example.invalid/"#,
+        ] {
+            assert_eq!(
+                convert_url_component(query),
+                Err(UrlEncodingError::InvalidParameterUpdates),
+                "{query}"
+            );
+        }
+        let repeated = ["[\"tag\",\"a\"]"; MAX_QUERY_PARAMETER_UPDATES + 1].join(",");
+        let query = format!("加参数组 [{repeated}] https://example.invalid/");
+        assert_eq!(
+            convert_url_component(&query),
+            Err(UrlEncodingError::InvalidParameterUpdates)
         );
     }
 

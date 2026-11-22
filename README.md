@@ -293,6 +293,7 @@
 - 输入 `URL: 相对 ["https://example.invalid/docs/api/","https://example.invalid/docs/guide?lang=zh#intro"]` 得到 `../guide?lang=zh#intro`。两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息，生成的链接可以用原基准网址拼接还原。 [Rust URL 相对链接生成](https://docs.rs/url/2.5.8/url/struct.Url.html#method.make_relative)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)
 - 输入 `URL: 加参数 ["tag","茶"] https://example.invalid/doc?tag=first#part` 会在末尾追加一项。用 `URL: 设参数` 会替换第一个同名项并移除其余同名项。其他查询参数保留编码和顺序。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
+- 输入 `URL: 设参数组 [["page","2"],["lang","zh"]] https://example.invalid/doc?page=1&q=a%20b&page=3#part` 可同时更新多个不同名称的参数，得到 `https://example.invalid/doc?page=2&q=a%20b&lang=zh#part`。新增项按填写顺序追加。用 `加参数组` 可追加包含同名项的一组参数。每次最多填写 16 项。
 - 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `路径: 文件名 "C:\工作\发布 包.tar.gz"` 得到 `发布 包.tar.gz`。换用 `主名`、`扩展名` 或 `上一级`，可分别提取 `发布 包.tar`、`gz` 或 `C:\工作`。操作直接解析粘贴的路径文本。 [Rust 路径组件](https://doc.rust-lang.org/std/path/struct.Path.html)
 - 输入 `路径: 换扩展名 ["C:\\工作\\发布 包.tar.gz",".zip"]` 得到 `C:\工作\发布 包.tar.zip`。用空字符串可删除最后一个扩展名，结果是可复制的路径文本。 [Rust 路径扩展名替换](https://doc.rust-lang.org/std/path/struct.Path.html#method.with_extension)
@@ -397,6 +398,7 @@
 - 同样可用 `分组最小` 或 `分组最大` 求每组的极值。支持列名和列号，按精确数值比较，结果沿用分组首次出现的顺序。
 - 用 `CSV: 分组极差 ["状态"] "金额"` 可求每组最大值与最小值的精确差。只有一个值的组输出 0。
 - 用 `CSV: 分组中位数 ["状态"] "金额"` 可按组计算所选数值列的中位数。组顺序取首次出现的位置，每组最多 128 个有效数值。组内为偶数项时，取中间两项的精确平均。
+- 用 `CSV: 组内最高 [["地区"],"金额",2]` 加上含表头的表格，可保留每个地区金额最高的两条完整记录。用 `组内最低` 可取最小值。每组按所选数值列排序，同值保留原次序，各组按首次出现的位置输出。列名和列号可以混用。
 - 分组计数、合计和平均也支持按表头名称选列，例如 `CSV: 分组平均 ["地区","状态"] "金额"`。分组列用 JSON 数组填写，数组内可以混用列名和列号，每列只能选一次。
 - 用 `CSV: 透视合计 ["地区","状态","金额"]` 加上含表头的表格，可按地区生成行、按状态生成列，并在各交叉格显示金额的精确合计。行和列按首次出现的顺序排列，未出现的组合留空。三列可以混用列名和列号。
 - 用 `CSV: 逆透视 [["地区"],"月份","金额"]` 加上含表头的表格，可保留“地区”，把其余列逐一展开为“月份”和“金额”两列。保留列可混用列名和列号，各行按原列序展开，空单元格照常输出。 [列转行原理](https://learn.microsoft.com/en-us/power-query/unpivot-column)

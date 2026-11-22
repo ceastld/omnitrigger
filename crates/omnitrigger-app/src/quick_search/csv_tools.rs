@@ -99,6 +99,7 @@ pub(super) enum CsvError {
     ColumnBinsArguments,
     AggregateColumn,
     GroupingColumns,
+    GroupSelectionArguments,
     SortFields,
     PivotColumns,
     UnpivotArguments,
@@ -191,6 +192,9 @@ impl CsvError {
             Self::ColumnBinsArguments => "填写列名或列号和边界，例如 [\"金额\",\"0,1/2,2\"]",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
+            Self::GroupSelectionArguments => {
+                "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
+            }
             Self::SortFields => {
                 "填写 1 至 8 个 [列,排序方式]，例如 [[\"地区\",\"文本升序\"],[2,\"数值降序\"]]"
             }
@@ -287,6 +291,12 @@ enum Operation {
     GroupMedian {
         columns: Vec<ColumnReference>,
         amount: ColumnReference,
+    },
+    SelectGroupExtrema {
+        columns: Vec<ColumnReference>,
+        amount: ColumnReference,
+        limit: usize,
+        highest: bool,
     },
     PivotSum([ColumnReference; 3]),
     Unpivot(Vec<ColumnReference>, [String; 2]),
@@ -759,6 +769,23 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::GroupMedian { columns, amount }
         }
+        label @ ("组内最高" | "group-top" | "组内最低" | "group-bottom") => {
+            let ((columns, amount, limit), data) =
+                json_argument_and_data::<(Vec<ColumnReference>, ColumnReference, usize)>(
+                    input,
+                    CsvError::GroupSelectionArguments,
+                )?;
+            if columns.is_empty() || limit == 0 {
+                return Err(CsvError::GroupSelectionArguments);
+            }
+            input = data;
+            Operation::SelectGroupExtrema {
+                columns,
+                amount,
+                limit,
+                highest: matches!(label, "组内最高" | "group-top"),
+            }
+        }
         "列统计" | "column-stats" | "列总体" | "column-population" => {
             let (column, data) = single_column_argument(input, CsvError::StatisticsColumn)?;
             input = data;
@@ -931,6 +958,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             aggregation,
         } => aggregate_by_columns(&rows, &columns, amount, aggregation),
         Operation::GroupMedian { columns, amount } => median_by_columns(&rows, &columns, amount),
+        Operation::SelectGroupExtrema {
+            columns,
+            amount,
+            limit,
+            highest,
+        } => select_group_extrema(&rows, &columns, amount, limit, highest),
         Operation::PivotSum(columns) => pivot_sum(&rows, &columns),
         Operation::Unpivot(columns, names) => unpivot(&rows, &columns, &names),
         Operation::ColumnStatistics { column, sample } => {
@@ -2002,6 +2035,43 @@ fn median_by_columns(
     Ok(grouped_csv(header, &columns, medians, "中位数"))
 }
 
+fn select_group_extrema(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    amount: ColumnReference,
+    limit: usize,
+    highest: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
+    let amount = amount.resolve(header)?;
+    validate_column_width(&[amount], header.len())?;
+    let mut group_indices = HashMap::new();
+    let mut groups: Vec<Vec<_>> = Vec::new();
+    for row in records {
+        let value = parse_fraction_literal(&row[amount]).map_err(|_| CsvError::InvalidNumber)?;
+        let index = *group_indices
+            .entry(column_key(row, &columns))
+            .or_insert_with(|| {
+                let index = groups.len();
+                groups.push(Vec::new());
+                index
+            });
+        groups[index].push((value, row));
+    }
+    let selected = groups.into_iter().flat_map(|mut group| {
+        group.sort_by(|(left, _), (right, _)| {
+            if highest {
+                right.cmp(left)
+            } else {
+                left.cmp(right)
+            }
+        });
+        group.into_iter().take(limit).map(|(_, row)| row)
+    });
+    Ok(write_rows(std::iter::once(header).chain(selected), ','))
+}
+
 fn grouped_csv<'a, T: ToString>(
     header: &[String],
     columns: &[usize],
@@ -2653,6 +2723,43 @@ mod tests {
             ),
             (
                 "列分箱 [2,\"0\"] 编号,金额\n001,坏",
+                CsvError::InvalidNumber,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn keeps_complete_highest_or_lowest_rows_per_group_with_stable_ties() {
+        let input = "地区,班次,金额,备注\n北,A,1/2,甲\n南,A,-2,乙\n北,A,2e0,丙\n北,B,9,丁\n北,A,0.50,戊\n南,A,1/3,己";
+        assert_eq!(
+            transform_csv(&format!("组内最高 [[\"地区\",2],\"金额\",2] {input}")).as_deref(),
+            Ok("地区,班次,金额,备注\r\n北,A,2e0,丙\r\n北,A,1/2,甲\r\n南,A,1/3,己\r\n南,A,-2,乙\r\n北,B,9,丁")
+        );
+        assert_eq!(
+            transform_csv(&format!("group-bottom [[1,2],3,2] {input}")).as_deref(),
+            Ok("地区,班次,金额,备注\r\n北,A,1/2,甲\r\n北,A,0.50,戊\r\n南,A,-2,乙\r\n南,A,1/3,己\r\n北,B,9,丁")
+        );
+        assert_eq!(
+            transform_csv("组内最高 [[1],2,9] 地区,金额").as_deref(),
+            Ok("地区,金额"),
+        );
+        for (query, error) in [
+            (
+                "组内最高 [[1],2,0] 地区,金额",
+                CsvError::GroupSelectionArguments,
+            ),
+            (
+                "组内最低 [[],2,2] 地区,金额",
+                CsvError::GroupSelectionArguments,
+            ),
+            (
+                "组内最高 [[1,\"地区\"],2,3] 地区,金额",
+                CsvError::GroupingColumns,
+            ),
+            (
+                "组内最高 [[1],2,1] 地区,金额\n北,待确认",
                 CsvError::InvalidNumber,
             ),
         ] {

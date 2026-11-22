@@ -2608,6 +2608,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留每组金额最高的两条完整记录",
+        query: "CSV: 组内最高 [[\"地区\"],\"金额\",2] 地区,金额,编号\n北,1/2,001\n南,3,002\n北,2e0,003\n北,0.50,004",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "保留每组金额最低的一条完整记录",
+        query: "CSV: 组内最低 [[\"地区\"],\"金额\",1] 地区,金额,编号\n北,2e0,001\n南,3,002\n北,1/2,003",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按两个分类透视汇总 CSV 数值",
         query: "CSV: 透视合计 [\"地区\",\"状态\",\"金额\"] 地区,状态,金额\n北,完成,1/2\n南,待办,0\n北,完成,2/3\n南,完成,-1",
     },
@@ -2875,6 +2885,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Browser,
         title: "设置查询参数并合并同名项",
         query: r#"URL: 设参数 ["page","2"] https://example.invalid/doc?page=1&q=a%20b&page=3#part"#,
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "同时设置多个查询参数",
+        query: r#"URL: 设参数组 [["page","2"],["lang","zh"]] https://example.invalid/doc?page=1&q=a%20b&page=3#part"#,
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "按顺序追加多个查询参数",
+        query: r#"URL: 加参数组 [["tag","茶"],["tag","咖啡"]] https://example.invalid/doc?tag=first#part"#,
     },
     Example {
         icon: Icon::Browser,
