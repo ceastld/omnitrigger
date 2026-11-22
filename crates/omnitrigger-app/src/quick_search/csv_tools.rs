@@ -87,7 +87,7 @@ pub(super) enum CsvError {
     ClockDifferenceColumnArguments,
     DateOffsetColumnArguments,
     DataConversionTarget(ConversionError),
-    RunningColumnArguments,
+    GroupedColumnArguments,
     MovingColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
@@ -196,7 +196,7 @@ impl CsvError {
                 "填写新列名、来源日期列和整数天数列，例如 [\"到期日期\",\"日期\",\"天数\"]"
             }
             Self::DataConversionTarget(cause) => cause.message(),
-            Self::RunningColumnArguments => {
+            Self::GroupedColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
             }
             Self::MovingColumnArguments => {
@@ -318,6 +318,12 @@ enum Operation {
         source: ColumnReference,
         groups: Vec<ColumnReference>,
         computation: RunningColumnComputation,
+    },
+    RankColumn {
+        name: String,
+        source: ColumnReference,
+        groups: Vec<ColumnReference>,
+        ascending: bool,
     },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
@@ -743,7 +749,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let ((name, source, groups), data) =
                 json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(
                     input,
-                    CsvError::RunningColumnArguments,
+                    CsvError::GroupedColumnArguments,
                 )?;
             input = data;
             Operation::RunningColumn {
@@ -781,6 +787,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     width,
                     average: matches!(kind, "移动平均列" | "moving-average-column"),
                 },
+            }
+        }
+        kind @ ("排名列" | "rank-column" | "升序排名列" | "ascending-rank-column") => {
+            let ((name, source, groups), data) =
+                json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(
+                    input,
+                    CsvError::GroupedColumnArguments,
+                )?;
+            input = data;
+            Operation::RankColumn {
+                name,
+                source,
+                groups,
+                ascending: matches!(kind, "升序排名列" | "ascending-rank-column"),
             }
         }
         "计算列" | "compute-column" => {
@@ -1146,6 +1166,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             groups,
             computation,
         } => running_column(&rows, &name, source, &groups, computation),
+        Operation::RankColumn {
+            name,
+            source,
+            groups,
+            ascending,
+        } => rank_column(&rows, &name, source, &groups, ascending),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -2120,7 +2146,7 @@ fn running_column(
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
-        return Err(CsvError::RunningColumnArguments);
+        return Err(CsvError::GroupedColumnArguments);
     }
     let source = source.resolve(header)?;
     validate_column_width(&[source], header.len())?;
@@ -2214,6 +2240,61 @@ fn running_column(
                 Ok(mean.to_string())
             }
         }
+    })
+}
+
+fn rank_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    groups: &[ColumnReference],
+    ascending: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::GroupedColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, groups, CsvError::GroupingColumns)?;
+    let mut grouped_rows: HashMap<_, Vec<_>> = HashMap::new();
+    for (index, row) in records.iter().enumerate() {
+        let cell = row[source].trim();
+        if cell.is_empty() {
+            continue;
+        }
+        let value = parse_fraction_literal(cell).map_err(|error| CsvError::DataRowValue {
+            row: index + 1,
+            cause: error.message(),
+        })?;
+        grouped_rows
+            .entry(column_key(row, &groups))
+            .or_default()
+            .push((value, index));
+    }
+    let mut ranks = vec![None; records.len()];
+    for group in grouped_rows.values_mut() {
+        group.sort_unstable_by(|left, right| {
+            if ascending {
+                left.0.cmp(&right.0)
+            } else {
+                right.0.cmp(&left.0)
+            }
+        });
+        let mut rank = 1;
+        for (position, (value, index)) in group.iter().enumerate() {
+            if position > 0 && *value != group[position - 1].0 {
+                rank = position + 1;
+            }
+            ranks[*index] = Some(rank);
+        }
+    }
+    let mut ranks = ranks.into_iter();
+    write_appended_column(header, records, name, |_| {
+        Ok(ranks
+            .next()
+            .flatten()
+            .map_or_else(String::new, |rank| rank.to_string()))
     })
 }
 
@@ -4676,6 +4757,23 @@ mod tests {
         assert!(matches!(
             transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:00"),
             Err(CsvError::DataRowValue { row: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn appends_grouped_competition_ranks_without_reordering_records() {
+        let query = "排名列 [\"名次\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/2\n南,2\n北,3/2\n北,0.50\n南,1\n北,0\n北,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("部门,金额,名次\r\n北,1/2,2\r\n南,2,1\r\n北,3/2,1\r\n北,0.50,2\r\n南,1,2\r\n北,0,4\r\n北,\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("升序排名列 [\"名次\",1,[]]\n金额\n1/2\n0.50\n3/2").as_deref(),
+            Ok("金额,名次\r\n1/2,1\r\n0.50,1\r\n3/2,3")
+        );
+        assert!(matches!(
+            transform_csv("rank-column [\"名次\",1,[]]\n金额\n1\n坏值"),
+            Err(CsvError::DataRowValue { row: 2, .. })
         ));
     }
 
