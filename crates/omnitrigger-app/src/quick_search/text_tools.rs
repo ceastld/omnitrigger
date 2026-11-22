@@ -2,6 +2,7 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Write as _,
+    sync::OnceLock,
 };
 
 use base64::{
@@ -43,6 +44,7 @@ pub(super) enum TextError {
     InvalidLineRange,
     MissingLine,
     InvalidNumberLine,
+    InvalidLineEnding,
     EmptySearchText,
     InvalidRegex,
     IncompleteRegexGroup,
@@ -77,6 +79,7 @@ impl TextError {
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::MissingLine => "指定行号超出了文本行数",
             Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
+            Self::InvalidLineEnding => "填写 LF 或 CRLF，然后粘贴原文",
             Self::EmptySearchText => "请输入要查找的文字",
             Self::InvalidRegex => "请检查或缩短正则表达式",
             Self::IncompleteRegexGroup => "输入组名或组号、带引号的正则表达式和原文",
@@ -123,6 +126,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
         "拆分成行" | "split-lines" => return split_lines(text),
+        "转换换行" | "convert-line-endings" => return convert_line_endings(text),
         "正则拆分成行" | "regex-split-lines" => {
             let (pattern, text) = regex_text_argument(text)?;
             return Ok(pattern.split(text).collect::<Vec<_>>().join("\n"));
@@ -203,6 +207,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             Ok(text.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
         }
         "去公共缩进" | "dedent" => Ok(remove_common_indent(text)),
+        "换行统计" | "line-ending-counts" => Ok(count_line_endings(text)),
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
         "按行去重" | "unique-lines" => Ok(join_distinct_lines(text.lines())),
         "按行排序" | "sort-lines" => {
@@ -342,6 +347,42 @@ fn decimal_run(text: &[u8]) -> (&[u8], &[u8]) {
         .position(|&byte| byte != b'0')
         .unwrap_or(digits.len());
     (&digits[significant..], rest)
+}
+
+fn newline_pattern() -> &'static Regex {
+    static NEWLINES: OnceLock<Regex> = OnceLock::new();
+    NEWLINES.get_or_init(|| Regex::new(r"\r\n|\n|\r").expect("固定的换行表达式有效"))
+}
+
+fn count_line_endings(text: &str) -> String {
+    let (mut crlf, mut lf, mut cr) = (0, 0, 0);
+    for newline in newline_pattern()
+        .find_iter(text)
+        .map(|found| found.as_str())
+    {
+        match newline {
+            "\r\n" => crlf += 1,
+            "\n" => lf += 1,
+            "\r" => cr += 1,
+            _ => unreachable!("只匹配三种换行符"),
+        }
+    }
+    format!("CRLF {crlf} · LF {lf} · CR {cr}")
+}
+
+fn convert_line_endings(input: &str) -> Result<String, TextError> {
+    let (target, text) = input
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::InvalidLineEnding)?;
+    let replacement = match target.to_ascii_lowercase().as_str() {
+        "lf" => "\n",
+        "crlf" => "\r\n",
+        _ => return Err(TextError::InvalidLineEnding),
+    };
+    Ok(newline_pattern()
+        .replace_all(text_payload(text)?, replacement)
+        .into_owned())
 }
 
 fn remove_common_indent(text: &str) -> String {
@@ -1098,6 +1139,31 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn counts_and_converts_mixed_line_endings_including_terminal_blank_lines() {
+        let mixed = "\" 甲\r\n乙\r\r丙\n\n\"";
+        assert_eq!(
+            transform_text(&format!("换行统计 {mixed}")).as_deref(),
+            Ok("CRLF 1 · LF 2 · CR 2")
+        );
+        assert_eq!(
+            transform_text(&format!("转换换行 LF {mixed}")).as_deref(),
+            Ok(" 甲\n乙\n\n丙\n\n")
+        );
+        assert_eq!(
+            transform_text(&format!("convert-line-endings crlf {mixed}")).as_deref(),
+            Ok(" 甲\r\n乙\r\n\r\n丙\r\n\r\n")
+        );
+        assert_eq!(
+            transform_text("换行统计 不换行\u{2028}另一段").as_deref(),
+            Ok("CRLF 0 · LF 0 · CR 0")
+        );
+        assert_eq!(
+            transform_text("转换换行 CR 文本"),
+            Err(TextError::InvalidLineEnding)
+        );
     }
 
     #[test]

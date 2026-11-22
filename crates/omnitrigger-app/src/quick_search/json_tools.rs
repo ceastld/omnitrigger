@@ -46,6 +46,7 @@ pub(super) enum JsonError {
     SelectionKeys,
     SelectionConflict,
     FilterValue,
+    ReplacementValue,
     NumberFilter,
     ExpectedScalar,
     ExpectedNumber,
@@ -85,6 +86,7 @@ impl JsonError {
             Self::SelectionKeys => "选键需要至少一个互不重复的键名",
             Self::SelectionConflict => "待选键在同一对象中重复出现",
             Self::FilterValue => "路径后请输入 JSON 字符串、数字、布尔值或 null，再粘贴数组",
+            Self::ReplacementValue => "路径后填入一个完整的新 JSON 值，再用空格隔开原 JSON",
             Self::NumberFilter => "路径后填写比较符和 JSON 数字，例如 /价格 >= 1.5",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
@@ -139,6 +141,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "列指针" | "列路径" | "list-pointers" => return write_pointer_leaves(source, false),
         "展平" | "flatten" => return write_pointer_leaves(source, true),
         "改键" | "rename-key" => return rename_json_key(source),
+        "改值" | "replace" => return replace_json_value(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "转csv" | "to-csv" => return json_to_csv(source),
         "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
@@ -292,6 +295,26 @@ fn select_json_path<'a>(root: &'a RawValue, pointer: &str) -> Result<&'a RawValu
     pointer_keys(pointer)?.try_fold(root, |value, key| select_member(value, &key?))
 }
 
+fn replace_json_value(query: &str) -> Result<String, JsonError> {
+    let (pointer, query) = pointer_and_source(query)?;
+    let (replacement, source) = json_value_and_source(query, JsonError::ReplacementValue)?;
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let selected = select_json_path(root, &pointer)?.get();
+    // 借用的 RawValue 直接指向输入切片，可以用字节位置保留其余原文。
+    let start = selected
+        .as_ptr()
+        .addr()
+        .checked_sub(source.as_ptr().addr())
+        .ok_or(JsonError::Invalid)?;
+    let range = start..start + selected.len();
+    if source.get(range.clone()) != Some(selected) {
+        return Err(JsonError::Invalid);
+    }
+    let mut output = source.to_owned();
+    output.replace_range(range, replacement.get());
+    Ok(output)
+}
+
 fn select_json_column(query: &str) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let items = read_json_array(source)?;
@@ -324,6 +347,17 @@ fn filter_json_by_pointer(query: &str, keep_present: bool) -> Result<String, Jso
 
 fn filter_json_by_scalar(query: &str, keep_match: bool) -> Result<String, JsonError> {
     let (pointer, query) = pointer_and_source(query)?;
+    let (value, source) = json_value_and_source(query, JsonError::FilterValue)?;
+    let expected = json_scalar(value)?.ok_or(JsonError::FilterValue)?;
+    filter_json_items(&pointer, source, keep_match, |value| {
+        Ok(match value {
+            Some(value) => json_scalar(value)?.is_some_and(|scalar| scalar == expected),
+            None => false,
+        })
+    })
+}
+
+fn json_value_and_source(query: &str, invalid: JsonError) -> Result<(&RawValue, &str), JsonError> {
     let mut values = serde_json::Deserializer::from_str(query).into_iter::<&RawValue>();
     let value = values
         .next()
@@ -332,7 +366,7 @@ fn filter_json_by_scalar(query: &str, keep_match: bool) -> Result<String, JsonEr
             if error.is_eof() {
                 JsonError::Incomplete
             } else {
-                JsonError::FilterValue
+                invalid
             }
         })?;
     let source = &query[values.byte_offset()..];
@@ -340,15 +374,9 @@ fn filter_json_by_scalar(query: &str, keep_match: bool) -> Result<String, JsonEr
         return Err(JsonError::Incomplete);
     }
     if !source.starts_with(char::is_whitespace) {
-        return Err(JsonError::FilterValue);
+        return Err(invalid);
     }
-    let expected = json_scalar(value)?.ok_or(JsonError::FilterValue)?;
-    filter_json_items(&pointer, source.trim_start(), keep_match, |value| {
-        Ok(match value {
-            Some(value) => json_scalar(value)?.is_some_and(|scalar| scalar == expected),
-            None => false,
-        })
-    })
+    Ok((value, source.trim_start()))
 }
 
 fn filter_json_numbers(query: &str) -> Result<String, JsonError> {
@@ -2088,6 +2116,29 @@ mod tests {
             transform_json(r#"get /a {"a":[ 1 , 2 ],"b":0,"b":1}"#).as_deref(),
             Ok("[ 1 , 2 ]")
         );
+    }
+
+    #[test]
+    fn replaces_only_the_pointer_value_and_keeps_other_json_bytes() {
+        assert_eq!(
+            transform_json(
+                r#"改值 /a~1b/1 {"新":1.50} { "a/b":[3.50,"\u597d"], "其它":1e2, "same":"\u597d" }"#
+            )
+            .as_deref(),
+            Ok(r#"{ "a/b":[3.50,{"新":1.50}], "其它":1e2, "same":"\u597d" }"#)
+        );
+        assert_eq!(
+            transform_json(r#"replace "" null {"x":1}"#).as_deref(),
+            Ok("null")
+        );
+        for (query, error) in [
+            (r#"改值 /x "新" {"x":1,"x":2}"#, JsonError::DuplicateKey),
+            (r#"改值 /- 9 [1,2]"#, JsonError::MissingValue),
+            (r#"改值 /x {}{"x":1}"#, JsonError::ReplacementValue),
+            (r#"改值 /x 1"#, JsonError::Incomplete),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
     }
 
     #[test]

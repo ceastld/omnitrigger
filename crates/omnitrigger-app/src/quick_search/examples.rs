@@ -1372,6 +1372,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计 CRLF、LF 和 CR 换行符",
+        query: "文本: 换行统计 \"甲\r\n乙\r丙\n\"",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把混合换行统一转成 LF",
+        query: "文本: 转换换行 LF \"甲\r\n乙\r丙\n\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "去掉多行共有的缩进",
         query: "文本: 去公共缩进 \"    任务\n      子任务\n    完成\"",
     },
@@ -1679,6 +1689,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "改名一个顶层 JSON 键",
         query: r#"JSON: 改键 ["旧","新"] {"旧":1,"名称":"北京"}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按指针替换 JSON 中已有的值",
+        query: r#"JSON: 改值 /订单/0/金额 3.50 {"订单":[{"金额":1.00,"币种":"CNY"}],"税率":0.10}"#,
     },
     Example {
         icon: Icon::Terminal,
@@ -2275,6 +2290,10 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 }
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
+    // 示例补全只匹配操作名。已有参数的输入直接交给对应工具。
+    if term.contains(char::is_whitespace) {
+        return None;
+    }
     match scope {
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
         Scope::Fraction
@@ -2398,14 +2417,22 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         _ => return None,
     }
     let prefix = term.to_ascii_lowercase();
-    let items: Vec<_> = EXAMPLES
+    static OPERATIONS: OnceLock<Vec<(usize, Scope, String)>> = OnceLock::new();
+    let operations = OPERATIONS.get_or_init(|| {
+        EXAMPLES
+            .iter()
+            .enumerate()
+            .filter_map(|(index, example)| {
+                let (scope, input) = scoped_query(example.query)?;
+                let operation = input.split_whitespace().next()?.to_ascii_lowercase();
+                Some((index, scope, operation))
+            })
+            .collect()
+    });
+    let items: Vec<_> = operations
         .iter()
-        .enumerate()
-        .filter_map(|(index, example)| {
-            let (example_scope, input) = scoped_query(example.query)?;
-            let operation = input.split_whitespace().next()?;
-            (example_scope == scope && operation.to_ascii_lowercase().starts_with(&prefix))
-                .then_some(index)
+        .filter_map(|(index, example_scope, operation)| {
+            (*example_scope == scope && operation.starts_with(&prefix)).then_some(*index)
         })
         .collect();
     (!items.is_empty()).then_some(items)
@@ -2440,6 +2467,18 @@ pub(super) fn function_examples(query: &str) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shows_scoped_command_completions_only_before_arguments() {
+        for (scope, prefix, with_argument) in [
+            (Scope::Csv, "排序", "排序 1 编号"),
+            (Scope::Json, "改键", "改键 ["),
+            (Scope::TextTools, "取列", "取列 \"x\""),
+        ] {
+            assert!(tool_operation_examples(scope, prefix).is_some());
+            assert_eq!(tool_operation_examples(scope, with_argument), None);
+        }
+    }
 
     #[test]
     fn suggests_examples_for_empty_value_scopes_without_taking_over_the_input() {
