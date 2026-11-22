@@ -126,7 +126,10 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
         return byte_order(arguments, true);
     }
     if operation == "读字节序" || operation.eq_ignore_ascii_case("read-byte-order") {
-        return read_byte_order(arguments);
+        return read_byte_order(arguments, false);
+    }
+    if operation == "读补码" || operation.eq_ignore_ascii_case("read-twos-complement") {
+        return read_byte_order(arguments, true);
     }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
@@ -218,7 +221,7 @@ fn byte_order(input: &str, signed: bool) -> Result<String, RadixError> {
     ))
 }
 
-fn read_byte_order(input: &str) -> Result<String, RadixError> {
+fn read_byte_order(input: &str, signed: bool) -> Result<String, RadixError> {
     let (order, bytes) = input
         .split_once('@')
         .ok_or(RadixError::ReadByteOrderArguments)?;
@@ -245,7 +248,14 @@ fn read_byte_order(input: &str) -> Result<String, RadixError> {
         value |= u128::from(byte) << (8 * offset);
     }
     let width = bytes.len() * 2;
-    Ok(format!("十六进制 0x{value:0width$X}\n十进制 {value}"))
+    let decimal = if signed {
+        // 将最高有效位移到 i128 的符号位，再以算术右移补齐符号位。
+        let shift = (16 - bytes.len()) * 8;
+        (((value << shift) as i128) >> shift).to_string()
+    } else {
+        value.to_string()
+    };
+    Ok(format!("十六进制 0x{value:0width$X}\n十进制 {decimal}"))
 }
 
 fn arbitrary_base(token: &str) -> Option<u32> {
@@ -325,6 +335,29 @@ mod tests {
         ] {
             assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn decodes_signed_twos_complement_using_the_number_of_supplied_bytes() {
+        for (query, expected) in [
+            ("读补码 小端 @ FF FE", "十六进制 0xFEFF\n十进制 -257"),
+            ("read-twos-complement BE @ 80", "十六进制 0x80\n十进制 -128"),
+            ("读补码 大端 @ 00 80", "十六进制 0x0080\n十进制 128"),
+            ("读补码 大端 @ FF", "十六进制 0xFF\n十进制 -1"),
+            ("读字节序 小端 @ FF FE", "十六进制 0xFEFF\n十进制 65279"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        let query = format!("读补码 大端 @ 80{}", " 00".repeat(15));
+        let expected = format!("十六进制 0x80{}\n十进制 {}", "00".repeat(15), i128::MIN);
+        assert_eq!(
+            convert_arbitrary_radix(&query).as_deref(),
+            Ok(expected.as_str())
+        );
     }
 
     #[test]
