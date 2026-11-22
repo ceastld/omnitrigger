@@ -41,7 +41,7 @@ impl DateError {
             Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
-            Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天",
+            Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天或每隔 2 个月",
             Self::PatternArguments => {
                 "用 JSON 数组填写日期和格式，例如 [\"2026-11-21\",\"%Y%m%d\"]"
             }
@@ -338,6 +338,7 @@ fn is_workday_unit(unit: &str) -> bool {
 
 enum DateSelection {
     EveryDays(u32),
+    EveryMonths(u32),
     Workdays,
     Weekends,
     Weekdays([bool; 7]),
@@ -345,28 +346,49 @@ enum DateSelection {
 
 fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
     let lower = rule.to_ascii_lowercase();
-    if matches!(lower.as_str(), "每天" | "daily") {
-        return Ok(DateSelection::EveryDays(1));
+    match lower.as_str() {
+        "每天" | "daily" => return Ok(DateSelection::EveryDays(1)),
+        "每月" | "每个月" | "monthly" => return Ok(DateSelection::EveryMonths(1)),
+        _ => {}
     }
     let interval = lower
         .strip_prefix("每隔")
         .or_else(|| lower.strip_prefix('每'))
-        .and_then(|value| value.trim_end().strip_suffix('天'))
+        .and_then(|value| {
+            [("个月", true), ("月", true), ("天", false)]
+                .into_iter()
+                .find_map(|(unit, monthly)| {
+                    value
+                        .trim_end()
+                        .strip_suffix(unit)
+                        .map(|count| (count, monthly))
+                })
+        })
         .or_else(|| {
             let (keyword, value) = lower.split_once(char::is_whitespace)?;
             if keyword != "every" {
                 return None;
             }
             let (count, unit) = value.trim_start().split_once(char::is_whitespace)?;
-            matches!(unit.trim(), "day" | "days").then_some(count)
+            match unit.trim() {
+                "day" | "days" => Some((count, false)),
+                "month" | "months" => Some((count, true)),
+                _ => None,
+            }
         });
-    if let Some(count) = interval {
+    if let Some((count, monthly)) = interval {
         return count
             .trim()
             .parse::<u32>()
             .ok()
             .filter(|&step| step > 0)
-            .map(DateSelection::EveryDays)
+            .map(|step| {
+                if monthly {
+                    DateSelection::EveryMonths(step)
+                } else {
+                    DateSelection::EveryDays(step)
+                }
+            })
             .ok_or(DateError::InvalidDateInterval);
     }
     match lower.as_str() {
@@ -409,20 +431,32 @@ fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
     if end < start {
         return Err(DateError::ReversedDateRange);
     }
+    if let DateSelection::EveryMonths(step) = selection {
+        // 每次从起始日计算，短月取月底后，下一个月仍使用起始日的日号。
+        let dates = (0_u32..)
+            .map_while(|index| start.checked_add_months(Months::new(index.checked_mul(step)?)))
+            .take_while(|date| *date <= end);
+        return format_date_list(dates);
+    }
     let days = end.signed_duration_since(start).num_days();
     let step = match selection {
         DateSelection::EveryDays(step) => step as usize,
         _ => 1,
     };
-    let dates: Vec<_> = (0..=days)
+    let dates = (0..=days)
         .step_by(step)
         .map(|offset| start + TimeDelta::days(offset))
         .filter(|date| match selection {
-            DateSelection::EveryDays(_) => true,
             DateSelection::Workdays => date.weekday().num_days_from_monday() < 5,
             DateSelection::Weekends => date.weekday().num_days_from_monday() >= 5,
             DateSelection::Weekdays(days) => days[date.weekday().num_days_from_monday() as usize],
-        })
+            DateSelection::EveryDays(_) | DateSelection::EveryMonths(_) => true,
+        });
+    format_date_list(dates)
+}
+
+fn format_date_list(dates: impl Iterator<Item = NaiveDate>) -> Result<String, DateError> {
+    let dates: Vec<_> = dates
         .take(MAX_LISTED_DATES + 1)
         .map(|date| date.to_string())
         .collect();
@@ -871,6 +905,15 @@ mod tests {
                 "2024-02-27\n2024-03-02\n2024-03-06",
             ),
             ("列出 今天 到 明天 每隔1000000000天", "2026-11-21"),
+            (
+                "列出 2024-01-31 到 2024-05-31 每隔 1 个月",
+                "2024-01-31\n2024-02-29\n2024-03-31\n2024-04-30\n2024-05-31",
+            ),
+            (
+                "list 2024-02-29 to 2028-03-01 Every 12 months",
+                "2024-02-29\n2025-02-28\n2026-02-28\n2027-02-28\n2028-02-29",
+            ),
+            ("列出 9999-12-31 到 9999-12-31 每月", "9999-12-31"),
         ] {
             assert_eq!(
                 calculate_date(query, today).as_deref(),
@@ -883,6 +926,10 @@ mod tests {
             ("列出 今天 到 明天 每周八", DateError::InvalidDateList),
             ("列出 今天 到 明天 每隔0天", DateError::InvalidDateInterval),
             ("列出 今天 到 明天 每隔-2天", DateError::InvalidDateInterval),
+            (
+                "列出 今天 到 明天 每隔0个月",
+                DateError::InvalidDateInterval,
+            ),
             ("列出 今天 到 明天 每周六、", DateError::InvalidDateList),
             (
                 "列出 今天 到 明天 每周六、工作日",
@@ -896,6 +943,10 @@ mod tests {
             ),
             (
                 "列出 2024-01-01 到 2027-01-04 每 3 天",
+                DateError::TooManyDates,
+            ),
+            (
+                "列出 2000-01-01 到 2035-01-01 每月",
                 DateError::TooManyDates,
             ),
         ] {

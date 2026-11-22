@@ -802,6 +802,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按固定月份间隔列出日期",
+        query: "日期: 列出 2024-01-31 到 2024-05-31 每隔 1 个月",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "列出日期区间内的工作日",
         query: "日期: 列出 2026-11-20 到 2026-11-23 工作日",
     },
