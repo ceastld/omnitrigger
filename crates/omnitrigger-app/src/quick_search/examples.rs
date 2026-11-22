@@ -3199,7 +3199,13 @@ pub(super) const EXAMPLES: &[Example] = &[
 ];
 
 pub(super) fn search_key(text: &str) -> String {
-    let narrowed: String = text.chars().map(narrow_ascii_graphic).collect();
+    let narrowed: String = text
+        .chars()
+        .map(|character| match character {
+            '\u{3000}' => ' ',
+            _ => narrow_ascii_graphic(character),
+        })
+        .collect();
     narrowed.to_lowercase()
 }
 
