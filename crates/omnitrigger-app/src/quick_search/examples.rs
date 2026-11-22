@@ -440,6 +440,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 时间戳 1700000000 to Asia/Shanghai\n1970-01-01T08:00:00+08:00",
     },
     Example {
+        icon: Icon::Clock,
+        title: "以 CSV 导出时间戳换算的输入和结果",
+        query: "批量换算: 时间戳对照 0 to UTC+8\n1970-01-01T08:00:00+08:00",
+    },
+    Example {
         icon: Icon::Layers,
         title: "逐行提取文件名、扩展名和转换文件网址",
         query: "批量换算: 路径 文件名 \"C:\\工作\\报告 集.txt\"\n转文件网址 C:\\docs\\report 2026.txt\n扩展名 C:\\资料\\图.png",
@@ -2871,7 +2876,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 term,
                 "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址" | "日" | "日期"
             ) || (!term.is_empty()
-                && ["对照", "时长对照", "日期对照"]
+                && ["对照", "时长对照", "时间戳对照", "日期对照"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term))) => {}
         Scope::Date

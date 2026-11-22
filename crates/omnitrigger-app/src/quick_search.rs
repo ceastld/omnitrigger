@@ -684,6 +684,14 @@ impl Results {
                             map_batch_lines(arguments, convert_duration)
                                 .map_err(ValueError::BatchDuration),
                         )
+                    } else if let Some(arguments) =
+                        batch_arguments(term, "时间戳对照", "timestamp-csv")
+                    {
+                        let now = chrono::Utc::now();
+                        Self::text_value(
+                            map_batch_csv(arguments, "输入", |line| convert_timestamp(line, now))
+                                .map_err(ValueError::BatchTimestamp),
+                        )
                     } else if let Some(arguments) = batch_arguments(term, "时间戳", "timestamp")
                     {
                         let now = chrono::Utc::now();
@@ -2544,6 +2552,30 @@ mod tests {
             for_query("批量换算: 时长对", &[]).suggested_input(0),
             Some("批量换算: 时长对照 扣除休息 23:45 到 01:15 | 30分钟\n08:00 到 10:15 to min")
         );
+    }
+
+    #[test]
+    fn exports_timestamp_queries_and_results_with_one_batch_reference_time() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 时间戳对照 0 to UTC+8\n1970-01-01T08:00:00+08:00",
+                &[]
+            ),
+            Results::Value(Ok(value)) if value.text
+                == "输入,结果\r\n0 to UTC+8,1970-01-01T08:00:00+08:00\r\n1970-01-01T08:00:00+08:00,0"
+        ));
+        let Results::Value(Ok(value)) = for_query("批量换算: timestamp-csv 现在 ns\nnow ns", &[])
+        else {
+            panic!("缺少时间戳对照结果");
+        };
+        let results: Vec<_> = value
+            .text
+            .lines()
+            .skip(1)
+            .map(|line| line.rsplit_once(',').unwrap().1)
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], results[1]);
     }
 
     #[test]
