@@ -47,6 +47,7 @@ pub(super) enum JsonError {
     ComparisonTooLarge,
     PointerListTooLarge,
     KeySearchArguments,
+    ValueSearchArguments,
     DuplicateKeyReportTooLarge,
     DuplicateKeyPolicy,
     FlattenedObjectTooLarge,
@@ -114,6 +115,7 @@ impl JsonError {
             Self::KeySearchArguments => {
                 "先输入带双引号的键名，再输入 JSON，例如 \"编号\" {\"编号\":1}"
             }
+            Self::ValueSearchArguments => "先输入要查找的 JSON 标量，再输入文档，例如 1.5 [1,1.50]",
             Self::DuplicateKeyReportTooLarge => "重复键报告超过 1 MiB，请缩小数据范围",
             Self::DuplicateKeyPolicy => "在 JSON 前填写留首或留末，指定保留哪次出现的键",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
@@ -218,6 +220,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
         "列指针" | "列路径" | "list-pointers" => return write_pointer_leaves(source, false),
         "找键" | "find-key" => return find_json_key_paths(source),
+        "找值" | "find-value" => return find_json_value_paths(source),
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
         "展平" | "flatten" => return write_pointer_leaves(source, true),
@@ -1900,21 +1903,40 @@ fn append_pointer_key(pointer: &mut String, key: &str) {
 }
 
 fn write_pointer_leaves(source: &str, include_values: bool) -> Result<String, JsonError> {
-    write_json_pointer_results(source, include_values, None)
+    let mode = if include_values {
+        PointerResultMode::Flattened
+    } else {
+        PointerResultMode::Leaves
+    };
+    write_json_pointer_results(source, mode)
 }
 
 fn find_json_key_paths(query: &str) -> Result<String, JsonError> {
     let (key, source) = json_value_and_source(query, JsonError::KeySearchArguments)?;
     let key =
         serde_json::from_str::<String>(key.get()).map_err(|_| JsonError::KeySearchArguments)?;
-    write_json_pointer_results(source, false, Some(&key))
+    write_json_pointer_results(source, PointerResultMode::Key(&key))
+}
+
+fn find_json_value_paths(query: &str) -> Result<String, JsonError> {
+    let (value, source) = json_value_and_source(query, JsonError::ValueSearchArguments)?;
+    let scalar = json_scalar(value)?.ok_or(JsonError::ValueSearchArguments)?;
+    write_json_pointer_results(source, PointerResultMode::Value(&scalar))
+}
+
+#[derive(Clone, Copy)]
+enum PointerResultMode<'a> {
+    Leaves,
+    Flattened,
+    Key(&'a str),
+    Value(&'a JsonScalar),
 }
 
 fn write_json_pointer_results(
     source: &str,
-    include_values: bool,
-    matching_key: Option<&str>,
+    mode: PointerResultMode<'_>,
 ) -> Result<String, JsonError> {
+    let include_values = matches!(mode, PointerResultMode::Flattened);
     let (opening, closing, size_error) = if include_values {
         ('{', '}', JsonError::FlattenedObjectTooLarge)
     } else {
@@ -1947,9 +1969,14 @@ fn write_json_pointer_results(
                 .collect(),
             _ => Vec::new(),
         };
-        let emit = matching_key.map_or_else(|| children.is_empty(), |_| matches_key);
+        let emit = match mode {
+            PointerResultMode::Leaves | PointerResultMode::Flattened => children.is_empty(),
+            PointerResultMode::Key(_) => matches_key,
+            PointerResultMode::Value(expected) => json_scalar(value)?.as_ref() == Some(expected),
+        };
         for (key, child) in children.into_iter().rev() {
-            let matches_key = kind == b'{' && matching_key == Some(key.as_str());
+            let matches_key = kind == b'{'
+                && matches!(mode, PointerResultMode::Key(expected) if expected == key.as_str());
             pending.push((child, Some((path.len(), key)), matches_key));
         }
         if !emit {
@@ -2683,6 +2710,33 @@ mod tests {
         assert_eq!(
             report_duplicate_json_keys(&source),
             Err(JsonError::DuplicateKeyReportTooLarge)
+        );
+    }
+
+    #[test]
+    fn finds_exact_json_scalar_values_in_document_order() {
+        for (query, expected) in [
+            (
+                r#"找值 1.5 {"值":[1.500,1.5e0,"1.5"],"a/b":{"~":1.5}}"#,
+                r#"["/值/0","/值/1","/a~1b/~0"]"#,
+            ),
+            (
+                "find-value 9007199254740993 [9007199254740992,9007199254740993,9007199254740993.00]",
+                r#"["/1","/2"]"#,
+            ),
+            ("找值 true [false,true,1]", r#"["/1"]"#),
+            ("找值 null null", r#"[""]"#),
+            (r#"找值 null {"值":"null"}"#, "[]"),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            transform_json("找值 [] {}"),
+            Err(JsonError::ValueSearchArguments)
+        );
+        assert_eq!(
+            transform_json(r#"找值 1 {"重复":1,"重复":2}"#),
+            Err(JsonError::DuplicateKey)
         );
     }
 
