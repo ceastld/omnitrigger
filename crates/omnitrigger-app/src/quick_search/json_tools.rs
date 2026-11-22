@@ -92,6 +92,9 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
     let (operation, source) = query
         .split_once(char::is_whitespace)
         .ok_or(JsonError::Incomplete)?;
+    let raw_source = query[operation.len()..]
+        .strip_prefix("\r\n")
+        .unwrap_or(source);
     let source = source.trim_start();
     let pretty = match operation.to_ascii_lowercase().as_str() {
         "格式化" | "format" | "pretty" => true,
@@ -117,6 +120,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
+        "校验行" | "validate-jsonl" => return validate_json_lines(raw_source),
         "合并对象" | "merge-objects" => return merge_json_objects(source),
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
@@ -547,16 +551,43 @@ fn json_lines_to_array(source: &str) -> Result<String, JsonError> {
     if source.is_empty() {
         return Err(JsonError::Incomplete);
     }
-    let values = source
-        .lines()
-        .filter(|line| !line.trim_matches([' ', '\t', '\r']).is_empty())
-        .map(|line| {
+    let values = json_lines(source)
+        .map(|(_, line)| {
             let value =
                 serde_json::from_str::<&RawValue>(line).map_err(|_| JsonError::InvalidLine)?;
             layout_json(value.get(), false)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("[{}]", values.join(",")))
+}
+
+fn json_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
+    source.lines().enumerate().filter_map(|(index, line)| {
+        (!line.trim_matches([' ', '\t', '\r']).is_empty()).then_some((index + 1, line))
+    })
+}
+
+fn validate_json_lines(source: &str) -> Result<String, JsonError> {
+    let mut valid = 0;
+    let mut errors = Vec::new();
+    for (line_number, line) in json_lines(source) {
+        match serde_json::from_str::<&RawValue>(line) {
+            Ok(_) => valid += 1,
+            Err(error) => {
+                let reason = if error.is_eof() {
+                    "JSON 尚未完整"
+                } else {
+                    "JSON 语法无效"
+                };
+                errors.push(format!("第 {line_number} 行 · {reason}"));
+            }
+        }
+    }
+    if valid == 0 && errors.is_empty() {
+        return Err(JsonError::Incomplete);
+    }
+    errors.insert(0, format!("{} 行有效，{} 行无效", valid, errors.len()));
+    Ok(errors.join("\n"))
 }
 
 fn merge_json_objects(source: &str) -> Result<String, JsonError> {
@@ -1154,6 +1185,19 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_every_json_line_and_retains_source_positions_after_blank_lines() {
+        assert_eq!(
+            transform_json("校验行\r\n \t\r\n1e999\r\n错误文本\r\n{\"编号\":\r\nnull").as_deref(),
+            Ok("2 行有效，2 行无效\n第 3 行 · JSON 语法无效\n第 4 行 · JSON 尚未完整")
+        );
+        assert_eq!(
+            transform_json("validate-jsonl []\ntrue").as_deref(),
+            Ok("2 行有效，0 行无效")
+        );
+        assert_eq!(transform_json("校验行 \n \t\n"), Err(JsonError::Incomplete));
+    }
 
     #[test]
     fn converts_nested_json_paths_to_ordered_csv_columns() {
