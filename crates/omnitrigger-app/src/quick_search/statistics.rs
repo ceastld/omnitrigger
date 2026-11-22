@@ -38,6 +38,8 @@ pub(super) enum StatisticsError {
     NonPositiveHarmonicValue,
     StandardErrorCount,
     StandardScoresConstant,
+    VariationSampleCount,
+    VariationZeroMean,
     Paired(LinearFitError),
     Evaluation(FractionError),
 }
@@ -66,6 +68,8 @@ impl StatisticsError {
             Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
             Self::StandardErrorCount => "均值标准误至少需要两个观测值",
             Self::StandardScoresConstant => "标准分需要至少两个不同的观测值",
+            Self::VariationSampleCount => "样本变异系数至少需要两个观测值",
+            Self::VariationZeroMean => "平均值为零时无法计算变异系数",
             Self::Paired(error) => error.message(),
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
@@ -89,6 +93,9 @@ enum StatisticsOperation {
     RootMeanSquare,
     HarmonicMean,
     StandardError,
+    CoefficientOfVariation {
+        sample: bool,
+    },
     StandardScores {
         sample: bool,
     },
@@ -153,6 +160,14 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "标准误" | "均值标准误" | "sem" | "standard-error" => {
             (StatisticsOperation::StandardError, values.trim())
         }
+        "变异系数" | "样本变异系数" | "coefficient-of-variation" => (
+            StatisticsOperation::CoefficientOfVariation { sample: true },
+            values.trim(),
+        ),
+        "总体变异系数" | "population-coefficient-of-variation" => (
+            StatisticsOperation::CoefficientOfVariation { sample: false },
+            values.trim(),
+        ),
         "标准分" | "z-score" => (
             StatisticsOperation::StandardScores { sample: true },
             values.trim(),
@@ -284,6 +299,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             Ok(format_square_root(&squared_error))
         }
         StatisticsOperation::StandardScores { sample } => standard_scores(&values, count, sample),
+        StatisticsOperation::CoefficientOfVariation { sample } => {
+            coefficient_of_variation(&values, count, sample)
+        }
         StatisticsOperation::HarmonicMean => {
             let reciprocal_sum = values.into_iter().try_fold(
                 BigRational::default(),
@@ -629,6 +647,29 @@ fn observation_sum(values: &[(BigRational, u64)]) -> Result<BigRational, Statist
         .try_fold(BigRational::default(), |sum, (value, repetitions)| {
             bounded(sum + value * BigInt::from(*repetitions))
         })
+}
+
+fn coefficient_of_variation(
+    values: &[(BigRational, u64)],
+    count: u64,
+    sample: bool,
+) -> Result<String, StatisticsError> {
+    let divisor = count - u64::from(sample);
+    if divisor == 0 {
+        return Err(StatisticsError::VariationSampleCount);
+    }
+    let average = bounded(observation_sum(values)? / BigInt::from(count))?;
+    let sign = average.numer().sign();
+    if sign == Sign::NoSign {
+        return Err(StatisticsError::VariationZeroMean);
+    }
+    let deviation_sum = squared_deviation_sum(values, &average)?;
+    let variance = bounded(deviation_sum / BigInt::from(divisor))?;
+    let squared = bounded(variance / (&average * &average))?;
+    if squared.numer().sign() == Sign::NoSign {
+        return Ok("0".into());
+    }
+    Ok(format_signed_square_root(&squared, sign))
 }
 
 fn standard_scores(
@@ -1283,6 +1324,32 @@ mod tests {
                 Err(StatisticsError::StandardScoresConstant),
             );
         }
+    }
+
+    #[test]
+    fn calculates_exact_coefficients_of_variation_for_samples_and_populations() {
+        for (query, expected) in [
+            ("变异系数 1,2,3", "1/2"),
+            ("总体变异系数 1,2,3", "√(1/6)"),
+            ("coefficient-of-variation 频数 1@1,2@1,3@1", "1/2"),
+            ("样本变异系数 -1,-2,-3", "-1/2"),
+            ("变异系数 -5,-5", "0"),
+            ("总体变异系数 5", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("变异系数 5"),
+            Err(StatisticsError::VariationSampleCount)
+        );
+        assert_eq!(
+            calculate_statistics("变异系数 -1,1"),
+            Err(StatisticsError::VariationZeroMean)
+        );
     }
 
     #[test]

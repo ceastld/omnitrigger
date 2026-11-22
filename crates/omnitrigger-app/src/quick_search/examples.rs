@@ -256,6 +256,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求样本标准差与平均值的比值",
+        query: "统计: 变异系数 1,2,3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按总体标准差求变异系数",
+        query: "统计: 总体变异系数 1,2,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用总体标准差求每个值的标准分",
         query: "统计: 总体标准分 0,2",
     },
@@ -3672,6 +3682,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "移动最小",
                     "移动最大",
                     "移动极差",
+                    "变异系数",
+                    "样本变异系数",
+                    "总体变异系数",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
