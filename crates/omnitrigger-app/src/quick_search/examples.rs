@@ -1833,6 +1833,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用精确算式给 CSV 追加一列",
+        query: "CSV: 公式列 [\"含费金额\",\"数量\",3,\"x*y+1/6\"] 商品,数量,单价\n茶,3,2.50\n梨,2,1/3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除 CSV 中内容重复的行",
         query: "CSV: 去重 编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,梨",
     },

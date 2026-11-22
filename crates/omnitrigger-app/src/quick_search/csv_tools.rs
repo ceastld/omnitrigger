@@ -14,13 +14,17 @@ use serde::{
 };
 
 use super::{
-    fraction::{ensure_exact_size, parse_fraction_literal},
+    calculator::normalize,
+    fraction::{
+        calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal, FractionError,
+    },
     operators::{select_index_ranges, IndexRangeError, NumberComparison},
     statistics::{summarize_unweighted, StatisticsError},
     text_tools::{compare_natural, compile_regex, TextError},
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
+const MAX_FORMULA_RECORDS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -43,6 +47,9 @@ pub(super) enum CsvError {
     NullReplacementValue,
     HeaderNameConflict,
     ComputedColumnArguments,
+    FormulaColumnArguments,
+    FormulaColumnLimit,
+    FormulaEvaluation(FractionError),
     ComputedDivisionByZero,
     ComputedNumberRange,
     InvalidColumnValue,
@@ -84,6 +91,11 @@ impl CsvError {
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
             }
+            Self::FormulaColumnArguments => {
+                "用 JSON 数组填写新列名、x 列、y 列和算式，例如 [\"金额\",2,3,\"x*y+1/6\"]"
+            }
+            Self::FormulaColumnLimit => "公式列每次最多处理 32 条数据",
+            Self::FormulaEvaluation(error) => error.message(),
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
             Self::InvalidColumnValue => "输入列号或带双引号的列名，再输入带双引号的值",
@@ -174,6 +186,7 @@ enum ColumnArithmetic {
     Subtract,
     Multiply,
     Divide,
+    Formula(String),
 }
 
 impl ColumnArithmetic {
@@ -196,6 +209,16 @@ impl ColumnArithmetic {
                 return Err(CsvError::ComputedDivisionByZero);
             }
             Self::Divide => left / right,
+            Self::Formula(expression) => {
+                return calculate_fraction_with_variables(expression, Some(&left), Some(&right))
+                    .map_err(|error| match error {
+                        FractionError::ZeroDenominator => CsvError::ComputedDivisionByZero,
+                        FractionError::Invalid | FractionError::Incomplete => {
+                            CsvError::FormulaColumnArguments
+                        }
+                        _ => CsvError::FormulaEvaluation(error),
+                    });
+            }
         })
     }
 }
@@ -271,6 +294,23 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 left,
                 right,
                 arithmetic: ColumnArithmetic::parse(&operator)?,
+            }
+        }
+        "公式列" | "formula-column" => {
+            let ((name, left, right, expression), data) =
+                json_argument_and_data::<(String, ColumnReference, ColumnReference, String)>(
+                    input,
+                    CsvError::FormulaColumnArguments,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') || expression.trim().is_empty() {
+                return Err(CsvError::FormulaColumnArguments);
+            }
+            input = data;
+            Operation::ComputeColumn {
+                name,
+                left,
+                right,
+                arithmetic: ColumnArithmetic::Formula(normalize(&expression)),
             }
         }
         "按列去重" | "deduplicate-columns" => {
@@ -637,6 +677,9 @@ fn compute_column(
     validate_column_width(&[left, right], header.len())?;
     if header.contains(&name) {
         return Err(CsvError::HeaderNameConflict);
+    }
+    if matches!(arithmetic, ColumnArithmetic::Formula(_)) && records.len() > MAX_FORMULA_RECORDS {
+        return Err(CsvError::FormulaColumnLimit);
     }
     header.push(name);
     for row in records {
@@ -1440,6 +1483,40 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn appends_an_exact_formula_column_without_rewriting_input_cells() {
+        assert_eq!(
+            transform_csv(
+                "公式列 [\"含费金额\",\"数量\",3,\"x*y+1/6\"] 商品,数量,单价\n\"茶,咖啡\",3,2.50\n梨,2,1/3"
+            )
+            .as_deref(),
+            Ok("商品,数量,单价,含费金额\r\n\"茶,咖啡\",3,2.50,23/3\r\n梨,2,1/3,5/6")
+        );
+        for (query, error) in [
+            (
+                "formula-column [\"商\",1,2,\"x/y\"]\nx,y\n1,0",
+                CsvError::ComputedDivisionByZero,
+            ),
+            (
+                "公式列 [\"结果\",1,2,\"x+z\"]\nx,y\n1,2",
+                CsvError::FormulaColumnArguments,
+            ),
+            (
+                "公式列 [\"x\",1,2,\"x+y\"]\nx,y\n1,2",
+                CsvError::HeaderNameConflict,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error));
+        }
+        assert_eq!(
+            transform_csv(&format!(
+                "公式列 [\"和\",1,2,\"x+y\"]\nx,y{}",
+                "\n1,2".repeat(MAX_FORMULA_RECORDS + 1)
+            )),
+            Err(CsvError::FormulaColumnLimit)
+        );
     }
 
     #[test]

@@ -169,12 +169,13 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
 }
 
 pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
-    calculate_fraction_at(input, None)
+    calculate_fraction_with_variables(input, None, None)
 }
 
-fn calculate_fraction_at(
+pub(super) fn calculate_fraction_with_variables(
     input: &str,
     x: Option<&BigRational>,
+    y: Option<&BigRational>,
 ) -> Result<BigRational, FractionError> {
     if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(FractionError::TooLong);
@@ -182,6 +183,7 @@ fn calculate_fraction_at(
     let mut parser = FractionParser {
         remaining: input,
         x,
+        y,
     };
     let value = parser.sum()?;
     if !parser.remaining.trim().is_empty() {
@@ -202,7 +204,7 @@ fn fraction_table(input: &str) -> Result<String, FractionError> {
     let mut rows = vec!["x\ty".to_owned()];
     for point in points {
         let x = parse_fraction_literal(point)?;
-        let y = calculate_fraction_at(expression.trim(), Some(&x))?;
+        let y = calculate_fraction_with_variables(expression.trim(), Some(&x), None)?;
         rows.push(format!("{x}\t{y}"));
     }
     Ok(rows.join("\n"))
@@ -216,6 +218,7 @@ pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, Fractio
     let mut parser = FractionParser {
         remaining: input,
         x: None,
+        y: None,
     };
     let mut value = parser.signed_number()?;
     if parser.consume('/') {
@@ -417,6 +420,7 @@ impl CombinatorialFunction {
 struct FractionParser<'a> {
     remaining: &'a str,
     x: Option<&'a BigRational>,
+    y: Option<&'a BigRational>,
 }
 
 impl FractionParser<'_> {
@@ -525,10 +529,14 @@ impl FractionParser<'_> {
         let input = self.remaining.trim_start();
         let length = input.bytes().take_while(u8::is_ascii_alphabetic).count();
         let (name, rest) = input.split_at(length);
-        if name == "x" {
-            let x = self.x.cloned().ok_or(FractionError::Invalid)?;
+        let variable = match name {
+            "x" => self.x,
+            "y" => self.y,
+            _ => None,
+        };
+        if let Some(value) = variable {
             self.remaining = rest;
-            return Ok(x);
+            return Ok(value.clone());
         }
         let function = if name.eq_ignore_ascii_case("comb") {
             CombinatorialFunction::Combination
