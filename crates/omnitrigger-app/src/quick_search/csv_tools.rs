@@ -74,7 +74,7 @@ impl CsvError {
             Self::Regex(error) => error.message(),
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
-            Self::StatisticsColumn => "列统计需要一个列号，列号从 1 开始",
+            Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
             Self::AggregateColumn => "填写一个需要汇总的数值列号，列号从 1 开始",
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
             Self::Statistics(error) => error.message(),
@@ -113,7 +113,7 @@ enum Operation {
         average: bool,
     },
     ColumnStatistics {
-        column: usize,
+        column: ColumnReference,
         sample: bool,
     },
     SortByColumns {
@@ -240,7 +240,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         }
         "数值筛选" | "filter-numeric" => {
             let (column, rest) =
-                filter_column_argument(input.trim_start(), CsvError::InvalidNumberFilter)?;
+                column_reference_argument(input.trim_start(), CsvError::InvalidNumberFilter)?;
             let (operator, rest) =
                 split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
             let (threshold, data) =
@@ -275,13 +275,18 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             }
         }
         "列统计" | "column-stats" | "列总体" | "column-population" => {
-            let (columns, data) = column_arguments(input)?;
-            let [column] = columns.as_slice() else {
-                return Err(CsvError::StatisticsColumn);
+            let (column, data) = if input.trim_start().starts_with('"') {
+                column_reference_argument(input, CsvError::StatisticsColumn)?
+            } else {
+                let (columns, data) = column_arguments(input)?;
+                let [column] = columns.as_slice() else {
+                    return Err(CsvError::StatisticsColumn);
+                };
+                (ColumnReference::Number(*column + 1), data)
             };
             input = data;
             Operation::ColumnStatistics {
-                column: *column,
+                column,
                 sample: matches!(operation.as_str(), "列统计" | "column-stats"),
             }
         }
@@ -368,12 +373,12 @@ fn column_arguments(input: &str) -> Result<(Vec<usize>, &str), CsvError> {
 }
 
 fn column_value_arguments(input: &str) -> Result<(ColumnReference, String, &str), CsvError> {
-    let (column, input) = filter_column_argument(input, CsvError::InvalidColumnValue)?;
+    let (column, input) = column_reference_argument(input, CsvError::InvalidColumnValue)?;
     let (value, data) = json_argument_and_data(input, CsvError::InvalidColumnValue)?;
     Ok((column, value, data))
 }
 
-fn filter_column_argument(
+fn column_reference_argument(
     input: &str,
     error: CsvError,
 ) -> Result<(ColumnReference, &str), CsvError> {
@@ -664,8 +669,13 @@ fn sort_by_columns(
     Ok(write_rows(std::iter::once(header).chain(ordered), ','))
 }
 
-fn summarize_column(rows: &[Vec<String>], column: usize, sample: bool) -> Result<String, CsvError> {
+fn summarize_column(
+    rows: &[Vec<String>],
+    column: ColumnReference,
+    sample: bool,
+) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let column = column.resolve(header)?;
     validate_column_width(&[column], header.len())?;
     let values = records
         .iter()
@@ -1038,6 +1048,8 @@ mod tests {
         for (query, last_line) in [
             ("列统计 2", "样本方差 1 · 标准差 1"),
             ("列总体 2", "总体方差 2/3 · 标准差 √(2/3)"),
+            (r#"列统计 "数值""#, "样本方差 1 · 标准差 1"),
+            (r#"列总体 "数值""#, "总体方差 2/3 · 标准差 √(2/3)"),
         ] {
             assert_eq!(
                 transform_csv(&format!("{query}\n{data}")),
@@ -1050,6 +1062,11 @@ mod tests {
             ("列总体 2 编号,金额", CsvError::EmptyStatisticsColumn),
             ("列统计 2 编号,金额\n001,", CsvError::InvalidNumber),
             ("列统计 2 编号,金额\n001,1+2", CsvError::InvalidNumber),
+            (r#"列统计 "金额" 编号,数值"#, CsvError::MissingColumnName),
+            (
+                r#"列总体 "金额" 编号,金额,金额"#,
+                CsvError::AmbiguousColumnName,
+            ),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
