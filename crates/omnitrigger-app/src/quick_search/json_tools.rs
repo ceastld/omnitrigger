@@ -46,6 +46,8 @@ pub(super) enum JsonError {
     ExpectedArray,
     ExpectedArrayAtPointer,
     ExpectedObjectItem,
+    DefaultFieldArguments,
+    ObjectOutputTooLarge,
     InvalidLine,
     MissingValue,
     DuplicateKey,
@@ -101,6 +103,8 @@ impl JsonError {
             Self::ExpectedArray => "请输入 JSON 数组",
             Self::ExpectedArrayAtPointer => "每一项的指定 JSON 路径都须对应数组",
             Self::ExpectedObjectItem => "数组中的每一项都应是 JSON 对象",
+            Self::DefaultFieldArguments => "填写 [键名,默认值]，再粘贴 JSON 对象或对象数组",
+            Self::ObjectOutputTooLarge => "JSON 对象处理结果超过 1 MiB",
             Self::InvalidLine => "每个非空行需要一个完整的 JSON 值",
             Self::MissingValue => "JSON 路径没有对应的值",
             Self::DuplicateKey => "JSON 路径遇到了重复的键",
@@ -193,6 +197,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "去空字段" | "remove-null-fields" => return remove_null_json_fields(source),
+        "补字段" | "fill-missing-field" => return fill_missing_json_field(source),
         "转csv" | "to-csv" => return json_to_csv(source),
         "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
         "选键" | "pick-keys" => return pick_json_keys(source),
@@ -1399,6 +1404,26 @@ fn remove_null_json_fields(source: &str) -> Result<String, JsonError> {
     })
 }
 
+fn fill_missing_json_field(query: &str) -> Result<String, JsonError> {
+    let (argument, source) = json_value_and_source(query, JsonError::DefaultFieldArguments)?;
+    let (name, default) = serde_json::from_str::<(String, &RawValue)>(argument.get())
+        .map_err(|_| JsonError::DefaultFieldArguments)?;
+    map_json_objects(source, |raw| {
+        let mut entries = read_object_entries(raw)?;
+        let already_present = {
+            let mut names = HashSet::new();
+            if entries.iter().any(|(key, _)| !names.insert(key)) {
+                return Err(JsonError::DuplicateKey);
+            }
+            names.contains(&name)
+        };
+        if !already_present {
+            entries.push((name.clone(), default));
+        }
+        write_object_entries(entries)
+    })
+}
+
 fn json_to_csv(source: &str) -> Result<String, JsonError> {
     let rows = read_json_array(source)?;
     match rows.first().and_then(|row| row.get().chars().next()) {
@@ -1464,20 +1489,34 @@ fn map_json_objects(
     mut transform: impl FnMut(&str) -> Result<String, JsonError>,
 ) -> Result<String, JsonError> {
     if !source.starts_with('[') {
-        return transform(source);
+        let output = transform(source)?;
+        return (output.len() <= MAX_PRETTY_BYTES)
+            .then_some(output)
+            .ok_or(JsonError::ObjectOutputTooLarge);
     }
-    let items = read_json_array(source)?
-        .into_iter()
-        .map(|item| {
-            let raw = item.get();
-            if raw.starts_with('{') {
-                transform(raw)
-            } else {
-                Err(JsonError::ExpectedObjectItem)
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(format!("[{}]", items.join(",")))
+    let mut output = String::from("[");
+    for (index, item) in read_json_array(source)?.into_iter().enumerate() {
+        let raw = item.get();
+        if !raw.starts_with('{') {
+            return Err(JsonError::ExpectedObjectItem);
+        }
+        let object = transform(raw)?;
+        let comma = usize::from(index != 0);
+        if output
+            .len()
+            .saturating_add(object.len())
+            .saturating_add(comma + 1)
+            > MAX_PRETTY_BYTES
+        {
+            return Err(JsonError::ObjectOutputTooLarge);
+        }
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str(&object);
+    }
+    output.push(']');
+    Ok(output)
 }
 
 fn json_array_rows_to_csv(rows: Vec<&RawValue>) -> Result<String, JsonError> {
@@ -2315,6 +2354,39 @@ mod tests {
         assert_eq!(
             transform_json(r#"remove-null-fields {"a":0,"\u0061":null}"#),
             Err(JsonError::DuplicateKey)
+        );
+    }
+
+    #[test]
+    fn fills_only_missing_json_fields_and_limits_repeated_defaults() {
+        assert_eq!(
+            transform_json(
+                r#"补字段 ["金额",1.50] [{"编号":"001"},{"编号":"002","金额":null},{"金额":0.00}]"#
+            )
+            .as_deref(),
+            Ok(r#"[{"编号":"001","金额":1.50},{"编号":"002","金额":null},{"金额":0.00}]"#)
+        );
+        assert_eq!(
+            transform_json(r#"fill-missing-field ["",{"a":1e0}] {"编号":"001"}"#).as_deref(),
+            Ok(r#"{"编号":"001","":{"a":1e0}}"#)
+        );
+        assert_eq!(
+            transform_json(r#"补字段 ["a",9] [{"\u0061":1,"a":2}]"#),
+            Err(JsonError::DuplicateKey)
+        );
+        assert_eq!(
+            transform_json(r#"补字段 ["a",9] [3]"#),
+            Err(JsonError::ExpectedObjectItem)
+        );
+        assert_eq!(
+            transform_json(r#"补字段 ["a"] [{}]"#),
+            Err(JsonError::DefaultFieldArguments)
+        );
+        let default = "x".repeat(65_536);
+        let source = ["{}"; 16].join(",");
+        assert_eq!(
+            transform_json(&format!(r#"补字段 ["a","{default}"] [{source}]"#)),
+            Err(JsonError::ObjectOutputTooLarge)
         );
     }
 

@@ -32,6 +32,7 @@ const MAX_STACK_TABLES: usize = 16;
 const MAX_VALUE_MAPPINGS: usize = 32;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
+const MAX_PIPELINE_STEPS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -67,6 +68,10 @@ pub(super) enum CsvError {
     SplitColumnArguments,
     AddedColumnTooLarge,
     StackArguments,
+    PipelineArguments,
+    NestedPipeline,
+    PipelineOutputTooLarge,
+    PipelineStep { index: usize, cause: &'static str },
     ComputedColumnArguments,
     FormulaColumnArguments,
     FormulaColumnLimit,
@@ -136,6 +141,10 @@ impl CsvError {
             }
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
+            Self::PipelineArguments => "用 JSON 字符串数组填写 1 至 8 条单行 CSV 命令，再粘贴原表格",
+            Self::NestedPipeline => "每一步填写一条 CSV 命令",
+            Self::PipelineOutputTooLarge => "处理结果超过 1 MiB，请缩小表格范围",
+            Self::PipelineStep { cause, .. } => cause,
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
             }
@@ -335,9 +344,17 @@ enum ColumnCondition {
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
-    let (operation, mut input) = split_argument(query).ok_or(CsvError::MissingInput)?;
+    let (operation, input) = split_argument(query).ok_or(CsvError::MissingInput)?;
+    if operation == "依次处理" || operation.eq_ignore_ascii_case("pipeline") {
+        return transform_csv_pipeline(input);
+    }
+    transform_csv_operation(operation, input)
+}
+
+fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, CsvError> {
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
+        "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -937,6 +954,35 @@ fn append_bounded_csv_row<'a>(
         separator = ",";
     }
     Ok(())
+}
+
+fn transform_csv_pipeline(input: &str) -> Result<String, CsvError> {
+    let (steps, data) = json_argument_and_data::<Vec<String>>(input, CsvError::PipelineArguments)?;
+    if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len())
+        || steps
+            .iter()
+            .any(|step| step.trim().is_empty() || step.contains(['\r', '\n', '\0']))
+    {
+        return Err(CsvError::PipelineArguments);
+    }
+    let mut current = Cow::Borrowed(data);
+    for (index, step) in steps.iter().enumerate() {
+        let query = format!("{}\n{current}", step.trim());
+        let (operation, input) = split_argument(&query).expect("命令和数据之间已经添加换行");
+        let output =
+            transform_csv_operation(operation, input).map_err(|error| CsvError::PipelineStep {
+                index: index + 1,
+                cause: error.message(),
+            })?;
+        if output.len() > MAX_EXPANDED_CSV_BYTES {
+            return Err(CsvError::PipelineStep {
+                index: index + 1,
+                cause: CsvError::PipelineOutputTooLarge.message(),
+            });
+        }
+        current = Cow::Owned(output);
+    }
+    Ok(current.into_owned())
 }
 
 fn split_argument(input: &str) -> Option<(&str, &str)> {
@@ -2123,6 +2169,39 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applies_csv_commands_in_order_and_reports_the_first_failing_step() {
+        assert_eq!(
+            transform_csv(concat!(
+                r#"依次处理 ["去空行","删行 2","选列 2,1"] 编号,商品"#,
+                "\n001,茶\n\n002,梨\n003,\"咖啡,热\""
+            ))
+            .as_deref(),
+            Ok("商品,编号\r\n茶,001\r\n\"咖啡,热\",003")
+        );
+        assert_eq!(
+            transform_csv("PIPELINE [\"选列 1\",\"对象\"] 编号,金额\n001,1.50").as_deref(),
+            Ok(r#"[{"编号":"001"}]"#)
+        );
+        assert_eq!(
+            transform_csv(r#"依次处理 ["去空行","选列 3","去重"] 编号,商品"#),
+            Err(CsvError::PipelineStep {
+                index: 2,
+                cause: CsvError::ColumnOutOfRange.message(),
+            })
+        );
+        assert_eq!(
+            transform_csv(r#"依次处理 ["pipeline []"] 编号"#),
+            Err(CsvError::PipelineStep {
+                index: 1,
+                cause: CsvError::NestedPipeline.message(),
+            })
+        );
+        for query in [r#"依次处理 [] 编号"#, r#"依次处理 [" \n"] 编号"#] {
+            assert_eq!(transform_csv(query), Err(CsvError::PipelineArguments));
+        }
+    }
 
     #[test]
     fn joins_tables_by_text_in_left_and_right_record_order_with_bounded_output() {

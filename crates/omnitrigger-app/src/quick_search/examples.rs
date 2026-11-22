@@ -2102,6 +2102,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "给缺少指定键的 JSON 对象补上默认值",
+        query: r#"JSON: 补字段 ["金额",1.50] [{"编号":"001"},{"编号":"002","金额":null}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除 JSONC 注释并格式化 JSON",
         query: "JSON: 去注释 {\n// 说明\n\"网址\":\"https://example.invalid/\",/* 金额 */\n\"值\":1.50\n}",
     },
@@ -2244,6 +2249,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "定位 CSV 语法错误的记录和列",
         query: "CSV: 校验 编号,说明\n001,\"茶\n咖啡\"\n002,\"未闭合",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "依次去掉空行、删除指定记录并选择列",
+        query: "CSV: 依次处理 [\"去空行\",\"删行 2\",\"选列 2,1\"] 编号,商品\n001,茶\n\n002,梨\n003,咖啡",
     },
     Example {
         icon: Icon::Terminal,
