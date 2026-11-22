@@ -321,6 +321,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算括号算式计算出的数据量",
+        query: "(2**10)B to KiB",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "把多条单位和进制换算合成一列结果",
         query: "批量换算: 3 m to cm\n0xff to dec\n1 GiB to MiB",
     },
@@ -643,6 +648,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "按电压和电流求电阻及功率",
         query: "电路: 12 V, 1.5 A",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算串联电阻的等效电阻",
+        query: "电路: 串联 220 Ω,330 Ω,1 kΩ",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算并联电阻的等效电阻",
+        query: "电路: 并联 220 Ω,330 Ω",
     },
     Example {
         icon: Icon::Clock,
@@ -2557,6 +2572,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
+        Scope::Circuit
+            if !term.is_empty()
+                && ["串联", "并联"]
+                    .iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Equation if !term.is_empty() && "不等式".starts_with(term) => {}
         Scope::Cidr
             if !term.is_empty()

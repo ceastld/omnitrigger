@@ -169,7 +169,7 @@ fn convert_timestamp_with_local(
             .iter()
             .map(|(name, zone)| {
                 format_display_time(time, format, zone, &to_local)
-                    .map(|clock| format!("{name}\t{clock}"))
+                    .map(|clock| format!("{name}\n{clock}"))
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|lines| lines.join("\n")),
@@ -585,14 +585,14 @@ mod tests {
         assert_eq!(
             convert_timestamp("2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles", now)
                 .as_deref(),
-            Ok("UTC\t2026-07-01T13:00:00Z\nAsia/Shanghai\t2026-07-01T21:00:00+08:00\nAmerica/Los_Angeles\t2026-07-01T06:00:00-07:00")
+            Ok("UTC\n2026-07-01T13:00:00Z\nAsia/Shanghai\n2026-07-01T21:00:00+08:00\nAmerica/Los_Angeles\n2026-07-01T06:00:00-07:00")
         );
         let offset = FixedOffset::east_opt(8 * 3_600).unwrap();
         assert_eq!(
             convert_timestamp_with_local("现在 + 0.5s to 本地、UTC", now, |time| time
                 .with_timezone(&offset))
             .as_deref(),
-            Ok("本地\t1970-01-01T08:00:00.500+08:00\nUTC\t1970-01-01T00:00:00.500Z")
+            Ok("本地\n1970-01-01T08:00:00.500+08:00\nUTC\n1970-01-01T00:00:00.500Z")
         );
         assert_eq!(
             convert_timestamp("0 to UTC, nowhere", now),

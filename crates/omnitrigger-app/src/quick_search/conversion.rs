@@ -7,6 +7,7 @@ use super::batch::{map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
 use super::fraction::parse_fraction_literal;
+use super::operators::split_top_level_commas;
 use super::radix::Base;
 use super::InputSuggestion;
 
@@ -25,6 +26,7 @@ pub(super) enum ConversionError {
     InvalidUnitPrice,
     InvalidCircuit,
     InvalidResistanceOperands,
+    InvalidResistanceList,
     InvalidPeriod,
     InvalidPeriodTarget,
     OutOfRange,
@@ -51,6 +53,7 @@ impl ConversionError {
                 "输入两种电学量，例如 5 V, 20 Ω。电压、电流须为非负值，电阻须大于零"
             }
             Self::InvalidResistanceOperands => "求电阻时，电压和电流均须大于零",
+            Self::InvalidResistanceList => "输入 2 至 32 个正电阻值，各项用逗号隔开",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
             Self::InvalidPeriodTarget => "频率请选择时间单位，周期请选择频率单位",
             Self::OutOfRange => "结果超出换算范围",
@@ -431,6 +434,21 @@ pub(super) fn split_conversion(input: &str) -> Option<(&str, &str)> {
 }
 
 fn split_quantity(source: &str) -> (&str, &str) {
+    if source.starts_with('(') {
+        let mut depth = 0;
+        for (index, character) in source.char_indices() {
+            match character {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source.split_at(index + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     source.rsplit_once(' ').unwrap_or_else(|| {
         let unit_start = source
             .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E' | '_'))
@@ -890,6 +908,13 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
         return Err(ConversionError::TooLong);
     }
     let input = normalize(query).replace(char::is_whitespace, " ");
+    if let Some((operation, values)) = input.trim().split_once(' ') {
+        match operation.to_ascii_lowercase().as_str() {
+            "串联" | "series" => return equivalent_resistance(values, false),
+            "并联" | "parallel" => return equivalent_resistance(values, true),
+            _ => {}
+        }
+    }
     let (left, right) = input
         .split_once(',')
         .ok_or(ConversionError::InvalidCircuit)?;
@@ -924,6 +949,35 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
         format_circuit_value(value, unit)?,
         format_circuit_value(power, "W")?
     ))
+}
+
+fn equivalent_resistance(input: &str, parallel: bool) -> Result<String, ConversionError> {
+    const MAX_RESISTORS: usize = 32;
+    let resistors = split_top_level_commas(input)
+        .take(MAX_RESISTORS + 1)
+        .collect::<Vec<_>>();
+    if !(2..=MAX_RESISTORS).contains(&resistors.len()) {
+        return Err(ConversionError::InvalidResistanceList);
+    }
+    let resistors = resistors
+        .into_iter()
+        .map(|term| match CircuitInput::parse(term) {
+            Ok(CircuitInput::Resistance(value)) => Ok(value),
+            Err(ConversionError::OutOfRange) => Err(ConversionError::OutOfRange),
+            _ => Err(ConversionError::InvalidResistanceList),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = if parallel {
+        // 以最小电阻为基准，避免直接取很小电阻的倒数时溢出。
+        let minimum = resistors.iter().copied().fold(f64::INFINITY, f64::min);
+        minimum / resistors.iter().map(|value| minimum / value).sum::<f64>()
+    } else {
+        resistors.into_iter().sum::<f64>()
+    };
+    if result == 0. {
+        return Err(ConversionError::OutOfRange);
+    }
+    format_circuit_value(result, "Ω")
 }
 
 fn format_circuit_value(value: f64, unit: &str) -> Result<String, ConversionError> {
@@ -1676,6 +1730,42 @@ mod tests {
             })
         );
         assert_eq!(convert_batch(" \r\n "), Err(BatchError::Empty));
+    }
+
+    #[test]
+    fn calculates_series_and_parallel_resistance_with_mixed_scales() {
+        for (query, expected) in [
+            ("串联 220 Ω,330 Ω,1 kΩ", "1.55 kΩ"),
+            ("series 220 Ω, (2**5+1)Ω", "253 Ω"),
+            ("并联 220 Ω, 330Ω", "132 Ω"),
+            ("parallel 2 kΩ,2kΩ", "1 kΩ"),
+            ("并联 900 mΩ, 900mΩ,900mΩ", "300 mΩ"),
+        ] {
+            assert_eq!(calculate_circuit(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["并联 2 kΩ", "串联 2Ω,0Ω", "parallel 1 V,3Ω"] {
+            assert_eq!(
+                calculate_circuit(query),
+                Err(ConversionError::InvalidResistanceList),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn converts_parenthesized_amounts_without_a_space_before_the_unit() {
+        for (query, expected) in [
+            ("(2**10)B to KiB", "1 KiB"),
+            ("(2^10)B to KiB", "1 KiB"),
+            ("((2 + 1/2) * 2)km to m", "5000 m"),
+            ("（10+5）cm转mm", "150 mm"),
+        ] {
+            assert_eq!(convert(query).unwrap().as_deref(), Ok(expected), "{query}");
+        }
+        assert!(suggested_targets("(2**10)B")
+            .unwrap()
+            .iter()
+            .any(|item| { item.expression == "(2**10)B to KiB" && item.result == "1 KiB" }));
     }
 
     #[test]

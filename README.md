@@ -162,7 +162,7 @@
 - 输入 `统计: 移动平均 2 1/2,1,2,4` 可依次得到 `3/4`、`3/2` 和 `3`。窗口大小 2 表示每次取相邻两个值，从第一个完整窗口开始，每个结果占一行。
 - 输入 `统计: 移动中位数 3 1/2,100,2,3,-1` 依次得到 `2`、`3` 和 `2`。每个完整窗口输出一行，窗口大小为偶数时取中间两个值的精确平均。
 - 输入 `统计: 累计合计 1/2,1,2,4` 可依次得到 `1/2`、`3/2`、`7/2` 和 `15/2`。用 `累计平均` 可求截至每一项的精确平均值。
-- 输入 `统计: 累计分布 3,1/2,0.5,3,5` 可按不同数值查看累计次数和累计频率。例如小于或等于 `3` 的观测有 4 个，占 `4/5`。支持用 `频数` 输入各组已有次数，结果保留精确分数。
+- 输入 `统计: 累计分布 3,1/2,0.5,3,5` 可按不同数值查看累计次数和累计频率。例如小于或等于 `3` 的观测有 4 个，占 `4/5`。支持用 `频数` 输入各组已有次数，结果以 CSV 输出并保留精确分数。
 - 输入 `统计: 均方根 1/2,3/2` 得到 `√(5/4)`。也可用频数组，例如 `统计: 均方根 频数 0@2,6@1,-8@1` 得到 `5`。
 - 输入 `统计: 调和平均 36,72` 得到 `48`，可用于按相同路程求两段的平均速度。数值须大于零，支持分数与 `频数` 数据，结果保留精确分数。 [调和平均定义](https://docs.python.org/3/library/statistics.html#statistics.harmonic_mean)
 - 输入 `统计: 标准误 1,3,5` 得到 `√(4/3)`，即样本标准差除以观测数的平方根。至少需要两个观测值，支持 `频数` 数据，结果保留精确分数或根式。 [NIST 均值标准误定义](https://www.itl.nist.gov/div898/software/dataplot/refman2/ch2/sd_mean.pdf)
@@ -190,6 +190,8 @@
 - 输入 `3.3 V to mV`、`500 mA to A` 或 `2.2 kΩ to Ω` 可换算电压、电流和电阻。前缀 `m` 表示毫，`M` 表示兆。 [NIST 电气单位和 SI 前缀](https://www.nist.gov/pml/special-publication-811/nist-guide-si-chapter-4-two-classes-si-units-and-si-prefixes)
 - 输入 `12 pt to px` 得到 `16 px`。搜索框按 CSS 绝对长度比例换算像素 `px`、点 `pt`、派卡 `pc` 和四分之一毫米 `Q`。 [W3C CSS 绝对长度定义](https://www.w3.org/TR/css-values-4/#absolute-lengths)
 - 输入 `电路: 5 V, 20 Ω` 可求出 `250 mA · 1.25 W`，输入 `电路: 12 V, 1.5 A` 得到 `8 Ω · 18 W`。输入同一电阻上的两种电学量，可计算第三种和功率。求电阻时，电压和电流均须为正。 [欧姆定律与电功率](https://openstax.org/books/university-physics-volume-2/pages/9-5-electrical-energy-and-power)
+- 输入 `电路: 串联 220 Ω,330 Ω,1 kΩ` 得到 `1.55 kΩ`，输入 `电路: 并联 220 Ω,330 Ω` 得到 `132 Ω`。每组可填 2 至 32 个正电阻值，支持不同数量级的欧姆单位。 [OpenStax 串联与并联电阻](https://openstax.org/books/university-physics-volume-2/pages/10-2-resistors-in-series-and-parallel)
+- 单位可紧跟括号内的算式。例如 `(2**10)B to KiB` 得到 `1 KiB`，`((2 + 1/2) * 2)km to m` 得到 `5000 m`。只输入带单位的算式，也可选择换算目标。
 - 输入 `周期: 50 Hz to ms` 得到 `20 ms`，输入 `周期: 2.5 ms to Hz` 得到 `400 Hz`。周期与频率互为倒数，省略目标单位时会按结果大小选择单位。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
 - 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。
@@ -407,7 +409,7 @@
 - 加上 `本地` 或 `local` 可按系统时区显示带偏移量的时间，例如 `时间戳: 1700000000 本地` 或 `时间戳: 现在 本地`。
 - 用 `to +08:00` 或 `to -05:30` 可指定目标时区偏移。Unix 时间戳和带时区的时间都可以换算，例如 `时间戳: 1700000000123ms to +08:00`。
 - 也可输入 IANA 地区时区名。 `时间戳: 1700000000 to America/New_York` 得到 `2023-11-14T17:13:20-05:00`，按该时刻的夏令时和历史规则换算。 [IANA 时区数据库](https://www.iana.org/time-zones)
-- 输入 `时间戳: 2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles` 可在一次换算中查看同一时刻在三个时区的时间。结果按输入顺序逐行显示。目标用逗号或顿号隔开，最多八个。
+- 输入 `时间戳: 2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles` 可在一次换算中查看同一时刻在三个时区的时间。结果按输入顺序显示，每个时区占两行，先列名称，再列完整日期时间。目标用逗号或顿号隔开，最多八个。
 - 可直接输入当地的日期和时间，再写原时区和目标时区。 `时间戳: 2026-07-01 09:00 America/New_York to Asia/Shanghai` 得到 `2026-07-01T21:00:00+08:00`。夏令时跳过或重复的钟表时刻会有对应提示。
 - 时区偏移可精确到秒。把历史查询的结果作为输入，例如 `时间戳: 1900-01-01T00:09:21.123+00:09:21 to UTC`，可还原为 `1900-01-01T00:00:00.123Z`。结果中的毫秒一并保留。
 - 输入 `时间戳: 间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York` 得到 `01:00:00`。间隔按两端对应的 UTC 时间计算，支持地区时区和明确的 UTC 偏移，结果可精确到纳秒。交换两端会反转正负号。 [NIST 夏令时规则](https://www.nist.gov/pml/time-and-frequency-division/popular-links/daylight-saving-time-dst)

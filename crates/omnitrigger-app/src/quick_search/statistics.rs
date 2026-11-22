@@ -314,10 +314,10 @@ fn report_frequencies(
         return format!("众数 {modes} · 各出现 {highest} 次");
     }
     let cumulative = matches!(report, FrequencyReport::Cumulative);
-    let header = if cumulative {
-        "值\t累计次数\t累计频率"
+    let (header, separator, newline) = if cumulative {
+        ("值,累计次数,累计频率", ',', "\r\n")
     } else {
-        "值\t次数\t频率"
+        ("值\t次数\t频率", '\t', "\n")
     };
     let mut total = 0;
     std::iter::once(header.to_owned())
@@ -325,10 +325,10 @@ fn report_frequencies(
             total += repetitions;
             let occurrences = if cumulative { total } else { repetitions };
             let share = BigRational::new(occurrences.into(), count.into());
-            format!("{value}\t{occurrences}\t{share}")
+            format!("{value}{separator}{occurrences}{separator}{share}")
         }))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(newline)
 }
 
 pub(super) fn summarize_unweighted(
@@ -773,11 +773,11 @@ mod tests {
     fn reports_exact_cumulative_distribution_including_weighted_ties() {
         assert_eq!(
             calculate_statistics("累计分布 3,1/2,0.5,3,5").as_deref(),
-            Ok("值\t累计次数\t累计频率\n1/2\t2\t2/5\n3\t4\t4/5\n5\t5\t1")
+            Ok("值,累计次数,累计频率\r\n1/2,2,2/5\r\n3,4,4/5\r\n5,5,1")
         );
         assert_eq!(
             calculate_statistics("ecdf 频数 2@18446744073709551614,1@1").as_deref(),
-            Ok("值\t累计次数\t累计频率\n1\t1\t1/18446744073709551615\n2\t18446744073709551615\t1")
+            Ok("值,累计次数,累计频率\r\n1,1,1/18446744073709551615\r\n2,18446744073709551615,1")
         );
         assert_eq!(
             calculate_statistics("累计分布 频数 2@18446744073709551615,1@1"),
