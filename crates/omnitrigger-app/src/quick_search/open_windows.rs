@@ -55,11 +55,22 @@ impl OpenWindowsIndex {
             Self::Ready(windows) | Self::Refreshing(windows) => windows,
         };
         let query = search_key(query);
+        let Some((process, query)) = window_query(&query) else {
+            return Results::OpenWindowsUnavailable(
+                "填写程序文件名，例如 进程=notepad.exe。文件名含空格时用双引号包住。".into(),
+            );
+        };
         let terms: Vec<_> = query.split_whitespace().collect();
         let mut matches: Vec<_> = windows
             .iter()
+            .filter(|window| process.is_none_or(|name| window.process_key == name))
             .filter_map(|window| {
-                window_rank(&window.title_key, &window.process_key, &query, &terms)
+                let process_key = if process.is_some() {
+                    ""
+                } else {
+                    &window.process_key
+                };
+                window_rank(&window.title_key, process_key, query, &terms)
                     .map(|rank| (rank, window))
             })
             .collect();
@@ -73,6 +84,26 @@ impl OpenWindowsIndex {
                 .collect(),
         )
     }
+}
+
+fn window_query(query: &str) -> Option<(Option<&str>, &str)> {
+    let Some(input) = query
+        .strip_prefix("进程=")
+        .or_else(|| query.strip_prefix("process="))
+    else {
+        return Some((None, query));
+    };
+    let (process, terms) = if let Some(quoted) = input.strip_prefix('"') {
+        let (name, terms) = quoted.split_once('"')?;
+        if !terms.is_empty() && !terms.starts_with(char::is_whitespace) {
+            return None;
+        }
+        (name, terms)
+    } else {
+        input.split_at(input.find(char::is_whitespace).unwrap_or(input.len()))
+    };
+    (!process.trim().is_empty() && !process.contains(['/', '\\', ':', '"']))
+        .then_some((Some(process), terms.trim_start()))
 }
 
 fn window_rank(title: &str, process: &str, query: &str, terms: &[&str]) -> Option<(u8, bool)> {
@@ -90,6 +121,37 @@ fn window_rank(title: &str, process: &str, query: &str, terms: &[&str]) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_exact_process_filters_and_separates_remaining_title_terms() {
+        let query = search_key("进程＝ＯｍｎｉＴｒｉｇｇｅｒ．ｅｘｅ　报告");
+        assert_eq!(
+            window_query(&query),
+            Some((Some("omnitrigger.exe"), "报告"))
+        );
+        assert_eq!(
+            window_query(r#"process="example tool.exe" 预算"#),
+            Some((Some("example tool.exe"), "预算"))
+        );
+        assert_eq!(
+            window_query("process=notes.exe"),
+            Some((Some("notes.exe"), ""))
+        );
+        assert_eq!(window_query("预算 notes"), Some((None, "预算 notes")));
+        for invalid in [
+            "进程=",
+            r#"process="" 标题"#,
+            r#"process="tool.exe"紧邻标题"#,
+            r#"process="未闭合"#,
+            r"process=C:\work\tool.exe",
+        ] {
+            assert!(window_query(invalid).is_none(), "{invalid}");
+        }
+        assert!(matches!(
+            OpenWindowsIndex::Ready(Vec::new()).results("进程="),
+            Results::OpenWindowsUnavailable(_)
+        ));
+    }
 
     #[test]
     fn matches_fullwidth_window_query_and_prioritizes_all_terms_in_the_title() {
