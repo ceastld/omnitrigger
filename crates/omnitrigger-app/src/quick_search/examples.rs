@@ -466,6 +466,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "一次输出三种单位的精确数据量",
+        query: "数据换算: 1/3 KiB to [B, b, MiB]",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算括号算式计算出的数据量",
         query: "(2**10)B to KiB",
     },

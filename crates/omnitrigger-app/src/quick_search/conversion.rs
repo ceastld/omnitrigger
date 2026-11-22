@@ -1128,20 +1128,24 @@ pub(super) fn convert_exact_data(query: &str) -> Result<String, ConversionError>
     let (source, target) = split_conversion(input.trim()).ok_or(ConversionError::Incomplete)?;
     let (amount, source) = split_quantity(source);
     let source = Unit::parse(source)?;
-    let target = Unit::parse(target)?;
-    if !matches!(source.dimension, Dimension::Data | Dimension::DataRate)
-        || !matches!(target.dimension, Dimension::Data | Dimension::DataRate)
-    {
+    if !matches!(source.dimension, Dimension::Data | Dimension::DataRate) {
         return Err(ConversionError::ExactDataUnit);
-    }
-    if source.dimension != target.dimension {
-        return Err(ConversionError::DifferentDimensions);
     }
     let amount = calculate_fraction(amount).map_err(|_| ConversionError::InvalidAmount)?;
     // 数据量和数据速率单位表中的比例是可精确表示的整数。
-    let converted = amount * BigInt::from(source.scale as u64) / BigInt::from(target.scale as u64);
-    ensure_exact_size(&converted).map_err(|_| ConversionError::OutOfRange)?;
-    Ok(format_with_unit(converted, &target))
+    let bits = amount * BigInt::from(source.scale as u64);
+    format_targets(target, |target| {
+        let target = Unit::parse(target)?;
+        if !matches!(target.dimension, Dimension::Data | Dimension::DataRate) {
+            return Err(ConversionError::ExactDataUnit);
+        }
+        if source.dimension != target.dimension {
+            return Err(ConversionError::DifferentDimensions);
+        }
+        let converted = &bits / BigInt::from(target.scale as u64);
+        ensure_exact_size(&converted).map_err(|_| ConversionError::OutOfRange)?;
+        Ok(format_with_unit(converted, &target))
+    })
 }
 
 pub(super) fn convert_batch(input: &str) -> Result<String, BatchError<ConversionError>> {
@@ -1221,6 +1225,15 @@ pub(super) fn conversion_target_input(query: &str) -> Option<String> {
 
 fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionError> {
     let (amount, source) = parse_quantity(source)?;
+    format_targets(target, |target| {
+        format_quantity_target(amount, &source, target)
+    })
+}
+
+fn format_targets(
+    target: &str,
+    mut format: impl FnMut(&str) -> Result<String, ConversionError>,
+) -> Result<String, ConversionError> {
     let target = target.trim();
     if let Some(list) = target.strip_prefix('[') {
         let list = list
@@ -1232,11 +1245,11 @@ fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionErro
         }
         return targets
             .into_iter()
-            .map(|target| format_quantity_target(amount, &source, target))
+            .map(format)
             .collect::<Result<Vec<_>, _>>()
             .map(|values| values.join("\n"));
     }
-    format_quantity_target(amount, &source, target)
+    format(target)
 }
 
 fn format_quantity_target(
@@ -1344,7 +1357,12 @@ mod tests {
             ("9007199254740993 B to KiB", "9007199254740993/1024 KiB"),
             ("(2**53 + 1)B to KiB", "9007199254740993/1024 KiB"),
             ("1/3 KiB to B", "1024/3 B"),
+            ("1/3 KiB to [B,b,MiB]", "1024/3 B\n8192/3 b\n1/3072 MiB"),
             ("1 MiB/s to MB/s", "16384/15625 MB/s"),
+            (
+                "(1/3)MiB/s to [MB/s,KiB/s]",
+                "16384/46875 MB/s\n1024/3 KiB/s",
+            ),
             ("8 b to B", "1 B"),
             ("1 字节 to 比特", "8 b"),
             ("-1 kB to B", "-1000 B"),
@@ -1362,6 +1380,14 @@ mod tests {
         assert_eq!(
             convert_exact_data("3 m to cm"),
             Err(ConversionError::ExactDataUnit)
+        );
+        assert_eq!(
+            convert_exact_data("1 B to [KiB,]"),
+            Err(ConversionError::InvalidTargets)
+        );
+        assert_eq!(
+            convert_exact_data("1 B to [KiB,MiB/s]"),
+            Err(ConversionError::DifferentDimensions)
         );
     }
 
