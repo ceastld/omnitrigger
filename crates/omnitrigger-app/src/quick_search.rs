@@ -1193,11 +1193,13 @@ impl Results {
             Self::ConversionTargets(items) if !items.is_empty() => {
                 132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
-            Self::FileOptions(items) | Self::Bookmarks(items) if !items.is_empty() => {
+            Self::FileOptions(items)
+            | Self::Bookmarks(items)
+            | Self::Calculations(items)
+            | Self::Conversions(items)
+                if !items.is_empty() =>
+            {
                 132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
-            }
-            Self::Calculations(items) | Self::Conversions(items) if !items.is_empty() => {
-                132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
             }
             _ => 158.,
         }
@@ -2070,9 +2072,10 @@ impl QuickSearch {
         let (count, page_size) = match &self.results {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
-            Results::FileOptions(items) | Results::Bookmarks(items) => {
-                (items.len(), EXAMPLE_PAGE_SIZE)
-            }
+            Results::FileOptions(items)
+            | Results::Bookmarks(items)
+            | Results::Calculations(items)
+            | Results::Conversions(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             Results::Help(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             Results::Value(Ok(_)) => (self.expanded_value_pages.as_ref().map_or(0, Vec::len), 1),
             _ => return false,
@@ -2461,13 +2464,13 @@ impl QuickSearch {
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("未找到用过的算式"),
             Results::Calculations(items) => {
-                self.render_input_suggestions(items, Icon::Terminal, items.len(), cx)
+                self.render_input_suggestions(items, Icon::Terminal, EXAMPLE_PAGE_SIZE, cx)
             }
             Results::Conversions(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("未找到用过的换算"),
             Results::Conversions(items) => {
-                self.render_input_suggestions(items, Icon::Layers, items.len(), cx)
+                self.render_input_suggestions(items, Icon::Layers, EXAMPLE_PAGE_SIZE, cx)
             }
             Results::ConversionTargets(items) => {
                 self.render_input_suggestions(items, Icon::Layers, CONVERSION_PAGE_SIZE, cx)
@@ -3884,7 +3887,7 @@ mod tests {
         let (
             states,
             reopened_states,
-            (help_pages, output_pages),
+            [help_pages, output_pages, calculation_pages, conversion_pages],
             window_refresh,
             app_refresh,
             file_navigation,
@@ -3931,6 +3934,8 @@ mod tests {
             [last_example_page, last_example_page - EXAMPLE_PAGE_SIZE, 0]
         );
         assert_eq!(output_pages, [3, 2, 0]);
+        assert_eq!(calculation_pages, [EXAMPLE_PAGE_SIZE, 0, 0]);
+        assert_eq!(conversion_pages, [EXAMPLE_PAGE_SIZE, 0, 0]);
         assert_eq!(
             states.unwrap(),
             [
@@ -3958,7 +3963,7 @@ mod tests {
     fn visit_search_pages(
         handle: WindowHandle<QuickSearch>,
         cx: &mut gpui::AsyncApp,
-    ) -> ([usize; 3], [usize; 3]) {
+    ) -> [[usize; 3]; 4] {
         let visit_pages =
             |search: &mut QuickSearch, window: &mut Window, cx: &mut Context<QuickSearch>| {
                 ["ctrl-pagedown", "pageup", "ctrl-pageup"].map(|key| {
@@ -3989,7 +3994,30 @@ mod tests {
                 visit_pages(search, window, cx)
             })
             .unwrap();
-        (help, output)
+        handle
+            .update(cx, |search, _, _| {
+                for number in 0..12 {
+                    search
+                        .index
+                        .recent
+                        .calculations
+                        .record(&format!("{number}+1"), &(number + 1).to_string());
+                    search.index.recent.conversions.record(
+                        &format!("{number} km to m"),
+                        &format!("{} m", number * 1000),
+                    );
+                }
+            })
+            .unwrap();
+        let [calculations, conversions] = ["算式历史:", "换算历史:"].map(|query| {
+            handle
+                .update(cx, |search, window, cx| {
+                    search.fill_query(query, window, cx)
+                })
+                .unwrap();
+            handle.update(cx, visit_pages).unwrap()
+        });
+        [help, output, calculations, conversions]
     }
 
     #[test]

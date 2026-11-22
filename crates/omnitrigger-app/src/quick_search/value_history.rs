@@ -1,9 +1,9 @@
 use std::{cell::RefCell, rc::Rc};
 
+use super::examples::search_key;
 use super::InputSuggestion;
 
 const HISTORY_LIMIT: usize = 12;
-const MATCH_LIMIT: usize = 6;
 
 /// 同一工作台打开的搜索框共享本次运行中确认过的查询。
 #[derive(Clone, Default)]
@@ -26,18 +26,20 @@ impl RecentValues {
     }
 
     pub(super) fn matching(&self, query: &str) -> Vec<InputSuggestion> {
-        let query = query.to_lowercase();
+        if query.trim().is_empty() {
+            return self.0.borrow().clone();
+        }
+        let query = search_key(query);
         self.0
             .borrow()
             .iter()
             .filter(|item| {
-                let expression = item.expression.to_lowercase();
-                let result = item.result.to_lowercase();
+                let expression = search_key(&item.expression);
+                let result = search_key(&item.result);
                 query
                     .split_whitespace()
                     .all(|term| expression.contains(term) || result.contains(term))
             })
-            .take(MATCH_LIMIT)
             .cloned()
             .collect()
     }
@@ -63,12 +65,14 @@ mod tests {
             ["2**10", "sqrt(9)"],
         );
         assert_eq!(reopened.matching("SQRT 3")[0].expression, "sqrt(9)");
+        assert_eq!(reopened.matching("ＳＱＲＴ　３")[0].expression, "sqrt(9)");
         assert_eq!(reopened.matching("1024")[0].expression, "2**10");
         assert!(RecentValues::default().matching("").is_empty());
         for value in 0..HISTORY_LIMIT {
             history.record(&format!("1+{value}"), &(value + 1).to_string());
         }
         assert!(reopened.matching("2**10").is_empty());
-        assert_eq!(reopened.matching("").len(), MATCH_LIMIT);
+        assert_eq!(reopened.matching("").len(), HISTORY_LIMIT);
+        assert_eq!(reopened.matching("").last().unwrap().expression, "1+0");
     }
 }
