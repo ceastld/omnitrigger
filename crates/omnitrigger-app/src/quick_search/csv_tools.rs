@@ -65,7 +65,10 @@ pub(super) enum CsvError {
     JoinTooLarge,
     FillTooLarge,
     ConstantColumnArguments,
+    RowNumberArguments,
+    RowNumberOverflow,
     ConcatenatedColumnArguments,
+    FirstNonemptyColumnArguments,
     SplitColumnArguments,
     AddedColumnTooLarge,
     StackArguments,
@@ -136,8 +139,13 @@ impl CsvError {
             Self::ConstantColumnArguments => {
                 "用 JSON 数组填写新列名和固定文本，例如 [\"来源\",\"人工复核\"]"
             }
+            Self::RowNumberArguments => "填写新列名和非负整数起点，例如 [\"序号\",1]",
+            Self::RowNumberOverflow => "行号超过无符号 64 位整数范围",
             Self::ConcatenatedColumnArguments => {
                 "填写新列名、至少两列和分隔符，例如 [\"地址\",[\"省\",\"市\"],\"-\"]"
+            }
+            Self::FirstNonemptyColumnArguments => {
+                "填写新列名和至少两个候选列，例如 [\"联系方式\",[\"手机\",\"座机\"]]"
             }
             Self::SplitColumnArguments => {
                 "填写来源列、至少两个不同的新列名和非空分隔符，例如 [\"地址\",[\"省\",\"市\"],\"/\"]"
@@ -218,11 +226,13 @@ enum Operation {
         replacements: HashMap<String, String>,
     },
     ConstantColumn([String; 2]),
+    RowNumberColumn(String, u64),
     ConcatenateColumns {
         name: String,
         columns: Vec<ColumnReference>,
         separator: String,
     },
+    FirstNonemptyColumn(String, Vec<ColumnReference>),
     SplitColumn {
         source: ColumnReference,
         names: Vec<String>,
@@ -484,6 +494,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ConstantColumn(column)
         }
+        "加行号" | "number-rows" => {
+            let ((name, first), data) =
+                json_argument_and_data::<(String, u64)>(input, CsvError::RowNumberArguments)?;
+            input = data;
+            Operation::RowNumberColumn(name, first)
+        }
         "拼接列" | "concat-columns" => {
             let ((name, columns, separator), data) =
                 json_argument_and_data::<(String, Vec<ColumnReference>, String)>(
@@ -496,6 +512,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 columns,
                 separator,
             }
+        }
+        "首个非空" | "coalesce-columns" => {
+            let ((name, columns), data) = json_argument_and_data::<(String, Vec<ColumnReference>)>(
+                input,
+                CsvError::FirstNonemptyColumnArguments,
+            )?;
+            input = data;
+            Operation::FirstNonemptyColumn(name, columns)
         }
         "拆分列" | "split-column" => {
             let ((source, names, separator), data) =
@@ -728,11 +752,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             replacements,
         } => map_column_values(&rows, column, &replacements),
         Operation::ConstantColumn([name, value]) => add_constant_column(&rows, &name, &value),
+        Operation::RowNumberColumn(name, first) => number_csv_rows(&rows, &name, first),
         Operation::ConcatenateColumns {
             name,
             columns,
             separator,
         } => concatenate_columns(&rows, &name, &columns, &separator),
+        Operation::FirstNonemptyColumn(name, columns) => {
+            first_nonempty_csv_column(&rows, &name, &columns)
+        }
         Operation::SplitColumn {
             source,
             names,
@@ -1388,6 +1416,20 @@ fn add_constant_column(rows: &[Vec<String>], name: &str, value: &str) -> Result<
     write_appended_column(header, records, name, |_| Ok(value))
 }
 
+fn number_csv_rows(rows: &[Vec<String>], name: &str, first: u64) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::RowNumberArguments);
+    }
+    let mut numbers = first..=u64::MAX;
+    write_appended_column(header, records, name, |_| {
+        numbers
+            .next()
+            .map(|number| number.to_string())
+            .ok_or(CsvError::RowNumberOverflow)
+    })
+}
+
 fn concatenate_columns(
     rows: &[Vec<String>],
     name: &str,
@@ -1415,11 +1457,31 @@ fn concatenate_columns(
     })
 }
 
-fn write_appended_column<T: AsRef<str>>(
-    header: &[String],
-    records: &[Vec<String>],
+fn first_nonempty_csv_column(
+    rows: &[Vec<String>],
     name: &str,
-    mut cell_for: impl FnMut(&[String]) -> Result<T, CsvError>,
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') || columns.len() < 2 {
+        return Err(CsvError::FirstNonemptyColumnArguments);
+    }
+    let columns =
+        resolve_distinct_columns(header, columns, CsvError::FirstNonemptyColumnArguments)?;
+    write_appended_column(header, records, name, |row| {
+        Ok(columns
+            .iter()
+            .map(|&index| row[index].as_str())
+            .find(|value| !value.is_empty())
+            .unwrap_or(""))
+    })
+}
+
+fn write_appended_column<'a, T: AsRef<str>>(
+    header: &[String],
+    records: &'a [Vec<String>],
+    name: &str,
+    mut cell_for: impl FnMut(&'a [String]) -> Result<T, CsvError>,
 ) -> Result<String, CsvError> {
     if header.iter().any(|cell| cell == name) {
         return Err(CsvError::HeaderNameConflict);
@@ -2690,6 +2752,30 @@ mod tests {
     }
 
     #[test]
+    fn appends_contiguous_csv_row_numbers_and_counts_multiline_fields_once() {
+        assert_eq!(
+            transform_csv("加行号 [\"序号\",100] 编号,商品\n001,\"茶\n梨\"\n002,苹果").as_deref(),
+            Ok("编号,商品,序号\r\n001,\"茶\n梨\",100\r\n002,苹果,101")
+        );
+        assert_eq!(
+            transform_csv("number-rows [\"序号\",18446744073709551615] 编号\n001").as_deref(),
+            Ok("编号,序号\r\n001,18446744073709551615")
+        );
+        assert_eq!(
+            transform_csv("number-rows [\"序号\",18446744073709551615] 编号\n001\n002"),
+            Err(CsvError::RowNumberOverflow)
+        );
+        assert_eq!(
+            transform_csv(r#"加行号 ["编号",1] 编号"#),
+            Err(CsvError::HeaderNameConflict)
+        );
+        assert_eq!(
+            transform_csv(r#"加行号 ["序号",-1] 编号"#),
+            Err(CsvError::RowNumberArguments)
+        );
+    }
+
+    #[test]
     fn concatenates_chosen_csv_columns_in_order_and_keeps_empty_values() {
         assert_eq!(
             transform_csv(concat!(
@@ -2709,6 +2795,30 @@ mod tests {
         );
         assert_eq!(
             transform_csv(r#"拼接列 ["省",[1,2],"-"] 省,市"#),
+            Err(CsvError::HeaderNameConflict)
+        );
+    }
+
+    #[test]
+    fn appends_the_first_nonempty_selected_csv_cell_in_the_requested_order() {
+        assert_eq!(
+            transform_csv(concat!(
+                r#"首个非空 ["联系",["手机",3]] 编号,手机,座机"#,
+                "\n001,,021-1000\n002,  ,021-2000\n003,,\n004,\"123,456\",000"
+            ))
+            .as_deref(),
+            Ok(concat!(
+                "编号,手机,座机,联系\r\n",
+                "001,\"\",021-1000,021-1000\r\n002,  ,021-2000,  \r\n",
+                "003,\"\",\"\",\"\"\r\n004,\"123,456\",000,\"123,456\""
+            ))
+        );
+        assert_eq!(
+            transform_csv(r#"coalesce-columns ["联系",["手机",2]] 编号,手机,座机"#),
+            Err(CsvError::FirstNonemptyColumnArguments)
+        );
+        assert_eq!(
+            transform_csv(r#"coalesce-columns ["手机",[2,3]] 编号,手机,座机"#),
             Err(CsvError::HeaderNameConflict)
         );
     }

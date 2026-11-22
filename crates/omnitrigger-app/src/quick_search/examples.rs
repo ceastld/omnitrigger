@@ -2422,8 +2422,18 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "给 CSV 数据行追加连续行号",
+        query: "CSV: 加行号 [\"序号\",100] 编号,商品\n001,茶\n002,梨",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把所选 CSV 单元格拼成一列",
         query: "CSV: 拼接列 [\"地址\",[\"省\",3],\"-\"] 编号,省,市\n001,福建,福州\n002,浙江,杭州",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把每行按顺序找到的第一个非空值写入新列",
+        query: "CSV: 首个非空 [\"联系\",[\"手机\",\"座机\"]] 编号,手机,座机\n001,,021-1000\n002,010-2000,021-2000\n003,,",
     },
     Example {
         icon: Icon::Terminal,
