@@ -23,6 +23,7 @@ pub(super) enum MatrixError {
     PowerExponent,
     SolveDimensions,
     Singular,
+    LeastSquaresRank,
     Evaluation(FractionError),
 }
 
@@ -31,7 +32,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、行列式、迹、特征值、转置、求解、求逆、秩、行最简形、零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -42,6 +43,7 @@ impl MatrixError {
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
             Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
             Self::Singular => "系数矩阵不可逆，无法得到唯一解",
+            Self::LeastSquaresRank => "系数矩阵的列线性相关，最小二乘解不唯一",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "矩阵元素须为整数、有限小数、分数或精确算式"
             }
@@ -107,6 +109,10 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "求解" | "solve" => {
             let (left, right) = parse_pair(input)?;
             solve(left, right).map(format_matrix)
+        }
+        "最小二乘" | "least-squares" => {
+            let (left, right) = parse_pair(input)?;
+            least_squares(left, right).map(format_matrix)
         }
         "求逆" | "inverse" => {
             let matrix = parse_matrix(input)?;
@@ -372,6 +378,22 @@ fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
         .collect())
 }
 
+fn least_squares(left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
+    if left.len() != right.len() {
+        return Err(MatrixError::SolveDimensions);
+    }
+    if left[0].len() > left.len() {
+        return Err(MatrixError::LeastSquaresRank);
+    }
+    let transposed = transpose(left.clone());
+    let normal = multiply(&transposed, &left)?;
+    let projected = multiply(&transposed, &right)?;
+    solve(normal, projected).map_err(|error| match error {
+        MatrixError::Singular => MatrixError::LeastSquaresRank,
+        error => error,
+    })
+}
+
 fn elementwise(
     input: &str,
     operation: impl Fn(&mut BigRational, BigRational),
@@ -597,6 +619,28 @@ mod tests {
             ),
         ] {
             assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn finds_exact_least_squares_coefficients_for_one_or_more_response_columns() {
+        assert_eq!(
+            calculate_matrix("最小二乘 1,0;1,1;1,2 @ 1;2;2").as_deref(),
+            Ok("7/6\n1/2")
+        );
+        assert_eq!(
+            calculate_matrix("least-squares 1,0;1,1;1,2 @ 1,1;2,3;2,5").as_deref(),
+            Ok("7/6, 1\n1/2, 2")
+        );
+        for (query, expected) in [
+            (
+                "最小二乘 1,1;2,2;3,3 @ 1;2;3",
+                MatrixError::LeastSquaresRank,
+            ),
+            ("最小二乘 1,2 @ 1", MatrixError::LeastSquaresRank),
+            ("最小二乘 1;2 @ 1", MatrixError::SolveDimensions),
+        ] {
+            assert_eq!(calculate_matrix(query), Err(expected));
         }
     }
 

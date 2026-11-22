@@ -455,6 +455,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 求解 2,1; 1,-1 @ 5; 1",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用精确分数求矩阵的唯一最小二乘解",
+        query: "矩阵: 最小二乘 1,0; 1,1; 1,2 @ 1; 2; 2",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算方阵的逆矩阵",
         query: "矩阵: 求逆 1,2; 3,4",
@@ -3887,7 +3892,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["子网", "排除"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
-        Scope::Matrix if matches!(term, "乘方" | "特" | "特征" | "特征值") => {}
+        Scope::Matrix
+            if matches!(term, "乘方" | "特" | "特征" | "特征值")
+                || (!term.is_empty() && "最小二乘".starts_with(term)) => {}
         Scope::Duration
             if !term.is_empty()
                 && [
