@@ -71,6 +71,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "移动平均" | "moving-average" => return moving_average(values.trim()),
+        "移动中位数" | "moving-median" => return moving_median(values.trim()),
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
@@ -162,7 +163,7 @@ fn running_totals(input: &str, average: bool) -> Result<String, StatisticsError>
     Ok(output.join("\n"))
 }
 
-fn moving_average(input: &str) -> Result<String, StatisticsError> {
+fn sliding_window_values(input: &str) -> Result<(usize, Vec<BigRational>), StatisticsError> {
     let (width, input) = operation_and_arguments(input);
     let width = width
         .parse::<usize>()
@@ -177,6 +178,11 @@ fn moving_average(input: &str) -> Result<String, StatisticsError> {
         .into_iter()
         .map(|term| calculate_fraction(term).map_err(StatisticsError::Evaluation))
         .collect::<Result<Vec<_>, _>>()?;
+    Ok((width, values))
+}
+
+fn moving_average(input: &str) -> Result<String, StatisticsError> {
+    let (width, values) = sliding_window_values(input)?;
     let divisor = BigRational::from_integer(BigInt::from(width));
     let mut sum = BigRational::default();
     let mut averages = Vec::with_capacity(values.len() - width + 1);
@@ -190,6 +196,26 @@ fn moving_average(input: &str) -> Result<String, StatisticsError> {
         }
     }
     Ok(averages.join("\n"))
+}
+
+fn moving_median(input: &str) -> Result<String, StatisticsError> {
+    let (width, values) = sliding_window_values(input)?;
+    let mut ordered: Vec<&BigRational> = Vec::with_capacity(width);
+    let mut medians = Vec::with_capacity(values.len() - width + 1);
+    for window in values.windows(width) {
+        ordered.extend(window);
+        ordered.sort_unstable();
+        let middle = ordered[width / 2];
+        let median = if width.is_multiple_of(2) {
+            let previous = ordered[width / 2 - 1];
+            bounded((previous + middle) / BigInt::from(2))?.to_string()
+        } else {
+            middle.to_string()
+        };
+        medians.push(median);
+        ordered.clear();
+    }
+    Ok(medians.join("\n"))
 }
 
 fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
@@ -473,6 +499,30 @@ mod tests {
         }
         assert_eq!(
             calculate_statistics("累计平均"),
+            Err(StatisticsError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn reports_exact_medians_for_complete_sliding_windows() {
+        for (query, expected) in [
+            ("移动中位数 3 1/2,100,2,3,-1", "2\n3\n2"),
+            ("moving-median 2 -1\r\n1/2\r\n1\r\n2", "-1/4\n3/4\n3/2"),
+            ("移动中位数 1 comb(4,2),-2,-2", "6\n-2\n-2"),
+            ("移动中位数 4 7,0,3,1", "2"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("移动中位数 3 1,2"),
+            Err(StatisticsError::InvalidWindowWidth)
+        );
+        assert_eq!(
+            calculate_statistics("移动中位数 2"),
             Err(StatisticsError::Incomplete)
         );
     }

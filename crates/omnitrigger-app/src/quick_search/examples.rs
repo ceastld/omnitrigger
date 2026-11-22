@@ -111,6 +111,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按固定窗口计算精确移动中位数",
+        query: "统计: 移动中位数 3 1/2,100,2,3,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "逐项计算精确累计合计",
         query: "统计: 累计合计 1/2,1,2,4",
     },
@@ -2288,6 +2293,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "移动"
                     | "移动平"
                     | "移动平均"
+                    | "移动中"
+                    | "移动中位"
+                    | "移动中位数"
                     | "累"
                     | "累计"
                     | "累计合"
