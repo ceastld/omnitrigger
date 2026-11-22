@@ -1357,6 +1357,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "去掉每行开头匹配的文字",
+        query: "文本: 逐行去前缀 \"- \" - 苹果\n梨\n- - 茶",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "去掉每行末尾匹配的文字",
+        query: "文本: 逐行去后缀 \"。\" 苹果。\n梨\n茶。。",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "找出两组文本共有的行",
         query: r#"文本: 共有行 "苹果\n梨\n茶" "茶\n苹果\n柿子""#,
     },

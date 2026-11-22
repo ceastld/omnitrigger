@@ -121,6 +121,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "拆分成行" | "split-lines" => return split_lines(text),
         "逐行加前缀" | "prefix-lines" => return decorate_lines(text, true),
         "逐行加后缀" | "suffix-lines" => return decorate_lines(text, false),
+        "逐行去前缀" | "strip-line-prefix" => return strip_line_decoration(text, true),
+        "逐行去后缀" | "strip-line-suffix" => return strip_line_decoration(text, false),
         "取列" | "column" => return select_text_column(text),
         "取行" | "pick-lines" => return select_text_line_ranges(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
@@ -676,6 +678,22 @@ fn decorate_lines(input: &str, prepend: bool) -> Result<String, TextError> {
     Ok(result)
 }
 
+fn strip_line_decoration(input: &str, prefix: bool) -> Result<String, TextError> {
+    let (decoration, text) = quoted_text_argument(input)?;
+    let mut result = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let content = line.lines().next().unwrap_or_default();
+        let remaining = if prefix {
+            content.strip_prefix(decoration.as_str())
+        } else {
+            content.strip_suffix(decoration.as_str())
+        };
+        result.push_str(remaining.unwrap_or(content));
+        result.push_str(&line[content.len()..]);
+    }
+    Ok(result)
+}
+
 fn split_lines(input: &str) -> Result<String, TextError> {
     let (delimiter, text) = quoted_text_argument(input)?;
     if delimiter.is_empty() {
@@ -958,6 +976,24 @@ mod tests {
         }
         let large = format!("逐行加前缀 \"{}\" {}", "x".repeat(1024), "A\n".repeat(1100));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn removes_one_literal_line_affix_and_preserves_line_endings() {
+        for (query, expected) in [
+            (
+                "逐行去前缀 \"- \" \"- 甲\r\n\r\n乙\n- - 丙\n\"",
+                "甲\r\n\r\n乙\n- 丙\n",
+            ),
+            (
+                "strip-line-suffix \"。\" \"甲。\r\n乙\n丙。。\n\"",
+                "甲\r\n乙\n丙。\n",
+            ),
+            ("逐行去后缀 \" \" \"甲 \n乙\"", "甲\n乙"),
+            ("逐行去前缀 \"\" \" 甲\n\"", " 甲\n"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]
