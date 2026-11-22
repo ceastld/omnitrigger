@@ -231,8 +231,18 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把非零向量缩放为单位向量",
+        query: "向量: 单位向量 3,4",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算两个点的距离",
         query: "向量: 距离 0,0; 1,1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算点到线段的距离和最近点",
+        query: "向量: 线段距离 3,4 @ 0,0; 2,0",
     },
     Example {
         icon: Icon::Layers,

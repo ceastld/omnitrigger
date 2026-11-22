@@ -15,8 +15,10 @@ pub(super) enum VectorError {
     UnknownOperation,
     Dimensions,
     CrossDimensions,
+    SegmentArguments,
     ZeroDirection,
     ZeroAngleVector,
+    ZeroUnitVector,
     TooManyDimensions,
     Evaluation(FractionError),
 }
@@ -26,10 +28,12 @@ impl VectorError {
         match self {
             Self::Incomplete => "用逗号隔开分量，用分号隔开两个向量",
             Self::UnknownOperation => "输入 ? 向量 查看可用操作",
-            Self::Dimensions => "两个向量的分量数须一致",
+            Self::Dimensions => "各向量的分量数须一致",
             Self::CrossDimensions => "叉积需要两个三维向量",
+            Self::SegmentArguments => "用 @ 隔开点和线段，线段的两个端点用分号隔开",
             Self::ZeroDirection => "投影方向须为非零向量",
             Self::ZeroAngleVector => "计算夹角余弦需要两个非零向量",
+            Self::ZeroUnitVector => "计算单位向量需要非零向量",
             Self::TooManyDimensions => "每个向量最多 32 个分量",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "分量须为整数、有限小数、分数或精确算式"
@@ -46,9 +50,14 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
         .split_once(char::is_whitespace)
         .ok_or(VectorError::Incomplete)?;
     let operation = operation.to_ascii_lowercase();
-    if matches!(operation.as_str(), "长度" | "norm" | "length") {
-        let values = components(input)?;
-        return Ok(format_square_root(&dot_product(&values, &values)?));
+    match operation.as_str() {
+        "长度" | "norm" | "length" => {
+            let values = components(input)?;
+            return Ok(format_square_root(&dot_product(&values, &values)?));
+        }
+        "单位向量" | "unit-vector" => return unit_vector(&components(input)?),
+        "线段距离" | "segment-distance" => return distance_to_segment(input),
+        _ => {}
     }
     if !matches!(
         operation.as_str(),
@@ -160,6 +169,25 @@ fn format_vector(values: &[BigRational]) -> String {
         .join(", ")
 }
 
+fn unit_vector(values: &[BigRational]) -> Result<String, VectorError> {
+    let squared_length = dot_product(values, values)?;
+    if squared_length == BigRational::default() {
+        return Err(VectorError::ZeroUnitVector);
+    }
+    let components = values
+        .iter()
+        .map(|component| {
+            let squared = (component * component) / &squared_length;
+            ensure_exact_size(&squared).map_err(VectorError::Evaluation)?;
+            Ok(format_signed_square_root(
+                &squared,
+                component.numer().sign(),
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(components.join(", "))
+}
+
 fn vector_cosine(left: &[BigRational], right: &[BigRational]) -> Result<String, VectorError> {
     let squared_lengths = dot_product(left, left)? * dot_product(right, right)?;
     if squared_lengths == BigRational::default() {
@@ -169,6 +197,42 @@ fn vector_cosine(left: &[BigRational], right: &[BigRational]) -> Result<String, 
     let squared = (&dot * &dot) / squared_lengths;
     ensure_exact_size(&squared).map_err(VectorError::Evaluation)?;
     Ok(format_signed_square_root(&squared, dot.numer().sign()))
+}
+
+fn distance_to_segment(input: &str) -> Result<String, VectorError> {
+    let (point, segment) = input.split_once('@').ok_or(VectorError::SegmentArguments)?;
+    let (start, end) = segment
+        .split_once(';')
+        .ok_or(VectorError::SegmentArguments)?;
+    let (point, start, end) = (components(point)?, components(start)?, components(end)?);
+    if point.len() != start.len() || start.len() != end.len() {
+        return Err(VectorError::Dimensions);
+    }
+    let direction = vector_difference(&end, &start)?;
+    let squared_length = dot_product(&direction, &direction)?;
+    let zero = BigRational::default();
+    let closest = if squared_length == zero {
+        start
+    } else {
+        let offset = vector_difference(&point, &start)?;
+        let weight = (dot_product(&offset, &direction)? / squared_length)
+            .clamp(zero, BigRational::from_integer(1.into()));
+        start
+            .into_iter()
+            .zip(direction)
+            .map(|(origin, step)| {
+                let coordinate = origin + step * &weight;
+                ensure_exact_size(&coordinate).map_err(VectorError::Evaluation)?;
+                Ok(coordinate)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let difference = vector_difference(&point, &closest)?;
+    let distance = format_square_root(&dot_product(&difference, &difference)?);
+    Ok(format!(
+        "距离 {distance}\n最近点 {}",
+        format_vector(&closest)
+    ))
 }
 
 fn cross_product(left: &[BigRational], right: &[BigRational]) -> Result<String, VectorError> {
@@ -202,6 +266,38 @@ mod tests {
         );
         assert_eq!(
             calculate_vector("分解 1; 1,2"),
+            Err(VectorError::Dimensions)
+        );
+    }
+
+    #[test]
+    fn returns_exact_unit_vector_components_and_rejects_a_zero_vector() {
+        for (query, expected) in [
+            ("单位向量 3,4", "3/5, 4/5"),
+            ("unit-vector -1,1,0", "-√(1/2), √(1/2), 0"),
+            ("单位向量 -1/2", "-1"),
+        ] {
+            assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_vector("单位向量 0,0"),
+            Err(VectorError::ZeroUnitVector)
+        );
+    }
+
+    #[test]
+    fn finds_the_exact_closest_point_on_a_finite_segment() {
+        for (query, expected) in [
+            ("线段距离 3,4 @ 0,0; 2,0", "距离 √17\n最近点 2, 0"),
+            ("线段距离 -1,1 @ 0,0; 2,0", "距离 √2\n最近点 0, 0"),
+            ("segment-distance 1,1 @ 0,0; 2,0", "距离 1\n最近点 1, 0"),
+            ("线段距离 0,0 @ 3,4; 3,4", "距离 5\n最近点 3, 4"),
+            ("线段距离 1/2,1/2 @ 0,0; 1,1", "距离 0\n最近点 1/2, 1/2"),
+        ] {
+            assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_vector("线段距离 3,4 @ 0,0; 2,0,1"),
             Err(VectorError::Dimensions)
         );
     }
