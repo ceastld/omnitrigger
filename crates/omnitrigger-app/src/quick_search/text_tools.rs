@@ -196,6 +196,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             text.len()
         )),
         "显示空白" | "show-whitespace" => Ok(show_whitespace(text)),
+        "去ansi样式" | "strip-ansi-style" => Ok(strip_ansi_styles(text)),
         "下划线命名" | "snake-case" => Ok(join_identifier_words(text, "_")),
         "短横线命名" | "kebab-case" => Ok(join_identifier_words(text, "-")),
         "小驼峰命名" | "camel-case" => Ok(camel_case(text, false)),
@@ -382,6 +383,14 @@ fn show_whitespace(text: &str) -> String {
         }
     }
     result
+}
+
+fn strip_ansi_styles(text: &str) -> String {
+    static STYLES: OnceLock<Regex> = OnceLock::new();
+    let styles = STYLES.get_or_init(|| {
+        Regex::new(r"(?:\x1B\[|\u{009B})[0-9:;]*m").expect("固定的终端样式表达式有效")
+    });
+    styles.replace_all(text, "").into_owned()
 }
 
 pub(super) fn newline_pattern() -> &'static Regex {
@@ -1105,6 +1114,26 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_only_complete_ansi_style_sequences() {
+        for (query, expected) in [
+            (
+                "去ANSI样式 \x1b[31m错误\x1b[0m \u{009B}1m完成\u{009B}m",
+                "错误 完成",
+            ),
+            (
+                "strip-ansi-style \" \x1b[38;2;1;2;3m茶\x1b[0m\t\x1b[4:2m咖啡\x1b[m \"",
+                " 茶\t咖啡 ",
+            ),
+            (
+                "去ANSI样式 \x1b[2J原文\\x1b[31m\x1b[31",
+                "\x1b[2J原文\\x1b[31m\x1b[31",
+            ),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query:?}");
+        }
+    }
 
     #[test]
     fn converts_utf16_units_and_requires_ordered_surrogate_pairs() {

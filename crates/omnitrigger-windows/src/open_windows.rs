@@ -26,6 +26,11 @@ pub struct OpenWindow {
 }
 
 impl OpenWindow {
+    /// 比较 Windows 窗口标识，保留列表刷新期间仍然匹配的窗口。
+    pub fn same_window(&self, other: &Self) -> bool {
+        self.target == other.target && self.identity == other.identity
+    }
+
     /// 由用户选中窗口后请求切到前台，最小化的窗口先请求还原。
     pub fn activate(&self) -> Result<(), String> {
         let handle = HWND(self.target.0 as *mut c_void);
@@ -116,4 +121,27 @@ fn usable_window(handle: HWND) -> bool {
         )
     };
     visibility.is_ok() && cloaked == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_window_identity_when_its_title_changes() {
+        let original = OpenWindow {
+            title: "初始标题".to_owned(),
+            process: None,
+            target: ShortcutTarget(42),
+            identity: (10, 20),
+        };
+        let mut current = original.clone();
+        current.title = "新标题".to_owned();
+        assert!(original.same_window(&current));
+        current.identity = (10, 21);
+        assert!(!original.same_window(&current));
+        current.identity = original.identity;
+        current.target = ShortcutTarget(43);
+        assert!(!original.same_window(&current));
+    }
 }

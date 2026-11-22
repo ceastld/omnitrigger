@@ -1407,6 +1407,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "移除终端日志中的 ANSI 颜色和样式",
+        query: "文本: 去ANSI样式 \x1b[31m错误\x1b[0m \x1b[1m完成\x1b[m",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "转成大写",
         query: "文本: 大写 Straße",
     },

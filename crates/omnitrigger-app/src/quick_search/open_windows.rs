@@ -14,10 +14,21 @@ pub(super) enum OpenWindowsIndex {
     Unloaded,
     Loading,
     Ready(Vec<SearchWindow>),
+    Refreshing(Vec<SearchWindow>),
     Unavailable(String),
 }
 
 impl OpenWindowsIndex {
+    pub(super) fn begin_loading(&mut self) -> bool {
+        if matches!(self, Self::Loading | Self::Refreshing(_)) {
+            return false;
+        }
+        if let Self::Ready(previous) = std::mem::replace(self, Self::Loading) {
+            *self = Self::Refreshing(previous);
+        }
+        true
+    }
+
     pub(super) fn load() -> Self {
         match list_open_windows() {
             Ok(windows) => Self::Ready(
@@ -38,7 +49,7 @@ impl OpenWindowsIndex {
         let windows = match self {
             Self::Unloaded | Self::Loading => return Results::OpenWindowsLoading,
             Self::Unavailable(error) => return Results::OpenWindowsUnavailable(error.clone()),
-            Self::Ready(windows) => windows,
+            Self::Ready(windows) | Self::Refreshing(windows) => windows,
         };
         let query = query.to_lowercase();
         let mut matches: Vec<_> = windows

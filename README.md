@@ -84,7 +84,7 @@
 - 在最后一栏用 `名称列表` 可逐行复制匹配项的文件名或文件夹名，例如 `文件: C:\工作 | *.pdf | 仅文件 最近修改 名称列表`。结果沿用筛选与排序，并包含文件扩展名。
 - 在最后一栏用 `路径JSON` 可将匹配路径输出为 JSON 字符串数组，例如 `文件: C:\工作 | *.pdf | 路径JSON`。结果沿用筛选和排序，无匹配项时输出 `[]`。
 - 在最后一栏用 `后缀统计` 可将匹配文件按扩展名计数并输出 CSV，例如 `文件: C:\工作 | | 后缀统计`。扩展名按最后一个句点后的内容取值，忽略大小写，按数量从多到少排列，无扩展名的文件单独计数。 [扩展名取值规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.extension)
-- 输入 `窗口:` 可查看当前桌面的普通窗口，继续输入窗口标题或程序名可筛选。按回车切换，最小化窗口会请求还原。也可用 `window:`。每次打开搜索框后首次使用时读取窗口列表，按 `F5` 可用当前筛选条件刷新。 [Windows 前台切换规则](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
+- 输入 `窗口:` 可查看当前桌面的普通窗口，继续输入窗口标题或程序名可筛选。按回车切换，最小化窗口会请求还原。也可用 `window:`。每次打开搜索框后首次使用时读取窗口列表，按 `F5` 可用当前筛选条件刷新，并继续选中仍在列表中的窗口。 [Windows 前台切换规则](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
 - 可以按名称搜索已配置的轮盘，回车打开对应编辑页。输入 `轮盘: 编辑` 可只搜索轮盘。
 - 输入 `槽位: 复制` 可查找轮盘槽位，回车打开对应布局并选中槽位。可以加上轮盘名或应用名来缩小结果。
 - 输入 `预设: 顶部边缘` 可查找触发预设，回车打开对应的预设卡片。
@@ -204,6 +204,7 @@
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。
 - 用 `文本: 长度详情` 可同时查看字素簇、Unicode 码位、UTF-16 单元和 UTF-8 字节。例如用引号输入 `"👩‍💻 é"`，分别得到 3、6、8 和 15。 [Unicode 字素簇规则](https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries)
 - 用 `文本: 显示空白` 可把普通空格、制表符、回车和换行显示为 `␠`、`␉`、`␍` 和 `␊`。其他 Unicode 空白显示码位，例如不换行空格显示为 `<U+00A0>`。用引号可保留待转换文本首尾的空白。 [Unicode 控制字符图形](https://www.unicode.org/charts/PDF/U2400.pdf)
+- 用 `文本: 去ANSI样式` 可清理终端日志中的颜色、粗体和下划线控制序列，保留日志正文。输入命令后可按 Tab 填入一条含样式的示例。 [Microsoft 终端文字样式](https://learn.microsoft.com/windows/console/console-virtual-terminal-sequences#text-formatting)
 - 输入 `文本: 码位 北京` 得到 `U+5317 U+4EAC`，用 `文本: 码位解码 U+5317 U+4EAC` 转回文字。组合字符按各自的 Unicode 码位显示。
 - 输入 `文本: UTF8编码 北京` 可查看 UTF-8 字节 `E5 8C 97 E4 BA AC`。用 `文本: UTF8解码` 加上十六进制字节可还原文字，接受连续数字、空白分隔或带 `0x` 的字节组。
 - 输入 `文本: UTF16编码 北😀` 可查看 UTF-16 码元 `5317 D83D DE00`。用 `文本: UTF16解码` 可还原文字。每个码元为四位十六进制数字，可连续输入或用空白分隔，代理码元须按顺序成对出现。 [Unicode UTF-16 规则](https://www.unicode.org/faq/utf_bom.html#utf16)

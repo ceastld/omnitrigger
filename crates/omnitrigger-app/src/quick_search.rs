@@ -1280,23 +1280,44 @@ impl QuickSearch {
         if matches!(self.index.open_windows, OpenWindowsIndex::Unloaded)
             && matches!(self.results, Results::OpenWindowsLoading)
         {
-            self.index.open_windows = OpenWindowsIndex::Loading;
-            cx.spawn_in(window, async move |this, cx| {
-                let open_windows = cx
-                    .background_executor()
-                    .spawn(async { OpenWindowsIndex::load() })
-                    .await;
-                let _ = cx.update(|window, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.index.open_windows = open_windows;
-                        let query = this.input.read(cx).text();
-                        this.refresh_results(&query, window, cx);
-                    });
-                });
-            })
-            .detach();
+            self.load_open_windows(window, cx);
         }
         cx.notify();
+    }
+
+    fn load_open_windows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.index.open_windows.begin_loading() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let open_windows = cx
+                .background_executor()
+                .spawn(async { OpenWindowsIndex::load() })
+                .await;
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    let previous = match &this.results {
+                        Results::Destinations(items) => items.get(this.selected).cloned(),
+                        _ => None,
+                    };
+                    this.index.open_windows = open_windows;
+                    let query = this.input.read(cx).text();
+                    this.refresh_results(&query, window, cx);
+                    let Some(Destination::OpenWindow(previous)) = previous else {
+                        return;
+                    };
+                    let Results::Destinations(items) = &this.results else {
+                        return;
+                    };
+                    if let Some(index) = items.iter().position(|item| {
+                        matches!(item, Destination::OpenWindow(target) if target.same_window(&previous))
+                    }) {
+                        this.selected = index;
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     fn load_applications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1589,18 +1610,12 @@ impl QuickSearch {
                 match scoped_query(query.trim()) {
                     Some((Scope::LocalFiles | Scope::OpenWindows | Scope::Applications, _))
                         if event.is_held => {}
-                    Some((Scope::OpenWindows, _))
-                        if matches!(self.index.open_windows, OpenWindowsIndex::Loading) => {}
                     Some((Scope::LocalFiles, term)) => {
                         if let Some(load) = self.index.local_files.reload(term) {
                             self.load_local_files(load, window, cx);
                         }
                     }
-                    Some((Scope::OpenWindows, _)) => {
-                        self.index.open_windows = OpenWindowsIndex::Unloaded;
-                        self.refresh_results(&query, window, cx);
-                        cx.notify();
-                    }
+                    Some((Scope::OpenWindows, _)) => self.load_open_windows(window, cx),
                     Some((Scope::Applications, _)) => self.load_applications(window, cx),
                     _ => return,
                 }
@@ -2830,6 +2845,7 @@ mod tests {
                         .update(cx, |search, window, cx| {
                             search.index.open_windows = OpenWindowsIndex::Ready(Vec::new());
                             search.fill_query("窗口: 测试", window, cx);
+                            search.refresh_results("窗口: 测试", window, cx);
                             let event = KeyDownEvent {
                                 keystroke: gpui::Keystroke::parse("f5").unwrap(),
                                 is_held: false,
@@ -2842,13 +2858,15 @@ mod tests {
                             let ready =
                                 matches!(search.index.open_windows, OpenWindowsIndex::Ready(_));
                             search.key_down(&event, window, cx);
-                            let loading =
-                                matches!(search.index.open_windows, OpenWindowsIndex::Loading);
+                            let loading = matches!(
+                                search.index.open_windows,
+                                OpenWindowsIndex::Refreshing(_)
+                            ) && matches!(&search.results, Results::Destinations(items) if items.is_empty());
                             search.key_down(&event, window, cx);
                             (
                                 ready,
                                 loading,
-                                matches!(search.index.open_windows, OpenWindowsIndex::Loading),
+                                matches!(search.index.open_windows, OpenWindowsIndex::Refreshing(_)),
                             )
                         })
                         .unwrap();
