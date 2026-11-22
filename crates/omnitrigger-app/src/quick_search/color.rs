@@ -22,6 +22,7 @@ pub(super) enum ColorError {
     Invalid,
     InvalidFormat,
     InvalidMix,
+    InvalidPalette,
     MixColorSpace,
     TransparentContrast,
     TransparentTextBackground,
@@ -35,6 +36,9 @@ impl ColorError {
             Self::Invalid => "检查颜色名、HEX 位数或颜色通道范围",
             Self::InvalidFormat => "目标颜色格式可用 HEX、RGB、HSL 或 HWB",
             Self::InvalidMix => "输入两个颜色，权重范围为 0% 到 100%，总权重需大于 0%",
+            Self::InvalidPalette => {
+                "填写起始颜色、结束颜色和 2 至 32 个色值，例如 #000 到 #fff @ 5"
+            }
             Self::MixColorSpace => "颜色混合支持 in srgb",
             Self::TransparentContrast => "计算对比度需要两个不透明颜色",
             Self::TransparentTextBackground => "需要不透明底色，也可先叠加到实际背景上",
@@ -49,6 +53,7 @@ enum ColorFormat {
     Hwb,
 }
 
+#[derive(Clone, Copy)]
 struct Channels {
     rgb: [u8; 3],
     alpha: Option<u8>,
@@ -84,6 +89,15 @@ impl Channels {
     fn swatch(&self) -> u32 {
         let [r, g, b] = self.rgb;
         u32::from_be_bytes([r, g, b, self.alpha.unwrap_or(255)])
+    }
+
+    fn format_hex(&self) -> String {
+        let [r, g, b] = self.rgb;
+        if let Some(alpha) = self.alpha {
+            format!("#{r:02X}{g:02X}{b:02X}{alpha:02X}")
+        } else {
+            format!("#{r:02X}{g:02X}{b:02X}")
+        }
     }
 
     fn over(self, backdrop: Self) -> Self {
@@ -392,6 +406,28 @@ fn mix_stop(input: &str) -> Result<(Channels, Option<f64>), ColorError> {
     Ok((Channels::parse(color.trim())?, Some(weight)))
 }
 
+pub(super) fn make_color_palette(input: &str) -> Result<String, ColorError> {
+    let input = normalize(input);
+    let (range, count) = input.rsplit_once('@').ok_or(ColorError::InvalidPalette)?;
+    let count = count
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|count| (2..=32).contains(count))
+        .ok_or(ColorError::InvalidPalette)?;
+    let (first, last) = color_pair(range, "到", " to ").ok_or(ColorError::InvalidPalette)?;
+    let first = Channels::parse(first.trim())?;
+    let last = Channels::parse(last.trim())?;
+    let mut colors = Vec::with_capacity(count as usize);
+    colors.push(first.format_hex());
+    for index in 1..count - 1 {
+        let weight = f64::from(index) / f64::from(count - 1) * 100.;
+        colors.push(first.mix(last, 100. - weight, weight)?.format_hex());
+    }
+    colors.push(last.format_hex());
+    Ok(colors.join("\n"))
+}
+
 pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     let normalized = normalize(input);
     let input = normalized.trim();
@@ -440,13 +476,7 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     };
     let [r, g, b] = channels.rgb;
     let output = match target.unwrap_or(default) {
-        ColorFormat::Hex => {
-            if let Some(alpha) = channels.alpha {
-                format!("#{r:02X}{g:02X}{b:02X}{alpha:02X}")
-            } else {
-                format!("#{r:02X}{g:02X}{b:02X}")
-            }
-        }
+        ColorFormat::Hex => channels.format_hex(),
         ColorFormat::Rgb => {
             if let Some(alpha) = channels.alpha {
                 format!("rgba({r}, {g}, {b}, {:.3})", f64::from(alpha) / 255.)
@@ -548,6 +578,26 @@ mod tests {
             Err(ColorError::TransparentTextBackground),
         );
         assert_eq!(convert_color("文字色"), Err(ColorError::Incomplete));
+    }
+
+    #[test]
+    fn produces_equally_spaced_srgb_hex_colors_including_both_endpoints() {
+        assert_eq!(
+            make_color_palette("#000 到 #fff @ 5").as_deref(),
+            Ok("#000000\n#404040\n#808080\n#BFBFBF\n#FFFFFF")
+        );
+        assert_eq!(
+            make_color_palette("#F000 TO rgba(0, 0, 255, 0.5) @ 3").as_deref(),
+            Ok("#FF000000\n#0000FF40\n#0000FF80")
+        );
+        assert_eq!(
+            make_color_palette("rebeccapurple 到 #0080ff @ 2").as_deref(),
+            Ok("#663399\n#0080FF")
+        );
+        assert_eq!(
+            make_color_palette("#000 到 #fff @ 33"),
+            Err(ColorError::InvalidPalette)
+        );
     }
 
     #[test]

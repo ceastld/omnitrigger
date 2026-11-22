@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::{collections::HashMap, fmt::Write as _};
 
 use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta, Weekday};
 
@@ -19,6 +19,7 @@ pub(super) enum DateError {
     InvalidOperation,
     InvalidDateList,
     InvalidDateInterval,
+    WorkdayExceptions,
     PatternArguments,
     InvalidDatePattern,
     DatePatternMismatch,
@@ -44,6 +45,9 @@ impl DateError {
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
             Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天或每隔 2 个月",
+            Self::WorkdayExceptions => {
+                "工作日例外需要两个日期数组，先休息日再补班日，每个日期只填一次"
+            }
             Self::PatternArguments => {
                 "用 JSON 数组填写日期和格式，例如 [\"2026-11-21\",\"%Y%m%d\"]"
             }
@@ -341,13 +345,22 @@ fn is_workday_unit(unit: &str) -> bool {
 enum DateSelection {
     EveryDays(u32),
     EveryMonths(u32),
-    Workdays,
+    Workdays(HashMap<NaiveDate, bool>),
     Weekends,
     Weekdays([bool; 7]),
 }
 
 fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
     let lower = rule.to_ascii_lowercase();
+    if let Some((unit, dates)) = lower
+        .split_once("例外")
+        .or_else(|| lower.split_once(" except "))
+    {
+        if !is_workday_unit(unit.trim_end()) {
+            return Err(DateError::InvalidDateList);
+        }
+        return adjusted_workdays(dates.trim_start());
+    }
     match lower.as_str() {
         "每天" | "daily" => return Ok(DateSelection::EveryDays(1)),
         "每月" | "每个月" | "monthly" => return Ok(DateSelection::EveryMonths(1)),
@@ -395,7 +408,7 @@ fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
     }
     match lower.as_str() {
         "周末" | "weekend" | "weekends" => Ok(DateSelection::Weekends),
-        rule if is_workday_unit(rule) => Ok(DateSelection::Workdays),
+        rule if is_workday_unit(rule) => Ok(DateSelection::Workdays(HashMap::new())),
         rule => {
             let mut selected = [false; 7];
             for term in rule.split([',', '，', '、']) {
@@ -414,6 +427,25 @@ fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
             Ok(DateSelection::Weekdays(selected))
         }
     }
+}
+
+fn adjusted_workdays(input: &str) -> Result<DateSelection, DateError> {
+    let [days_off, days_on] = serde_json::from_str::<[Vec<String>; 2]>(input)
+        .map_err(|_| DateError::WorkdayExceptions)?;
+    let mut exceptions = HashMap::new();
+    for (dates, is_workday) in [(days_off, false), (days_on, true)] {
+        for date in dates {
+            let (date, "") = iso_date_prefix(&date).ok_or(DateError::WorkdayExceptions)? else {
+                return Err(DateError::WorkdayExceptions);
+            };
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .map_err(|_| DateError::WorkdayExceptions)?;
+            if exceptions.insert(date, is_workday).is_some() {
+                return Err(DateError::WorkdayExceptions);
+            }
+        }
+    }
+    Ok(DateSelection::Workdays(exceptions))
 }
 
 fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
@@ -448,8 +480,11 @@ fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let dates = (0..=days)
         .step_by(step)
         .map(|offset| start + TimeDelta::days(offset))
-        .filter(|date| match selection {
-            DateSelection::Workdays => date.weekday().num_days_from_monday() < 5,
+        .filter(|date| match &selection {
+            DateSelection::Workdays(exceptions) => exceptions
+                .get(date)
+                .copied()
+                .unwrap_or_else(|| date.weekday().num_days_from_monday() < 5),
             DateSelection::Weekends => date.weekday().num_days_from_monday() >= 5,
             DateSelection::Weekdays(days) => days[date.weekday().num_days_from_monday() as usize],
             DateSelection::EveryDays(_) | DateSelection::EveryMonths(_) => true,
@@ -917,6 +952,33 @@ mod tests {
             (r#"格式化 ["今天"]"#, DateError::PatternArguments),
         ] {
             assert_eq!(calculate_date(query, today), Err(expected));
+        }
+    }
+
+    #[test]
+    fn lists_workdays_with_explicit_days_off_and_weekend_makeup_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        for query in [
+            r#"列出 2026-11-25 到 2026-11-30 工作日 例外 [["2026-11-26"],["2026-11-28"]]"#,
+            r#"list 2026-11-25 to 2026-11-30 Workdays EXCEPT [["2026-11-26"],["2026-11-28"]]"#,
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok("2026-11-25\n2026-11-27\n2026-11-28\n2026-11-30")
+            );
+        }
+        for dates in [
+            r#"[["2026-11-26"],["2026-11-26"]]"#,
+            r#"[["2026-11-31"],[]]"#,
+            r#"[["2026-11-26"]]"#,
+        ] {
+            assert_eq!(
+                calculate_date(
+                    &format!("列出 2026-11-25 到 2026-11-30 工作日 例外 {dates}"),
+                    today,
+                ),
+                Err(DateError::WorkdayExceptions)
+            );
         }
     }
 

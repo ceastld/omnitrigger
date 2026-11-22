@@ -74,7 +74,7 @@ use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
-use color::{calculate_contrast, convert_color, ColorError};
+use color::{calculate_contrast, convert_color, make_color_palette, ColorError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
     calculate_unit_price, conversion_target_input, convert, convert_batch, convert_period,
@@ -752,14 +752,20 @@ impl Results {
                 Scope::Ulid => {
                     Self::text_value(transform_ulid(term).map_err(ValueError::Identifier))
                 }
-                Scope::Color => Self::Value(
-                    convert_color(term)
-                        .map(|color| ResultValue {
-                            text: color.output,
-                            kind: ValueKind::Color(color.swatch),
-                        })
-                        .map_err(ValueError::Color),
-                ),
+                Scope::Color => {
+                    if let Some(input) = batch_arguments(term, "色阶", "palette") {
+                        Self::text_value(make_color_palette(input).map_err(ValueError::Color))
+                    } else {
+                        Self::Value(
+                            convert_color(term)
+                                .map(|color| ResultValue {
+                                    text: color.output,
+                                    kind: ValueKind::Color(color.swatch),
+                                })
+                                .map_err(ValueError::Color),
+                        )
+                    }
+                }
                 Scope::ColorContrast => Self::Value(
                     calculate_contrast(term)
                         .map(|contrast| ResultValue {

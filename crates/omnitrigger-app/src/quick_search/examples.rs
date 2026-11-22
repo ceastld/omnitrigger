@@ -901,6 +901,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 列出 2026-11-20 到 2026-11-23 工作日",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "列工作日时加入手动指定的休息日和补班日",
+        query: r#"日期: 列出 2026-11-25 到 2026-11-30 工作日 例外 [["2026-11-26"],["2026-11-28"]]"#,
+    },
+    Example {
         icon: Icon::Clock,
         title: "按年月日计算日期差",
         query: "日期: 2025-03-15 - 2024-01-31 年月日",
@@ -1274,6 +1279,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "按比例混合两个颜色",
         query: "颜色: color-mix(in srgb, #fff 25%, #000)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按 sRGB 等距离生成两种颜色之间的色阶",
+        query: "颜色: 色阶 #004080 到 #80C0FF @ 5",
     },
     Example {
         icon: Icon::Layers,
@@ -2311,6 +2321,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["列出", "格式化", "解析", "月历"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
+        Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
         Scope::Duration
             if !term.is_empty()
                 && [
