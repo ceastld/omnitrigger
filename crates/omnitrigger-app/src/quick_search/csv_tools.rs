@@ -61,6 +61,8 @@ pub(super) enum CsvError {
     AggregateColumn,
     GroupingColumns,
     PivotColumns,
+    UnpivotArguments,
+    UnpivotColumns,
     PivotTooLarge,
     EmptyStatisticsColumn,
     Statistics(StatisticsError),
@@ -109,6 +111,10 @@ impl CsvError {
             Self::PivotColumns => {
                 "用 JSON 数组填写互不重复的行、列和数值列，例如 [\"地区\",\"状态\",\"金额\"]"
             }
+            Self::UnpivotArguments => {
+                "用 JSON 数组填写保留列、展开后的列名和值列名，例如 [[\"地区\"],\"月份\",\"金额\"]"
+            }
+            Self::UnpivotColumns => "至少留一列用于展开",
             Self::PivotTooLarge => "透视表结果超过 1 MiB，请缩小数据范围",
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
             Self::Statistics(error) => error.message(),
@@ -155,6 +161,7 @@ enum Operation {
         average: bool,
     },
     PivotSum([ColumnReference; 3]),
+    Unpivot(Vec<ColumnReference>, [String; 2]),
     ColumnStatistics {
         column: ColumnReference,
         sample: bool,
@@ -384,6 +391,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             input = data;
             Operation::PivotSum(columns)
         }
+        "逆透视" | "unpivot" => {
+            let ((columns, label, value), data) =
+                json_argument_and_data(input, CsvError::UnpivotArguments)?;
+            input = data;
+            Operation::Unpivot(columns, [label, value])
+        }
         "排序" | "sort-columns" | "降序" | "sort-columns-desc" | "数值排序" | "sort-numeric"
         | "数值降序" | "sort-numeric-desc" => {
             let (columns, data) =
@@ -458,6 +471,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             average,
         } => aggregate_by_columns(&rows, &columns, amount, average),
         Operation::PivotSum(columns) => pivot_sum(&rows, &columns),
+        Operation::Unpivot(columns, names) => unpivot(&rows, &columns, &names),
         Operation::ColumnStatistics { column, sample } => summarize_column(&rows, column, sample),
         Operation::SortByColumns {
             columns,
@@ -892,6 +906,69 @@ fn pivot_sum(rows: &[Vec<String>], columns: &[ColumnReference; 3]) -> Result<Str
     Ok(output)
 }
 
+fn unpivot(
+    rows: &[Vec<String>],
+    keep: &[ColumnReference],
+    names: &[String; 2],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let keep = resolve_distinct_columns(header, keep, CsvError::UnpivotArguments)?;
+    if keep.len() == header.len() {
+        return Err(CsvError::UnpivotColumns);
+    }
+    if names
+        .iter()
+        .any(|name| name.is_empty() || name.contains('\0'))
+    {
+        return Err(CsvError::UnpivotArguments);
+    }
+    if names[0] == names[1]
+        || names
+            .iter()
+            .any(|name| keep.iter().any(|&column| header[column] == *name))
+    {
+        return Err(CsvError::HeaderNameConflict);
+    }
+
+    let kept_columns = keep.iter().copied().collect::<HashSet<_>>();
+    let expanded = header
+        .iter()
+        .enumerate()
+        .filter(|(column, _)| !kept_columns.contains(column))
+        .map(|(column, label)| (column, csv_cell(label)))
+        .collect::<Vec<_>>();
+    let mut output = keep
+        .iter()
+        .map(|&column| &header[column])
+        .chain(names)
+        .map(|name| csv_cell(name))
+        .collect::<Vec<_>>()
+        .join(",");
+    for record in records {
+        let mut prefix = keep
+            .iter()
+            .map(|&column| csv_cell(&record[column]))
+            .collect::<Vec<_>>()
+            .join(",");
+        if !keep.is_empty() {
+            prefix.push(',');
+        }
+        for (column, label) in &expanded {
+            let value = csv_cell(&record[*column]);
+            let row_bytes = 3 + prefix.len() + label.len() + value.len();
+            if output.len() + row_bytes > MAX_PIVOT_BYTES {
+                return Err(CsvError::PivotTooLarge);
+            }
+            output.push_str("\r\n");
+            output.push_str(&prefix);
+            output.push_str(label);
+            output.push(',');
+            output.push_str(&value);
+        }
+    }
+    Ok(output)
+}
+
 fn sort_by_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -1315,6 +1392,44 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn unpivots_csv_by_record_and_keeps_quoted_empty_and_numeric_cells() {
+        assert_eq!(
+            transform_csv(
+                "逆透视 [[\"地区\",2],\"月份\",\"金额\"]\n地区,编号,一月,\"二月,补录\"\n北,001,2.50,\n南,002,1/3,3"
+            )
+            .as_deref(),
+            Ok("地区,编号,月份,金额\r\n北,001,一月,2.50\r\n北,001,\"二月,补录\",\"\"\r\n南,002,一月,1/3\r\n南,002,\"二月,补录\",3")
+        );
+        assert_eq!(
+            transform_csv("unpivot [[],\"字段\",\"值\"] 一,二\n甲,乙").as_deref(),
+            Ok("字段,值\r\n一,甲\r\n二,乙")
+        );
+        for (query, error) in [
+            (
+                r#"逆透视 [[1,"地区"],"月份","金额"] 地区,一月"#,
+                CsvError::UnpivotArguments,
+            ),
+            (
+                r#"逆透视 [[1,2],"月份","金额"] 地区,一月"#,
+                CsvError::UnpivotColumns,
+            ),
+            (
+                r#"逆透视 [[1],"地区","金额"] 地区,一月"#,
+                CsvError::HeaderNameConflict,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+
+        let header = format!("地区,{}月", "月,".repeat(650));
+        let row = format!("{},{}1", "x".repeat(1800), "1,".repeat(650));
+        assert_eq!(
+            transform_csv(&format!("unpivot [[1],\"月份\",\"金额\"] {header}\n{row}")),
+            Err(CsvError::PivotTooLarge)
+        );
     }
 
     #[test]

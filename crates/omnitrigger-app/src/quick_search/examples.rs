@@ -1923,6 +1923,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 CSV 的多列展开为列名和内容",
+        query: "CSV: 逆透视 [[\"地区\"],\"月份\",\"金额\"] 地区,一月,二月\n北,2.50,\n南,1/3,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定列自然升序排列 CSV 行",
         query: "CSV: 排序 2 编号,名称\n001,文件10\n002,文件2\n003,文件20",
     },
@@ -1990,6 +1995,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "查找多条绝对路径共同的最长前缀",
         query: r#"路径: 共同路径 ["C:\\工作\\发布\\A.txt","C:\\工作\\草稿\\B.txt"]"#,
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按分段规范化 Windows 路径",
+        query: r#"路径: 规范化 "C:/工作//发布/./临时/../报告 集.txt""#,
     },
     Example {
         icon: Icon::Layers,

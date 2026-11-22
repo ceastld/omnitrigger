@@ -15,6 +15,8 @@ pub(super) enum PathError {
     RelativePartRequired,
     RelativeArguments,
     CommonPathArguments,
+    NormalizationPath,
+    AbovePathRoot,
     DifferentRoot,
     ExtensionArguments,
     InvalidExtension,
@@ -37,6 +39,8 @@ impl PathError {
             Self::CommonPathArguments => {
                 "用 JSON 数组填写至少两个普通盘符或共享目录下的绝对路径，路径里省略 .."
             }
+            Self::NormalizationPath => "请输入普通盘符或共享目录下的绝对路径",
+            Self::AbovePathRoot => ".. 超出了盘符或共享根目录",
             Self::DifferentRoot => "输入路径须在同一盘符或同一共享根目录下",
             Self::ExtensionArguments => "用 JSON 字符串数组填写路径和新扩展名",
             Self::InvalidExtension => "扩展名须为文件名后缀，可用空字符串删除",
@@ -77,6 +81,7 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
                 .map_err(|_| PathError::AbsolutePathRequired);
         }
         "从文件网址" | "from-file-url" => return path_from_file_url(input),
+        "规范化" | "normalize" => return normalize_absolute_path(path),
         "文件名" | "name" | "filename" => path.file_name().and_then(|part| part.to_str()),
         "主名" | "stem" => path.file_stem().and_then(|part| part.to_str()),
         "扩展名" | "ext" | "extension" => path.extension().and_then(|part| part.to_str()),
@@ -205,17 +210,47 @@ fn replace_extension(input: &str) -> Result<String, PathError> {
         .ok_or(PathError::InvalidPath)
 }
 
-fn absolute_path(input: &str) -> Option<&Path> {
-    let path = Path::new(input);
-    (!input.contains(INVALID_PATH_TEXT)
-        && path.is_absolute()
-        && path.components().all(|part| match part {
-            Component::ParentDir => false,
-            Component::Prefix(prefix) => {
+fn has_ordinary_root(path: &Path) -> bool {
+    path.is_absolute()
+        && match path.components().next() {
+            Some(Component::Prefix(prefix)) => {
                 matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
             }
             _ => true,
-        }))
+        }
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<String, PathError> {
+    if !has_ordinary_root(path) {
+        return Err(PathError::NormalizationPath);
+    }
+    let mut root = String::new();
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                let prefix = prefix.as_os_str().to_str().ok_or(PathError::InvalidPath)?;
+                root.push_str(&prefix.replace('/', MAIN_SEPARATOR_STR));
+            }
+            Component::RootDir => root.push_str(MAIN_SEPARATOR_STR),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                segments.pop().ok_or(PathError::AbovePathRoot)?;
+            }
+            Component::Normal(segment) => {
+                segments.push(segment.to_str().ok_or(PathError::InvalidPath)?);
+            }
+        }
+    }
+    root.push_str(&segments.join(MAIN_SEPARATOR_STR));
+    Ok(root)
+}
+
+fn absolute_path(input: &str) -> Option<&Path> {
+    let path = Path::new(input);
+    (!input.contains(INVALID_PATH_TEXT)
+        && has_ordinary_root(path)
+        && !path.components().any(|part| part == Component::ParentDir))
     .then_some(path)
 }
 
@@ -256,6 +291,36 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn normalizes_drive_and_unc_paths_lexically() {
+        for (query, expected) in [
+            (
+                r#"规范化 "C:/工作//发布/./临时/../报告 集.txt""#,
+                r"C:\工作\发布\报告 集.txt",
+            ),
+            (r"normalize \\Host\Share\目录\..", "\\\\Host\\Share\\"),
+            (r"规范化 C:\资料\..\.", "C:\\"),
+        ] {
+            assert_eq!(path_component(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            path_component(r"规范化 C:\..\资料"),
+            Err(PathError::AbovePathRoot)
+        );
+        for query in [
+            r"规范化 目录\..\文件",
+            r"规范化 C:相对",
+            r"规范化 \\?\C:\文件",
+        ] {
+            assert_eq!(
+                path_component(query),
+                Err(PathError::NormalizationPath),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn finds_the_longest_common_path_by_complete_components() {
         for (input, expected) in [
             (
