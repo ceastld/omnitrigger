@@ -101,6 +101,7 @@ pub(super) enum CsvError {
     RegexCaptureColumnArguments,
     SplitColumnArguments,
     DataConversionColumnArguments,
+    NumericComparisonColumnArguments,
     DateDifferenceColumnArguments,
     ClockDifferenceColumnArguments,
     DateOffsetColumnArguments,
@@ -221,6 +222,9 @@ impl CsvError {
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
             Self::DataConversionColumnArguments => {
                 "填写新列名、来源列和目标单位，例如 [\"速率(MiB/s)\",\"速率\",\"MiB/s\"]"
+            }
+            Self::NumericComparisonColumnArguments => {
+                "填写新列名、左列、右列和比较符，例如 [\"达标\",\"实测\",\"门槛\",\">=\"]"
             }
             Self::DateDifferenceColumnArguments => {
                 "填写新列名、开始日期列和结束日期列，例如 [\"天数\",\"开始\",\"结束\"]"
@@ -392,6 +396,7 @@ enum Operation {
         arithmetic: ColumnArithmetic,
     },
     ConvertDataColumn(String, ColumnReference, String),
+    NumericComparisonColumn(String, ColumnReference, ColumnReference, NumberComparison),
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
     ClockDifferenceColumn(String, ColumnReference, ColumnReference),
     DateOffsetColumn {
@@ -1020,6 +1025,17 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 parse_input: matches!(kind, "日期解析列" | "date-parse-column"),
             }
         }
+        "数值比较列" | "numeric-comparison-column" => {
+            let ((name, left, right, operator), data) =
+                json_argument_and_data::<(String, ColumnReference, ColumnReference, String)>(
+                    input,
+                    CsvError::NumericComparisonColumnArguments,
+                )?;
+            let comparison = NumberComparison::parse(operator.trim())
+                .ok_or(CsvError::NumericComparisonColumnArguments)?;
+            input = data;
+            Operation::NumericComparisonColumn(name, left, right, comparison)
+        }
         "日期差列" | "date-difference-column" => {
             let ((name, start, end), data) =
                 json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
@@ -1490,6 +1506,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         } => compute_column(rows, name, left, right, arithmetic),
         Operation::ConvertDataColumn(name, source, target) => {
             convert_data_column(&rows, &name, source, &target)
+        }
+        Operation::NumericComparisonColumn(name, left, right, comparison) => {
+            append_from_two_columns(
+                &rows,
+                &name,
+                left,
+                right,
+                CsvError::NumericComparisonColumnArguments,
+                |left, right| {
+                    let parse = |cell| parse_fraction_literal(cell).map_err(FractionError::message);
+                    let order = parse(left)?.cmp(&parse(right)?);
+                    Ok(comparison.accepts(order).to_string())
+                },
+            )
         }
         Operation::DateDifferenceColumn(name, start, end) => append_from_two_columns(
             &rows,
@@ -6042,6 +6072,34 @@ null"#
             transform_csv("累计合计列 [\"累计\",1,[]]\n金额\n1\n坏值"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn appends_an_exact_numeric_comparison_in_each_csv_record() {
+        let input = concat!(
+            "数值比较列 [\"达标\",\"实测\",2,\">=\"] 实测,门槛\n",
+            "1.50,3/2\n1,2\n9007199254740993,9007199254740992\n,0",
+        );
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("实测,门槛,达标\r\n1.50,3/2,true\r\n1,2,false\r\n9007199254740993,9007199254740992,true\r\n\"\",0,\"\"")
+        );
+        assert_eq!(
+            transform_csv(
+                r#"numeric-comparison-column ["结果",1,"乙","≠"] 甲,乙
+0.00,0"#
+            )
+            .as_deref(),
+            Ok("甲,乙,结果\r\n0.00,0,false")
+        );
+        assert!(matches!(
+            transform_csv("数值比较列 [\"达标\",1,2,\">=\"] 实测,门槛\n3,2\n坏值,2"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+        assert_eq!(
+            transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
+            Err(CsvError::NumericComparisonColumnArguments)
+        );
     }
 
     #[test]

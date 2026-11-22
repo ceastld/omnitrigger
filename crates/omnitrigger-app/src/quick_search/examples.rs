@@ -2963,6 +2963,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按精确数值比较两列并标记是否达标",
+        query: "CSV: 数值比较列 [\"达标\",\"实测\",2,\">=\"] 实测,门槛\n1.50,3/2\n1,2\n,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 中混用的容量单位换算为同一单位",
         query: "CSV: 数据换算列 [\"容量(KiB)\",\"容量\",\"KiB\"]\n文件,容量\n甲,9007199254740993 B\n乙,1/3 KiB\n丙,",
     },
