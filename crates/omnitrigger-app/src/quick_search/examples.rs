@@ -761,6 +761,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从非负整数截取一段二进制位",
+        query: "进制: 取位 8-15 @ 0x12345678",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -3864,7 +3869,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Radix
             if !term.is_empty()
-                && ["字节序", "读字节序", "补码", "读补码", "位统计"]
+                && ["字节序", "读字节序", "补码", "读补码", "位统计", "取位"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Triangle

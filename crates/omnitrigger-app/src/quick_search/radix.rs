@@ -20,6 +20,7 @@ pub(super) enum RadixError {
     SignedByteOrderWidthExceeded,
     ReadByteOrderArguments,
     ReadByteOrderBytes,
+    BitRangeArguments,
 }
 
 impl RadixError {
@@ -38,6 +39,9 @@ impl RadixError {
             Self::SignedByteOrderWidthExceeded => "有符号整数超出所填位宽",
             Self::ReadByteOrderArguments => "填写大端或小端，例如 读字节序 小端 @ 78 56 34 12",
             Self::ReadByteOrderBytes => "填写 1 至 16 个两位十六进制字节，字节之间用空格分开",
+            Self::BitRangeArguments => {
+                "填写位号范围和非负整数，例如 取位 8-15 @ 0x12345678。位号为 0 至 8191"
+            }
         }
     }
 }
@@ -134,6 +138,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "位统计" || operation.eq_ignore_ascii_case("bit-statistics") {
         return bit_statistics(arguments);
     }
+    if operation == "取位" || operation.eq_ignore_ascii_case("bit-range") {
+        return bit_range(arguments);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -165,6 +172,31 @@ fn bit_statistics(input: &str) -> Result<String, RadixError> {
         value.bits(),
         value.count_ones()
     ))
+}
+
+fn bit_range(input: &str) -> Result<String, RadixError> {
+    let (range, number) = input.split_once('@').ok_or(RadixError::BitRangeArguments)?;
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
+    let position = |text: &str| {
+        text.trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|&bit| bit < MAX_INTEGER_BITS)
+            .ok_or(RadixError::BitRangeArguments)
+    };
+    let (start, end) = (position(start)?, position(end)?);
+    let number = number.trim();
+    if start > end || number.starts_with('-') {
+        return Err(RadixError::BitRangeArguments);
+    }
+    let number = number.strip_prefix('+').unwrap_or(number);
+    let (base, digits) = Base::prefixed(number).unwrap_or((Base::Decimal, number));
+    let value = bounded_magnitude(digits, base as u32)?;
+    let width = end - start + 1;
+    let mask = (BigUint::from(1_u8) << width) - 1_u8;
+    let field = (value >> start) & mask;
+    let hex_digits = width.div_ceil(4) as usize;
+    Ok(format!("十六进制 0x{field:0>hex_digits$X}\n十进制 {field}"))
 }
 
 fn bounded_magnitude(digits: &str, base: u32) -> Result<BigUint, RadixError> {
@@ -295,6 +327,34 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_inclusive_integer_bit_fields_and_pads_to_hex_width() {
+        for (query, expected) in [
+            ("取位 8-15 @ 0x12345678", "十六进制 0x56\n十进制 86"),
+            ("取位 0-11 @ 0b11", "十六进制 0x003\n十进制 3"),
+            ("bit-range 4 @ +16", "十六进制 0x1\n十进制 1"),
+            ("取位 １４－１５ ＠ １", "十六进制 0x0\n十进制 0"),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query).as_deref(), Ok(expected));
+        }
+        let one_at_top = format!("取位 8191 @ 0x8{}", "0".repeat(2047));
+        assert_eq!(
+            convert_arbitrary_radix(&one_at_top).as_deref(),
+            Ok("十六进制 0x1\n十进制 1")
+        );
+        for query in [
+            "取位 8-3 @ 0x41",
+            "取位 -1 @ 1",
+            "取位 8192 @ 1",
+            "取位 3 @ -1",
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query),
+                Err(RadixError::BitRangeArguments)
+            );
+        }
+    }
 
     #[test]
     fn counts_absolute_integer_bits_and_enforces_the_existing_radix_limit() {
