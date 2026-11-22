@@ -219,6 +219,9 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "最近修改" | "modified" if order == DirectoryOrder::Name => {
                 order = DirectoryOrder::ModifiedDescending;
             }
+            "最近创建" | "created" if order == DirectoryOrder::Name => {
+                order = DirectoryOrder::CreatedDescending;
+            }
             "大小" | "size" if order == DirectoryOrder::Name => {
                 order = DirectoryOrder::SizeDescending;
             }
@@ -381,6 +384,25 @@ mod tests {
             [Destination::LocalFile { name: first, .. }, Destination::LocalFile { name: second, .. }]
             if first == "Z report.txt" && second == "report.txt"
         ));
+    }
+
+    #[test]
+    fn creation_order_accepts_aliases_and_composes_with_type_and_json_output() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | *.txt | 最近创建 仅文件 路径JSON";
+        let latest = index.request(Some(query)).unwrap();
+        assert_eq!(latest.order, DirectoryOrder::CreatedDescending);
+        assert_eq!(latest.entry_type, DirectoryEntryType::File);
+        assert_eq!(latest.pattern.as_deref(), Some("*.txt"));
+        assert!(index
+            .request(Some(r"C:\Work | *.txt | created files json-paths"))
+            .is_none());
+        assert!(index.finish(
+            &latest,
+            Ok(vec![entry("z.txt", "file"), entry("a.txt", "file")])
+        ));
+        assert!(matches!(index.results(query), Results::Value(Ok(value))
+            if value.text == r#"["C:\\Work\\z.txt","C:\\Work\\a.txt"]"#));
     }
 
     #[test]

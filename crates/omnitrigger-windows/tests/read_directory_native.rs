@@ -134,6 +134,49 @@ fn read_directory_real_windows_does_not_follow_child_or_root_link() {
 }
 
 #[test]
+#[ignore = "Windows 原生创建时间排序实测；需显式测试父目录"]
+fn read_directory_real_windows_orders_by_creation_time_then_name() {
+    use omnitrigger_windows::{
+        read_local_directory_with_options, DirectoryEntryType, DirectoryOrder,
+        LocalDirectoryOptions,
+    };
+    use std::{os::windows::fs::FileTimesExt, time::Duration};
+
+    let fixture = Fixture::new();
+    let older = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let newer = older + Duration::from_nanos(100);
+    for (name, created, modified) in [
+        ("a.txt", older, newer),
+        ("z.txt", newer, older),
+        ("x.txt", newer, newer),
+    ] {
+        fs::File::create(fixture.root.join(name))
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_created(created)
+                    .set_modified(modified),
+            )
+            .unwrap();
+    }
+    let options = LocalDirectoryOptions {
+        max_entries: 8,
+        order: DirectoryOrder::CreatedDescending,
+        metadata: false,
+        entry_type: DirectoryEntryType::File,
+        search_pattern: Some("*.txt".into()),
+    };
+    let entries = read_local_directory_with_options(fixture.path(), &options, || Ok(())).unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["x.txt", "z.txt", "a.txt"]
+    );
+}
+
+#[test]
 #[ignore = "Windows 显式目录投影和100ns原生实测；需显式测试父目录"]
 fn read_directory_real_windows_options_preserve_metadata_precision_and_filters() {
     use omnitrigger_windows::{

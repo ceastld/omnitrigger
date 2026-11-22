@@ -151,6 +151,10 @@ pub(super) fn read_options(
                     DirectoryOrder::ModifiedDescending => {
                         sort_keys.push(Some(file_time_ticks(data.ftLastWriteTime)));
                     }
+                    DirectoryOrder::CreatedDescending => {
+                        let created = file_time_ticks(data.ftCreationTime);
+                        sort_keys.push((created != 0).then_some(created));
+                    }
                     DirectoryOrder::SizeDescending => {
                         let length =
                             (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow);
@@ -196,7 +200,9 @@ pub(super) fn read_options(
     Ok(match options.order {
         DirectoryOrder::Name => collector.finish(),
         DirectoryOrder::Native => collector.entries,
-        DirectoryOrder::ModifiedDescending | DirectoryOrder::SizeDescending => {
+        DirectoryOrder::ModifiedDescending
+        | DirectoryOrder::CreatedDescending
+        | DirectoryOrder::SizeDescending => {
             let mut entries: Vec<_> = sort_keys.into_iter().zip(collector.entries).collect();
             entries.sort_by(|(left_key, left), (right_key, right)| {
                 right_key.cmp(left_key).then_with(|| left.name.cmp(&right.name))

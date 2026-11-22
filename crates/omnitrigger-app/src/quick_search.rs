@@ -1051,6 +1051,13 @@ pub(super) fn request_foreground(
     .detach();
 }
 
+enum PageChange {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
@@ -1461,6 +1468,18 @@ impl QuickSearch {
                     self.fill_query(next, window, cx);
                 }
                 cx.stop_propagation();
+            } else if modifiers == 1
+                && keystroke.modifiers.control
+                && matches!(keystroke.key.as_str(), "pageup" | "pagedown")
+            {
+                let page = if keystroke.key == "pageup" {
+                    PageChange::First
+                } else {
+                    PageChange::Last
+                };
+                if self.change_page(page, cx) {
+                    cx.stop_propagation();
+                }
             } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "up" {
                 let query = self.input.read(cx).text();
                 let Some((Scope::LocalFiles, term)) = scoped_query(&query) else {
@@ -1501,7 +1520,12 @@ impl QuickSearch {
             }
             "escape" => window.remove_window(),
             key @ ("pageup" | "pagedown") => {
-                if !self.change_page(key == "pagedown", cx) {
+                let page = if key == "pageup" {
+                    PageChange::Previous
+                } else {
+                    PageChange::Next
+                };
+                if !self.change_page(page, cx) {
                     return;
                 }
             }
@@ -1557,7 +1581,7 @@ impl QuickSearch {
         cx.stop_propagation();
     }
 
-    fn change_page(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+    fn change_page(&mut self, movement: PageChange, cx: &mut Context<Self>) -> bool {
         let (count, page_size) = match &self.results {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
@@ -1570,10 +1594,11 @@ impl QuickSearch {
         }
         let page = self.selected / page_size;
         let last_page = (count - 1) / page_size;
-        let next = if forward {
-            (page + 1).min(last_page)
-        } else {
-            page.saturating_sub(1)
+        let next = match movement {
+            PageChange::Previous => page.saturating_sub(1),
+            PageChange::Next => (page + 1).min(last_page),
+            PageChange::First => 0,
+            PageChange::Last => last_page,
         };
         if next != page {
             self.selected = next * page_size;
@@ -1636,16 +1661,22 @@ impl QuickSearch {
             .child(
                 button("result-prev", "上一页", Tone::Ghost, page > 0)
                     .h(px(20.))
+                    .tooltip(theme::text_tooltip(
+                        "PageUp 上一页 · Ctrl+PageUp 首页".into(),
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.change_page(false, cx);
+                        this.change_page(PageChange::Previous, cx);
                     })),
             )
             .child(format!("{} / {page_count}", page + 1))
             .child(
                 button("result-next", "下一页", Tone::Ghost, page + 1 < page_count)
                     .h(px(20.))
+                    .tooltip(theme::text_tooltip(
+                        "PageDown 下一页 · Ctrl+PageDown 末页".into(),
+                    ))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.change_page(true, cx);
+                        this.change_page(PageChange::Next, cx);
                     })),
             )
     }
@@ -2699,6 +2730,62 @@ mod tests {
                 "2**10",
             ]
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    #[ignore = "需要 Windows 桌面会话"]
+    fn search_pages_jump_to_edges_in_help_and_expanded_results() {
+        let (send, receive) = std::sync::mpsc::channel();
+        gpui::Application::new()
+            .with_assets(crate::Assets)
+            .run(move |cx| {
+                let window = open_test_search(SearchIndex::default(), cx);
+                cx.spawn(async move |cx| {
+                    let visit_pages =
+                        |search: &mut QuickSearch,
+                         window: &mut Window,
+                         cx: &mut Context<QuickSearch>| {
+                            ["ctrl-pagedown", "pageup", "ctrl-pageup"].map(|key| {
+                                search.key_down(
+                                    &KeyDownEvent {
+                                        keystroke: gpui::Keystroke::parse(key).unwrap(),
+                                        is_held: false,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                search.selected
+                            })
+                        };
+                    window
+                        .update(cx, |search, window, cx| search.fill_query("?", window, cx))
+                        .unwrap();
+                    let help = window.update(cx, visit_pages).unwrap();
+                    window
+                        .update(cx, |search, window, cx| {
+                            let lines = vec!["样例"; 40].join("\n");
+                            search.fill_query(format!("文本: 按行编号 {lines}"), window, cx);
+                        })
+                        .unwrap();
+                    let output = window
+                        .update(cx, |search, window, cx| {
+                            search.toggle_value_preview(window, cx);
+                            visit_pages(search, window, cx)
+                        })
+                        .unwrap();
+                    send.send((help, output)).unwrap();
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
+            });
+        let (help, output) = receive.recv().unwrap();
+        let last_example_page = (EXAMPLES.len() - 1) / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
+        assert_eq!(
+            help,
+            [last_example_page, last_example_page - EXAMPLE_PAGE_SIZE, 0]
+        );
+        assert_eq!(output, [3, 2, 0]);
     }
 
     #[test]

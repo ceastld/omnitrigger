@@ -10,6 +10,7 @@ pub enum DirectoryOrder {
     Name,
     Native,
     ModifiedDescending,
+    CreatedDescending,
     SizeDescending,
 }
 
