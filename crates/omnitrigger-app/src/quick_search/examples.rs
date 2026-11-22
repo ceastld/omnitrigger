@@ -2077,6 +2077,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "移除对象中值为 null 的顶层字段",
+        query: r#"JSON: 去空字段 [{"编号":"001","备注":null,"金额":1.50},{"编号":"002","备注":""}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除 JSONC 注释并格式化 JSON",
         query: "JSON: 去注释 {\n// 说明\n\"网址\":\"https://example.invalid/\",/* 金额 */\n\"值\":1.50\n}",
     },

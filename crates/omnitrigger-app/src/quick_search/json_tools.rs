@@ -189,6 +189,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "对比" | "diff" => return compare_json_values(source),
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
+        "去空字段" | "remove-null-fields" => return remove_null_json_fields(source),
         "转csv" | "to-csv" => return json_to_csv(source),
         "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
         "选键" | "pick-keys" => return pick_json_keys(source),
@@ -1362,6 +1363,21 @@ fn remove_json_keys(query: &str) -> Result<String, JsonError> {
     )
 }
 
+fn remove_null_json_fields(source: &str) -> Result<String, JsonError> {
+    map_json_objects(source, |raw| {
+        let entries = read_object_entries(raw)?;
+        let mut names = HashSet::new();
+        if entries.iter().any(|(key, _)| !names.insert(key)) {
+            return Err(JsonError::DuplicateKey);
+        }
+        write_object_entries(
+            entries
+                .into_iter()
+                .filter(|(_, value)| value.get() != "null"),
+        )
+    })
+}
+
 fn json_to_csv(source: &str) -> Result<String, JsonError> {
     let rows = read_json_array(source)?;
     match rows.first().and_then(|row| row.get().chars().next()) {
@@ -1411,7 +1427,7 @@ fn pick_json_keys(query: &str) -> Result<String, JsonError> {
     if names.is_empty() || names.len() != wanted.len() {
         return Err(JsonError::SelectionKeys);
     }
-    let project = |raw: &str| {
+    map_json_objects(source, |raw| {
         let mut selected = HashMap::new();
         for (key, value) in read_object_entries(raw)? {
             if wanted.contains(key.as_str()) && selected.insert(key, value).is_some() {
@@ -1419,16 +1435,22 @@ fn pick_json_keys(query: &str) -> Result<String, JsonError> {
             }
         }
         write_object_entries(names.iter().filter_map(|key| selected.remove_entry(key)))
-    };
+    })
+}
+
+fn map_json_objects(
+    source: &str,
+    mut transform: impl FnMut(&str) -> Result<String, JsonError>,
+) -> Result<String, JsonError> {
     if !source.starts_with('[') {
-        return project(source);
+        return transform(source);
     }
     let items = read_json_array(source)?
         .into_iter()
         .map(|item| {
             let raw = item.get();
             if raw.starts_with('{') {
-                project(raw)
+                transform(raw)
             } else {
                 Err(JsonError::ExpectedObjectItem)
             }
@@ -2248,6 +2270,30 @@ mod tests {
         assert_eq!(
             transform_json(r#"filter-any [] []"#),
             Err(JsonError::FilterConditions)
+        );
+    }
+
+    #[test]
+    fn removes_top_level_null_json_fields_and_keeps_order_and_scalar_spelling() {
+        assert_eq!(
+            transform_json(
+                r#"去空字段 [{"编号":"001","备注":null,"已确认":false,"金额":1.50},{"编号":"002","备注":""},{"备注":null}]"#
+            )
+            .as_deref(),
+            Ok(r#"[{"编号":"001","已确认":false,"金额":1.50},{"编号":"002","备注":""},{}]"#)
+        );
+        assert_eq!(
+            transform_json(r#"remove-null-fields {"空":null,"内层":{"空":null},"行":[null]}"#)
+                .as_deref(),
+            Ok(r#"{"内层":{"空":null},"行":[null]}"#)
+        );
+        assert_eq!(
+            transform_json(r#"remove-null-fields [{"a":null},3]"#),
+            Err(JsonError::ExpectedObjectItem)
+        );
+        assert_eq!(
+            transform_json(r#"remove-null-fields {"a":0,"\u0061":null}"#),
+            Err(JsonError::DuplicateKey)
         );
     }
 
