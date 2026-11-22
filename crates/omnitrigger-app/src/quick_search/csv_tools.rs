@@ -15,6 +15,7 @@ use serde::{
 };
 use serde_json::value::RawValue;
 
+use super::statistics::{parse_bin_edges, report_binned_unweighted};
 use super::{
     calculator::normalize,
     fraction::{
@@ -95,6 +96,7 @@ pub(super) enum CsvError {
     DecimalColumnsArguments,
     DecimalColumnsTooLarge,
     StatisticsColumn,
+    ColumnBinsArguments,
     AggregateColumn,
     GroupingColumns,
     SortFields,
@@ -186,6 +188,7 @@ impl CsvError {
             Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
             Self::DecimalColumnsTooLarge => "小数列结果超过 1 MiB，请缩小表格范围",
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
+            Self::ColumnBinsArguments => "填写列名或列号和边界，例如 [\"金额\",\"0,1/2,2\"]",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
             Self::SortFields => {
@@ -291,6 +294,7 @@ enum Operation {
         column: ColumnReference,
         sample: bool,
     },
+    ColumnBins(ColumnReference, Vec<BigRational>),
     SortByColumns {
         columns: Vec<ColumnReference>,
         descending: bool,
@@ -763,6 +767,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 sample: matches!(operation.as_str(), "列统计" | "column-stats"),
             }
         }
+        "列分箱" | "column-bins" => {
+            let ((column, edges), data) = json_argument_and_data::<(ColumnReference, String)>(
+                input,
+                CsvError::ColumnBinsArguments,
+            )?;
+            let edges = parse_bin_edges(&edges).map_err(CsvError::Statistics)?;
+            input = data;
+            Operation::ColumnBins(column, edges)
+        }
         "透视合计" | "pivot-sum" => {
             let (columns, data) = json_argument_and_data(input, CsvError::PivotColumns)?;
             input = data;
@@ -920,7 +933,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::GroupMedian { columns, amount } => median_by_columns(&rows, &columns, amount),
         Operation::PivotSum(columns) => pivot_sum(&rows, &columns),
         Operation::Unpivot(columns, names) => unpivot(&rows, &columns, &names),
-        Operation::ColumnStatistics { column, sample } => summarize_column(&rows, column, sample),
+        Operation::ColumnStatistics { column, sample } => {
+            summarize_unweighted(numeric_column_values(&rows, column)?, sample)
+                .map_err(csv_column_statistics_error)
+        }
+        Operation::ColumnBins(column, edges) => {
+            report_binned_unweighted(numeric_column_values(&rows, column)?, &edges)
+                .map_err(csv_column_statistics_error)
+        }
         Operation::SortByColumns {
             columns,
             descending,
@@ -2212,22 +2232,24 @@ fn order_records<'a>(
     Ok(ordered)
 }
 
-fn summarize_column(
+fn numeric_column_values(
     rows: &[Vec<String>],
     column: ColumnReference,
-    sample: bool,
-) -> Result<String, CsvError> {
+) -> Result<Vec<BigRational>, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let column = column.resolve(header)?;
     validate_column_width(&[column], header.len())?;
-    let values = records
+    records
         .iter()
         .map(|row| parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber))
-        .collect::<Result<Vec<_>, _>>()?;
-    summarize_unweighted(values, sample).map_err(|error| match error {
+        .collect()
+}
+
+fn csv_column_statistics_error(error: StatisticsError) -> CsvError {
+    match error {
         StatisticsError::Incomplete => CsvError::EmptyStatisticsColumn,
         error => CsvError::Statistics(error),
-    })
+    }
 }
 
 fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError> {
@@ -2606,6 +2628,37 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bins_a_selected_csv_column_using_exact_fraction_edges() {
+        assert_eq!(
+            transform_csv(
+                "列分箱 [\"金额\",\"0,1/2,2\"] 编号,金额\n001,-1\n002,0\n003,0.50\n004,1\n005,2.00"
+            )
+            .as_deref(),
+            Ok("下界,上界,次数,频率\r\n-∞,0,1,1/5\r\n0,1/2,1,1/5\r\n1/2,2,2,2/5\r\n2,+∞,1,1/5"),
+        );
+        for (query, error) in [
+            (
+                r#"column-bins [3,"0"] 编号,金额"#,
+                CsvError::ColumnOutOfRange,
+            ),
+            (
+                r#"列分箱 [2,"0"] 编号,金额"#,
+                CsvError::EmptyStatisticsColumn,
+            ),
+            (
+                r#"列分箱 ["金额","1/2,0.5"] 编号,金额"#,
+                CsvError::Statistics(StatisticsError::InvalidBinEdges),
+            ),
+            (
+                "列分箱 [2,\"0\"] 编号,金额\n001,坏",
+                CsvError::InvalidNumber,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn groups_csv_medians_in_first_seen_order_with_exact_even_and_odd_counts() {

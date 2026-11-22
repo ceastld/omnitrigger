@@ -14,6 +14,7 @@ use serde_json::value::RawValue;
 use super::csv_tools::csv_cell;
 use super::fraction::{ensure_exact_size, parse_fraction_literal};
 use super::operators::{FieldSortOrder, NumberComparison, MAX_SORT_FIELDS};
+use super::statistics::{median_sorted_values, MAX_VALUES};
 use super::text_tools::compare_natural;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
@@ -77,6 +78,7 @@ pub(super) enum JsonError {
     GroupStatisticsPaths,
     GroupStatisticsNumber,
     GroupStatisticsRange,
+    GroupStatisticsLimit,
     ExpectedString,
 }
 
@@ -146,6 +148,7 @@ impl JsonError {
             }
             Self::GroupStatisticsNumber => "数值路径须在每一项中对应 JSON 数字",
             Self::GroupStatisticsRange => "分组数值或结果超出精确计算范围",
+            Self::GroupStatisticsLimit => "每组最多可统计 128 个数值",
             Self::ExpectedString => "文本排序需要每一项的指定路径都对应 JSON 字符串",
         }
     }
@@ -189,6 +192,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "分组计数" | "group-count" => return count_json_by_scalar(source),
         "分组明细" | "group-records" => return group_json_records(source),
         "分组统计" | "group-statistics" => return summarize_json_groups(source),
+        "分组中位数" | "group-median" => return median_json_groups(source),
         "数值排序" | "sort-numeric" => return sort_json_numbers(source, false),
         "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
         "文本排序" | "sort-text" => return sort_json_text(source, false),
@@ -972,12 +976,7 @@ fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
             sum: BigRational::default(),
         },
         |group, item| {
-            let amount = select_pointer_keys(item, &amount_keys)?.get();
-            if !matches!(amount.as_bytes()[0], b'-' | b'0'..=b'9') {
-                return Err(JsonError::GroupStatisticsNumber);
-            }
-            group.sum +=
-                parse_fraction_literal(amount).map_err(|_| JsonError::GroupStatisticsRange)?;
+            group.sum += json_group_number(select_pointer_keys(item, &amount_keys)?)?;
             ensure_exact_size(&group.sum).map_err(|_| JsonError::GroupStatisticsRange)?;
             group.count += 1;
             Ok(())
@@ -997,6 +996,60 @@ fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
         })
         .collect::<Result<Vec<_>, JsonError>>()?;
     Ok(serde_json::to_string(&summaries).expect("有效 JSON 值和字符串可以序列化"))
+}
+
+fn json_group_number(value: &RawValue) -> Result<BigRational, JsonError> {
+    let value = value.get();
+    if !matches!(value.as_bytes()[0], b'-' | b'0'..=b'9') {
+        return Err(JsonError::GroupStatisticsNumber);
+    }
+    parse_fraction_literal(value).map_err(|_| JsonError::GroupStatisticsRange)
+}
+
+fn median_json_groups(query: &str) -> Result<String, JsonError> {
+    #[derive(serde::Serialize)]
+    struct Median<'a> {
+        #[serde(rename = "值")]
+        value: &'a RawValue,
+        #[serde(rename = "中位数")]
+        median: String,
+    }
+
+    let (pointers, source) = strings_and_source(query, JsonError::GroupStatisticsPaths)?;
+    let [group, amount] = pointers.as_slice() else {
+        return Err(JsonError::GroupStatisticsPaths);
+    };
+    let amount_keys = pointer_keys(amount)?.collect::<Result<Vec<_>, _>>()?;
+    let groups = collect_json_groups(
+        group,
+        source,
+        |value| (value, Vec::new()),
+        |(_, numbers), item| {
+            if numbers.len() == MAX_VALUES {
+                return Err(JsonError::GroupStatisticsLimit);
+            }
+            numbers.push(json_group_number(select_pointer_keys(item, &amount_keys)?)?);
+            Ok(())
+        },
+    )?;
+    let mut output = String::from("[");
+    for (index, (value, mut numbers)) in groups.into_iter().enumerate() {
+        numbers.sort_unstable();
+        let median = median_sorted_values(&numbers).map_err(|_| JsonError::GroupStatisticsRange)?;
+        let item = serde_json::to_string(&Median {
+            value,
+            median: median.to_string(),
+        })
+        .expect("有效 JSON 值和字符串可以序列化");
+        let separator = if index == 0 { "" } else { "," };
+        if output.len() + separator.len() + item.len() + 1 > MAX_PRETTY_BYTES {
+            return Err(JsonError::ObjectOutputTooLarge);
+        }
+        output.push_str(separator);
+        output.push_str(&item);
+    }
+    output.push(']');
+    Ok(output)
 }
 
 fn collect_json_groups<'a, Group>(
@@ -2067,6 +2120,26 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn groups_json_numeric_medians_by_exact_scalar_keys_in_first_seen_order() {
+        let query = r#"分组中位数 ["/组","/值/金额"] [{"组":1.0,"值":{"金额":1.50}},{"组":"北","值":{"金额":4}},{"组":1e0,"值":{"金额":2e0}},{"组":"北","值":{"金额":2}},{"组":"北","值":{"金额":3}}]"#;
+        assert_eq!(
+            transform_json(query).as_deref(),
+            Ok(r#"[{"值":1.0,"中位数":"7/4"},{"值":"北","中位数":"3"}]"#),
+        );
+        assert_eq!(
+            transform_json(r#"group-median ["/组","/金额"] []"#).as_deref(),
+            Ok("[]"),
+        );
+        assert_eq!(
+            transform_json(r#"分组中位数 ["/组","/金额"] [{"组":"北","金额":"1.50"}]"#),
+            Err(JsonError::GroupStatisticsNumber),
+        );
+        let rows = vec![r#"{"组":"北","金额":1}"#; MAX_VALUES + 1].join(",");
+        let query = format!(r#"分组中位数 ["/组","/金额"] [{rows}]"#);
+        assert_eq!(transform_json(&query), Err(JsonError::GroupStatisticsLimit));
+    }
 
     #[test]
     fn strips_json_comments_and_preserves_literals() {

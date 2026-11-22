@@ -479,7 +479,7 @@ fn report_frequencies(
         .join(newline)
 }
 
-fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, StatisticsError> {
+pub(super) fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, StatisticsError> {
     let terms: Vec<_> = split_top_level_commas(input)
         .take(MAX_BIN_EDGES + 1)
         .collect();
@@ -527,18 +527,30 @@ pub(super) fn summarize_unweighted(
     values: Vec<BigRational>,
     sample: bool,
 ) -> Result<String, StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    summarize(values, count, sample)
+}
+
+pub(super) fn report_binned_unweighted(
+    values: Vec<BigRational>,
+    edges: &[BigRational],
+) -> Result<String, StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    Ok(report_binned_frequencies(values, count, edges))
+}
+
+fn unweighted_observations(
+    values: Vec<BigRational>,
+) -> Result<Vec<(BigRational, u64)>, StatisticsError> {
     if values.is_empty() {
         return Err(StatisticsError::Incomplete);
     }
     if values.len() > MAX_VALUES {
         return Err(StatisticsError::TooManyValues);
     }
-    let count = values.len() as u64;
-    summarize(
-        values.into_iter().map(|value| (value, 1)).collect(),
-        count,
-        sample,
-    )
+    Ok(values.into_iter().map(|value| (value, 1)).collect())
 }
 
 fn observation_sum(values: &[(BigRational, u64)]) -> Result<BigRational, StatisticsError> {
