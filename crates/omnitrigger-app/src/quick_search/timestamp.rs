@@ -10,6 +10,7 @@ use jiff::{
 
 use super::calculator::normalize;
 use super::conversion::split_conversion;
+use super::csv_tools::csv_cell;
 use super::duration::{
     elapsed_duration, format_clock_duration, format_duration_unit, DurationError, NANOS_PER_SECOND,
 };
@@ -22,6 +23,7 @@ pub(super) enum TimestampError {
     Invalid,
     InvalidOffset,
     TooManyTargetZones,
+    ZoneTableArguments,
     InvalidSourceZone,
     SourceClockGap,
     SourceClockFold,
@@ -40,6 +42,9 @@ impl TimestampError {
             Self::Invalid => "输入 Unix 时间戳或带 UTC 偏移量或地区时区的日期时间",
             Self::InvalidOffset => "输入目标时区，例如 本地、+08:00 或 Asia/Shanghai",
             Self::TooManyTargetZones => "可用逗号隔开最多 8 个目标时区",
+            Self::ZoneTableArguments => {
+                "填写同一时刻和目标时区，例如 时间戳: 时区CSV 0 to UTC, Asia/Shanghai"
+            }
             Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
             Self::SourceClockGap => "该地区跳过了这一时刻，请检查输入的钟表时间",
             Self::SourceClockFold => "该地区的钟表时间出现两次，请用 UTC 偏移量指定其中一次",
@@ -142,8 +147,18 @@ fn convert_timestamp_with_local(
     if operation == "间隔" || operation.eq_ignore_ascii_case("between") {
         return timestamp_interval(argument, now);
     }
+    let table =
+        operation.eq_ignore_ascii_case("时区csv") || operation.eq_ignore_ascii_case("zone-csv");
+    let input = if table { argument.trim_start() } else { input };
     let (input, target_zone) = if let Some((source, target)) = split_conversion(input) {
-        (source, Some(parse_display_targets(target)?))
+        let targets = if table {
+            DisplayTargets::Multiple(parse_named_display_targets(target)?)
+        } else {
+            parse_display_targets(target)?
+        };
+        (source, Some(targets))
+    } else if table {
+        return Err(TimestampError::ZoneTableArguments);
     } else {
         (input, None)
     };
@@ -167,15 +182,26 @@ fn convert_timestamp_with_local(
     let display_time = |time: DateTime<Utc>, format| match &target_zone {
         None => format_display_time(time, format, &DisplayZone::Utc, &to_local),
         Some(DisplayTargets::Single(zone)) => format_display_time(time, format, zone, &to_local),
-        Some(DisplayTargets::Multiple(zones)) => zones
-            .iter()
-            .map(|(name, zone)| {
-                format_display_time(time, format, zone, &to_local)
-                    .map(|clock| format!("{name}\n{clock}"))
+        Some(DisplayTargets::Multiple(zones)) => {
+            let rows = zones
+                .iter()
+                .map(|(name, zone)| {
+                    let clock = format_display_time(time, format, zone, &to_local)?;
+                    Ok(if table {
+                        format!("{},{}", csv_cell(name), csv_cell(&clock))
+                    } else {
+                        format!("{name}\n{clock}")
+                    })
+                })
+                .collect::<Result<Vec<_>, TimestampError>>()?;
+            Ok(if table {
+                format!("时区,时间\r\n{}", rows.join("\r\n"))
+            } else {
+                rows.join("\n")
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map(|lines| lines.join("\n")),
+        }
     };
+    let operation = input.split_whitespace().next().unwrap_or("");
     let round_up = match operation.to_ascii_lowercase().as_str() {
         "向下对齐" | "floor-time" => Some(false),
         "向上对齐" | "ceil-time" => Some(true),
@@ -441,6 +467,10 @@ fn parse_display_targets(input: &str) -> Result<DisplayTargets<'_>, TimestampErr
     if !input.contains([',', '、']) {
         return parse_display_zone(input).map(DisplayTargets::Single);
     }
+    parse_named_display_targets(input).map(DisplayTargets::Multiple)
+}
+
+fn parse_named_display_targets(input: &str) -> Result<Vec<(&str, DisplayZone)>, TimestampError> {
     let zones = input
         .split([',', '、'])
         .map(str::trim)
@@ -452,8 +482,7 @@ fn parse_display_targets(input: &str) -> Result<DisplayTargets<'_>, TimestampErr
     zones
         .into_iter()
         .map(|name| Ok((name, parse_display_zone(name)?)))
-        .collect::<Result<Vec<_>, _>>()
-        .map(DisplayTargets::Multiple)
+        .collect()
 }
 
 fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
@@ -654,6 +683,32 @@ mod tests {
         ] {
             assert_eq!(convert_timestamp(query, now), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn exports_same_instant_to_named_time_zone_rows_with_exact_offset_and_precision() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        assert_eq!(
+            convert_timestamp(
+                "时区CSV 2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles",
+                now,
+            )
+            .as_deref(),
+            Ok(concat!(
+                "时区,时间\r\n",
+                "UTC,2026-07-01T13:00:00Z\r\n",
+                "Asia/Shanghai,2026-07-01T21:00:00+08:00\r\n",
+                "America/Los_Angeles,2026-07-01T06:00:00-07:00",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp("zone-csv 现在 + 1ns to UTC", now).as_deref(),
+            Ok("时区,时间\r\nUTC,1970-01-01T00:00:00.000000001Z")
+        );
+        assert_eq!(
+            convert_timestamp("时区CSV 0", now),
+            Err(TimestampError::ZoneTableArguments)
+        );
     }
 
     #[test]
