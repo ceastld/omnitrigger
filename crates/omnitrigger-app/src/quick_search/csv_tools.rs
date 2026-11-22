@@ -33,6 +33,7 @@ const MAX_VALUE_MAPPINGS: usize = 32;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
 const MAX_PIPELINE_STEPS: usize = 8;
+const MAX_FILTER_CONDITIONS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -84,6 +85,7 @@ pub(super) enum CsvError {
     ComputedNumberRange,
     InvalidColumnValue,
     InvalidNumberFilter,
+    FilterConditions,
     Regex(TextError),
     ColumnOutOfRange,
     InvalidNumber,
@@ -168,6 +170,9 @@ impl CsvError {
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
             Self::InvalidColumnValue => "输入列号或带双引号的列名，再输入带双引号的值",
             Self::InvalidNumberFilter => "输入列号或带双引号的列名、比较符和数值",
+            Self::FilterConditions => {
+                "填写 1 至 16 个 [列,比较方式,\"值\"]，例如 [[\"状态\",\"文本=\",\"完成\"],[2,\">=\",\"3/2\"]]"
+            }
             Self::Regex(error) => error.message(),
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
@@ -253,6 +258,10 @@ enum Operation {
         column: ColumnReference,
         condition: ColumnCondition,
         keep_matches: bool,
+    },
+    FilterMultiple {
+        filters: Vec<ColumnFilter>,
+        any: bool,
     },
     CountByColumns(Vec<ColumnReference>),
     AggregateByColumns {
@@ -358,6 +367,25 @@ enum ColumnCondition {
     Exact(String),
     Regex(Regex),
     Number(NumberComparison, BigRational),
+}
+
+impl ColumnCondition {
+    fn matches(&self, field: &str) -> Result<bool, CsvError> {
+        Ok(match self {
+            Self::Exact(value) => field == value.as_str(),
+            Self::Regex(pattern) => pattern.is_match(field),
+            Self::Number(comparison, threshold) => {
+                let value = parse_fraction_literal(field).map_err(|_| CsvError::InvalidNumber)?;
+                comparison.accepts(value.cmp(threshold))
+            }
+        })
+    }
+}
+
+struct ColumnFilter {
+    column: ColumnReference,
+    condition: ColumnCondition,
+    expected: bool,
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
@@ -622,6 +650,50 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 keep_matches: true,
             }
         }
+        "多条件筛选" | "filter-all" | "任一条件筛选" | "filter-any" => {
+            let (filters, data) = json_argument_and_data::<Vec<(ColumnReference, String, String)>>(
+                input,
+                CsvError::FilterConditions,
+            )?;
+            if !(1..=MAX_FILTER_CONDITIONS).contains(&filters.len()) {
+                return Err(CsvError::FilterConditions);
+            }
+            let filters = filters
+                .into_iter()
+                .map(|(column, operator, value)| {
+                    let operator = operator.to_ascii_lowercase();
+                    let (condition, expected) = match operator.as_str() {
+                        "文本=" | "text=" => (ColumnCondition::Exact(value), true),
+                        "文本!=" | "text!=" => (ColumnCondition::Exact(value), false),
+                        "正则" | "regex" => (
+                            ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
+                            true,
+                        ),
+                        "正则排除" | "regex-not" => (
+                            ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
+                            false,
+                        ),
+                        _ => {
+                            let comparison = NumberComparison::parse(&operator)
+                                .ok_or(CsvError::FilterConditions)?;
+                            let threshold = parse_fraction_literal(&value)
+                                .map_err(|_| CsvError::InvalidNumber)?;
+                            (ColumnCondition::Number(comparison, threshold), true)
+                        }
+                    };
+                    Ok(ColumnFilter {
+                        column,
+                        condition,
+                        expected,
+                    })
+                })
+                .collect::<Result<Vec<_>, CsvError>>()?;
+            input = data;
+            Operation::FilterMultiple {
+                filters,
+                any: matches!(operation.as_str(), "任一条件筛选" | "filter-any"),
+            }
+        }
         "分组计数" | "group-count" => {
             let (columns, data) = column_reference_arguments(input, CsvError::GroupingColumns)?;
             input = data;
@@ -795,6 +867,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             condition,
             keep_matches,
         } => filter_column(&rows, column, &condition, keep_matches),
+        Operation::FilterMultiple { filters, any } => filter_multiple_columns(&rows, &filters, any),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
         Operation::AggregateByColumns {
             columns,
@@ -1658,16 +1731,37 @@ fn filter_column(
     validate_column_width(&[column], header.len())?;
     let mut selected = vec![header];
     for row in records {
-        let matched = match condition {
-            ColumnCondition::Exact(value) => row[column] == value.as_str(),
-            ColumnCondition::Regex(pattern) => pattern.is_match(&row[column]),
-            ColumnCondition::Number(comparison, threshold) => {
-                let value =
-                    parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber)?;
-                comparison.accepts(value.cmp(threshold))
-            }
-        };
-        if matched == keep_matches {
+        if condition.matches(&row[column])? == keep_matches {
+            selected.push(row);
+        }
+    }
+    Ok(write_rows(selected, ','))
+}
+
+fn filter_multiple_columns(
+    rows: &[Vec<String>],
+    filters: &[ColumnFilter],
+    any: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = filters
+        .iter()
+        .map(|filter| filter.column.resolve(header))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_column_width(&columns, header.len())?;
+    let mut selected = vec![header];
+    for row in records {
+        let mut matched = !any;
+        for (&column, filter) in columns.iter().zip(filters) {
+            // 即使已有筛选结论，也检查该记录的其余数值条件。
+            let accepted = filter.condition.matches(&row[column])? == filter.expected;
+            matched = if any {
+                matched || accepted
+            } else {
+                matched && accepted
+            };
+        }
+        if matched {
             selected.push(row);
         }
     }
@@ -3322,6 +3416,51 @@ mod tests {
             transform_csv(r#"筛选 3 "值" a,b"#),
             Err(CsvError::ColumnOutOfRange)
         );
+    }
+
+    #[test]
+    fn combines_text_numeric_and_regex_filters_preserving_original_record_order() {
+        let input = "编号,状态,金额,备注\r\n001,完成,1.50,\"咖啡,热\"\r\n002,完成,3/2,茶\r\n003,待确认,1e1,\"咖啡\n中杯\"\r\n004,完成,2e1,水";
+        for (arguments, expected) in [
+            (
+                r#"多条件筛选 [["状态","文本=","完成"],[3,">=","3/2"],[3,"<","2"],["备注","正则","^咖啡"]]"#,
+                "编号,状态,金额,备注\r\n001,完成,1.50,\"咖啡,热\"",
+            ),
+            (
+                r#"任一条件筛选 [["状态","文本!=","完成"],["备注","正则排除","^(茶|水)$"]]"#,
+                "编号,状态,金额,备注\r\n001,完成,1.50,\"咖啡,热\"\r\n003,待确认,1e1,\"咖啡\n中杯\"",
+            ),
+            (
+                r#"filter-all [["状态","text=","忽略"]]"#,
+                "编号,状态,金额,备注",
+            ),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("{arguments}\n{input}")).as_deref(),
+                Ok(expected),
+            );
+        }
+        for (query, error) in [
+            (r#"多条件筛选 [] A,B"#, CsvError::FilterConditions),
+            (
+                r#"任一条件筛选 [[3,"文本=","x"]] A,B"#,
+                CsvError::ColumnOutOfRange,
+            ),
+            (
+                r#"filter-all [[1,"?","0"]] A,B"#,
+                CsvError::FilterConditions,
+            ),
+            (
+                "多条件筛选 [[1,\"文本=\",\"x\"],[2,\">=\",\"1\"]] A,B\nz,坏",
+                CsvError::InvalidNumber,
+            ),
+            (
+                "任一条件筛选 [[1,\"文本=\",\"x\"],[2,\">=\",\"1\"]] A,B\nx,坏",
+                CsvError::InvalidNumber,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
     }
 
     #[test]

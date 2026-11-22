@@ -191,6 +191,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按指定边界分箱并导出精确次数和频率",
+        query: "统计: 分箱 0,1/2,2 @ -1,0,0.50,1,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算恰好成功指定次数的二项概率",
         query: "统计: 二项概率 4,2,50%",
     },
@@ -2513,6 +2518,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按状态和精确金额筛选 CSV 行",
+        query: "CSV: 多条件筛选 [[\"状态\",\"文本=\",\"完成\"],[3,\">=\",\"3/2\"]] 编号,状态,金额\n001,完成,1.50\n002,待确认,2e0\n003,完成,1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "保留符合任一条件的 CSV 行",
+        query: "CSV: 任一条件筛选 [[\"状态\",\"文本=\",\"完成\"],[\"商品\",\"正则\",\"^茶\"]] 编号,状态,商品\n001,完成,米\n002,待确认,茶粉\n003,待确认,面",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定 CSV 列的组合计数",
         query: "CSV: 分组计数 2 编号,状态\n001,完成\n002,待办\n003,完成",
     },
@@ -3204,6 +3219,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "累计平均"
                     | "累计分"
                     | "累计分布"
+                    | "分箱"
                     | "均"
                     | "均方"
                     | "均方根"

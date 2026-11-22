@@ -14,6 +14,7 @@ use super::linear_fit::{
 use super::operators::split_top_level_commas;
 
 const MAX_VALUES: usize = 128;
+const MAX_BIN_EDGES: usize = 16;
 const MAX_BINOMIAL_TRIALS: u32 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,7 @@ pub(super) enum StatisticsError {
     ZeroTotalWeight,
     InvalidProbability,
     InvalidTrimShare,
+    InvalidBinEdges,
     BinomialArguments,
     HypergeometricArguments,
     InvalidWindowWidth,
@@ -49,6 +51,7 @@ impl StatisticsError {
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidTrimShare => "每端截去的比例须为 0 到小于 50%，例如 10%",
+            Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
             Self::HypergeometricArguments => {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
@@ -74,6 +77,7 @@ enum StatisticsOperation {
     Quartiles,
     Quantile(BigRational),
     Frequencies(FrequencyReport),
+    Bins(Vec<BigRational>),
     RootMeanSquare,
     HarmonicMean,
     StandardError,
@@ -108,6 +112,15 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             StatisticsOperation::Frequencies(FrequencyReport::Mode),
             values.trim(),
         ),
+        "分箱" | "histogram" => {
+            let (edges, input) = values
+                .split_once('@')
+                .ok_or(StatisticsError::InvalidBinEdges)?;
+            (
+                StatisticsOperation::Bins(parse_bin_edges(edges)?),
+                input.trim(),
+            )
+        }
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "调和平均" | "harmonic-mean" => (StatisticsOperation::HarmonicMean, values.trim()),
         "标准误" | "均值标准误" | "sem" | "standard-error" => {
@@ -198,6 +211,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             report_quantiles(values, count, Some(&probability))
         }
         StatisticsOperation::Frequencies(report) => Ok(report_frequencies(values, count, report)),
+        StatisticsOperation::Bins(edges) => Ok(report_binned_frequencies(values, count, &edges)),
         StatisticsOperation::MedianAbsoluteDeviation => {
             median_absolute_deviation(values, count).map(|value| value.to_string())
         }
@@ -457,6 +471,50 @@ fn report_frequencies(
         }))
         .collect::<Vec<_>>()
         .join(newline)
+}
+
+fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, StatisticsError> {
+    let terms: Vec<_> = split_top_level_commas(input)
+        .take(MAX_BIN_EDGES + 1)
+        .collect();
+    if terms.is_empty()
+        || terms.len() > MAX_BIN_EDGES
+        || terms.iter().any(|term| term.trim().is_empty())
+    {
+        return Err(StatisticsError::InvalidBinEdges);
+    }
+    let edges: Vec<_> = terms
+        .into_iter()
+        .map(|term| calculate_fraction(term).map_err(StatisticsError::Evaluation))
+        .collect::<Result<_, _>>()?;
+    if edges.windows(2).any(|edge| edge[0] >= edge[1]) {
+        return Err(StatisticsError::InvalidBinEdges);
+    }
+    Ok(edges)
+}
+
+fn report_binned_frequencies(
+    values: Vec<(BigRational, u64)>,
+    count: u64,
+    edges: &[BigRational],
+) -> String {
+    let mut bins = vec![0; edges.len() + 1];
+    for (value, occurrences) in values {
+        let index = edges.partition_point(|edge| edge <= &value);
+        // 各组频数的总和已在调用前检查。
+        bins[index] += occurrences;
+    }
+    let edges: Vec<_> = std::iter::once("-∞".to_owned())
+        .chain(edges.iter().map(ToString::to_string))
+        .chain(std::iter::once("+∞".to_owned()))
+        .collect();
+    std::iter::once("下界,上界,次数,频率".to_owned())
+        .chain(edges.windows(2).zip(bins).map(|(edge, occurrences)| {
+            let share = BigRational::new(occurrences.into(), count.into());
+            format!("{},{},{occurrences},{share}", edge[0], edge[1])
+        }))
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }
 
 pub(super) fn summarize_unweighted(
@@ -1183,6 +1241,35 @@ mod tests {
         );
         assert_eq!(
             calculate_statistics("累计分布 频数 2@18446744073709551615,1@1"),
+            Err(StatisticsError::FrequencyOverflow)
+        );
+    }
+
+    #[test]
+    fn bins_exact_values_and_weighted_frequencies_without_expanding_observations() {
+        assert_eq!(
+            calculate_statistics("分箱 0,1/2,2 @ -1,0,0.50,1,2").as_deref(),
+            Ok("下界,上界,次数,频率\r\n-∞,0,1,1/5\r\n0,1/2,1,1/5\r\n1/2,2,2,2/5\r\n2,+∞,1,1/5")
+        );
+        assert_eq!(
+            calculate_statistics("histogram (0+0),1 @ 频数 0@18446744073709551614,-1@1").as_deref(),
+            Ok("下界,上界,次数,频率\r\n-∞,0,1,1/18446744073709551615\r\n0,1,18446744073709551614,18446744073709551614/18446744073709551615\r\n1,+∞,0,0")
+        );
+        for input in [
+            "分箱 0 1,2",
+            "分箱 @ 1",
+            "分箱 0, @ 1",
+            "分箱 0.50,1/2 @ 1",
+            "分箱 1,0 @ 1",
+        ] {
+            assert_eq!(
+                calculate_statistics(input),
+                Err(StatisticsError::InvalidBinEdges),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("分箱 0 @ 频数 2@18446744073709551615,1@1"),
             Err(StatisticsError::FrequencyOverflow)
         );
     }
