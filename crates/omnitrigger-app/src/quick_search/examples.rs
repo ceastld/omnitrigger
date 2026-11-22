@@ -2152,6 +2152,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "清理 CSV 指定列的首尾空白",
+        query: "CSV: 去空白 [\"名称\",2] 名称,备注,编号\n\" 茶 \",\"  热  \",001\n\" 梨 \",\" 冷 饮 \",002",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用数量和单价算出新的一列",
         query:
             "CSV: 计算列 [\"金额\",\"数量\",\"*\",\"单价\"] 商品,数量,单价\n茶,3,2.50\n咖啡,2,1/3",

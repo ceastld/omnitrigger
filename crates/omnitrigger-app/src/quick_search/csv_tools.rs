@@ -150,6 +150,7 @@ enum Operation {
     SelectColumns(Vec<usize>),
     SelectNamedColumns(Vec<String>),
     DropColumns(Vec<ColumnReference>),
+    TrimColumns(Vec<ColumnReference>),
     SelectRows(String),
     RenameColumn([String; 2]),
     ReplaceValue {
@@ -309,6 +310,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::DropColumns(columns)
+        }
+        "去空白" | "trim-columns" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::TrimColumns(columns)
         }
         "改列名" | "rename-header" => {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
@@ -493,6 +500,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::DropColumns(columns) => drop_columns(&rows, &columns),
+        Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
         Operation::SelectRows(ranges) => select_data_rows(&rows, &ranges),
         Operation::RenameColumn(names) => rename_column(rows, names),
         Operation::ReplaceValue {
@@ -869,6 +877,24 @@ fn replace_column_values(
     for row in records {
         if row[column] == previous {
             replacement.clone_into(&mut row[column]);
+        }
+    }
+    Ok(write_rows(&rows, ','))
+}
+
+fn trim_column_values(
+    mut rows: Vec<Vec<String>>,
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first_mut().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    for row in records {
+        for &column in &columns {
+            let cell = &mut row[column];
+            let trimmed = cell.trim();
+            if trimmed.len() != cell.len() {
+                *cell = trimmed.to_owned();
+            }
         }
     }
     Ok(write_rows(&rows, ','))
@@ -1644,6 +1670,27 @@ mod tests {
         assert_eq!(
             transform_csv(r#"纵向合并 ["ID\n001"]"#),
             Err(CsvError::StackArguments)
+        );
+    }
+
+    #[test]
+    fn trims_only_the_selected_data_cells_and_keeps_internal_whitespace() {
+        assert_eq!(
+            transform_csv(concat!(
+                "去空白 [\"名称\",2] 名称,备注,编号\n",
+                "\"\u{3000}茶, 热  \",\"\t 热\u{a0}\",\" 001 \"\n",
+                " 梨 ,\" \n甲\n乙\n \", 002 ",
+            ))
+            .as_deref(),
+            Ok("名称,备注,编号\r\n\"茶, 热\",热, 001 \r\n梨,\"甲\n乙\", 002 ")
+        );
+        assert_eq!(
+            transform_csv("trim-columns 1 编号,备注\n\" \", 甲 ").as_deref(),
+            Ok("编号,备注\r\n\"\", 甲 ")
+        );
+        assert_eq!(
+            transform_csv("去空白 [\"名称\",1] 名称,编号\n茶,001"),
+            Err(CsvError::NamedColumnArguments)
         );
     }
 
