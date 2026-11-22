@@ -15,6 +15,7 @@ const MAX_VERTICES: usize = 32;
 pub(super) enum PolygonError {
     Incomplete,
     PointArguments,
+    ContainmentArguments,
     VertexCount,
     DuplicateVertex,
     IntersectingEdges,
@@ -27,6 +28,7 @@ impl PolygonError {
             Self::Incomplete | Self::PointArguments => {
                 "按轮廓顺序输入二维坐标，点内用逗号，各点用分号"
             }
+            Self::ContainmentArguments => "先填待检查的点，加 @ 后按轮廓顺序填写多边形顶点",
             Self::VertexCount => "请输入 3 至 32 个顶点，末尾可再填一次起点",
             Self::DuplicateVertex => "除末尾可重复起点外，各顶点须互不重合",
             Self::IntersectingEdges => "多边形的边相交、接触或重叠，请检查顶点顺序",
@@ -43,19 +45,32 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
     let input = normalized.trim();
     let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     let centroid = operation == "重心" || operation.eq_ignore_ascii_case("centroid");
-    let input = if centroid { arguments.trim() } else { input };
+    let parse_coordinate = |part: &str| {
+        parse_point(part).map_err(|error| match error {
+            PointError::Arguments => PolygonError::PointArguments,
+            PointError::Evaluation(error) => PolygonError::Evaluation(error),
+        })
+    };
+    let (input, point) = if operation == "包含" || operation.eq_ignore_ascii_case("contains") {
+        let (point, vertices) = arguments
+            .split_once('@')
+            .ok_or(PolygonError::ContainmentArguments)?;
+        if point.trim().is_empty() || vertices.trim().is_empty() {
+            return Err(PolygonError::ContainmentArguments);
+        }
+        (vertices.trim(), Some(parse_coordinate(point)?))
+    } else if centroid {
+        (arguments.trim(), None)
+    } else {
+        (input, None)
+    };
     if input.is_empty() {
         return Err(PolygonError::Incomplete);
     }
     let mut vertices = input
         .split(';')
         .take(MAX_VERTICES + 2)
-        .map(|part| {
-            parse_point(part).map_err(|error| match error {
-                PointError::Arguments => PolygonError::PointArguments,
-                PointError::Evaluation(error) => PolygonError::Evaluation(error),
-            })
-        })
+        .map(parse_coordinate)
         .collect::<Result<Vec<_>, _>>()?;
     if vertices.len() > 1 && vertices.first() == vertices.last() {
         vertices.pop();
@@ -68,6 +83,9 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         return Err(PolygonError::DuplicateVertex);
     }
     check_edges(&vertices)?;
+    if let Some(point) = point {
+        return point_position(&point, &vertices).map(str::to_owned);
+    }
     let origin = &vertices[0];
     let mut twice_area = BigRational::default();
     for pair in vertices[1..].windows(2) {
@@ -94,6 +112,27 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         "面积 {area} · 顶点 {}\n顶点顺序 {winding}",
         vertices.len()
     ))
+}
+
+fn point_position(point: &Point2, vertices: &[Point2]) -> Result<&'static str, PolygonError> {
+    let mut inside = false;
+    for (a, b) in vertices.iter().zip(vertices.iter().cycle().skip(1)) {
+        let turn = orientation(a, b, point)?;
+        if turn == Sign::NoSign && in_edge_bounds(point, a, b) {
+            return Ok("点在多边形边界上");
+        }
+        // 半开高度范围使经过顶点的水平射线不会把同一次穿越计两次。
+        let crosses_height = (a[1] > point[1]) != (b[1] > point[1]);
+        let rightward_turn = if a[1] < b[1] { Sign::Plus } else { Sign::Minus };
+        if crosses_height && turn == rightward_turn {
+            inside = !inside;
+        }
+    }
+    Ok(if inside {
+        "点在多边形内部"
+    } else {
+        "点在多边形外部"
+    })
 }
 
 fn area_centroid(vertices: &[Point2], twice_area: &BigRational) -> Result<String, PolygonError> {
@@ -214,6 +253,29 @@ mod tests {
             Err(PolygonError::IntersectingEdges)
         );
         assert_eq!(calculate_polygon("重心"), Err(PolygonError::Incomplete));
+    }
+
+    #[test]
+    fn classifies_exact_points_on_edges_vertices_and_both_sides_of_concave_polygons() {
+        for (query, expected) in [
+            ("包含 1/2,3/2 @ 0,0;4,0;2,2;4,4;0,4", "点在多边形内部"),
+            ("包含 3,2 @ 0,0;4,0;2,2;4,4;0,4", "点在多边形外部"),
+            ("包含 1,2 @ 0,0;4,0;2,2;4,4;0,4", "点在多边形内部"),
+            ("包含 5/2,3/2 @ 0,0;4,0;2,2;4,4;0,4", "点在多边形边界上"),
+            ("包含 3/2,0 @ 0,0;4,0;2,2;4,4;0,4", "点在多边形边界上"),
+            ("CONTAINS 2,2 @ 0,0;0,4;4,4;2,2;4,0;0,0", "点在多边形边界上"),
+            ("包含 5/2,0 @ 0,0;2,0;2,2;0,2", "点在多边形外部"),
+        ] {
+            assert_eq!(calculate_polygon(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_polygon("包含 0,0"),
+            Err(PolygonError::ContainmentArguments)
+        );
+        assert_eq!(
+            calculate_polygon("包含 1,1 @ 0,0;3,3;0,3;4,0"),
+            Err(PolygonError::IntersectingEdges)
+        );
     }
 
     #[test]

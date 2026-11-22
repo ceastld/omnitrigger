@@ -335,6 +335,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "多边形: 重心 0,0;3,0;3,1;1,1;1,3;0,3",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "判断分数坐标的点是否位于多边形边界",
+        query: "多边形: 包含 5/2,3/2 @ 0,0;4,0;2,2;4,4;0,4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算两个向量的点积",
         query: "向量: 点积 1,2,3; 4,5,6",
@@ -3905,7 +3910,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Triangle
         | Scope::RatioAllocation
             if term.is_empty() => {}
-        Scope::Polygon if term.is_empty() || "重心".starts_with(term) => {}
+        Scope::Polygon if "重心".starts_with(term) || "包含".starts_with(term) => {}
         _ => return None,
     }
     let prefix = term.to_ascii_lowercase();
