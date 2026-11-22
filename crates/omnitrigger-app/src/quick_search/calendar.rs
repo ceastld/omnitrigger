@@ -169,10 +169,10 @@ fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), Date
         let date = today.checked_add_signed(TimeDelta::days(days));
         return Ok((in_range(date)?, rest));
     }
-    if let Some((offset, last_day, rest)) = relative_month_edge(input) {
-        let start = relative_month_start(today, offset)?;
+    if let Some((offset, months, last_day, rest)) = relative_period_edge(input) {
+        let start = relative_period_start(today, offset, months)?;
         let date = if last_day {
-            month_end(start, 1)?
+            month_end(start, months)?
         } else {
             start
         };
@@ -332,18 +332,35 @@ fn chinese_weekday(input: &str) -> Option<Weekday> {
     })
 }
 
-fn relative_month_edge(input: &str) -> Option<(i8, bool, &str)> {
-    [("本月", 0), ("上月", -1), ("下月", 1), ("月", 0)]
-        .into_iter()
-        .find_map(|(prefix, offset)| {
-            let mut rest = input.strip_prefix(prefix)?.chars();
-            let last_day = match rest.next()? {
-                '初' => false,
-                '底' | '末' => true,
-                _ => return None,
-            };
-            Some((offset, last_day, rest.as_str().trim_start()))
-        })
+fn relative_period_edge(input: &str) -> Option<(i8, u32, bool, &str)> {
+    [
+        ("本月", 0, 1),
+        ("上月", -1, 1),
+        ("下月", 1, 1),
+        ("月", 0, 1),
+        ("本季度", 0, 3),
+        ("上季度", -1, 3),
+        ("下季度", 1, 3),
+        ("季度", 0, 3),
+        ("本季", 0, 3),
+        ("上季", -1, 3),
+        ("下季", 1, 3),
+        ("季", 0, 3),
+        ("今年", 0, 12),
+        ("去年", -1, 12),
+        ("明年", 1, 12),
+        ("年", 0, 12),
+    ]
+    .into_iter()
+    .find_map(|(prefix, offset, months)| {
+        let mut rest = input.strip_prefix(prefix)?.chars();
+        let last_day = match rest.next()? {
+            '初' => false,
+            '底' | '末' => true,
+            _ => return None,
+        };
+        Some((offset, months, last_day, rest.as_str().trim_start()))
+    })
 }
 
 pub(super) fn looks_like_date_query(query: &str) -> bool {
@@ -372,7 +389,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
         return date.is_empty()
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
             || relative_weekday(date).is_some_and(|(_, _, rest)| date_tail(rest))
-            || relative_month_edge(date).is_some_and(|(_, _, rest)| date_tail(rest))
+            || relative_period_edge(date).is_some_and(|(_, _, _, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_week_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || written_date_prefix(date).is_some_and(|(_, _, _, rest)| date_tail(rest));
@@ -384,7 +401,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
             .is_some()
         || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
         || relative_weekday(input).is_some_and(|(_, _, rest)| date_tail(rest))
-        || relative_month_edge(input).is_some_and(|(_, _, rest)| date_tail(rest))
+        || relative_period_edge(input).is_some_and(|(_, _, _, rest)| date_tail(rest))
         || (input.get(4..).is_some_and(|rest| rest.starts_with('年'))
             && written_date_prefix(input).is_some_and(|(_, _, _, rest)| date_tail(rest)))
 }
@@ -852,20 +869,29 @@ fn month_end(start: NaiveDate, months: u32) -> Result<NaiveDate, DateError> {
     )
 }
 
-fn relative_month_start(today: NaiveDate, offset: i8) -> Result<NaiveDate, DateError> {
-    let current = in_range(today.with_day(1))?;
-    in_range(match offset {
-        -1 => current.checked_sub_months(Months::new(1)),
-        1 => current.checked_add_months(Months::new(1)),
-        _ => Some(current),
-    })
+fn relative_period_start(
+    today: NaiveDate,
+    offset: i8,
+    months: u32,
+) -> Result<NaiveDate, DateError> {
+    let first_month = today.month0() / months * months + 1;
+    let shift = Months::new(u32::from(offset.unsigned_abs()) * months);
+    in_range(
+        NaiveDate::from_ymd_opt(today.year(), first_month, 1).and_then(|start| {
+            if offset < 0 {
+                start.checked_sub_months(shift)
+            } else {
+                start.checked_add_months(shift)
+            }
+        }),
+    )
 }
 
 fn month_calendar(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let start = if let Some((year, month)) = iso_month_parts(input) {
         NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidMonthCalendar)?
     } else if let Some(RelativePeriod::Month(offset)) = relative_period(input) {
-        relative_month_start(today, offset)?
+        relative_period_start(today, offset, 1)?
     } else {
         return Err(DateError::InvalidMonthCalendar);
     };
@@ -1103,14 +1129,10 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             return week_range(monday);
         }
         Some(RelativePeriod::Month(offset)) => {
-            return month_range(relative_month_start(today, offset)?, 1);
+            return month_range(relative_period_start(today, offset, 1)?, 1);
         }
         Some(RelativePeriod::Quarter(offset)) => {
-            let quarter = 4 * today.year() + (today.month0() / 3) as i32 + i32::from(offset);
-            let year = quarter.div_euclid(4);
-            let start_month = 1 + 3 * quarter.rem_euclid(4) as u32;
-            let start = in_range(NaiveDate::from_ymd_opt(year, start_month, 1))?;
-            return month_range(start, 3);
+            return month_range(relative_period_start(today, offset, 3)?, 3);
         }
         Some(RelativePeriod::Year(offset)) => return year_range(today.year() + i32::from(offset)),
         None => {}
@@ -1271,6 +1293,36 @@ mod tests {
         assert_eq!(
             calculate_date("days-csv 9999-12-31 至 9999-12-31", today).as_deref(),
             Ok("日期,星期,工作日\r\n9999-12-31,星期五,1")
+        );
+    }
+
+    #[test]
+    fn uses_relative_quarter_and_year_boundaries_and_keeps_period_queries() {
+        let today = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        for (query, expected) in [
+            ("上季末", "2023-12-31"),
+            ("下季度初 星期几", "星期一"),
+            ("明年初", "2025-01-01"),
+            ("年底", "2024-12-31"),
+            ("去年底 + 1天", "2024-01-01"),
+            ("本季度", "2024-01-01 至 2024-03-31\n91 天 · 65 工作日"),
+        ] {
+            assert!(looks_like_date_query(query), "{query}");
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("按季度拆分CSV 本季度初至本季度末", today).as_deref(),
+            Ok("季度,开始,结束,天数,工作日\r\n2024-Q1,2024-01-01,2024-03-31,91,65")
+        );
+        assert!(!looks_like_date_query("本季初稿"));
+        let last_year = NaiveDate::from_ymd_opt(9999, 12, 16).unwrap();
+        assert_eq!(
+            calculate_date("明年初", last_year),
+            Err(DateError::OutOfRange)
         );
     }
 

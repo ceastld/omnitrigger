@@ -1156,6 +1156,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 本月初 + 1天",
     },
     Example {
+        icon: Icon::Clock,
+        title: "以去年最后一天为起点计算",
+        query: "日期: 去年底 + 1天",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "用季度首尾指定完整的日期范围",
+        query: "日期: 按季度拆分CSV 本季度初至本季度末",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "用月初和月底指定完整的日期范围",
         query: "日期: 按月拆分CSV 本月初至本月底",
@@ -2139,6 +2149,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "给缺少指定键的 JSON 对象补上默认值",
         query: r#"JSON: 补字段 ["金额",1.50] [{"编号":"001"},{"编号":"002","金额":null}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "一次补上多个缺少的 JSON 字段",
+        query: r#"JSON: 补字段 {"币种":"CNY","金额":1.50} [{"编号":"001"},{"编号":"002","币种":"USD"}]"#,
     },
     Example {
         icon: Icon::Terminal,

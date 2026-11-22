@@ -103,7 +103,9 @@ impl JsonError {
             Self::ExpectedArray => "请输入 JSON 数组",
             Self::ExpectedArrayAtPointer => "每一项的指定 JSON 路径都须对应数组",
             Self::ExpectedObjectItem => "数组中的每一项都应是 JSON 对象",
-            Self::DefaultFieldArguments => "填写 [键名,默认值]，再粘贴 JSON 对象或对象数组",
+            Self::DefaultFieldArguments => {
+                "填写 [键名,默认值] 或默认值对象，再粘贴 JSON 对象或对象数组"
+            }
             Self::ObjectOutputTooLarge => "JSON 对象处理结果超过 1 MiB",
             Self::InvalidLine => "每个非空行需要一个完整的 JSON 值",
             Self::MissingValue => "JSON 路径没有对应的值",
@@ -197,7 +199,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "去空字段" | "remove-null-fields" => return remove_null_json_fields(source),
-        "补字段" | "fill-missing-field" => return fill_missing_json_field(source),
+        "补字段" | "fill-missing-field" => return fill_missing_json_fields(source),
         "转csv" | "to-csv" => return json_to_csv(source),
         "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
         "选键" | "pick-keys" => return pick_json_keys(source),
@@ -1404,23 +1406,33 @@ fn remove_null_json_fields(source: &str) -> Result<String, JsonError> {
     })
 }
 
-fn fill_missing_json_field(query: &str) -> Result<String, JsonError> {
+fn fill_missing_json_fields(query: &str) -> Result<String, JsonError> {
     let (argument, source) = json_value_and_source(query, JsonError::DefaultFieldArguments)?;
-    let (name, default) = serde_json::from_str::<(String, &RawValue)>(argument.get())
-        .map_err(|_| JsonError::DefaultFieldArguments)?;
+    let defaults = if argument.get().starts_with('{') {
+        let defaults = read_object_entries(argument.get())?;
+        let mut names = HashSet::new();
+        if defaults.iter().any(|(name, _)| !names.insert(name)) {
+            return Err(JsonError::DuplicateKey);
+        }
+        defaults
+    } else {
+        vec![serde_json::from_str::<(String, &RawValue)>(argument.get())
+            .map_err(|_| JsonError::DefaultFieldArguments)?]
+    };
     map_json_objects(source, |raw| {
-        let mut entries = read_object_entries(raw)?;
-        let already_present = {
+        let entries = read_object_entries(raw)?;
+        let missing = {
             let mut names = HashSet::new();
             if entries.iter().any(|(key, _)| !names.insert(key)) {
                 return Err(JsonError::DuplicateKey);
             }
-            names.contains(&name)
+            defaults
+                .iter()
+                .filter(|(name, _)| !names.contains(name))
+                .cloned()
+                .collect::<Vec<_>>()
         };
-        if !already_present {
-            entries.push((name.clone(), default));
-        }
-        write_object_entries(entries)
+        write_object_entries(entries.into_iter().chain(missing))
     })
 }
 
@@ -2359,6 +2371,20 @@ mod tests {
 
     #[test]
     fn fills_only_missing_json_fields_and_limits_repeated_defaults() {
+        assert_eq!(
+            transform_json(
+                r#"补字段 {"币种":"CNY","金额":1.50,"备注":null} [{"编号":"001","金额":null},{"编号":"002","币种":"USD"}]"#
+            )
+            .as_deref(),
+            Ok(concat!(
+                r#"[{"编号":"001","金额":null,"币种":"CNY","备注":null},"#,
+                r#"{"编号":"002","币种":"USD","金额":1.50,"备注":null}]"#,
+            ))
+        );
+        assert_eq!(
+            transform_json(r#"补字段 {"a":1,"\u0061":2} {}"#),
+            Err(JsonError::DuplicateKey)
+        );
         assert_eq!(
             transform_json(
                 r#"补字段 ["金额",1.50] [{"编号":"001"},{"编号":"002","金额":null},{"金额":0.00}]"#
