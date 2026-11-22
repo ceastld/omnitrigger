@@ -2342,6 +2342,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把选中的 CSV 列转换成 JSON 数字",
+        query: "CSV: 数值对象 [\"金额\",3] 编号,金额,数量\n001,1.50,9007199254740993\n002,,2e0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "由 CSV 生成 Markdown 表格",
         query: "CSV: Markdown 编号,备注\n001,茶|咖啡",
     },

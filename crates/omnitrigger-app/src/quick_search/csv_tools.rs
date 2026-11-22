@@ -13,6 +13,7 @@ use serde::{
     ser::{Serialize, SerializeMap, Serializer},
     Deserialize,
 };
+use serde_json::value::RawValue;
 
 use super::{
     calculator::normalize,
@@ -104,6 +105,8 @@ pub(super) enum CsvError {
     EmptyStatisticsColumn,
     Statistics(StatisticsError),
     Serialization,
+    JsonNumericCells,
+    JsonNumericObjectsTooLarge,
 }
 
 impl CsvError {
@@ -199,6 +202,8 @@ impl CsvError {
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
+            Self::JsonNumericCells => "所选列须为 JSON 数字或空白，例如 1.50 或 2e0",
+            Self::JsonNumericObjectsTooLarge => "转换后的 JSON 超过 1 MiB，请缩小表格范围",
         }
     }
 }
@@ -208,6 +213,7 @@ enum Operation {
     PadRows,
     JsonRows,
     JsonObjects,
+    JsonNumericObjects(Vec<ColumnReference>),
     Markdown(Option<Vec<MarkdownAlignment>>),
     Transpose,
     ToTsv,
@@ -416,6 +422,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "纵向合并" | "stack" => return stack_csv(input),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
+        "数值对象" | "numeric-objects" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::JsonNumericObjects(columns)
+        }
         "markdown" | "表格" => Operation::Markdown(None),
         "从markdown" | "from-markdown" => return read_markdown_table(input),
         "markdown对齐" | "markdown-align" => {
@@ -814,7 +826,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::Validate => Ok(report_csv_columns(&rows)),
         Operation::PadRows => pad_rows(rows),
         Operation::JsonRows => serde_json::to_string(&rows).map_err(|_| CsvError::Serialization),
-        Operation::JsonObjects => json_objects(&rows),
+        Operation::JsonObjects => json_objects(&rows, None),
+        Operation::JsonNumericObjects(columns) => json_objects(&rows, Some(&columns)),
         Operation::Markdown(alignments) => markdown_table(&rows, alignments.as_deref()),
         Operation::Transpose => Ok(transpose(&rows)),
         Operation::ToTsv => Ok(write_rows(&rows, '\t')),
@@ -2182,7 +2195,10 @@ fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError
     Ok(())
 }
 
-fn json_objects(rows: &[Vec<String>]) -> Result<String, CsvError> {
+fn json_objects(
+    rows: &[Vec<String>],
+    numeric_columns: Option<&[ColumnReference]>,
+) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let mut names = HashSet::new();
     if header
@@ -2191,11 +2207,33 @@ fn json_objects(rows: &[Vec<String>]) -> Result<String, CsvError> {
     {
         return Err(CsvError::InvalidHeader);
     }
-    let objects: Vec<_> = records
-        .iter()
-        .map(|fields| CsvObject { header, fields })
-        .collect();
-    serde_json::to_string(&objects).map_err(|_| CsvError::Serialization)
+    let numeric_columns = numeric_columns
+        .map(|columns| {
+            resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)
+                .map(|indices| indices.into_iter().collect::<HashSet<_>>())
+        })
+        .transpose()?;
+    let objects = records.iter().map(|fields| CsvObject {
+        header,
+        fields,
+        numeric_columns: numeric_columns.as_ref(),
+    });
+    if numeric_columns.is_none() {
+        return serde_json::to_string(&objects.collect::<Vec<_>>())
+            .map_err(|_| CsvError::Serialization);
+    }
+    let mut output = String::from("[");
+    for (index, object) in objects.enumerate() {
+        let row = serde_json::to_string(&object).map_err(|_| CsvError::JsonNumericCells)?;
+        let separator = if index == 0 { "" } else { "," };
+        if output.len() + separator.len() + row.len() + 1 > MAX_EXPANDED_CSV_BYTES {
+            return Err(CsvError::JsonNumericObjectsTooLarge);
+        }
+        output.push_str(separator);
+        output.push_str(&row);
+    }
+    output.push(']');
+    Ok(output)
 }
 
 fn markdown_table(
@@ -2491,13 +2529,33 @@ fn read_field(input: &str, delimiter: char) -> Result<(String, &str), CsvError> 
 struct CsvObject<'a> {
     header: &'a [String],
     fields: &'a [String],
+    numeric_columns: Option<&'a HashSet<usize>>,
 }
 
 impl Serialize for CsvObject<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut object = serializer.serialize_map(Some(self.header.len()))?;
-        for (key, value) in self.header.iter().zip(self.fields) {
-            object.serialize_entry(key, value)?;
+        for (index, (key, value)) in self.header.iter().zip(self.fields).enumerate() {
+            if self
+                .numeric_columns
+                .is_some_and(|columns| columns.contains(&index))
+            {
+                let value = value.trim();
+                let number = if value.is_empty() {
+                    None
+                } else {
+                    if !matches!(value.as_bytes().first(), Some(b'-' | b'0'..=b'9')) {
+                        return Err(serde::ser::Error::custom("预期 JSON 数字"));
+                    }
+                    Some(
+                        serde_json::from_str::<&RawValue>(value)
+                            .map_err(<S::Error as serde::ser::Error>::custom)?,
+                    )
+                };
+                object.serialize_entry(key, &number)?;
+            } else {
+                object.serialize_entry(key, value)?;
+            }
         }
         object.end()
     }
@@ -2506,6 +2564,36 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_selected_csv_cells_as_raw_json_numbers_or_null() {
+        let input = "编号,金额,数量\n001,1.50,9007199254740993\n002, ,2e0\n003,-0,";
+        assert_eq!(
+            transform_csv(&format!("数值对象 [[\"金额\"],3] {input}")),
+            Err(CsvError::NamedColumnArguments),
+        );
+        assert_eq!(
+            transform_csv(&format!("数值对象 [\"金额\",3] {input}")).as_deref(),
+            Ok(
+                r#"[{"编号":"001","金额":1.50,"数量":9007199254740993},{"编号":"002","金额":null,"数量":2e0},{"编号":"003","金额":-0,"数量":null}]"#
+            ),
+        );
+        assert_eq!(
+            transform_csv("numeric-objects [2] 编号,金额").as_deref(),
+            Ok("[]"),
+        );
+        assert_eq!(
+            transform_csv("对象 编号,金额\n001,1.50").as_deref(),
+            Ok(r#"[{"编号":"001","金额":"1.50"}]"#),
+        );
+        for field in ["1/3", "001", "true", "null", "[1]", "1e", "0xff"] {
+            assert_eq!(
+                transform_csv(&format!("数值对象 [1] 金额\n{field}")),
+                Err(CsvError::JsonNumericCells),
+                "{field}",
+            );
+        }
+    }
 
     #[test]
     fn formats_selected_csv_columns_with_exact_ties_to_even_and_preserves_empty_cells() {
