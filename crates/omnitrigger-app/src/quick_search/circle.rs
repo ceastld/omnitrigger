@@ -4,7 +4,9 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::normalize;
-use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root, FractionError,
+};
 use super::plane::{parse_point, Point2, PointError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,9 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
     }
     if operation == "两圆关系" || operation.eq_ignore_ascii_case("relation") {
         return compare_circles(arguments);
+    }
+    if operation == "两圆交点" || operation.eq_ignore_ascii_case("intersections") {
+        return circle_intersections(arguments);
     }
     let (length, angle) = input
         .split_once('@')
@@ -116,27 +121,43 @@ fn parse_positive_length(input: &str) -> Result<BigRational, CircleError> {
     Ok(length)
 }
 
-fn circle_center_and_radius(input: &str) -> Result<(Point2, BigRational), CircleError> {
+struct CenteredCircle {
+    center: Point2,
+    radius: BigRational,
+}
+
+fn circle_center_and_radius(input: &str) -> Result<CenteredCircle, CircleError> {
     let (center, radius) = input
         .split_once('@')
         .ok_or(CircleError::TwoCircleArguments)?;
     if center.trim().is_empty() || radius.trim().is_empty() {
         return Err(CircleError::TwoCircleArguments);
     }
-    Ok((circle_point(center)?, parse_positive_length(radius)?))
+    Ok(CenteredCircle {
+        center: circle_point(center)?,
+        radius: parse_positive_length(radius)?,
+    })
 }
 
-fn compare_circles(input: &str) -> Result<String, CircleError> {
+fn parse_two_circles(input: &str) -> Result<[CenteredCircle; 2], CircleError> {
     let mut circles = input.split(';');
     let (Some(first), Some(second), None) = (circles.next(), circles.next(), circles.next()) else {
         return Err(CircleError::TwoCircleArguments);
     };
-    let ([x1, y1], first_radius) = circle_center_and_radius(first)?;
-    let ([x2, y2], second_radius) = circle_center_and_radius(second)?;
+    Ok([
+        circle_center_and_radius(first)?,
+        circle_center_and_radius(second)?,
+    ])
+}
+
+fn compare_circles(input: &str) -> Result<String, CircleError> {
+    let [first, second] = parse_two_circles(input)?;
+    let [x1, y1] = first.center;
+    let [x2, y2] = second.center;
     let (dx, dy) = (x1 - x2, y1 - y2);
     let distance_squared = &dx * &dx + &dy * &dy;
-    let sum = &first_radius + &second_radius;
-    let difference = first_radius - second_radius;
+    let sum = &first.radius + &second.radius;
+    let difference = first.radius - second.radius;
     let outer_limit = &sum * &sum;
     let inner_limit = &difference * &difference;
     for value in [&distance_squared, &outer_limit, &inner_limit] {
@@ -158,6 +179,72 @@ fn compare_circles(input: &str) -> Result<String, CircleError> {
         "{relation}\n圆心距 {}",
         format_square_root(&distance_squared)
     ))
+}
+
+fn circle_intersections(input: &str) -> Result<String, CircleError> {
+    let [first, second] = parse_two_circles(input)?;
+    let [x1, y1] = &first.center;
+    let [x2, y2] = &second.center;
+    let (dx, dy) = (x2 - x1, y2 - y1);
+    let dx_squared = &dx * &dx;
+    let dy_squared = &dy * &dy;
+    let distance_squared = &dx_squared + &dy_squared;
+    if distance_squared.numer().sign() == Sign::NoSign {
+        return Ok(if first.radius == second.radius {
+            "无穷多个交点".to_owned()
+        } else {
+            "无交点".to_owned()
+        });
+    }
+    let first_radius_squared = &first.radius * &first.radius;
+    let second_radius_squared = &second.radius * &second.radius;
+    let projection = (&distance_squared + &first_radius_squared - second_radius_squared)
+        / (&distance_squared * BigInt::from(2_u8));
+    let offset_squared = first_radius_squared / distance_squared - &projection * &projection;
+    let offset_sign = offset_squared.numer().sign();
+    if offset_sign == Sign::Minus {
+        return Ok("无交点".to_owned());
+    }
+    let middle_x = x1 + &projection * &dx;
+    let middle_y = y1 + projection * &dy;
+    let shift_x_squared = dy_squared * &offset_squared;
+    let shift_y_squared = dx_squared * offset_squared;
+    let subtract_x = dy.numer().sign() == Sign::Plus;
+    let subtract_y = dx.numer().sign() == Sign::Minus;
+    let render_point = |opposite| {
+        let x = intersection_axis(&middle_x, &shift_x_squared, subtract_x ^ opposite)?;
+        let y = intersection_axis(&middle_y, &shift_y_squared, subtract_y ^ opposite)?;
+        Ok::<_, CircleError>(format!("交点 ({x}, {y})"))
+    };
+    let first = render_point(false)?;
+    if offset_sign == Sign::NoSign {
+        return Ok(first);
+    }
+    Ok(format!("{first}\n{}", render_point(true)?))
+}
+
+fn intersection_axis(
+    center: &BigRational,
+    shift_squared: &BigRational,
+    subtract: bool,
+) -> Result<String, CircleError> {
+    ensure_exact_size(shift_squared).map_err(CircleError::Evaluation)?;
+    if let Some(shift) = exact_abs_square_root(shift_squared) {
+        let coordinate = if subtract {
+            center - shift
+        } else {
+            center + shift
+        };
+        ensure_exact_size(&coordinate).map_err(CircleError::Evaluation)?;
+        return Ok(coordinate.to_string());
+    }
+    ensure_exact_size(center).map_err(CircleError::Evaluation)?;
+    let shift = format_square_root(shift_squared);
+    let operator = if subtract { '-' } else { '+' };
+    if center.numer().sign() == Sign::NoSign {
+        return Ok(if subtract { format!("-{shift}") } else { shift });
+    }
+    Ok(format!("{center} {operator} {shift}"))
 }
 
 fn circle_through_points(input: &str) -> Result<String, CircleError> {
@@ -241,6 +328,26 @@ fn multiple_of_pi(value: &BigRational) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_exact_circle_intersection_points_or_reports_their_absence() {
+        for (query, expected) in [
+            ("两圆交点 -3,0 @ 5; 3,0 @ 5", "交点 (0, 4)\n交点 (0, -4)"),
+            ("两圆交点 0,0 @ 2; 2,2 @ 2", "交点 (0, 2)\n交点 (2, 0)"),
+            (
+                "两圆交点 0,0 @ 1; 1,0 @ 1",
+                "交点 (1/2, √(3/4))\n交点 (1/2, -√(3/4))",
+            ),
+            ("intersections 0,0 @ 1/2; 1,0 @ 1/2", "交点 (1/2, 0)"),
+            ("两圆交点 0,0 @ 3; 2,0 @ 1", "交点 (3, 0)"),
+            ("两圆交点 0,0 @ 3; 1,0 @ 1", "无交点"),
+            ("两圆交点 0,0 @ 1; 3,0 @ 1", "无交点"),
+            ("两圆交点 0,0 @ 1; 0,0 @ 2", "无交点"),
+            ("两圆交点 0,0 @ 1/2; 0,0 @ 0.5", "无穷多个交点"),
+        ] {
+            assert_eq!(calculate_circle(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
 
     #[test]
     fn classifies_two_circles_using_precise_distances_and_radii() {
