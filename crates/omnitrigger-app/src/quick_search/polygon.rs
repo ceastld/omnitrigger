@@ -40,30 +40,42 @@ impl PolygonError {
     }
 }
 
+enum PolygonOperation {
+    Area,
+    Centroid,
+    Perimeter,
+    Bounds,
+    Contains(Point2),
+}
+
 pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
     let normalized = normalize(query);
     let input = normalized.trim();
     let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-    let centroid = operation == "重心" || operation.eq_ignore_ascii_case("centroid");
-    let perimeter = operation == "周长" || operation.eq_ignore_ascii_case("perimeter");
     let parse_coordinate = |part: &str| {
         parse_point(part).map_err(|error| match error {
             PointError::Arguments => PolygonError::PointArguments,
             PointError::Evaluation(error) => PolygonError::Evaluation(error),
         })
     };
-    let (input, point) = if operation == "包含" || operation.eq_ignore_ascii_case("contains") {
-        let (point, vertices) = arguments
-            .split_once('@')
-            .ok_or(PolygonError::ContainmentArguments)?;
-        if point.trim().is_empty() || vertices.trim().is_empty() {
-            return Err(PolygonError::ContainmentArguments);
+    let arguments = arguments.trim();
+    let (input, operation) = match operation.to_ascii_lowercase().as_str() {
+        "重心" | "centroid" => (arguments, PolygonOperation::Centroid),
+        "周长" | "perimeter" => (arguments, PolygonOperation::Perimeter),
+        "边界框" | "bounds" => (arguments, PolygonOperation::Bounds),
+        "包含" | "contains" => {
+            let (point, vertices) = arguments
+                .split_once('@')
+                .ok_or(PolygonError::ContainmentArguments)?;
+            if point.trim().is_empty() || vertices.trim().is_empty() {
+                return Err(PolygonError::ContainmentArguments);
+            }
+            (
+                vertices.trim(),
+                PolygonOperation::Contains(parse_coordinate(point)?),
+            )
         }
-        (vertices.trim(), Some(parse_coordinate(point)?))
-    } else if centroid || perimeter {
-        (arguments.trim(), None)
-    } else {
-        (input, None)
+        _ => (input, PolygonOperation::Area),
     };
     if input.is_empty() {
         return Err(PolygonError::Incomplete);
@@ -84,12 +96,16 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         return Err(PolygonError::DuplicateVertex);
     }
     check_edges(&vertices)?;
-    if let Some(point) = point {
-        return point_position(&point, &vertices).map(str::to_owned);
+    match operation {
+        PolygonOperation::Area => polygon_area(&vertices, false),
+        PolygonOperation::Centroid => polygon_area(&vertices, true),
+        PolygonOperation::Perimeter => polygon_perimeter(&vertices),
+        PolygonOperation::Bounds => polygon_bounds(&vertices),
+        PolygonOperation::Contains(point) => point_position(&point, &vertices).map(str::to_owned),
     }
-    if perimeter {
-        return polygon_perimeter(&vertices);
-    }
+}
+
+fn polygon_area(vertices: &[Point2], centroid: bool) -> Result<String, PolygonError> {
     let origin = &vertices[0];
     let mut twice_area = BigRational::default();
     for pair in vertices[1..].windows(2) {
@@ -103,7 +119,7 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         Sign::NoSign => return Err(PolygonError::IntersectingEdges),
     };
     if centroid {
-        return area_centroid(&vertices, &twice_area);
+        return area_centroid(vertices, &twice_area);
     }
     let magnitude = if sign == Sign::Minus {
         -twice_area
@@ -115,6 +131,25 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
     Ok(format!(
         "面积 {area} · 顶点 {}\n顶点顺序 {winding}",
         vertices.len()
+    ))
+}
+
+fn polygon_bounds(vertices: &[Point2]) -> Result<String, PolygonError> {
+    let [x, y] = &vertices[0];
+    let (mut min_x, mut max_x) = (x, x);
+    let (mut min_y, mut max_y) = (y, y);
+    for [x, y] in &vertices[1..] {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    ensure_exact_size(&width).map_err(PolygonError::Evaluation)?;
+    ensure_exact_size(&height).map_err(PolygonError::Evaluation)?;
+    Ok(format!(
+        "X [{min_x},{max_x}] · Y [{min_y},{max_y}]\n宽 {width} · 高 {height}"
     ))
 }
 
@@ -287,6 +322,22 @@ mod tests {
             Err(PolygonError::IntersectingEdges)
         );
         assert_eq!(calculate_polygon("重心"), Err(PolygonError::Incomplete));
+    }
+
+    #[test]
+    fn reports_axis_aligned_extrema_and_exact_width_and_height() {
+        assert_eq!(
+            calculate_polygon("边界框 -1/2,-2;2,-2;1,1;-1/2,1/3").as_deref(),
+            Ok("X [-1/2,2] · Y [-2,1]\n宽 5/2 · 高 3")
+        );
+        assert_eq!(
+            calculate_polygon("BOUNDS 0,0;0,4;4,4;2,2;4,0").as_deref(),
+            Ok("X [0,4] · Y [0,4]\n宽 4 · 高 4")
+        );
+        assert_eq!(
+            calculate_polygon("边界框 0,0;4,4;0,4;4,0"),
+            Err(PolygonError::IntersectingEdges)
+        );
     }
 
     #[test]

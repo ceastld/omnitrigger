@@ -365,6 +365,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "多边形: 周长 0,0;1,1;2,0",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "查看多边形沿坐标轴的边界范围",
+        query: "多边形: 边界框 -1/2,-2;2,-2;1,1;-1/2,1/3",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算两个向量的点积",
         query: "向量: 点积 1,2,3; 4,5,6",
@@ -4015,7 +4020,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::RatioAllocation
             if term.is_empty() => {}
         Scope::Polygon
-            if ["重心", "包含", "周长"]
+            if ["重心", "包含", "周长", "边界框"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         _ => return None,
