@@ -2727,6 +2727,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按多个 JSON 路径上的值组合计数",
+        query: r#"JSON: 分组计数 ["/地区","/状态"] [{"地区":"北","状态":"完成"},{"地区":"南","状态":"完成"},{"地区":"北","状态":"完成"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定 JSON 路径分组保留完整记录",
         query: r#"JSON: 分组明细 /状态 [{"状态":"完成","金额":1.50},{"状态":"待办","金额":2e0},{"状态":"完成","金额":3}]"#,
     },

@@ -885,7 +885,7 @@ fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
     })
 }
 
-fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, JsonError> {
+fn distinct_json_paths_and_source(query: &str) -> Result<(Vec<Vec<String>>, &str), JsonError> {
     let (input, source) = json_value_and_source(query, JsonError::UniquePaths)?;
     let pointers =
         serde_json::from_str::<Vec<String>>(input.get()).map_err(|_| JsonError::UniquePaths)?;
@@ -902,6 +902,11 @@ fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, 
             pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    Ok((paths, source))
+}
+
+fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, JsonError> {
+    let (paths, source) = distinct_json_paths_and_source(query)?;
     let key_for = |item: &RawValue| {
         paths
             .iter()
@@ -935,11 +940,38 @@ fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, 
 
 fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
     #[derive(serde::Serialize)]
-    struct Group<'a> {
+    struct Group<Value> {
         #[serde(rename = "值")]
-        value: &'a RawValue,
+        value: Value,
         #[serde(rename = "计数")]
         count: usize,
+    }
+
+    if query.trim_start().starts_with('[') {
+        let (paths, source) = distinct_json_paths_and_source(query)?;
+        let groups = collect_json_groups_by(
+            source,
+            |item| {
+                let mut key = Vec::with_capacity(paths.len());
+                let mut values = Vec::with_capacity(paths.len());
+                for path in &paths {
+                    let value = select_pointer_keys(item, path)?;
+                    key.push(json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?);
+                    values.push(value);
+                }
+                Ok((key, values))
+            },
+            |value| Group { value, count: 0 },
+            |group, _| {
+                group.count += 1;
+                Ok(())
+            },
+        )?;
+        let output =
+            serde_json::to_string(&groups).expect("有效的原始 JSON 值数组和计数可直接序列化");
+        return (output.len() <= MAX_PRETTY_BYTES)
+            .then_some(output)
+            .ok_or(JsonError::ObjectOutputTooLarge);
     }
 
     let (pointer, source) = pointer_and_source(query)?;
@@ -1096,12 +1128,29 @@ fn collect_json_groups<'a, Group>(
     append: impl Fn(&mut Group, &'a RawValue) -> Result<(), JsonError>,
 ) -> Result<Vec<Group>, JsonError> {
     let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
+    collect_json_groups_by(
+        source,
+        |item| {
+            let value = select_pointer_keys(item, &keys)?;
+            let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
+            Ok((scalar, value))
+        },
+        create,
+        append,
+    )
+}
+
+fn collect_json_groups_by<'a, Key: Eq + std::hash::Hash, Value, Group>(
+    source: &'a str,
+    key_for: impl Fn(&'a RawValue) -> Result<(Key, Value), JsonError>,
+    create: impl Fn(Value) -> Group,
+    append: impl Fn(&mut Group, &'a RawValue) -> Result<(), JsonError>,
+) -> Result<Vec<Group>, JsonError> {
     let mut positions = HashMap::new();
     let mut groups = Vec::new();
     for item in read_json_array(source)? {
-        let value = select_pointer_keys(item, &keys)?;
-        let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
-        let position = *positions.entry(scalar).or_insert_with(|| {
+        let (key, value) = key_for(item)?;
+        let position = *positions.entry(key).or_insert_with(|| {
             let position = groups.len();
             groups.push(create(value));
             position
@@ -2547,6 +2596,32 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn counts_json_groups_by_multiple_typed_scalar_paths_in_first_seen_order() {
+        let query = concat!(
+            r#"分组计数 ["/地区","/金额"] [{"地区":"北","金额":1.50},"#,
+            r#"{"地区":"南","金额":1.5},{"地区":"北","金额":1.5e0},{"地区":"北","金额":"1.5"}]"#,
+        );
+        assert_eq!(
+            transform_json(query).as_deref(),
+            Ok(
+                r#"[{"值":["北",1.50],"计数":2},{"值":["南",1.5],"计数":1},{"值":["北","1.5"],"计数":1}]"#
+            )
+        );
+        assert_eq!(
+            transform_json(r#"group-count ["/a","/b"] []"#).as_deref(),
+            Ok("[]")
+        );
+        assert_eq!(
+            transform_json(r#"分组计数 ["/a","/a"] []"#),
+            Err(JsonError::UniquePaths)
+        );
+        assert_eq!(
+            transform_json(r#"分组计数 ["/a","/b"] [{"a":1,"b":[]}]"#),
+            Err(JsonError::ExpectedScalar)
+        );
     }
 
     #[test]
