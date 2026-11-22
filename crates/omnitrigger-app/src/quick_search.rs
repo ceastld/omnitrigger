@@ -1705,7 +1705,11 @@ impl QuickSearch {
                         let help = match scoped_query(query.trim()) {
                             Some((Scope::LocalFiles, term)) => local_files::option_help_query(term),
                             _ => None,
-                        };
+                        }
+                        .or_else(|| {
+                            let (prefix, _) = query.trim().split_once([':', '：'])?;
+                            tool_example_keyword(prefix).map(|keyword| format!("? {keyword}"))
+                        });
                         self.input_before_help = Some(query);
                         self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
                     }
@@ -3301,6 +3305,24 @@ mod tests {
                             })
                         })
                         .unwrap();
+                    let scoped_help = reopened
+                        .update(cx, |search, window, cx| {
+                            const QUERY: &str = "ＪＳＯＮ：取值 /城市 {\"城市\":\"北京\"}";
+                            search.fill_query(QUERY, window, cx);
+                            let event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("f1").unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&event, window, cx);
+                            let help = search.input.read(cx).text();
+                            search.refresh_results(&help, window, cx);
+                            let examples_match = matches!(&search.results, Results::Help(items)
+                                if !items.is_empty()
+                                    && items.iter().all(|&index| EXAMPLES[index].query.starts_with("JSON:")));
+                            search.key_down(&event, window, cx);
+                            (help, examples_match, search.input.read(cx).text())
+                        })
+                        .unwrap();
                     send.send((
                         states,
                         reopened_states,
@@ -3309,6 +3331,7 @@ mod tests {
                         app_refresh,
                         file_navigation,
                         file_help,
+                        scoped_help,
                     ))
                     .unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
@@ -3323,7 +3346,11 @@ mod tests {
             app_refresh,
             file_navigation,
             file_help,
+            (help_input, all_json_examples, restored_input),
         ) = receive.recv().unwrap();
+        assert_eq!(help_input, "? JSON:");
+        assert!(all_json_examples);
+        assert_eq!(restored_input, "ＪＳＯＮ：取值 /城市 {\"城市\":\"北京\"}");
         assert_eq!(reopened_states, ["", "3**4"]);
         assert_eq!(window_refresh, (true, true, true));
         assert_eq!(app_refresh, (true, true, true, true));

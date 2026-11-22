@@ -6,6 +6,7 @@ use num_rational::BigRational;
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::conversion::split_conversion;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
+use super::radix::{ungroup_digits, Base};
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_MODULAR_POWER_BITS: u64 = 1024;
@@ -988,6 +989,21 @@ impl FractionParser<'_> {
 
     fn number(&mut self) -> Result<BigRational, FractionError> {
         let input = self.remaining.trim_start();
+        if let Some((base, digits)) = Base::prefixed(input) {
+            let length = digits
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .count();
+            let (digits, rest) = digits.split_at(length);
+            self.remaining = rest;
+            if digits.is_empty() {
+                return Err(self.expected_token());
+            }
+            let digits = ungroup_digits(digits).ok_or(FractionError::Invalid)?;
+            let numerator = BigInt::parse_bytes(digits.as_bytes(), base as u32)
+                .ok_or(FractionError::Invalid)?;
+            return Ok(BigRational::from_integer(numerator));
+        }
         let whole = input.bytes().take_while(u8::is_ascii_digit).count();
         let (fraction, rest) = if let Some(after_dot) = input[whole..].strip_prefix('.') {
             let length = after_dot.bytes().take_while(u8::is_ascii_digit).count();
@@ -1257,6 +1273,33 @@ mod tests {
             parse_fraction_literal(&padded),
             Ok(BigRational::new(15.into(), 2.into()))
         );
+    }
+
+    #[test]
+    fn calculates_exact_fractions_with_prefixed_integer_literals() {
+        for (input, expected) in [
+            ("计算 0x2000_0000_0000_01 + 0b10", "9007199254740995"),
+            ("计算 ０Ｘ１ＦＦ / 0o10", "511/8"),
+            ("计算 -0O10**2 + 0B1", "-63"),
+            ("计算 gcd(0x1e,0b10010)", "6"),
+        ] {
+            assert_eq!(simplify_fraction(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            parse_fraction_literal("-0x21/0b10"),
+            Ok(BigRational::new((-33).into(), 2.into()))
+        );
+        for (input, error) in [
+            ("0x", FractionError::Incomplete),
+            ("0x+1", FractionError::Invalid),
+            ("0o8", FractionError::Invalid),
+            ("0b1__1", FractionError::Invalid),
+            ("0x_ff", FractionError::Invalid),
+            ("0xff_", FractionError::Invalid),
+            ("0x10.5", FractionError::Invalid),
+        ] {
+            assert_eq!(calculate_fraction(input), Err(error), "{input}");
+        }
     }
 
     #[test]

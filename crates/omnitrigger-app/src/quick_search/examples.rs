@@ -2943,6 +2943,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "精确计算二进制、八进制和十六进制数",
+        query: "分数: 计算 0x2000_0000_0000_01 + 0b10",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "给同一算式批量代入不同的 x",
         query: "分数: 取值表 [-2,0,3/2] x**2+1/3",
     },

@@ -130,7 +130,7 @@ fn arbitrary_base(token: &str) -> Option<u32> {
         .or_else(|| token.parse().ok().filter(|base| (2..=36).contains(base)))
 }
 
-fn ungroup_digits(digits: &str) -> Option<String> {
+pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
     (digits
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
