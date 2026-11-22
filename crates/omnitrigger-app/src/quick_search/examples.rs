@@ -2097,6 +2097,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "找出多行共有的开头",
+        query: "文本: 公共前缀 Report-01\nReport-02\nReport-10",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "找出多行共有的结尾",
+        query: "文本: 公共后缀 image-01.png\nphoto-02.png\nscan-03.png",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按数字顺序排列文件名",
         query: "文本: 自然排序 照片10\n照片2\n照片1",
     },

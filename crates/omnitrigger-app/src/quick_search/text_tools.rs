@@ -275,6 +275,8 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
             Ok(text.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
         }
         "去公共缩进" | "dedent" => Ok(remove_common_indent(text)),
+        "公共前缀" | "common-prefix" => Ok(common_line_affix(text, false)),
+        "公共后缀" | "common-suffix" => Ok(common_line_affix(text, true)),
         "换行统计" | "line-ending-counts" => Ok(count_line_endings(text)),
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
         "按行倒序" | "reverse-lines" => Ok(text.lines().rev().collect::<Vec<_>>().join("\n")),
@@ -545,6 +547,34 @@ fn convert_line_endings(input: &str) -> Result<String, TextError> {
     Ok(newline_pattern()
         .replace_all(text_payload(text)?, replacement)
         .into_owned())
+}
+
+fn common_line_affix(text: &str, suffix: bool) -> String {
+    let mut lines = text.lines();
+    let mut common = lines.next().unwrap_or_default();
+    for line in lines {
+        let length = if suffix {
+            matching_grapheme_bytes(common.graphemes(true).rev().zip(line.graphemes(true).rev()))
+        } else {
+            matching_grapheme_bytes(common.graphemes(true).zip(line.graphemes(true)))
+        };
+        common = if suffix {
+            &common[common.len() - length..]
+        } else {
+            &common[..length]
+        };
+        if common.is_empty() {
+            break;
+        }
+    }
+    common.to_owned()
+}
+
+fn matching_grapheme_bytes<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> usize {
+    pairs
+        .take_while(|(a, b)| a == b)
+        .map(|(grapheme, _)| grapheme.len())
+        .sum()
 }
 
 fn remove_common_indent(text: &str) -> String {
@@ -1582,6 +1612,26 @@ mod tests {
             transform_text("转换换行 CR 文本"),
             Err(TextError::InvalidLineEnding)
         );
+    }
+
+    #[test]
+    fn finds_common_line_prefixes_and_suffixes_on_grapheme_boundaries() {
+        for (query, expected) in [
+            ("公共前缀 Report-01\nReport-02\nReport-10", "Report-"),
+            ("公共后缀 image-01.png\nphoto-02.png\nscan-03.png", ".png"),
+            ("公共前缀 👩‍💻1\n👩‍💻2", "👩‍💻"),
+            ("公共前缀 👩‍💻1\n👩1", ""),
+            (
+                "公共后缀 x\u{00A0}e\u{301}\ny\u{00A0}e\u{301}",
+                "\u{00A0}e\u{301}",
+            ),
+            ("公共前缀 A\n\nA", ""),
+            ("公共前缀 report\nReport", ""),
+            ("公共后缀 \"唯一一行\n\"", "唯一一行"),
+            ("公共后缀 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        }
     }
 
     #[test]
