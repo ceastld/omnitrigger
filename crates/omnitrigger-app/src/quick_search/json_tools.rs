@@ -102,6 +102,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "排除" | "exclude" => return filter_json_by_scalar(source, false),
         "数值筛选" | "filter-numeric" => return filter_json_numbers(source),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
+        "分组计数" | "group-count" => return count_json_by_scalar(source),
         "数值排序" | "sort-numeric" => return sort_json_numbers(source, false),
         "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
         "文本排序" | "sort-text" => return sort_json_text(source, false),
@@ -296,6 +297,32 @@ fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
         let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
         Ok(seen.insert(scalar))
     })
+}
+
+fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
+    #[derive(serde::Serialize)]
+    struct Group<'a> {
+        #[serde(rename = "值")]
+        value: &'a RawValue,
+        #[serde(rename = "计数")]
+        count: usize,
+    }
+
+    let (pointer, source) = pointer_and_source(query)?;
+    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let mut positions = HashMap::new();
+    let mut groups = Vec::new();
+    for item in read_json_array(source)? {
+        let value = select_pointer_keys(item, &keys)?;
+        let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
+        let position = *positions.entry(scalar).or_insert_with(|| {
+            let position = groups.len();
+            groups.push(Group { value, count: 0 });
+            position
+        });
+        groups[position].count += 1;
+    }
+    Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值和计数可直接序列化"))
 }
 
 fn sort_json_numbers(query: &str, descending: bool) -> Result<String, JsonError> {
@@ -1212,6 +1239,28 @@ mod tests {
             (r#"按值去重 /键 [{"键":1,"键":2}]"#, JsonError::DuplicateKey),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn counts_exact_json_scalars_in_first_seen_order_with_raw_values() {
+        let values = r#"[1.50,"1.5",1.5,9007199254740993,9007199254740992,null,"\u8336","茶",null,1.500,90071992547409930e-1]"#;
+        assert_eq!(
+            transform_json(&format!(r#"group-count "" {values}"#)).as_deref(),
+            Ok(
+                r#"[{"值":1.50,"计数":3},{"值":"1.5","计数":1},{"值":9007199254740993,"计数":2},{"值":9007199254740992,"计数":1},{"值":null,"计数":2},{"值":"\u8336","计数":2}]"#
+            )
+        );
+        assert_eq!(transform_json("分组计数 /状态 []").as_deref(), Ok("[]"));
+        for (input, error) in [
+            ("分组计数 /状态 [{}]", JsonError::MissingValue),
+            (r#"分组计数 /状态 [{"状态":[]}]"#, JsonError::ExpectedScalar),
+            (
+                r#"分组计数 /状态 [{"状态":1,"状态":2}]"#,
+                JsonError::DuplicateKey,
+            ),
+        ] {
+            assert_eq!(transform_json(input), Err(error), "{input}");
         }
     }
 

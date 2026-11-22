@@ -1647,6 +1647,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按指定 JSON 路径上的值计数",
+        query: r#"JSON: 分组计数 /状态 [{"状态":"完成"},{"状态":"待办"},{"状态":"完成"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按路径上的数字升序排列 JSON 项",
         query: r#"JSON: 数值排序 /价格 [{"编号":"001","价格":12.50},{"编号":"002","价格":-2.75},{"编号":"003","价格":1.5e0}]"#,
     },
