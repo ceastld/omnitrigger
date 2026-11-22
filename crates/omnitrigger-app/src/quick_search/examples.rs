@@ -76,6 +76,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算拟合的残差平方和与均方根误差",
+        query: "拟合: 误差 0,0; 1,1; 2,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "从表格粘贴两列数据进行直线拟合",
         query: "拟合: 0\t1\n1\t3\n2\t5",
     },
@@ -3440,7 +3445,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::LinearFit
             if !term.is_empty()
-                && ["预测", "残差"]
+                && ["预测", "残差", "误差"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Cidr

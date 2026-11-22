@@ -3,7 +3,8 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::fraction::{
-    calculate_fraction, ensure_exact_size, format_signed_square_root, FractionError,
+    calculate_fraction, ensure_exact_size, format_signed_square_root, format_square_root,
+    FractionError,
 };
 use super::operators::split_top_level_commas;
 
@@ -42,6 +43,7 @@ enum FitOutput {
     Summary,
     Predictions(Vec<BigRational>),
     Residuals,
+    Errors,
 }
 
 pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError> {
@@ -72,6 +74,11 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         {
             (rest.trim(), FitOutput::Residuals)
         }
+        Some((operation, rest))
+            if operation == "误差" || operation.eq_ignore_ascii_case("errors") =>
+        {
+            (rest.trim(), FitOutput::Errors)
+        }
         _ => (input, FitOutput::Summary),
     };
     let sums = paired_sums(points, matches!(output, FitOutput::Residuals))?;
@@ -80,7 +87,7 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         return Err(LinearFitError::ConstantX);
     }
     let slope = &products.cross / &products.square_x;
-    let intercept = (sums.y - &slope * sums.x) / sums.count;
+    let intercept = (sums.y - &slope * sums.x) / &sums.count;
     check_size([&slope, &intercept])?;
     let predict_y = |x: &BigRational| {
         let y = &slope * x + &intercept;
@@ -89,6 +96,16 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
     };
     match output {
         FitOutput::Summary => {}
+        FitOutput::Errors => {
+            // 中心化平方和与乘积和已乘以样本数量。
+            let residual_sum = (&products.square_y - &products.cross * &slope) / &sums.count;
+            let mean_squared = &residual_sum / sums.count;
+            check_size([&residual_sum, &mean_squared])?;
+            let root_mean_squared = format_square_root(&mean_squared);
+            return Ok(format!(
+                "残差平方和 {residual_sum}\n均方误差 {mean_squared}\n均方根误差 {root_mean_squared}"
+            ));
+        }
         FitOutput::Predictions(xs) => {
             if let [x] = xs.as_slice() {
                 return predict_y(x).map(|value| value.to_string());
@@ -315,6 +332,22 @@ mod tests {
         );
         assert_eq!(
             calculate_linear_fit("residuals 0,1/2; 0,1"),
+            Err(LinearFitError::ConstantX)
+        );
+    }
+
+    #[test]
+    fn summarizes_exact_fit_errors_with_observation_count_as_the_divisor() {
+        assert_eq!(
+            calculate_linear_fit("误差 0,0; 1,1; 2,1").as_deref(),
+            Ok("残差平方和 1/6\n均方误差 1/18\n均方根误差 √(1/18)")
+        );
+        assert_eq!(
+            calculate_linear_fit("errors 0,2/3; 5,2/3").as_deref(),
+            Ok("残差平方和 0\n均方误差 0\n均方根误差 0")
+        );
+        assert_eq!(
+            calculate_linear_fit("误差 0,0; 0,2"),
             Err(LinearFitError::ConstantX)
         );
     }
