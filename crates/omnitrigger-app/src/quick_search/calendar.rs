@@ -1223,6 +1223,14 @@ pub(super) fn shift_calendar_days(
     })
 }
 
+pub(super) fn shift_calendar_workdays(
+    date: NaiveDate,
+    amount: u64,
+    subtract: bool,
+) -> Result<NaiveDate, DateError> {
+    in_range(shift_workdays(date, amount, subtract))
+}
+
 fn convert_date_pattern(input: &str, today: NaiveDate, parse: bool) -> Result<String, DateError> {
     let [value, pattern] =
         serde_json::from_str::<[String; 2]>(input).map_err(|_| DateError::PatternArguments)?;

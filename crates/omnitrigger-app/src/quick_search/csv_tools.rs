@@ -23,7 +23,9 @@ use serde_json::value::RawValue;
 use super::statistics::{parse_bin_edges, report_binned_unweighted};
 use super::{
     calculator::normalize,
-    calendar::{parse_complete_date, shift_calendar_days, shift_calendar_months},
+    calendar::{
+        parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
+    },
     conversion::{exact_data_converter, ConversionError},
     duration::{elapsed_clock_interval, format_clock_duration},
     fraction::{
@@ -337,7 +339,7 @@ enum Operation {
         name: String,
         source: ColumnReference,
         amounts: ColumnReference,
-        whole_months: bool,
+        unit: DateOffsetUnit,
     },
     DatePatternColumn {
         name: String,
@@ -754,9 +756,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 separator,
             }
         }
-        kind
-        @ ("日期加天列" | "date-offset-column" | "日期加月列" | "date-month-offset-column") =>
-        {
+        kind @ ("日期加天列"
+        | "date-offset-column"
+        | "日期加月列"
+        | "date-month-offset-column"
+        | "日期加工作日列"
+        | "workday-offset-column") => {
             let ((name, source, amounts), data) =
                 json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
                     input,
@@ -767,7 +772,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 name,
                 source,
                 amounts,
-                whole_months: matches!(kind, "日期加月列" | "date-month-offset-column"),
+                unit: match kind {
+                    "日期加月列" | "date-month-offset-column" => DateOffsetUnit::Months,
+                    "日期加工作日列" | "workday-offset-column" => DateOffsetUnit::Workdays,
+                    _ => DateOffsetUnit::Days,
+                },
             }
         }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
@@ -1271,8 +1280,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             name,
             source,
             amounts,
-            whole_months,
-        } => date_offset_column(&rows, &name, source, amounts, whole_months),
+            unit,
+        } => date_offset_column(&rows, &name, source, amounts, unit),
         Operation::DatePatternColumn {
             name,
             source,
@@ -2247,12 +2256,18 @@ fn date_pattern_column(
     })
 }
 
+enum DateOffsetUnit {
+    Days,
+    Months,
+    Workdays,
+}
+
 fn date_offset_column(
     rows: &[Vec<String>],
     name: &str,
     source: ColumnReference,
     amounts: ColumnReference,
-    whole_months: bool,
+    unit: DateOffsetUnit,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -2261,15 +2276,10 @@ fn date_offset_column(
     let source = source.resolve(header)?;
     let amounts = amounts.resolve(header)?;
     validate_column_width(&[source, amounts], header.len())?;
-    let shift = if whole_months {
-        shift_calendar_months
-    } else {
-        shift_calendar_days
-    };
-    let amount_error = if whole_months {
-        "月数须为整数且在支持范围内"
-    } else {
-        "天数须为整数且在支持范围内"
+    let (shift, amount_error): (fn(_, _, _) -> _, _) = match unit {
+        DateOffsetUnit::Days => (shift_calendar_days, "天数须为整数且在支持范围内"),
+        DateOffsetUnit::Months => (shift_calendar_months, "月数须为整数且在支持范围内"),
+        DateOffsetUnit::Workdays => (shift_calendar_workdays, "工作日数须为整数且在支持范围内"),
     };
     let mut row_number = 0;
     write_appended_column(header, records, name, |row| {
@@ -4976,6 +4986,28 @@ mod tests {
         );
         assert!(matches!(
             transform_csv("日期加月列 [\"结果\",1,2]\n日期,月数\n9999-12-31,1"),
+            Err(CsvError::DataRowValue { row: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn shifts_each_csv_date_by_workdays_across_weekends_in_both_directions() {
+        let query = "日期加工作日列 [\"到期日期\",\"日期\",\"工作日数\"]\n日期,工作日数\n2024-03-01,1\n2024-03-04,-1\n2024-03-02,0\n2024-03-03,-1\n2024-03-01,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("日期,工作日数,到期日期\r\n2024-03-01,1,2024-03-04\r\n2024-03-04,-1,2024-03-01\r\n2024-03-02,0,2024-03-02\r\n2024-03-03,-1,2024-03-01\r\n2024-03-01,\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv(
+                "workday-offset-column [\"结果\",1,2]\n日期,工作日数\n2024-03-01,1\n2024-03-01,1/2"
+            ),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: "工作日数须为整数且在支持范围内"
+            })
+        );
+        assert!(matches!(
+            transform_csv("日期加工作日列 [\"结果\",1,2]\n日期,工作日数\n9999-12-31,1"),
             Err(CsvError::DataRowValue { row: 1, .. })
         ));
     }

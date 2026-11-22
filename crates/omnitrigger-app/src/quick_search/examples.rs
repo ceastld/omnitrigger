@@ -2783,6 +2783,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "跳过周末，按每行的工作日数推算日期",
+        query: "CSV: 日期加工作日列 [\"到期日期\",\"日期\",\"工作日数\"]\n日期,工作日数\n2024-03-01,1\n2024-03-04,-1\n2024-03-02,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 中的日期按指定格式追加为一列",
         query: "CSV: 日期格式列 [\"年月\",\"日期\",\"%Y年%m月\"]\n日期,编号\n2024-02-29,甲\n2024-W09-5,乙\n2024年1月31日,丙",
     },
