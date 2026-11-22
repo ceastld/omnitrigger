@@ -445,7 +445,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "全连接" | "full-join" => return join_csv(input, JoinKind::Full),
         "左表匹配" | "semi-join" => return join_csv(input, JoinKind::MatchedLeft),
         "左表独有" | "anti-join" => return join_csv(input, JoinKind::UnmatchedLeft),
-        "对比列" | "compare-column" => return compare_csv_column(input),
+        "对比列" | "compare-column" => return compare_csv_column(input, false),
+        "数值对比列" | "compare-numeric-column" => return compare_csv_column(input, true),
         "纵向合并" | "stack" => return stack_csv(input),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
@@ -1188,7 +1189,7 @@ fn read_csv_pair(data: &str, invalid: CsvError) -> Result<[Vec<Vec<String>>; 2],
     ])
 }
 
-fn compare_csv_column(input: &str) -> Result<String, CsvError> {
+fn compare_csv_column(input: &str, numeric: bool) -> Result<String, CsvError> {
     let ((key_columns, column), data) = json_argument_and_data::<(
         Vec<ColumnReference>,
         ColumnReference,
@@ -1216,7 +1217,9 @@ fn compare_csv_column(input: &str) -> Result<String, CsvError> {
     let mut new_values = HashMap::new();
     for row in new_rows {
         let key = column_key(row, &new_keys);
-        if new_values.insert(key, row[new_column].as_str()).is_some() {
+        let value = row[new_column].as_str();
+        let comparable = comparable_column_value(value, numeric)?;
+        if new_values.insert(key, (value, comparable)).is_some() {
             return Err(CsvError::DuplicateComparisonKey);
         }
     }
@@ -1240,9 +1243,10 @@ fn compare_csv_column(input: &str) -> Result<String, CsvError> {
             return Err(CsvError::DuplicateComparisonKey);
         }
         let old_value = row[old_column].as_str();
+        let comparable = comparable_column_value(old_value, numeric)?;
         let (change, new_value) = match new_values.remove(&key) {
-            Some(new_value) if new_value == old_value => continue,
-            Some(new_value) => ("修改", new_value),
+            Some((_, new_comparable)) if new_comparable == comparable => continue,
+            Some((new_value, _)) => ("修改", new_value),
             None => ("删除", ""),
         };
         append_bounded_csv_row(
@@ -1253,7 +1257,7 @@ fn compare_csv_column(input: &str) -> Result<String, CsvError> {
     }
     for row in new_rows {
         let key = column_key(row, &new_keys);
-        if let Some(new_value) = new_values.remove(&key) {
+        if let Some((new_value, _)) = new_values.remove(&key) {
             append_bounded_csv_row(
                 &mut output,
                 key.into_iter().chain(["新增", "", new_value]),
@@ -1262,6 +1266,18 @@ fn compare_csv_column(input: &str) -> Result<String, CsvError> {
         }
     }
     Ok(output)
+}
+
+fn comparable_column_value(value: &str, numeric: bool) -> Result<Cow<'_, str>, CsvError> {
+    if !numeric {
+        return Ok(Cow::Borrowed(value));
+    }
+    if value.trim().is_empty() {
+        return Ok(Cow::Borrowed(""));
+    }
+    parse_fraction_literal(value)
+        .map(|value| Cow::Owned(value.to_string()))
+        .map_err(|_| CsvError::InvalidNumber)
 }
 
 fn joined_csv_columns<'a>(row: &'a [String], omitted: &'a [bool]) -> impl Iterator<Item = &'a str> {
@@ -3073,6 +3089,24 @@ mod tests {
             assert_eq!(
                 transform_csv(&format!(r#"全连接 {keys} ["区,月,品","月份,区域,额"]"#)),
                 Err(CsvError::JoinColumns)
+            );
+        }
+    }
+
+    #[test]
+    fn compares_csv_numeric_column_values_exactly_and_distinguishes_zero_from_blank() {
+        let tables = r#"[[1],2] ["编号,金额\n001,1.50\n002,\n003,9007199254740993\n004,1/2\n006,  ","编号,金额\n001,3/2\n002,0\n003,9007199254740992\n004,0.75\n006,\n005,2e0"]"#;
+        assert_eq!(
+            transform_csv(&format!("数值对比列 {tables}")).as_deref(),
+            Ok("键1,变更,原值,新值\r\n002,修改,\"\",0\r\n003,修改,9007199254740993,9007199254740992\r\n004,修改,1/2,0.75\r\n005,新增,\"\",2e0")
+        );
+        for tables in [
+            r#"[[1],2] ["编号,金额\n001,待确认","编号,金额"]"#,
+            r#"[[1],2] ["编号,金额","编号,金额\n002,待确认"]"#,
+        ] {
+            assert_eq!(
+                transform_csv(&format!("数值对比列 {tables}")),
+                Err(CsvError::InvalidNumber)
             );
         }
     }

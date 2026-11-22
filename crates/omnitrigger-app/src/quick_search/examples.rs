@@ -2693,6 +2693,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按精确数值比较两张表中的金额",
+        query: r#"CSV: 数值对比列 [["编号"],"金额"] ["编号,金额\n001,1.50\n002,2\n003,","金额,编号\n3/2,001\n5/2,002\n0,003"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按地区和月份保留右表能匹配的左表行",
         query: r#"CSV: 左表匹配 [["区","月"],["区域","月份"]] ["区,月,额\n北,01,1.50\n北,02,2\n南,01,3","月份,区域\n01,北\n01,北\n01,南"]"#,
     },
