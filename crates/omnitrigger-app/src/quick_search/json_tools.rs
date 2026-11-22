@@ -1778,15 +1778,37 @@ fn json_object_rows_to_csv(rows: Vec<&RawValue>) -> Result<String, JsonError> {
 }
 
 fn json_csv_cell(value: &RawValue) -> Result<String, JsonError> {
+    let text = json_csv_text(value)?;
+    Ok(csv_cell(&text).into_owned())
+}
+
+pub(super) fn json_cell_at_pointer<'a>(
+    source: &'a str,
+    keys: &[String],
+) -> Result<Cow<'a, str>, JsonError> {
+    if source.trim().is_empty() {
+        return Ok(Cow::Borrowed(""));
+    }
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    match select_pointer_keys(root, keys) {
+        Ok(value) => json_csv_text(value),
+        Err(JsonError::MissingValue) => Ok(Cow::Borrowed("")),
+        Err(error) => Err(error),
+    }
+}
+
+fn json_csv_text(value: &RawValue) -> Result<Cow<'_, str>, JsonError> {
     let raw = value.get();
-    if raw.starts_with('"') {
-        let decoded = serde_json::from_str::<String>(raw).map_err(json_parse_error)?;
-        return encode_csv_cell(&decoded);
+    let text = match raw.as_bytes()[0] {
+        b'"' => Cow::Owned(serde_json::from_str::<String>(raw).map_err(json_parse_error)?),
+        b'{' | b'[' => Cow::Owned(layout_json(raw, false)?),
+        b'n' => Cow::Borrowed(""),
+        _ => Cow::Borrowed(raw),
+    };
+    if text.contains('\0') {
+        return Err(JsonError::CsvNullCharacter);
     }
-    if raw.starts_with(['{', '[']) {
-        return encode_csv_cell(&layout_json(raw, false)?);
-    }
-    encode_csv_cell(if raw == "null" { "" } else { raw })
+    Ok(text)
 }
 
 fn encode_csv_cell(value: &str) -> Result<String, JsonError> {
@@ -1986,8 +2008,12 @@ fn parse_json_pointer(source: &str) -> Result<String, JsonError> {
     } else {
         Cow::Borrowed(source)
     };
-    let tokens = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let tokens = json_pointer_tokens(&pointer)?;
     serde_json::to_string(&tokens).map_err(json_parse_error)
+}
+
+pub(super) fn json_pointer_tokens(pointer: &str) -> Result<Vec<String>, JsonError> {
+    pointer_keys(pointer)?.collect()
 }
 
 #[derive(serde::Serialize)]

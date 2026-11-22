@@ -2908,6 +2908,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从 CSV 单元格的 JSON 中提取指定字段",
+        query: "CSV: JSON取值列 [\"城市\",\"数据\",\"/城市\"]\n编号,数据\n1,\"{\"\"城市\"\":\"\"北京\"\"}\"\n2,\"{\"\"状态\"\":true}\"\n3,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按部门逐行累计 CSV 金额",
         query: "CSV: 累计合计列 [\"累计金额\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },

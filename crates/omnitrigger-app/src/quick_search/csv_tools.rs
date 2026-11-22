@@ -33,6 +33,7 @@ use super::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
         rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
     },
+    json_tools::{json_cell_at_pointer, json_pointer_tokens, JsonError},
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
@@ -110,6 +111,8 @@ pub(super) enum CsvError {
     TextReplaceColumnArguments,
     RegexCountColumnArguments,
     RegexCountColumnInputTooLarge,
+    JsonPointerColumnArguments,
+    JsonPointerColumn(JsonError),
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
@@ -247,6 +250,10 @@ impl CsvError {
                 "填写新列名、来源列和正则表达式，例如 [\"次数\",\"备注\",\"\\\\d+\"]"
             }
             Self::RegexCountColumnInputTooLarge => "正则计数列的来源文本超过 16 KiB，请缩小表格范围",
+            Self::JsonPointerColumnArguments => {
+                "填写新列名、含 JSON 的来源列和指针，例如 [\"城市\",\"数据\",\"/城市\"]"
+            }
+            Self::JsonPointerColumn(error) => error.message(),
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
@@ -380,6 +387,7 @@ enum Operation {
         unit: DateOffsetUnit,
     },
     TextColumn(String, ColumnReference, TextColumnComputation),
+    JsonPointerColumn(String, ColumnReference, Vec<String>),
     DatePatternColumn {
         name: String,
         source: ColumnReference,
@@ -921,6 +929,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::TextColumn(name, source, TextColumnComputation::RegexCount(pattern))
         }
+        "json取值列" | "json-pointer-column" => {
+            let ((name, source, pointer), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(
+                    input,
+                    CsvError::JsonPointerColumnArguments,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(CsvError::JsonPointerColumnArguments);
+            }
+            let keys = json_pointer_tokens(&pointer).map_err(CsvError::JsonPointerColumn)?;
+            input = data;
+            Operation::JsonPointerColumn(name, source, keys)
+        }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
             let ((name, source, pattern), data) =
@@ -1437,6 +1458,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amounts,
             unit,
         } => date_offset_column(&rows, &name, source, amounts, unit),
+        Operation::JsonPointerColumn(name, source, keys) => {
+            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+            let source = source.resolve(header)?;
+            validate_column_width(&[source], header.len())?;
+            let mut row_number = 0;
+            write_appended_column(header, records, &name, |row| {
+                row_number += 1;
+                json_cell_at_pointer(&row[source], &keys).map_err(|error| CsvError::DataRowValue {
+                    row: row_number,
+                    cause: error.message(),
+                })
+            })
+        }
         Operation::TextColumn(name, source, computation) => {
             let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
             let source = source.resolve(header)?;
@@ -5368,6 +5402,44 @@ mod tests {
             "a".repeat(1100)
         );
         assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
+    }
+
+    #[test]
+    fn extracts_json_pointer_cells_and_preserves_exact_values_and_blank_rows() {
+        let query = r#"JSON取值列 ["结果","数据","/a~1b"]
+行,数据
+1,"{""a/b"":""茶,水""}"
+2,"{""a/b"":9007199254740993.00}"
+3,"{""a/b"":null}"
+4,{}
+5,
+6,"{""a/b"":[1, 2]}""#;
+        let expected = [
+            r#"行,数据,结果"#,
+            r#"1,"{""a/b"":""茶,水""}","茶,水""#,
+            r#"2,"{""a/b"":9007199254740993.00}",9007199254740993.00"#,
+            r#"3,"{""a/b"":null}","""#,
+            r#"4,{},"""#,
+            r#"5,"","""#,
+            r#"6,"{""a/b"":[1, 2]}","[1,2]""#,
+        ]
+        .join("\r\n");
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected.as_str()));
+        assert_eq!(
+            transform_csv("json-pointer-column [\"值\",1,\"\"] 原列\nnull\nfalse").as_deref(),
+            Ok("原列,值\r\nnull,\"\"\r\nfalse,false")
+        );
+        assert_eq!(
+            transform_csv("JSON取值列 [\"值\",1,\"/x~\"] 原列"),
+            Err(CsvError::JsonPointerColumn(JsonError::InvalidPointer))
+        );
+        assert_eq!(
+            transform_csv("JSON取值列 [\"值\",1,\"/x\"] 原列\n{}\n[1"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: JsonError::Incomplete.message()
+            })
+        );
     }
 
     #[test]
