@@ -3508,6 +3508,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "检查一个数是否属于任一给定区间",
+        query: "区间: 包含 1/2 @ [0,1/2); (2,4]",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在分数算式中精确开方并取绝对值",
         query: "分数: 计算 sqrt(81/16)+abs(-1/2)",
     },
@@ -3692,7 +3697,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
     }
     match scope {
         Scope::Intervals
-            if ["交集", "合并", "差集", "对称差", "长度"]
+            if ["交集", "合并", "差集", "对称差", "长度", "包含"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchCalculation

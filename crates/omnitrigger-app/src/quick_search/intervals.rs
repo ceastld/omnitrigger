@@ -17,6 +17,7 @@ pub(super) enum IntervalError {
     Operation,
     Count,
     TwoGroups,
+    PointAndIntervals,
     Notation,
     Reversed,
     Evaluation(FractionError),
@@ -26,10 +27,11 @@ impl IntervalError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete | Self::Operation => {
-                "输入交集、合并、差集、对称差或长度，再填写区间，例如 交集 [1/2,3); (2,5]"
+                "输入交集、合并、差集、对称差、长度或包含，例如 交集 [1/2,3); (2,5]"
             }
             Self::Count => "最多填写 32 个区间，用分号或换行分开",
             Self::TwoGroups => "用 @ 分开两组区间，例如 [0,3]; [8,9] @ [2,5]",
+            Self::PointAndIntervals => "先填写要检查的数，再加 @ 和区间，例如 1/2 @ [0,1); (2,4]",
             Self::Notation => "用方括号包含端点，用圆括号排除端点，两个端点用逗号分开",
             Self::Reversed => "区间的左端点须小于或等于右端点",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
@@ -88,6 +90,7 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
             IntervalOperation::SymmetricDifference
         }
         "长度" | "总长度" | "length" | "total-length" => IntervalOperation::Length,
+        "包含" | "contains" => return contains_point(arguments),
         "" => return Err(IntervalError::Incomplete),
         _ => return Err(IntervalError::Operation),
     };
@@ -123,6 +126,30 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
         .map(Interval::notation)
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn contains_point(input: &str) -> Result<String, IntervalError> {
+    let (point, ranges) = input
+        .split_once('@')
+        .ok_or(IntervalError::PointAndIntervals)?;
+    if point.trim().is_empty() || ranges.trim().is_empty() {
+        return Err(IntervalError::PointAndIntervals);
+    }
+    let point = calculate_fraction(point).map_err(IntervalError::Evaluation)?;
+    let ranges = parse_interval_list(ranges, MAX_INTERVALS)?;
+    let contains = ranges.into_iter().flatten().any(|interval| {
+        let start = point.cmp(&interval.start.value);
+        let end = point.cmp(&interval.end.value);
+        let after_start =
+            start == Ordering::Greater || (start == Ordering::Equal && interval.start.included);
+        let before_end = end == Ordering::Less || (end == Ordering::Equal && interval.end.included);
+        after_start && before_end
+    });
+    Ok(if contains {
+        "属于给定区间".to_owned()
+    } else {
+        "不属于给定区间".to_owned()
+    })
 }
 
 fn parse_interval_list(input: &str, limit: usize) -> Result<Vec<Option<Interval>>, IntervalError> {
@@ -299,6 +326,31 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn checks_exact_membership_and_endpoints_across_multiple_ranges() {
+        for (query, expected) in [
+            ("包含 1/2 @ [0,1/2]; (2,4]", "属于给定区间"),
+            ("包含 1/2 @ [0,1/2); (2,4]", "不属于给定区间"),
+            ("contains 0.1+0.2 @ [3/10,3/10]", "属于给定区间"),
+            ("包含 0 @ [0,0); (0,0]", "不属于给定区间"),
+            ("包含 2 @ [0,2); [2,3]", "属于给定区间"),
+        ] {
+            assert_eq!(
+                calculate_intervals(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_intervals("包含 1/2 @"),
+            Err(IntervalError::PointAndIntervals)
+        );
+        assert_eq!(
+            calculate_intervals("包含 0 @ [0,1]; [3,2]"),
+            Err(IntervalError::Reversed)
+        );
     }
 
     #[test]
