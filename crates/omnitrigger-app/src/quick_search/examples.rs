@@ -1452,6 +1452,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按指定路径的值对 JSON 数组去重",
+        query: r#"JSON: 按值去重 /状态 [{"编号":"001","状态":"完成"},{"编号":"002","状态":"待办"},{"编号":"003","状态":"完成"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 转成 JSON 行数组",
         query: "CSV: 转JSON 编号,名称\n001,\"茶,咖啡\"",
     },

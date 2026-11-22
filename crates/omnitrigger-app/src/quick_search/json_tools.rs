@@ -37,6 +37,7 @@ pub(super) enum JsonError {
     SelectionKeys,
     SelectionConflict,
     FilterValue,
+    ExpectedScalar,
 }
 
 impl JsonError {
@@ -65,6 +66,7 @@ impl JsonError {
             Self::SelectionKeys => "选键需要至少一个互不重复的键名",
             Self::SelectionConflict => "待选键在同一对象中重复出现",
             Self::FilterValue => "路径后请输入 JSON 字符串、数字、布尔值或 null，再粘贴数组",
+            Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
         }
     }
 }
@@ -83,6 +85,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "缺路径" | "missing-pointer" => return filter_json_by_pointer(source, false),
         "筛选" | "filter" => return filter_json_by_scalar(source, true),
         "排除" | "exclude" => return filter_json_by_scalar(source, false),
+        "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
@@ -214,11 +217,21 @@ fn filter_json_by_scalar(query: &str, keep_match: bool) -> Result<String, JsonEr
     })
 }
 
+fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let mut seen = HashSet::new();
+    filter_json_items(&pointer, source, true, |value| {
+        let value = value.ok_or(JsonError::MissingValue)?;
+        let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
+        Ok(seen.insert(scalar))
+    })
+}
+
 fn filter_json_items(
     pointer: &str,
     source: &str,
     keep_match: bool,
-    matches_value: impl Fn(Option<&RawValue>) -> Result<bool, JsonError>,
+    mut matches_value: impl FnMut(Option<&RawValue>) -> Result<bool, JsonError>,
 ) -> Result<String, JsonError> {
     let items = read_json_array(source)?;
     let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
@@ -236,7 +249,7 @@ fn filter_json_items(
     Ok(serde_json::to_string(&retained).expect("有效的原始 JSON 值可以直接序列化"))
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Hash)]
 enum JsonScalar {
     String(String),
     Number {
@@ -907,6 +920,28 @@ mod tests {
             ("筛选 /a true", JsonError::Incomplete),
             ("筛选 /a null {}", JsonError::ExpectedArray),
             (r#"筛选 /a 1 [{"a":1,"a":2}]"#, JsonError::DuplicateKey),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn keeps_the_first_json_item_for_each_exact_scalar_value() {
+        let source = r#"[{"键":9007199254740993,"序":"001"},{"键":90071992547409930e-1,"序":"002"},{"键":9007199254740992,"序":"003"},{"键":"9007199254740993","序":"004"},{"键":null,"序":"005"},{"键":null,"序":"006"}]"#;
+        assert_eq!(
+            transform_json(&format!("按值去重 /键 {source}")).as_deref(),
+            Ok(
+                r#"[{"键":9007199254740993,"序":"001"},{"键":9007199254740992,"序":"003"},{"键":"9007199254740993","序":"004"},{"键":null,"序":"005"}]"#
+            )
+        );
+        assert_eq!(
+            transform_json(r#"unique-by-pointer "" ["茶","\u8336",0,-0.0,false,false]"#).as_deref(),
+            Ok(r#"["茶",0,false]"#)
+        );
+        for (query, error) in [
+            ("按值去重 /键 [{}]", JsonError::MissingValue),
+            (r#"按值去重 /键 [{"键":[]}]"#, JsonError::ExpectedScalar),
+            (r#"按值去重 /键 [{"键":1,"键":2}]"#, JsonError::DuplicateKey),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
