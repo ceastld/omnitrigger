@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf, Prefix, MAIN_SEPARATOR_STR};
 use url::Url;
 
 const INVALID_PATH_TEXT: [char; 5] = ['\0', '"', '\r', '\n', '\t'];
+const MAX_FILENAME_UNITS: usize = 255;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PathError {
@@ -20,6 +21,7 @@ pub(super) enum PathError {
     DifferentRoot,
     ExtensionArguments,
     InvalidExtension,
+    FilenameTooLong,
     MissingPart,
 }
 
@@ -44,6 +46,7 @@ impl PathError {
             Self::DifferentRoot => "输入路径须在同一盘符或同一共享根目录下",
             Self::ExtensionArguments => "用 JSON 字符串数组填写路径和新扩展名",
             Self::InvalidExtension => "扩展名须为文件名后缀，可用空字符串删除",
+            Self::FilenameTooLong => "文件名最多支持 255 个 UTF-16 单元",
             Self::MissingPart => "这条路径没有所选部分",
         }
     }
@@ -59,6 +62,7 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         "拼接" | "join" => return join_paths(input.trim()),
         "相对路径" | "relative" => return relative_path(input.trim()),
         "共同路径" | "common-path" => return common_path(input.trim()),
+        "合法文件名" | "safe-filename" => return safe_filename(input.trim()),
         _ => {}
     }
     let input = strip_path_quotes(input.trim());
@@ -92,6 +96,59 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         .filter(|part| !part.is_empty())
         .map(str::to_owned)
         .ok_or(PathError::MissingPart)
+}
+
+fn safe_filename(input: &str) -> Result<String, PathError> {
+    let input = input
+        .strip_prefix('“')
+        .and_then(|quoted| quoted.strip_suffix('”'))
+        .unwrap_or_else(|| strip_path_quotes(input));
+    if input.is_empty() {
+        return Err(PathError::Incomplete);
+    }
+    let mut name: String = input
+        .chars()
+        .map(|character| {
+            if character < ' '
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    name.truncate(name.trim_end_matches([' ', '.']).len());
+    let stem = name
+        .split_once('.')
+        .map_or(name.as_str(), |(stem, _)| stem)
+        .trim_matches(' ')
+        .to_ascii_uppercase();
+    let numbered_device = stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|number| {
+            matches!(
+                number,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
+    if name.is_empty()
+        || numbered_device
+        || matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        )
+    {
+        name.insert(0, '_');
+    }
+    if name.encode_utf16().take(MAX_FILENAME_UNITS + 1).count() > MAX_FILENAME_UNITS {
+        return Err(PathError::FilenameTooLong);
+    }
+    Ok(name)
 }
 
 fn path_from_file_url(input: &str) -> Result<String, PathError> {
@@ -288,6 +345,28 @@ pub(super) fn strip_path_quotes(input: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn produces_a_single_windows_filename_and_handles_reserved_names() {
+        for (query, expected) in [
+            ("合法文件名 CON.报告?.txt", "_CON.报告_.txt"),
+            ("合法文件名 NUL .txt", "_NUL .txt"),
+            ("safe-filename COM².txt", "_COM².txt"),
+            ("safe-filename conout$.TXT", "_conout$.TXT"),
+            ("合法文件名 .temp", ".temp"),
+            ("合法文件名 \".. \"", "_"),
+            ("合法文件名 \"a:b\\c<d>|e*.\t\"", "a_b_c_d__e_._"),
+            ("合法文件名 “COM10.包.”", "COM10.包"),
+        ] {
+            assert_eq!(path_component(query).as_deref(), Ok(expected), "{query}");
+        }
+        let fits = format!("{}a", "😀".repeat(127));
+        assert_eq!(path_component(&format!("合法文件名 {fits}")), Ok(fits));
+        assert_eq!(
+            path_component(&format!("合法文件名 {}", "😀".repeat(128))),
+            Err(PathError::FilenameTooLong)
+        );
+    }
 
     #[cfg(windows)]
     #[test]

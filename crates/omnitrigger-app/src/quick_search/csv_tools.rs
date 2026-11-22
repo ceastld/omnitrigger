@@ -24,6 +24,7 @@ use super::{
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
+const MAX_JOIN_BYTES: usize = 1024 * 1024;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
 
@@ -49,6 +50,8 @@ pub(super) enum CsvError {
     ReplaceValueArguments,
     NullReplacementValue,
     HeaderNameConflict,
+    JoinArguments,
+    JoinTooLarge,
     ComputedColumnArguments,
     FormulaColumnArguments,
     FormulaColumnLimit,
@@ -95,6 +98,8 @@ impl CsvError {
             Self::ReplaceValueArguments => "用 JSON 数组填写列名或列号、旧值和新值",
             Self::NullReplacementValue => "新值不能包含空字符 U+0000",
             Self::HeaderNameConflict => "表头中已经有这个新列名",
+            Self::JoinArguments => "填写两个连接列，再填写包含两张 CSV 表格的 JSON 字符串数组",
+            Self::JoinTooLarge => "连接结果超过 1 MiB，请缩小表格范围",
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
             }
@@ -262,6 +267,8 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     let kind = match operation.as_str() {
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
+        "左连接" | "left-join" => return join_csv(input, true),
+        "内连接" | "inner-join" => return join_csv(input, false),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown(None),
@@ -516,6 +523,83 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             numeric,
         } => sort_by_columns(&rows, &columns, descending, numeric),
     }
+}
+
+fn join_csv(input: &str, keep_unmatched: bool) -> Result<String, CsvError> {
+    let ([left_key, right_key], data) =
+        json_argument_and_data::<[ColumnReference; 2]>(input, CsvError::JoinArguments)?;
+    let [left, right] =
+        serde_json::from_str::<[String; 2]>(data).map_err(|_| CsvError::JoinArguments)?;
+    let left = read_rows(left.strip_prefix('\u{feff}').unwrap_or(&left), ',')?;
+    let right = read_rows(right.strip_prefix('\u{feff}').unwrap_or(&right), ',')?;
+    let (left_header, left_rows) = left.split_first().ok_or(CsvError::MissingInput)?;
+    let (right_header, right_rows) = right.split_first().ok_or(CsvError::MissingInput)?;
+    let left_key = left_key.resolve(left_header)?;
+    let right_key = right_key.resolve(right_header)?;
+    validate_column_width(&[left_key], left_header.len())?;
+    validate_column_width(&[right_key], right_header.len())?;
+
+    let mut headers = HashSet::new();
+    if left_header
+        .iter()
+        .map(String::as_str)
+        .chain(joined_csv_columns(right_header, right_key))
+        .any(|name| name.is_empty() || !headers.insert(name))
+    {
+        return Err(CsvError::InvalidHeader);
+    }
+    let mut by_key = HashMap::<&str, Vec<&[String]>>::new();
+    for row in right_rows {
+        by_key.entry(row[right_key].as_str()).or_default().push(row);
+    }
+    let mut output = String::new();
+    append_joined_csv_row(
+        &mut output,
+        left_header,
+        joined_csv_columns(right_header, right_key),
+    )?;
+    for left in left_rows {
+        if let Some(matches) = by_key.get(left[left_key].as_str()) {
+            for right in matches {
+                append_joined_csv_row(&mut output, left, joined_csv_columns(right, right_key))?;
+            }
+        } else if keep_unmatched {
+            append_joined_csv_row(
+                &mut output,
+                left,
+                std::iter::repeat_n("", right_header.len() - 1),
+            )?;
+        }
+    }
+    Ok(output)
+}
+
+fn joined_csv_columns(row: &[String], omitted: usize) -> impl Iterator<Item = &str> {
+    row.iter()
+        .enumerate()
+        .filter(move |(index, _)| *index != omitted)
+        .map(|(_, field)| field.as_str())
+}
+
+fn append_joined_csv_row<'a>(
+    output: &mut String,
+    left: &'a [String],
+    right: impl Iterator<Item = &'a str>,
+) -> Result<(), CsvError> {
+    let line = left
+        .iter()
+        .map(String::as_str)
+        .chain(right)
+        .map(csv_cell)
+        .collect::<Vec<_>>()
+        .join(",");
+    let separator = if output.is_empty() { "" } else { "\r\n" };
+    if output.len() + separator.len() + line.len() > MAX_JOIN_BYTES {
+        return Err(CsvError::JoinTooLarge);
+    }
+    output.push_str(separator);
+    output.push_str(&line);
+    Ok(())
 }
 
 fn split_argument(input: &str) -> Option<(&str, &str)> {
@@ -1316,6 +1400,57 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joins_tables_by_text_in_left_and_right_record_order_with_bounded_output() {
+        for (query, expected) in [
+            (
+                r#"左连接 ["编号","键"] ["编号,商品\n001,茶\n002,米","键,金额\n001,1.50\n001,2e0\n1,4"]"#,
+                "编号,商品,金额\r\n001,茶,1.50\r\n001,茶,2e0\r\n002,米,\"\"",
+            ),
+            (
+                r#"inner-join [1,2] ["编号,商品\n001,\"茶,热\"\n002,米","价格,键\n1.50,001"]"#,
+                "编号,商品,价格\r\n001,\"茶,热\",1.50",
+            ),
+            (
+                r#"内连接 [1,1] ["ID,状态\na,草稿","键,说明"]"#,
+                "ID,状态,说明",
+            ),
+            (
+                r#"左连接 [1,1] ["ID,状态\na,草稿","键"]"#,
+                "ID,状态\r\na,草稿",
+            ),
+        ] {
+            assert_eq!(transform_csv(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, expected) in [
+            (
+                r#"左连接 [1,1] ["ID,状态\na,草稿","键,状态\na,已完成"]"#,
+                CsvError::InvalidHeader,
+            ),
+            (
+                r#"内连接 [1,3] ["ID\na","键,值\na,1"]"#,
+                CsvError::ColumnOutOfRange,
+            ),
+            (r#"左连接 [1,1] ["ID"]"#, CsvError::JoinArguments),
+            (
+                r#"左连接 [1,1] ["ID,状态\na","键"]"#,
+                CsvError::DifferentColumnCount,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(expected), "{query}");
+        }
+        let table = format!(
+            "ID,值\n{}",
+            "a,123456789012345678901234567890\n".repeat(180)
+        );
+        let right = table.replacen("ID,值", "键,参照", 1);
+        let source = serde_json::to_string(&[table, right]).unwrap();
+        assert_eq!(
+            transform_csv(&format!("左连接 [1,1] {source}")),
+            Err(CsvError::JoinTooLarge)
+        );
+    }
 
     #[test]
     fn pads_short_csv_records_to_the_largest_width_and_keeps_cells_exact() {

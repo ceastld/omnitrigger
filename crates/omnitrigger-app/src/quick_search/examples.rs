@@ -2033,6 +2033,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按键把两张 CSV 表左连接",
+        query: r#"CSV: 左连接 ["编号","键"] ["编号,商品\n001,茶\n002,米","键,金额\n001,1.50\n001,2e0"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按键保留两张 CSV 表匹配的行",
+        query: r#"CSV: 内连接 [1,1] ["编号,商品\n001,茶\n002,米","键,金额\n001,1.50"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定列自然升序排列 CSV 行",
         query: "CSV: 排序 2 编号,名称\n001,文件10\n002,文件2\n003,文件20",
     },
@@ -2105,6 +2115,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "按分段规范化 Windows 路径",
         query: r#"路径: 规范化 "C:/工作//发布/./临时/../报告 集.txt""#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把标题整理为 Windows 文件名",
+        query: "路径: 合法文件名 CON.报告?.txt",
     },
     Example {
         icon: Icon::Layers,
