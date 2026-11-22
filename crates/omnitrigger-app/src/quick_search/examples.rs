@@ -2131,6 +2131,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "展开精确分数的循环小数",
         query: "分数: 循环小数 1/7",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "给同一算式批量代入不同的 x",
+        query: "分数: 取值表 [-2,0,3/2] x**2+1/3",
+    },
 ];
 
 fn search_key(text: &str) -> String {
@@ -2207,7 +2212,11 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
-        Scope::Fraction if !term.is_empty() && "循环小数".starts_with(term) => {}
+        Scope::Fraction
+            if !term.is_empty()
+                && ["循环小数", "取值表"]
+                    .into_iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchConversion
             if matches!(term, "时" | "时长" | "时间" | "时间戳" | "路" | "路径") => {}
         Scope::Date

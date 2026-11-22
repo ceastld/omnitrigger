@@ -13,6 +13,7 @@ const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
 const MAX_EXACT_BITS: u64 = 8192;
 const MAX_DECIMAL_PLACES: u32 = 100;
 const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
+const MAX_TABLE_INPUTS: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FractionError {
@@ -28,6 +29,7 @@ pub(super) enum FractionError {
     CombinatorialRange,
     DecimalPlaces,
     RepeatingDecimalLength,
+    TableInputs,
     ExactRange,
 }
 
@@ -46,6 +48,9 @@ impl FractionError {
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
+            Self::TableInputs => {
+                "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
+            }
             Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -113,6 +118,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "循环小数" || verb.eq_ignore_ascii_case("repeating-decimal") {
         return repeating_decimal(&calculate_fraction(expression.trim())?);
     }
+    if verb == "取值表" || verb.eq_ignore_ascii_case("table") {
+        return fraction_table(expression.trim());
+    }
     if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
         let (source, places) =
             split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
@@ -161,10 +169,20 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
 }
 
 pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
+    calculate_fraction_at(input, None)
+}
+
+fn calculate_fraction_at(
+    input: &str,
+    x: Option<&BigRational>,
+) -> Result<BigRational, FractionError> {
     if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(FractionError::TooLong);
     }
-    let mut parser = FractionParser { remaining: input };
+    let mut parser = FractionParser {
+        remaining: input,
+        x,
+    };
     let value = parser.sum()?;
     if !parser.remaining.trim().is_empty() {
         return Err(FractionError::Invalid);
@@ -172,12 +190,33 @@ pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionErr
     Ok(value)
 }
 
+fn fraction_table(input: &str) -> Result<String, FractionError> {
+    let (points, expression) = input
+        .strip_prefix('[')
+        .and_then(|input| input.split_once(']'))
+        .ok_or(FractionError::TableInputs)?;
+    let points: Vec<_> = points.split(',').take(MAX_TABLE_INPUTS + 1).collect();
+    if points.len() > MAX_TABLE_INPUTS || points.iter().any(|point| point.trim().is_empty()) {
+        return Err(FractionError::TableInputs);
+    }
+    let mut rows = vec!["x\ty".to_owned()];
+    for point in points {
+        let x = parse_fraction_literal(point)?;
+        let y = calculate_fraction_at(expression.trim(), Some(&x))?;
+        rows.push(format!("{x}\t{y}"));
+    }
+    Ok(rows.join("\n"))
+}
+
 pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, FractionError> {
     let input = input.trim();
     if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(FractionError::TooLong);
     }
-    let mut parser = FractionParser { remaining: input };
+    let mut parser = FractionParser {
+        remaining: input,
+        x: None,
+    };
     let mut value = parser.signed_number()?;
     if parser.consume('/') {
         let denominator = parser.signed_number()?;
@@ -377,6 +416,7 @@ impl CombinatorialFunction {
 
 struct FractionParser<'a> {
     remaining: &'a str,
+    x: Option<&'a BigRational>,
 }
 
 impl FractionParser<'_> {
@@ -455,7 +495,7 @@ impl FractionParser<'_> {
             .trim_start()
             .starts_with(|character: char| character.is_ascii_alphabetic())
         {
-            self.combinatorial()?
+            self.named_value()?
         } else {
             self.number()?
         };
@@ -481,10 +521,15 @@ impl FractionParser<'_> {
         }
     }
 
-    fn combinatorial(&mut self) -> Result<BigRational, FractionError> {
+    fn named_value(&mut self) -> Result<BigRational, FractionError> {
         let input = self.remaining.trim_start();
         let length = input.bytes().take_while(u8::is_ascii_alphabetic).count();
         let (name, rest) = input.split_at(length);
+        if name == "x" {
+            let x = self.x.cloned().ok_or(FractionError::Invalid)?;
+            self.remaining = rest;
+            return Ok(x);
+        }
         let function = if name.eq_ignore_ascii_case("comb") {
             CombinatorialFunction::Combination
         } else if name.eq_ignore_ascii_case("perm") {
@@ -570,6 +615,34 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluates_a_formula_for_each_exact_table_input() {
+        assert_eq!(
+            simplify_fraction("取值表 [-2,0,3/2] x**2+1/3").as_deref(),
+            Ok("x\ty\n-2\t13/3\n0\t1/3\n3/2\t31/12")
+        );
+        assert_eq!(
+            simplify_fraction("table ［３，２，３］ comb(x,2)-x%2").as_deref(),
+            Ok("x\ty\n3\t2\n2\t1\n3\t2")
+        );
+        for input in [
+            "取值表 [] x",
+            "取值表 [1,,2] x",
+            "取值表 [0,1,2,3,4,5,6,7,8,9,10,11,12] x",
+        ] {
+            assert_eq!(simplify_fraction(input), Err(FractionError::TableInputs));
+        }
+        assert_eq!(
+            simplify_fraction("取值表 [2,0] 1/x"),
+            Err(FractionError::ZeroDenominator)
+        );
+        assert_eq!(calculate_fraction("x+1"), Err(FractionError::Invalid));
+        assert_eq!(
+            simplify_fraction("取值表 [2] xx"),
+            Err(FractionError::Invalid)
+        );
+    }
 
     #[test]
     fn expands_exact_fractions_with_minimal_repeating_digits() {
