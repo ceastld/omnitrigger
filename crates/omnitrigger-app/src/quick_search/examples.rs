@@ -1037,6 +1037,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按周输出日期区间天数和工作日 CSV",
+        query: "日期: 按周拆分CSV 2026-12-30 至 2027-01-05",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
     },
@@ -2222,6 +2227,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计 CSV 各列的空单元格",
+        query: "CSV: 空值统计 [\"备注\",1] 编号,备注\n001,\n,\" \"\n002,茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用数量和单价算出新的一列",
         query:
             "CSV: 计算列 [\"金额\",\"数量\",\"*\",\"单价\"] 商品,数量,单价\n茶,3,2.50\n咖啡,2,1/3",
@@ -2786,6 +2796,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "区间交集",
                     "按月拆分",
                     "按月拆分CSV",
+                    "按周拆分CSV",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

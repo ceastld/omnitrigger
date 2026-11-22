@@ -6,7 +6,7 @@ use super::calculator::normalize;
 
 const MAX_LISTED_DATES: usize = 366;
 const MAX_DATE_RANGES: usize = 32;
-const MAX_MONTH_RANGES: usize = 366;
+const MAX_SPLIT_RANGES: usize = 366;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DateError {
@@ -21,7 +21,7 @@ pub(super) enum DateError {
     InvalidOperation,
     InvalidDateList,
     InvalidDateRanges,
-    MonthSplitArguments,
+    RangeSplitArguments,
     InvalidDateInterval,
     WorkdayExceptions,
     PatternArguments,
@@ -31,6 +31,7 @@ pub(super) enum DateError {
     NoMatchingDates,
     TooManyDates,
     TooManyMonthRanges,
+    TooManyWeekRanges,
     OutOfRange,
 }
 
@@ -52,7 +53,7 @@ impl DateError {
             Self::InvalidDateRanges => {
                 "填写 2 至 32 个日期区间。每段用“至”连接日期，用分号或换行分隔各段"
             }
-            Self::MonthSplitArguments => {
+            Self::RangeSplitArguments => {
                 "用“至”连接开始日期和结束日期，例如 2024-01-31 至 2024-03-02"
             }
             Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天或每隔 2 个工作日",
@@ -68,6 +69,7 @@ impl DateError {
             Self::NoMatchingDates => "区间内没有符合条件的日期",
             Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
             Self::TooManyMonthRanges => "最多可拆分为 366 个月份，请缩短区间",
+            Self::TooManyWeekRanges => "最多可拆分为 366 周，请缩短区间",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
     }
@@ -610,16 +612,24 @@ fn combine_date_ranges(
     Ok(merged.join("\n"))
 }
 
-fn split_date_range_by_month(
+#[derive(Clone, Copy)]
+enum DateRangeSplit {
+    Months,
+    MonthsCsv,
+    WeeksCsv,
+}
+
+fn split_date_range(
     input: &str,
     today: NaiveDate,
-    csv: bool,
+    split: DateRangeSplit,
 ) -> Result<String, DateError> {
+    let csv = !matches!(split, DateRangeSplit::Months);
     if input.is_empty() {
-        return Err(DateError::MonthSplitArguments);
+        return Err(DateError::RangeSplitArguments);
     }
     let (mut start, end, remaining) =
-        date_range_operands(input.trim_start(), today, DateError::MonthSplitArguments)?;
+        date_range_operands(input.trim_start(), today, DateError::RangeSplitArguments)?;
     let exceptions = match (csv, remaining.trim_start()) {
         (_, "") => HashMap::new(),
         (true, remaining) => {
@@ -629,21 +639,33 @@ fn split_date_range_by_month(
             let dates = remaining
                 .strip_prefix("例外")
                 .or_else(|| first.eq_ignore_ascii_case("except").then_some(rest))
-                .ok_or(DateError::MonthSplitArguments)?;
+                .ok_or(DateError::RangeSplitArguments)?;
             parse_workday_exceptions(Some(dates.trim_start()))?
         }
-        _ => return Err(DateError::MonthSplitArguments),
+        _ => return Err(DateError::RangeSplitArguments),
     };
     if end < start {
         return Err(DateError::ReversedDateRange);
     }
     let mut ranges = Vec::new();
-    if csv {
-        ranges.push("开始,结束,天数,工作日".to_owned());
+    match split {
+        DateRangeSplit::Months => {}
+        DateRangeSplit::MonthsCsv => ranges.push("开始,结束,天数,工作日".to_owned()),
+        DateRangeSplit::WeeksCsv => ranges.push("周号,开始,结束,天数,工作日".to_owned()),
     }
-    for _ in 0..MAX_MONTH_RANGES {
-        let first = in_range(start.with_day(1))?;
-        let last = month_end(first, 1)?.min(end);
+    for _ in 0..MAX_SPLIT_RANGES {
+        let last = match split {
+            DateRangeSplit::Months | DateRangeSplit::MonthsCsv => {
+                month_end(in_range(start.with_day(1))?, 1)?
+            }
+            DateRangeSplit::WeeksCsv => {
+                let days_until_sunday = u64::from(6 - start.weekday().num_days_from_monday());
+                start
+                    .checked_add_days(Days::new(days_until_sunday))
+                    .ok_or(DateError::OutOfRange)?
+            }
+        }
+        .min(end);
         let row = if csv {
             let days = last.signed_duration_since(start).num_days() + 1;
             let adjustment: i64 = exceptions
@@ -654,7 +676,12 @@ fn split_date_range_by_month(
                 })
                 .sum();
             let workdays = inclusive_workdays(start, last) + adjustment;
-            format!("{start},{last},{days},{workdays}")
+            if matches!(split, DateRangeSplit::WeeksCsv) {
+                let week = start.format("%G-W%V");
+                format!("{week},{start},{last},{days},{workdays}")
+            } else {
+                format!("{start},{last},{days},{workdays}")
+            }
         } else {
             display_date_range((start, last))
         };
@@ -664,7 +691,10 @@ fn split_date_range_by_month(
         }
         start = in_range(last.succ_opt())?;
     }
-    Err(DateError::TooManyMonthRanges)
+    Err(match split {
+        DateRangeSplit::Months | DateRangeSplit::MonthsCsv => DateError::TooManyMonthRanges,
+        DateRangeSplit::WeeksCsv => DateError::TooManyWeekRanges,
+    })
 }
 
 fn display_date_range((start, end): (NaiveDate, NaiveDate)) -> String {
@@ -963,9 +993,14 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
         "合并区间" | "merge-ranges" => return combine_date_ranges(rest, today, false),
         "区间交集" | "intersect-ranges" => return combine_date_ranges(rest, today, true),
-        "按月拆分" | "split-months" => return split_date_range_by_month(rest, today, false),
+        "按月拆分" | "split-months" => {
+            return split_date_range(rest, today, DateRangeSplit::Months)
+        }
         "按月拆分csv" | "split-months-csv" => {
-            return split_date_range_by_month(rest, today, true)
+            return split_date_range(rest, today, DateRangeSplit::MonthsCsv)
+        }
+        "按周拆分csv" | "split-weeks-csv" => {
+            return split_date_range(rest, today, DateRangeSplit::WeeksCsv)
         }
         _ => {}
     }
@@ -1127,6 +1162,35 @@ mod tests {
                 today
             ),
             Err(DateError::WorkdayExceptions)
+        );
+    }
+
+    #[test]
+    fn exports_iso_week_segments_across_years_and_counts_workday_exceptions() {
+        let today = NaiveDate::from_ymd_opt(2026, 12, 30).unwrap();
+        assert_eq!(
+            calculate_date(
+                r#"按周拆分CSV 今天 至 2027-01-05 例外 [["2027-01-01"],["2027-01-02"]]"#,
+                today
+            )
+            .as_deref(),
+            Ok(concat!(
+                "周号,开始,结束,天数,工作日\r\n",
+                "2026-W53,2026-12-30,2027-01-03,5,3\r\n",
+                "2027-W01,2027-01-04,2027-01-05,2,2",
+            ))
+        );
+        assert_eq!(
+            calculate_date("split-weeks-csv 2027-01-03 至 2027-01-03", today).as_deref(),
+            Ok("周号,开始,结束,天数,工作日\r\n2026-W53,2027-01-03,2027-01-03,1,0")
+        );
+        assert_eq!(
+            calculate_date("按周拆分CSV 2027-01-05 至 2027-01-04", today),
+            Err(DateError::ReversedDateRange)
+        );
+        assert_eq!(
+            calculate_date("按周拆分CSV 2020-01-01 至 2030-01-01", today),
+            Err(DateError::TooManyWeekRanges)
         );
     }
 

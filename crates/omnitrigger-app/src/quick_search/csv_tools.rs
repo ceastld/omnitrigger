@@ -172,6 +172,7 @@ enum Operation {
     DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
     FillDown(Vec<ColumnReference>),
+    CountEmptyCells(Vec<ColumnReference>),
     SelectRows(String),
     RenameColumn([String; 2]),
     ReplaceValue {
@@ -357,6 +358,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::FillDown(columns)
+        }
+        "空值统计" | "count-empty" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::CountEmptyCells(columns)
         }
         "改列名" | "rename-header" => {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
@@ -587,6 +594,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::DropColumns(columns) => drop_columns(&rows, &columns),
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
         Operation::FillDown(columns) => fill_down_csv(&rows, &columns),
+        Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
         Operation::SelectRows(ranges) => select_data_rows(&rows, &ranges),
         Operation::RenameColumn(names) => rename_column(rows, names),
         Operation::ReplaceValue {
@@ -1082,6 +1090,30 @@ fn trim_column_values(
         }
     }
     Ok(write_rows(&rows, ','))
+}
+
+fn count_empty_cells(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let mut output = vec![vec![
+        "列号".to_owned(),
+        "列名".to_owned(),
+        "空单元格".to_owned(),
+        "非空单元格".to_owned(),
+    ]];
+    for column in columns {
+        let empty = records.iter().filter(|row| row[column].is_empty()).count();
+        output.push(vec![
+            (column + 1).to_string(),
+            header[column].clone(),
+            empty.to_string(),
+            (records.len() - empty).to_string(),
+        ]);
+    }
+    Ok(write_rows(&output, ','))
 }
 
 fn fill_down_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
@@ -2024,6 +2056,26 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("fill-down 1 地区,编号\n{large},001{many_blanks}")),
             Err(CsvError::FillTooLarge)
+        );
+    }
+
+    #[test]
+    fn counts_exactly_empty_csv_cells_by_selected_column_including_header_only_input() {
+        let input = concat!(
+            "空值统计 [\"备注\",1] 编号,备注,地区\n",
+            "001,,华北\n,\" \",华北\n002,\"\",华南\n003,\"上\n下\",华南",
+        );
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("列号,列名,空单元格,非空单元格\r\n2,备注,2,2\r\n1,编号,1,3")
+        );
+        assert_eq!(
+            transform_csv("count-empty 1 编号,备注").as_deref(),
+            Ok("列号,列名,空单元格,非空单元格\r\n1,编号,0,0")
+        );
+        assert_eq!(
+            transform_csv("空值统计 [2,\"备注\"] 编号,备注\n001,茶"),
+            Err(CsvError::NamedColumnArguments)
         );
     }
 
