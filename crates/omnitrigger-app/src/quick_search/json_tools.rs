@@ -19,6 +19,7 @@ use super::text_tools::compare_natural;
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
 const MAX_FILTER_CONDITIONS: usize = 16;
+const MAX_SORT_FIELDS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JsonError {
@@ -62,6 +63,7 @@ pub(super) enum JsonError {
     RemoveRoot,
     NumberFilter,
     FilterConditions,
+    SortFields,
     ExpectedScalar,
     ExpectedNumber,
     GroupStatisticsPaths,
@@ -117,6 +119,9 @@ impl JsonError {
             Self::FilterConditions => {
                 "填写 1 至 16 个 [路径,比较符,值]，例如 [[\"/金额\",\">=\",1.5]]"
             }
+            Self::SortFields => {
+                "填写 1 至 8 个 [路径,排序方式]，方式可为文本升序、文本降序、数值升序或数值降序"
+            }
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
             Self::GroupStatisticsPaths => {
@@ -160,6 +165,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
         "文本排序" | "sort-text" => return sort_json_text(source, false),
         "文本降序" | "sort-text-desc" => return sort_json_text(source, true),
+        "多路径排序" | "sort-by-pointers" => return sort_json_by_pointers(source),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
@@ -899,27 +905,82 @@ fn collect_json_groups<'a, Group>(
 }
 
 fn sort_json_numbers(query: &str, descending: bool) -> Result<String, JsonError> {
-    sort_json_by(
-        query,
-        descending,
-        |value| match json_scalar(value)? {
-            Some(JsonScalar::Number(number)) => Ok(number),
-            _ => Err(JsonError::ExpectedNumber),
-        },
-        JsonNumber::compare,
-    )
+    sort_json_by(query, descending, json_sort_number, JsonNumber::compare)
 }
 
 fn sort_json_text(query: &str, descending: bool) -> Result<String, JsonError> {
-    sort_json_by(
-        query,
-        descending,
-        |value| match json_scalar(value)? {
-            Some(JsonScalar::String(text)) => Ok(text),
-            _ => Err(JsonError::ExpectedString),
-        },
-        |left, right| compare_natural(left, right),
-    )
+    sort_json_by(query, descending, json_sort_text, |left, right| {
+        compare_natural(left, right)
+    })
+}
+
+fn json_sort_number(value: &RawValue) -> Result<JsonNumber, JsonError> {
+    match json_scalar(value)? {
+        Some(JsonScalar::Number(number)) => Ok(number),
+        _ => Err(JsonError::ExpectedNumber),
+    }
+}
+
+fn json_sort_text(value: &RawValue) -> Result<String, JsonError> {
+    match json_scalar(value)? {
+        Some(JsonScalar::String(text)) => Ok(text),
+        _ => Err(JsonError::ExpectedString),
+    }
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+enum JsonSortOrder {
+    #[serde(rename = "文本升序", alias = "text-asc")]
+    TextAscending,
+    #[serde(rename = "文本降序", alias = "text-desc")]
+    TextDescending,
+    #[serde(rename = "数值升序", alias = "numeric-asc")]
+    NumberAscending,
+    #[serde(rename = "数值降序", alias = "numeric-desc")]
+    NumberDescending,
+}
+
+fn sort_json_by_pointers(query: &str) -> Result<String, JsonError> {
+    let (input, source) = json_value_and_source(query, JsonError::SortFields)?;
+    let rules = serde_json::from_str::<Vec<(String, JsonSortOrder)>>(input.get())
+        .map_err(|_| JsonError::SortFields)?;
+    if !(1..=MAX_SORT_FIELDS).contains(&rules.len()) {
+        return Err(JsonError::SortFields);
+    }
+    let mut seen = HashSet::new();
+    let fields = rules
+        .iter()
+        .map(|(pointer, order)| {
+            if !seen.insert(pointer) {
+                return Err(JsonError::SortFields);
+            }
+            let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
+            Ok((keys, *order))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut items = read_json_array(source)?;
+    // 稳定排序先处理低优先级路径，再处理高优先级路径。
+    for (keys, order) in fields.into_iter().rev() {
+        let descending = matches!(
+            order,
+            JsonSortOrder::TextDescending | JsonSortOrder::NumberDescending
+        );
+        items = match order {
+            JsonSortOrder::TextAscending | JsonSortOrder::TextDescending => {
+                sort_json_items(items, &keys, descending, json_sort_text, |left, right| {
+                    compare_natural(left, right)
+                })?
+            }
+            JsonSortOrder::NumberAscending | JsonSortOrder::NumberDescending => sort_json_items(
+                items,
+                &keys,
+                descending,
+                json_sort_number,
+                JsonNumber::compare,
+            )?,
+        };
+    }
+    Ok(serde_json::to_string(&items).expect("有效的原始 JSON 值可以直接序列化"))
 }
 
 fn sort_json_by<Key>(
@@ -930,10 +991,21 @@ fn sort_json_by<Key>(
 ) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
-    let mut items = read_json_array(source)?
+    let values = sort_json_items(read_json_array(source)?, &keys, descending, key, compare)?;
+    Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+fn sort_json_items<'a, Key>(
+    items: Vec<&'a RawValue>,
+    keys: &[String],
+    descending: bool,
+    key: impl Fn(&RawValue) -> Result<Key, JsonError>,
+    compare: impl Fn(&Key, &Key) -> Ordering,
+) -> Result<Vec<&'a RawValue>, JsonError> {
+    let mut items = items
         .into_iter()
         .map(|item| {
-            let value = select_pointer_keys(item, &keys)?;
+            let value = select_pointer_keys(item, keys)?;
             Ok((key(value)?, item))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -944,8 +1016,7 @@ fn sort_json_by<Key>(
             compare(left, right)
         }
     });
-    let values: Vec<_> = items.into_iter().map(|(_, item)| item).collect();
-    Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
+    Ok(items.into_iter().map(|(_, item)| item).collect())
 }
 
 #[derive(PartialEq, Eq, Hash)]
@@ -2249,6 +2320,42 @@ mod tests {
             transform_json("文本排序 /名称 [{}]"),
             Err(JsonError::MissingValue)
         );
+    }
+
+    #[test]
+    fn sorts_json_by_multiple_path_priorities_with_stable_natural_and_exact_comparisons() {
+        let source = concat!(
+            r#"多路径排序 [["/组","文本升序"],["/额","numeric-desc"]] ["#,
+            r#"{"组":"文件10","额":1},"#,
+            r#"{"组":"文件2","额":1.50},"#,
+            r#"{"组":"文件2","额":2e0},"#,
+            r#"{"组":"文件2","额":1.500}]"#,
+        );
+        assert_eq!(
+            transform_json(source).as_deref(),
+            Ok(concat!(
+                r#"[{"组":"文件2","额":2e0},"#,
+                r#"{"组":"文件2","额":1.50},"#,
+                r#"{"组":"文件2","额":1.500},"#,
+                r#"{"组":"文件10","额":1}]"#,
+            ))
+        );
+        for (query, error) in [
+            (
+                r#"多路径排序 [["/a","文本升序"],["/a","数值升序"]] []"#,
+                JsonError::SortFields,
+            ),
+            (
+                r#"多路径排序 [["/a","数值升序"]] [{"a":"1"}]"#,
+                JsonError::ExpectedNumber,
+            ),
+            (
+                r#"多路径排序 [["/a","文本降序"]] [{}]"#,
+                JsonError::MissingValue,
+            ),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
     }
 
     #[test]

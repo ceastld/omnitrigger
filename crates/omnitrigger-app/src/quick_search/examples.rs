@@ -415,6 +415,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量计算: 分数 1/3 + 1/6\n2**80",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把算式和结果输出为两列 CSV",
+        query: "批量计算: 对照 2**10\navg(1,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用精确分数输出算式和结果对照",
+        query: "批量计算: 分数对照 1/3 + 1/6\n2**80",
+    },
+    Example {
         icon: Icon::Grid,
         title: "切换已打开的窗口",
         query: "窗口:",
@@ -2057,6 +2067,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "先按分组文本再按金额排列 JSON",
+        query: r#"JSON: 多路径排序 [["/组","文本升序"],["/金额","数值降序"]] [{"组":"文件10","金额":1},{"组":"文件2","金额":1.50},{"组":"文件2","金额":2e0}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按文件名的自然顺序排列 JSON 数组",
         query: r#"JSON: 文本排序 /文件名 [{"文件名":"文件10"},{"文件名":"文件2"},{"文件名":"文件1"}]"#,
     },
@@ -2675,7 +2690,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         return None;
     }
     match scope {
-        Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
+        Scope::BatchCalculation
+            if matches!(term, "分" | "分数" | "分数对" | "分数对照" | "对" | "对照") =>
+            {}
         Scope::Fraction
             if !term.is_empty()
                 && [

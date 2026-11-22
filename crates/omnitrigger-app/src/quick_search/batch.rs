@@ -1,3 +1,5 @@
+use super::csv_tools::csv_cell;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BatchError<E> {
     Empty,
@@ -11,8 +13,26 @@ pub(super) fn batch_arguments<'a>(query: &'a str, name: &str, alias: &str) -> Op
 
 pub(super) fn map_batch_lines<E>(
     input: &str,
-    mut operation: impl FnMut(&str) -> Result<String, E>,
+    operation: impl FnMut(&str) -> Result<String, E>,
 ) -> Result<String, BatchError<E>> {
+    batch_results(input, operation).map(|values| values.join("\n"))
+}
+
+pub(super) fn map_calculations_csv<E>(
+    input: &str,
+    mut calculate: impl FnMut(&str) -> Result<String, E>,
+) -> Result<String, BatchError<E>> {
+    let rows = batch_results(input, |query| {
+        let result = calculate(query)?;
+        Ok(format!("{},{}", csv_cell(query), csv_cell(&result)))
+    })?;
+    Ok(format!("算式,结果\r\n{}", rows.join("\r\n")))
+}
+
+fn batch_results<E>(
+    input: &str,
+    mut operation: impl FnMut(&str) -> Result<String, E>,
+) -> Result<Vec<String>, BatchError<E>> {
     let mut values = Vec::new();
     for (index, line) in input.lines().enumerate() {
         let query = line.trim();
@@ -28,5 +48,5 @@ pub(super) fn map_batch_lines<E>(
     if values.is_empty() {
         return Err(BatchError::Empty);
     }
-    Ok(values.join("\n"))
+    Ok(values)
 }

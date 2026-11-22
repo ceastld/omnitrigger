@@ -70,7 +70,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
-use batch::{batch_arguments, map_batch_lines, BatchError};
+use batch::{batch_arguments, map_batch_lines, map_calculations_csv, BatchError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
@@ -645,6 +645,19 @@ impl Results {
                                 calculate_fraction(query).map(|value| value.to_string())
                             })
                             .map_err(ValueError::BatchFraction),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "分数对照", "exact-csv")
+                    {
+                        Self::text_value(
+                            map_calculations_csv(arguments, |query| {
+                                calculate_fraction(query).map(|value| value.to_string())
+                            })
+                            .map_err(ValueError::BatchFraction),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "对照", "csv") {
+                        Self::text_value(
+                            map_calculations_csv(arguments, calculate)
+                                .map_err(ValueError::BatchCalculation),
                         )
                     } else {
                         Self::text_value(
@@ -2421,6 +2434,26 @@ mod tests {
     }
 
     #[test]
+    fn exports_batch_expressions_with_their_results_as_two_csv_columns() {
+        assert!(matches!(
+            for_query("批量计算: 对照 2**10\r\n \r\navg(1,3)", &[]),
+            Results::Value(Ok(value)) if value.text == "算式,结果\r\n2**10,1024\r\n\"avg(1,3)\",2"
+        ));
+        assert!(matches!(
+            for_query("batch calculation: exact-csv 1/3 + 1/6\n2**80", &[]),
+            Results::Value(Ok(value))
+                if value.text == "算式,结果\r\n1/3 + 1/6,1/2\r\n2**80,1208925819614629174706176"
+        ));
+        assert!(matches!(
+            for_query("批量计算: 分数对照 1/2\n\n1/0", &[]),
+            Results::Value(Err(ValueError::BatchFraction(BatchError::Row {
+                line: 3,
+                ..
+            })))
+        ));
+    }
+
+    #[test]
     fn converts_duration_notations_line_by_line_and_identifies_failures() {
         assert!(matches!(
             for_query("批量换算: 时长 01:30 to s\r\nPT1M30S to min\n1天2.5秒 to iso", &[]),
@@ -2781,6 +2814,7 @@ mod tests {
         ));
         assert!(examples_for("JSON: 数值筛")[0].starts_with("JSON: 数值筛选 "));
         assert!(examples_for("JSON: 多条件")[0].starts_with("JSON: 多条件筛选 "));
+        assert!(examples_for("JSON: 多路径")[0].starts_with("JSON: 多路径排序 "));
         assert!(examples_for("JSON: 数值排")[0].starts_with("JSON: 数值排序 "));
         assert!(examples_for("JSON: 文本排")[0].starts_with("JSON: 文本排序 "));
         assert!(examples_for("CSV: 纵向")[0].starts_with("CSV: 纵向合并 "));
@@ -3208,7 +3242,12 @@ mod tests {
             ("？ ＵＮＩＸ", &unix_examples[..]),
             (
                 "？ ２＊＊１０",
-                &["2**10", "(2**10)B to KiB", "分数: 计算 isqrt(2**100 - 1)"][..],
+                &[
+                    "2**10",
+                    "(2**10)B to KiB",
+                    "批量计算: 对照 2**10\navg(1,3)",
+                    "分数: 计算 isqrt(2**100 - 1)",
+                ][..],
             ),
             (
                 "? 时长",
