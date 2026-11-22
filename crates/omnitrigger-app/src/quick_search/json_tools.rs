@@ -11,6 +11,7 @@ use serde_json::value::RawValue;
 
 use super::csv_tools::csv_cell;
 use super::operators::NumberComparison;
+use super::text_tools::compare_natural;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 
@@ -44,6 +45,7 @@ pub(super) enum JsonError {
     NumberFilter,
     ExpectedScalar,
     ExpectedNumber,
+    ExpectedString,
 }
 
 impl JsonError {
@@ -77,6 +79,7 @@ impl JsonError {
             Self::NumberFilter => "路径后填写比较符和 JSON 数字，例如 /价格 >= 1.5",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
+            Self::ExpectedString => "文本排序需要每一项的指定路径都对应 JSON 字符串",
         }
     }
 }
@@ -101,6 +104,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "数值排序" | "sort-numeric" => return sort_json_numbers(source, false),
         "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
+        "文本排序" | "sort-text" => return sort_json_text(source, false),
+        "文本降序" | "sort-text-desc" => return sort_json_text(source, true),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
@@ -294,23 +299,49 @@ fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
 }
 
 fn sort_json_numbers(query: &str, descending: bool) -> Result<String, JsonError> {
+    sort_json_by(
+        query,
+        descending,
+        |value| match json_scalar(value)? {
+            Some(JsonScalar::Number(number)) => Ok(number),
+            _ => Err(JsonError::ExpectedNumber),
+        },
+        JsonNumber::compare,
+    )
+}
+
+fn sort_json_text(query: &str, descending: bool) -> Result<String, JsonError> {
+    sort_json_by(
+        query,
+        descending,
+        |value| match json_scalar(value)? {
+            Some(JsonScalar::String(text)) => Ok(text),
+            _ => Err(JsonError::ExpectedString),
+        },
+        |left, right| compare_natural(left, right),
+    )
+}
+
+fn sort_json_by<Key>(
+    query: &str,
+    descending: bool,
+    key: impl Fn(&RawValue) -> Result<Key, JsonError>,
+    compare: impl Fn(&Key, &Key) -> Ordering,
+) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
     let mut items = read_json_array(source)?
         .into_iter()
         .map(|item| {
             let value = select_pointer_keys(item, &keys)?;
-            let Some(JsonScalar::Number(number)) = json_scalar(value)? else {
-                return Err(JsonError::ExpectedNumber);
-            };
-            Ok((number, item))
+            Ok((key(value)?, item))
         })
         .collect::<Result<Vec<_>, _>>()?;
     items.sort_by(|(left, _), (right, _)| {
         if descending {
-            right.compare(left)
+            compare(right, left)
         } else {
-            left.compare(right)
+            compare(left, right)
         }
     });
     let values: Vec<_> = items.into_iter().map(|(_, item)| item).collect();
@@ -1234,6 +1265,35 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn sorts_json_strings_naturally_without_rewriting_values_or_ties() {
+        let source = r#"[{"文件名":"文件10"},{"文件名":"文件2"},{"文件名":"\u6587\u4ef602"},{"文件名":"文件1"}]"#;
+        assert_eq!(
+            transform_json(&format!("文本排序 /文件名 {source}")).as_deref(),
+            Ok(
+                r#"[{"文件名":"文件1"},{"文件名":"文件2"},{"文件名":"\u6587\u4ef602"},{"文件名":"文件10"}]"#
+            )
+        );
+        assert_eq!(
+            transform_json(&format!("文本降序 /文件名 {source}")).as_deref(),
+            Ok(
+                r#"[{"文件名":"文件10"},{"文件名":"文件2"},{"文件名":"\u6587\u4ef602"},{"文件名":"文件1"}]"#
+            )
+        );
+        assert_eq!(
+            transform_json(r#"sort-text "" ["x10","x2"]"#).as_deref(),
+            Ok(r#"["x2","x10"]"#)
+        );
+        assert_eq!(
+            transform_json(r#"文本排序 /名称 [{"名称":2}]"#),
+            Err(JsonError::ExpectedString)
+        );
+        assert_eq!(
+            transform_json("文本排序 /名称 [{}]"),
+            Err(JsonError::MissingValue)
+        );
     }
 
     #[test]

@@ -2291,7 +2291,7 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 27);
+        assert_eq!(examples_for("JSON：").len(), 29);
         assert!(examples_for("JSON: 展平")[0].starts_with("JSON: 展平 "));
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 取列")[0].starts_with("JSON: 取列 "));
@@ -2316,6 +2316,7 @@ mod tests {
         assert!(examples_for("JSON: 按")[0].starts_with("JSON: 按值去重 "));
         assert!(examples_for("JSON: 数值筛")[0].starts_with("JSON: 数值筛选 "));
         assert!(examples_for("JSON: 数值排")[0].starts_with("JSON: 数值排序 "));
+        assert!(examples_for("JSON: 文本排")[0].starts_with("JSON: 文本排序 "));
         assert!(examples_for("URL: 去")[0].starts_with("URL: 去查询串 "));
         assert!(examples_for("URL: 去参")[0].starts_with("URL: 去参数 "));
         assert_eq!(

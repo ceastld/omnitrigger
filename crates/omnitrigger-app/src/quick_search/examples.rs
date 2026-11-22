@@ -1632,6 +1632,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按文件名的自然顺序排列 JSON 数组",
+        query: r#"JSON: 文本排序 /文件名 [{"文件名":"文件10"},{"文件名":"文件2"},{"文件名":"文件1"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按指定字符串的自然顺序反向排列 JSON 数组",
+        query: r#"JSON: 文本降序 /文件名 [{"文件名":"文件10"},{"文件名":"文件2"},{"文件名":"文件1"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按路径上的数字降序排列 JSON 项",
         query: r#"JSON: 数值降序 /价格 [{"编号":"001","价格":12.50},{"编号":"002","价格":-2.75},{"编号":"003","价格":1.5e0}]"#,
     },
