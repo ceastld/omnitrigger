@@ -34,6 +34,7 @@ pub(super) enum CsvError {
     InvalidSeparator,
     DifferentColumnCount,
     InvalidHeader,
+    MarkdownAlignments,
     InvalidColumns,
     InvalidColumnNames,
     NamedColumnArguments,
@@ -78,6 +79,7 @@ impl CsvError {
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
             Self::DifferentColumnCount => "每行的列数须一致",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
+            Self::MarkdownAlignments => "用 JSON 数组为每一列填写左、右、中或默认",
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
             Self::InvalidColumnNames => "用 JSON 字符串数组输入互不重复的列名",
             Self::NamedColumnArguments => "用 JSON 数组填写互不重复的列名或列号，例如 [\"地区\",2]",
@@ -127,7 +129,7 @@ enum Operation {
     Validate,
     JsonRows,
     JsonObjects,
-    Markdown,
+    Markdown(Option<Vec<MarkdownAlignment>>),
     Transpose,
     ToTsv,
     FromTsv,
@@ -171,6 +173,19 @@ enum Operation {
         descending: bool,
         numeric: bool,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MarkdownAlignment {
+    #[serde(alias = "默认")]
+    Default,
+    #[serde(alias = "左")]
+    Left,
+    #[serde(alias = "中")]
+    Center,
+    #[serde(alias = "右")]
+    Right,
 }
 
 #[derive(Deserialize)]
@@ -244,7 +259,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "校验" | "validate" => Operation::Validate,
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
-        "markdown" | "表格" => Operation::Markdown,
+        "markdown" | "表格" => Operation::Markdown(None),
+        "markdown对齐" | "markdown-align" => {
+            let (alignments, data) = json_argument_and_data(input, CsvError::MarkdownAlignments)?;
+            input = data;
+            Operation::Markdown(Some(alignments))
+        }
         "转置" | "transpose" => Operation::Transpose,
         "转tsv" | "tsv" => Operation::ToTsv,
         "从tsv" | "from-tsv" => Operation::FromTsv,
@@ -426,7 +446,17 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         _ => ',',
     };
     let rows = if matches!(kind, Operation::Validate) {
-        read_delimited_rows(input, delimiter, false)?
+        match read_delimited_rows(input, delimiter, false) {
+            Ok(rows) => rows,
+            Err(error) => {
+                return Ok(format!(
+                    "CSV 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
+                    error.record,
+                    error.column,
+                    error.kind.message()
+                ));
+            }
+        }
     } else {
         read_rows(input, delimiter)?
     };
@@ -434,7 +464,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::Validate => Ok(report_csv_columns(&rows)),
         Operation::JsonRows => serde_json::to_string(&rows).map_err(|_| CsvError::Serialization),
         Operation::JsonObjects => json_objects(&rows),
-        Operation::Markdown => Ok(markdown_table(&rows)),
+        Operation::Markdown(alignments) => markdown_table(&rows, alignments.as_deref()),
         Operation::Transpose => Ok(transpose(&rows)),
         Operation::ToTsv => Ok(write_rows(&rows, '\t')),
         Operation::FromTsv => Ok(write_rows(&rows, ',')),
@@ -1055,7 +1085,24 @@ fn json_objects(rows: &[Vec<String>]) -> Result<String, CsvError> {
     serde_json::to_string(&objects).map_err(|_| CsvError::Serialization)
 }
 
-fn markdown_table(rows: &[Vec<String>]) -> String {
+fn markdown_table(
+    rows: &[Vec<String>],
+    alignments: Option<&[MarkdownAlignment]>,
+) -> Result<String, CsvError> {
+    let width = rows[0].len();
+    if alignments.is_some_and(|alignments| alignments.len() != width) {
+        return Err(CsvError::MarkdownAlignments);
+    }
+    let rules = (0..width)
+        .map(
+            |column| match alignments.map(|alignments| &alignments[column]) {
+                Some(MarkdownAlignment::Left) => ":---",
+                Some(MarkdownAlignment::Center) => ":---:",
+                Some(MarkdownAlignment::Right) => "---:",
+                Some(MarkdownAlignment::Default) | None => "---",
+            },
+        )
+        .collect::<Vec<_>>();
     let mut lines = Vec::with_capacity(rows.len() + 1);
     for (index, row) in rows.iter().enumerate() {
         let cells = row
@@ -1064,10 +1111,10 @@ fn markdown_table(rows: &[Vec<String>]) -> String {
             .collect::<Vec<_>>();
         lines.push(format!("| {} |", cells.join(" | ")));
         if index == 0 {
-            lines.push(format!("|{}", " --- |".repeat(row.len())));
+            lines.push(format!("| {} |", rules.join(" | ")));
         }
     }
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn markdown_cell(cell: &str) -> String {
@@ -1153,19 +1200,32 @@ fn report_csv_columns(rows: &[Vec<String>]) -> String {
     format!("{header}\n{}", mismatches.join("\n"))
 }
 
+struct CsvReadError {
+    kind: CsvError,
+    record: usize,
+    column: usize,
+}
+
 fn read_rows(input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvError> {
-    read_delimited_rows(input, delimiter, true)
+    read_delimited_rows(input, delimiter, true).map_err(|error| error.kind)
 }
 
 fn read_delimited_rows(
     mut input: &str,
     delimiter: char,
     require_uniform_width: bool,
-) -> Result<Vec<Vec<String>>, CsvError> {
+) -> Result<Vec<Vec<String>>, CsvReadError> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut fields = Vec::new();
     loop {
-        let (field, rest) = read_field(input, delimiter)?;
+        let record = rows.len() + 1;
+        let column = fields.len() + 1;
+        let at_field = |kind| CsvReadError {
+            kind,
+            record,
+            column,
+        };
+        let (field, rest) = read_field(input, delimiter).map_err(at_field)?;
         fields.push(field);
         if let Some(next) = rest.strip_prefix(delimiter) {
             input = next;
@@ -1176,14 +1236,14 @@ fn read_delimited_rows(
         } else {
             rest.strip_prefix("\r\n")
                 .or_else(|| rest.strip_prefix('\n'))
-                .ok_or(CsvError::InvalidSeparator)?
+                .ok_or_else(|| at_field(CsvError::InvalidSeparator))?
         };
         if require_uniform_width
             && rows
                 .first()
                 .is_some_and(|first| first.len() != fields.len())
         {
-            return Err(CsvError::DifferentColumnCount);
+            return Err(at_field(CsvError::DifferentColumnCount));
         }
         rows.push(std::mem::take(&mut fields));
         if input.is_empty() {
@@ -1244,11 +1304,38 @@ mod tests {
             transform_csv("validate \u{feff}编号,说明\r\n001,").as_deref(),
             Ok("2 条记录 · 每条 2 列")
         );
+        assert_eq!(transform_csv("校验 "), Err(CsvError::MissingInput));
+    }
+
+    #[test]
+    fn reports_the_record_and_field_for_csv_lexical_errors() {
         assert_eq!(
-            transform_csv("校验 a,b\n1,\"缺引号"),
+            transform_csv("校验 编号,说明\r\n001,\"茶\n咖啡\"\r\n002,\"未闭合").as_deref(),
+            Ok("CSV 语法错误 · 第 3 条记录 · 第 2 列\n字段的双引号尚未闭合")
+        );
+        assert_eq!(
+            transform_csv("校验 a,b\n\"x\"extra,y").as_deref(),
+            Ok("CSV 语法错误 · 第 2 条记录 · 第 1 列\n检查引号和分隔符，引号内的双引号用两个双引号表示")
+        );
+        assert_eq!(
+            transform_csv("转JSON a,b\n1,\"缺引号"),
             Err(CsvError::UnclosedQuote)
         );
-        assert_eq!(transform_csv("校验 "), Err(CsvError::MissingInput));
+    }
+
+    #[test]
+    fn generates_markdown_with_leading_trailing_or_both_alignment_colons() {
+        let input = "Markdown对齐 [\"左\",\"center\",\"右\",\"default\"] 编号,商品,数量,备注\n001,茶|咖啡,2,\"上\n下\"";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("| 编号 | 商品 | 数量 | 备注 |\n| :--- | :---: | ---: | --- |\n| 001 | 茶\\|咖啡 | 2 | 上<br>下 |")
+        );
+        for query in [
+            r#"Markdown对齐 ["左"] 编号,商品"#,
+            r#"markdown-align ["unexpected"] 编号"#,
+        ] {
+            assert_eq!(transform_csv(query), Err(CsvError::MarkdownAlignments));
+        }
     }
 
     #[test]

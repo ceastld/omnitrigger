@@ -1847,6 +1847,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位 CSV 语法错误的记录和列",
+        query: "CSV: 校验 编号,说明\n001,\"茶\n咖啡\"\n002,\"未闭合",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按 CSV 表头生成 JSON 对象",
         query: "CSV: 对象 编号,名称\n001,茶",
     },
@@ -1854,6 +1859,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "由 CSV 生成 Markdown 表格",
         query: "CSV: Markdown 编号,备注\n001,茶|咖啡",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "给 Markdown 表格的每一列指定对齐方式",
+        query: "CSV: Markdown对齐 [\"左\",\"中\",\"右\"] 编号,商品,数量\n001,茶|咖啡,2",
     },
     Example {
         icon: Icon::Terminal,
