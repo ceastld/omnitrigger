@@ -2337,6 +2337,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "移除所有单元格都为空的 CSV 数据行",
+        query: "CSV: 去空行 编号,备注\n001,茶\n\n,\n002,梨",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "为 CSV 每行追加固定文本列",
         query: "CSV: 常量列 [\"来源\",\"人工,复核\"] 编号,商品\n001,茶\n002,梨",
     },
@@ -2625,6 +2630,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Browser,
         title: "移除 URL 查询串",
         query: "URL: 去查询串 https://example.invalid/doc?source=mail#part",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "取出网址锚点并还原为文字",
+        query: "URL: 取锚点 https://example.invalid/doc?q=a#%E7%9B%AE%E5%BD%95",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把文字写入网址锚点并编码",
+        query: r#"URL: 设锚点 "目录 #2" https://example.invalid/doc?q=a#old"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "清除网址锚点并保留查询参数",
+        query: "URL: 去锚点 https://example.invalid/doc?q=a#old",
     },
     Example {
         icon: Icon::Browser,

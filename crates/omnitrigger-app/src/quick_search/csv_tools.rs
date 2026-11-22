@@ -187,6 +187,7 @@ enum Operation {
     TrimColumns(Vec<ColumnReference>),
     FillDown(Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
+    DropEmptyRecords,
     SelectRows {
         ranges: String,
         keep_selected: bool,
@@ -356,6 +357,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "转tsv" | "tsv" => Operation::ToTsv,
         "从tsv" | "from-tsv" => Operation::FromTsv,
         "去重" | "deduplicate" => Operation::DeduplicateRows,
+        "去空行" | "drop-empty-rows" => Operation::DropEmptyRecords,
         operation @ ("取行" | "pick-rows" | "删行" | "drop-rows") => {
             let (ranges, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
             input = data;
@@ -638,7 +640,10 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::FromTsv => '\t',
         _ => ',',
     };
-    let rows = if matches!(kind, Operation::Validate | Operation::PadRows) {
+    let rows = if matches!(
+        kind,
+        Operation::Validate | Operation::PadRows | Operation::DropEmptyRecords
+    ) {
         match read_delimited_rows(input, delimiter, false) {
             Ok(rows) => rows,
             Err(error) if matches!(kind, Operation::Validate) => {
@@ -669,6 +674,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
         Operation::FillDown(columns) => fill_down_csv(&rows, &columns),
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
+        Operation::DropEmptyRecords => drop_empty_csv_records(&rows),
         Operation::SelectRows {
             ranges,
             keep_selected,
@@ -1056,6 +1062,17 @@ fn select_data_rows(
         .zip(selected)
         .filter_map(|(row, selected)| (selected == keep_selected).then_some(row));
     Ok(write_rows(std::iter::once(header).chain(picked), ','))
+}
+
+fn drop_empty_csv_records(rows: &[Vec<String>]) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let retained = records
+        .iter()
+        .filter(|row| row.iter().any(|cell| !cell.is_empty()));
+    if retained.clone().any(|row| row.len() != header.len()) {
+        return Err(CsvError::DifferentColumnCount);
+    }
+    Ok(write_rows(std::iter::once(header).chain(retained), ','))
 }
 
 fn drop_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
@@ -2627,6 +2644,26 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn drops_empty_csv_records_with_or_without_delimiters_and_keeps_nonempty_fields() {
+        assert_eq!(
+            transform_csv("去空行 编号,备注\n\n,\n\"\",\"\"\n001, \n002,\"冷\n饮\"\n,").as_deref(),
+            Ok("编号,备注\r\n001, \r\n002,\"冷\n饮\"")
+        );
+        assert_eq!(
+            transform_csv("drop-empty-rows \u{feff}编号,备注\r\n,,\r\n,").as_deref(),
+            Ok("编号,备注")
+        );
+        assert_eq!(
+            transform_csv("去空行 编号,备注\n001"),
+            Err(CsvError::DifferentColumnCount)
+        );
+        assert_eq!(
+            transform_csv("去空行 编号,备注\n\""),
+            Err(CsvError::UnclosedQuote)
+        );
     }
 
     #[test]

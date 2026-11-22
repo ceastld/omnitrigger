@@ -265,6 +265,7 @@
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
 - 用 `URL: 路径分段 https://example.invalid/docs/a%2Fb/` 得到 `["docs","a/b",""]`。用 `URL: 设路径 ["新文档","a/b",""]` 加上网址，可替换路径并保留查询串与片段。末尾的空段保留斜杠，段内的斜杠会编码为 `%2F`。 [Rust URL 路径段](https://docs.rs/url/2.5.8/url/struct.Url.html#method.path_segments)
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
+- 用 `URL: 取锚点` 加上完整 URL，可把 `#` 后的片段解码为文字。用 `URL: 设锚点 "目录 #2" https://example.invalid/doc?q=a` 可设置并编码文字锚点。`URL: 去锚点` 可移除片段并保留查询参数。
 - 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 去参数组 ["source","campaign"]` 后加空格和网址，可同时移除指定名称的全部参数。列表填写解码后的名称，可直接写空格或加号。
 - 输入 `URL: 保留参数 ["q","page"] https://example.invalid/doc?source=mail&q=a%20b&page=2&q=a+b#part` 得到 `https://example.invalid/doc?q=a%20b&page=2&q=a+b#part`。列表填写解码后的名称并区分大小写。匹配项保留原有顺序和编码，同名项可以重复。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
@@ -344,6 +345,7 @@
 - 用 `CSV: 去空白 ["名称",2]` 加上含表头的 CSV，可去掉所选列各单元格开头和末尾的空白。列名与列号可以混用，表头、其他列与单元格中间的空白原样保留。
 - 用 `CSV: 向下填充 ["地区",2]` 加上含表头的 CSV，可在指定列用上方最近的非空值填充空单元格。各列独立填充，顶部无来源的空单元格保留，只有空字符串参与填充。结果最多 1 MiB。
 - 用 `CSV: 空值统计 ["备注",1]` 加上含表头的 CSV，可按指定顺序输出各列的列号、列名和空与非空单元格数。只将空字符串计为空，只有表头时计数均为 0。
+- 用 `CSV: 去空行` 可删除空行和各字段都为空的数据行，保留表头。含空格的字段照常保留，剩余记录的列数须与表头一致。
 - 用 `CSV: 计算列 ["金额",2,"*",3]` 加上含表头的 CSV，可逐行将第二列乘以第三列，在表尾追加“金额”列。支持 `+`、`-`、`*` 和 `/`，结果保留精确分数。
 - 用 `CSV: 常量列 ["来源","人工,复核"]` 加上含表头的 CSV，可在表尾追加“来源”列，并填入相同的文本。列名须非空且未被使用，值可以为空，结果最多 1 MiB。
 - 用 `CSV: 拼接列 ["地址",["省",3],"-"]` 加上含表头的 CSV，可逐行把“省”和第三列拼接为“地址”。可混用列名和列号，空单元格照常参与拼接。结果保留原列，最多 1 MiB。

@@ -37,6 +37,8 @@ pub(super) enum UrlEncodingError {
     OpaqueOrigin,
     OpaquePath,
     InvalidPathSegments,
+    InvalidFragmentArgument,
+    MissingFragment,
 }
 
 impl UrlEncodingError {
@@ -64,6 +66,8 @@ impl UrlEncodingError {
             Self::InvalidPathSegments => {
                 "用 JSON 字符串数组填写路径段，再输入 URL。各段不能是 . 或 .."
             }
+            Self::InvalidFragmentArgument => "用双引号填写锚点文字，再输入完整 URL",
+            Self::MissingFragment => "该 URL 没有 # 锚点",
         }
     }
 }
@@ -103,6 +107,26 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "去查询串" | "strip-query" => {
             let mut url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
             url.set_query(None);
+            Ok(url.into())
+        }
+        "取锚点" | "get-fragment" => {
+            let url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
+            decode_value(url.fragment().ok_or(UrlEncodingError::MissingFragment)?)
+        }
+        "设锚点" | "set-fragment" => {
+            let (fragment, address) =
+                parameter_argument::<String>(value, UrlEncodingError::InvalidFragmentArgument)?;
+            if fragment.contains('\0') {
+                return Err(UrlEncodingError::NullCharacter);
+            }
+            let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
+            let fragment = utf8_percent_encode(&fragment, URL_COMPONENT).to_string();
+            url.set_fragment(Some(&fragment));
+            Ok(url.into())
+        }
+        "去锚点" | "strip-fragment" => {
+            let mut url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
+            url.set_fragment(None);
             Ok(url.into())
         }
         "去参数" | "strip-param" => remove_parameter(value),
@@ -911,6 +935,47 @@ mod tests {
         assert_eq!(
             convert_url_component(r#"保留参数 ["q",1] https://example.invalid/"#),
             Err(UrlEncodingError::InvalidParameterNames)
+        );
+    }
+
+    #[test]
+    fn gets_sets_and_removes_fragments_while_retaining_the_query() {
+        for (query, expected) in [
+            (
+                r#"设锚点 "目录 #2 + 100%" https://example.invalid/doc?q=a%20b#old"#,
+                "https://example.invalid/doc?q=a%20b#%E7%9B%AE%E5%BD%95%20%232%20%2B%20100%25",
+            ),
+            (
+                "取锚点 https://example.invalid/doc?q=x#%E7%9B%AE%E5%BD%95%20%232+100%25",
+                "目录 #2+100%",
+            ),
+            (
+                "去锚点 https://example.invalid/a%23b?q=x%23y#part?view=1",
+                "https://example.invalid/a%23b?q=x%23y",
+            ),
+            (
+                r#"set-fragment "" https://example.invalid/doc?x=y"#,
+                "https://example.invalid/doc?x=y#",
+            ),
+            ("get-fragment https://example.invalid/#", ""),
+        ] {
+            assert_eq!(
+                convert_url_component(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_url_component("取锚点 https://example.invalid/doc?q=x"),
+            Err(UrlEncodingError::MissingFragment)
+        );
+        assert_eq!(
+            convert_url_component("取锚点 https://example.invalid/doc#%ZZ"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
+        assert_eq!(
+            convert_url_component(r#"设锚点 "\u0000" https://example.invalid/doc"#),
+            Err(UrlEncodingError::NullCharacter)
         );
     }
 
