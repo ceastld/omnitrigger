@@ -2142,6 +2142,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把多段文本逐行配对成多列 CSV",
+        query: r#"文本: 逐行配对 ["苹果\n梨\n茶","3\n2","箱\n袋"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按固定列数把连续文本行分组为 CSV",
         query: "文本: 按行分组CSV 3 甲\n乙\n丙\n丁",
     },

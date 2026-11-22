@@ -74,6 +74,7 @@ pub(super) enum TextError {
     EmptyDelimiter,
     InvalidColumn,
     CsvColumnCount,
+    CsvTextColumns,
     MissingColumn,
     InvalidLineRange,
     InvalidGraphemeRange,
@@ -118,6 +119,7 @@ impl TextError {
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
             Self::CsvColumnCount => "填写 1 至 128 的列数，例如 文本: 按行分组CSV 3",
+            Self::CsvTextColumns => "用 JSON 数组填写 2 至 128 段文本，每段对应一列",
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
             Self::MissingLine => "指定行号超出了文本行数",
@@ -1162,20 +1164,35 @@ fn read_line_comparison(input: &str) -> Result<(String, String), TextError> {
 }
 
 fn pair_lines_as_csv(input: &str) -> Result<String, TextError> {
-    let (left, right) = read_line_comparison(input)?;
-    let (mut left, mut right) = (left.lines(), right.lines());
-    let mut output = String::new();
-    loop {
-        let (first, second) = (left.next(), right.next());
-        if first.is_none() && second.is_none() {
-            return Ok(output);
+    let texts = if input.trim_start().starts_with('[') {
+        let texts =
+            serde_json::from_str::<Vec<String>>(input).map_err(|_| TextError::CsvTextColumns)?;
+        if !(2..=128).contains(&texts.len()) {
+            return Err(TextError::CsvTextColumns);
         }
+        if texts.iter().any(|text| text.contains('\0')) {
+            return Err(TextError::NullCharacter);
+        }
+        texts
+    } else {
+        let (left, right) = read_line_comparison(input)?;
+        vec![left, right]
+    };
+    let mut columns = texts
+        .iter()
+        .map(|text| text.lines().peekable())
+        .collect::<Vec<_>>();
+    let mut output = String::new();
+    while columns.iter_mut().any(|lines| lines.peek().is_some()) {
         append_bounded_csv_row(
             &mut output,
-            [first.unwrap_or_default(), second.unwrap_or_default()].into_iter(),
+            columns
+                .iter_mut()
+                .map(|lines| lines.next().unwrap_or_default()),
             TextError::ResultTooLarge,
         )?;
     }
+    Ok(output)
 }
 
 fn chunk_lines_as_csv(input: &str) -> Result<String, TextError> {
@@ -2202,6 +2219,29 @@ mod tests {
                 Err(TextError::CsvColumnCount)
             );
         }
+    }
+
+    #[test]
+    fn pairs_multiple_text_lists_as_csv_with_short_and_empty_columns() {
+        assert_eq!(
+            transform_text(r#"逐行配对 ["苹果\n梨\n茶","3\n2","\"箱\"",""]"#).as_deref(),
+            Ok("苹果,3,\"\"\"箱\"\"\",\"\"\r\n梨,2,\"\",\"\"\r\n茶,\"\",\"\",\"\"")
+        );
+        assert_eq!(
+            transform_text(r#"zip-lines ["\n甲",""]"#).as_deref(),
+            Ok("\"\",\"\"\r\n甲,\"\"")
+        );
+        for input in [
+            r#"逐行配对 []"#,
+            r#"逐行配对 ["甲"]"#,
+            r#"逐行配对 ["甲",null]"#,
+        ] {
+            assert_eq!(transform_text(input), Err(TextError::CsvTextColumns));
+        }
+        assert_eq!(
+            transform_text(r#"逐行配对 ["甲","\u0000"]"#),
+            Err(TextError::NullCharacter)
+        );
     }
 
     #[test]
