@@ -1468,11 +1468,14 @@ impl QuickSearch {
         {
             self.input_before_calculation_history = None;
         }
-        if self.input_before_bookmarks.is_some() {
-            let browsing = |input: &str| matches!(scoped_query(input), Some((Scope::Bookmarks, _)));
-            if !browsing(query) && !self.input_before_help.as_deref().is_some_and(browsing) {
-                self.input_before_bookmarks = None;
-            }
+        if self.input_before_bookmarks.is_some()
+            && !Self::is_bookmark_query(query)
+            && !self
+                .input_before_help
+                .as_deref()
+                .is_some_and(Self::is_bookmark_query)
+        {
+            self.input_before_bookmarks = None;
         }
         if self.results != next {
             let previous_height = self.results.height(self.value_line_limit());
@@ -1835,12 +1838,23 @@ impl QuickSearch {
         .then_some(query)
     }
 
+    fn is_bookmark_query(query: &str) -> bool {
+        matches!(scoped_query(query), Some((Scope::Bookmarks, _)))
+    }
+
     fn toggle_bookmark_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.input.read(cx).text();
-        if matches!(scoped_query(&query), Some((Scope::Bookmarks, _))) {
+        if Self::is_bookmark_query(&query) {
             if let Some(previous) = self.input_before_bookmarks.take() {
                 self.fill_query(previous, window, cx);
             }
+        } else if Self::shows_help(&query, &self.results)
+            && self
+                .input_before_help
+                .as_deref()
+                .is_some_and(Self::is_bookmark_query)
+        {
+            self.toggle_help(window, cx);
         } else {
             self.input_before_bookmarks = Some(query);
             self.fill_query("收藏: ", window, cx);
@@ -4167,6 +4181,13 @@ mod tests {
                             search.key_down(&key("f1", false), window, cx);
                             let restored_filter = search.input.read(cx).text();
                             search.refresh_results(&restored_filter, window, cx);
+                            search.key_down(&key("f1", false), window, cx);
+                            let reopened_help = search.input.read(cx).text();
+                            assert!(reopened_help.starts_with('?'));
+                            search.refresh_results(&reopened_help, window, cx);
+                            search.key_down(&key("f4", false), window, cx);
+                            assert_eq!(search.input.read(cx).text(), filter);
+                            search.refresh_results(filter, window, cx);
                             search.key_down(&key("f4", false), window, cx);
                             let restored_query = search.input.read(cx).text();
                             search.fill_query(filter, window, cx);
