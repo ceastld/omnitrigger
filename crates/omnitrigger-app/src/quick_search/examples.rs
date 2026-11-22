@@ -1742,6 +1742,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "连续空行只保留一行",
+        query: "文本: 合并空行 甲\n\n\n乙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按行编号",
         query: "文本: 按行编号 苹果\n梨",
     },
@@ -2319,6 +2324,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把所选 CSV 单元格拼成一列",
         query: "CSV: 拼接列 [\"地址\",[\"省\",3],\"-\"] 编号,省,市\n001,福建,福州\n002,浙江,杭州",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按分隔符把一列拆到多个新列",
+        query: "CSV: 拆分列 [\"地址\",[\"省\",\"市和区\"],\"/\"] 编号,地址\n001,福建/福州/鼓楼\n002,浙江",
     },
     Example {
         icon: Icon::Terminal,

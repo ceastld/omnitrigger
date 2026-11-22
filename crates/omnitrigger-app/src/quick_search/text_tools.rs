@@ -253,6 +253,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             .filter(|line| !line.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n")),
+        "合并空行" | "collapse-empty-lines" => Ok(collapse_empty_lines(text)),
         "按行编号" | "number-lines" => Ok(text
             .lines()
             .enumerate()
@@ -407,6 +408,25 @@ fn strip_ansi_styles(text: &str) -> String {
 pub(super) fn newline_pattern() -> &'static Regex {
     static NEWLINES: OnceLock<Regex> = OnceLock::new();
     NEWLINES.get_or_init(|| Regex::new(r"\r\n|\n|\r").expect("固定的换行表达式有效"))
+}
+
+fn collapse_empty_lines(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut start = 0;
+    let mut previous_was_blank = false;
+    let line_ends = newline_pattern()
+        .find_iter(text)
+        .map(|newline| (newline.start(), newline.end()))
+        .chain(std::iter::once((text.len(), text.len())));
+    for (content_end, end) in line_ends {
+        let blank = text[start..content_end].trim().is_empty();
+        if !blank || !previous_was_blank {
+            result.push_str(&text[start..end]);
+        }
+        previous_was_blank = blank;
+        start = end;
+    }
+    result
 }
 
 fn count_line_endings(text: &str) -> String {
@@ -1658,6 +1678,16 @@ mod tests {
             ("去空行 \" 甲\r\n  \t\r\n乙 \n\n丙\"", " 甲\n乙 \n丙"),
             ("按行去重 \"A\nA \nA\"", "A\nA "),
             ("去空行 \"\n\t\n \"", ""),
+            (
+                "合并空行 \" 甲\r\n\r\n \t\r乙 \n\n\n丙\"",
+                " 甲\r\n\r\n乙 \n\n丙",
+            ),
+            (
+                "collapse-empty-lines \"\t\r\n\n甲\r\r\n\n\"",
+                "\t\r\n甲\r\r\n",
+            ),
+            ("合并空行 \"甲\n \t\n \t\"", "甲\n \t\n"),
+            ("合并空行 \"\"", ""),
             ("按行编号 \" 甲\r\n\r\n乙 \"", "1\t 甲\n2\t\n3\t乙 "),
             ("number-lines \"A\n\"", "1\tA"),
             (

@@ -64,6 +64,7 @@ pub(super) enum CsvError {
     FillTooLarge,
     ConstantColumnArguments,
     ConcatenatedColumnArguments,
+    SplitColumnArguments,
     AddedColumnTooLarge,
     StackArguments,
     ComputedColumnArguments,
@@ -129,6 +130,9 @@ impl CsvError {
             }
             Self::ConcatenatedColumnArguments => {
                 "填写新列名、至少两列和分隔符，例如 [\"地址\",[\"省\",\"市\"],\"-\"]"
+            }
+            Self::SplitColumnArguments => {
+                "填写来源列、至少两个不同的新列名和非空分隔符，例如 [\"地址\",[\"省\",\"市\"],\"/\"]"
             }
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
@@ -198,6 +202,11 @@ enum Operation {
     ConcatenateColumns {
         name: String,
         columns: Vec<ColumnReference>,
+        separator: String,
+    },
+    SplitColumn {
+        source: ColumnReference,
+        names: Vec<String>,
         separator: String,
     },
     ComputeColumn {
@@ -445,6 +454,19 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 separator,
             }
         }
+        "拆分列" | "split-column" => {
+            let ((source, names, separator), data) =
+                json_argument_and_data::<(ColumnReference, Vec<String>, String)>(
+                    input,
+                    CsvError::SplitColumnArguments,
+                )?;
+            input = data;
+            Operation::SplitColumn {
+                source,
+                names,
+                separator,
+            }
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -658,6 +680,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             columns,
             separator,
         } => concatenate_columns(&rows, &name, &columns, &separator),
+        Operation::SplitColumn {
+            source,
+            names,
+            separator,
+        } => split_column(&rows, source, &names, &separator),
         Operation::ComputeColumn {
             name,
             left,
@@ -1256,6 +1283,48 @@ fn write_appended_column<T: AsRef<str>>(
             row.iter()
                 .map(String::as_str)
                 .chain(std::iter::once(cell.as_ref())),
+            CsvError::AddedColumnTooLarge,
+        )?;
+    }
+    Ok(output)
+}
+
+fn split_column(
+    rows: &[Vec<String>],
+    source: ColumnReference,
+    names: &[String],
+    separator: &str,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let mut seen = HashSet::new();
+    if names.len() < 2
+        || separator.is_empty()
+        || separator.contains('\0')
+        || names
+            .iter()
+            .any(|name| name.trim().is_empty() || name.contains('\0') || !seen.insert(name))
+    {
+        return Err(CsvError::SplitColumnArguments);
+    }
+    if names.iter().any(|name| header.contains(name)) {
+        return Err(CsvError::HeaderNameConflict);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let mut output = String::new();
+    append_bounded_csv_row(
+        &mut output,
+        header.iter().chain(names).map(String::as_str),
+        CsvError::AddedColumnTooLarge,
+    )?;
+    for row in records {
+        let parts = row[source]
+            .splitn(names.len(), separator)
+            .chain(std::iter::repeat(""))
+            .take(names.len());
+        append_bounded_csv_row(
+            &mut output,
+            row.iter().map(String::as_str).chain(parts),
             CsvError::AddedColumnTooLarge,
         )?;
     }
@@ -2409,6 +2478,46 @@ mod tests {
             transform_csv(r#"拼接列 ["省",[1,2],"-"] 省,市"#),
             Err(CsvError::HeaderNameConflict)
         );
+    }
+
+    #[test]
+    fn splits_one_csv_column_into_named_fields_and_keeps_the_remainder() {
+        assert_eq!(
+            transform_csv(concat!(
+                r#"拆分列 ["地址",["省","市,区"],"/"] 编号,地址"#,
+                "\n001,福建/福州/鼓楼\n002,浙江\n003,/杭州\n004,"
+            ))
+            .as_deref(),
+            Ok(concat!(
+                "编号,地址,省,\"市,区\"\r\n",
+                "001,福建/福州/鼓楼,福建,福州/鼓楼\r\n",
+                "002,浙江,浙江,\"\"\r\n003,/杭州,\"\",杭州\r\n004,\"\",\"\",\"\""
+            ))
+        );
+        assert_eq!(
+            transform_csv("split-column [1,[\"月份\",\"日期\"],\"::\"] 日期值\n02::03").as_deref(),
+            Ok("日期值,月份,日期\r\n02::03,02,03")
+        );
+        for (query, error) in [
+            (
+                r#"拆分列 [1,["省","市"],""] 地址"#,
+                CsvError::SplitColumnArguments,
+            ),
+            (
+                r#"拆分列 [1,["省","省"],"/"] 地址"#,
+                CsvError::SplitColumnArguments,
+            ),
+            (
+                r#"拆分列 [1,["省","地址"],"/"] 地址"#,
+                CsvError::HeaderNameConflict,
+            ),
+            (
+                r#"拆分列 [2,["省","市"],"/"] 地址"#,
+                CsvError::ColumnOutOfRange,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
     }
 
     #[test]
