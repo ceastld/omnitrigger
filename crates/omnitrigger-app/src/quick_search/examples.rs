@@ -456,6 +456,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "精确换算大整数字节数",
+        query: "数据换算: 9007199254740993 B to KiB",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把数据速率换算成精确分数",
+        query: "数据换算: 1 MiB/s to MB/s",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算括号算式计算出的数据量",
         query: "(2**10)B to KiB",
     },
@@ -3458,6 +3468,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::VideoFrames
         | Scope::Timecode
         | Scope::TransferTime
+        | Scope::ExactData
         | Scope::Pace
         | Scope::FuelEconomy
         | Scope::UnitPrice
@@ -3557,6 +3568,7 @@ mod tests {
             Scope::VideoFrames,
             Scope::Timecode,
             Scope::TransferTime,
+            Scope::ExactData,
             Scope::Pace,
             Scope::FuelEconomy,
             Scope::UnitPrice,

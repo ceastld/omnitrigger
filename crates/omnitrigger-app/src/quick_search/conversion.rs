@@ -6,7 +6,7 @@ use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
 use super::batch::{map_batch_csv, map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
-use super::fraction::parse_fraction_literal;
+use super::fraction::{calculate_fraction, ensure_exact_size, parse_fraction_literal};
 use super::operators::split_top_level_commas;
 use super::radix::Base;
 use super::InputSuggestion;
@@ -20,6 +20,7 @@ pub(super) enum ConversionError {
     InvalidInteger,
     UnknownUnit,
     InvalidTargets,
+    ExactDataUnit,
     DifferentDimensions,
     InvalidTransfer,
     InvalidTransferDuration,
@@ -45,6 +46,9 @@ impl ConversionError {
             Self::InvalidInteger => "进制转换需要整数，例如 0xff to dec",
             Self::UnknownUnit => "无法识别换算单位",
             Self::InvalidTargets => "用方括号和逗号填写 1 至 8 个目标单位，例如 [MiB, KiB, Gib]",
+            Self::ExactDataUnit => {
+                "可精确换算数据量或数据速率，例如 1/3 KiB to B 或 1 MiB/s to MB/s"
+            }
             Self::DifferentDimensions => "两个单位不属于同一类型",
             Self::InvalidTransfer => "输入非负的数据量和大于零的数据速率",
             Self::InvalidTransferDuration => {
@@ -1119,6 +1123,27 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     })
 }
 
+pub(super) fn convert_exact_data(query: &str) -> Result<String, ConversionError> {
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let (source, target) = split_conversion(input.trim()).ok_or(ConversionError::Incomplete)?;
+    let (amount, source) = split_quantity(source);
+    let source = Unit::parse(source)?;
+    let target = Unit::parse(target)?;
+    if !matches!(source.dimension, Dimension::Data | Dimension::DataRate)
+        || !matches!(target.dimension, Dimension::Data | Dimension::DataRate)
+    {
+        return Err(ConversionError::ExactDataUnit);
+    }
+    if source.dimension != target.dimension {
+        return Err(ConversionError::DifferentDimensions);
+    }
+    let amount = calculate_fraction(amount).map_err(|_| ConversionError::InvalidAmount)?;
+    // 数据量和数据速率单位表中的比例是可精确表示的整数。
+    let converted = amount * BigInt::from(source.scale as u64) / BigInt::from(target.scale as u64);
+    ensure_exact_size(&converted).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format_with_unit(converted, &target))
+}
+
 pub(super) fn convert_batch(input: &str) -> Result<String, BatchError<ConversionError>> {
     map_batch_lines(input, convert_batch_line)
 }
@@ -1297,17 +1322,48 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
         amount * (source.scale / target.scale)
     };
     let value = format_result(converted).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format_with_unit(value, target))
+}
+
+fn format_with_unit(value: impl std::fmt::Display, target: &Unit) -> String {
     let suffix = if target.dimension == Dimension::DataRate {
         "/s"
     } else {
         ""
     };
-    Ok(format!("{value} {}{suffix}", target.symbol))
+    format!("{value} {}{suffix}", target.symbol)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_data_amounts_and_rates_without_rounding_the_input_or_result() {
+        for (query, expected) in [
+            ("9007199254740993 B to KiB", "9007199254740993/1024 KiB"),
+            ("(2**53 + 1)B to KiB", "9007199254740993/1024 KiB"),
+            ("1/3 KiB to B", "1024/3 B"),
+            ("1 MiB/s to MB/s", "16384/15625 MB/s"),
+            ("8 b to B", "1 B"),
+            ("1 字节 to 比特", "8 b"),
+            ("-1 kB to B", "-1000 B"),
+        ] {
+            assert_eq!(
+                convert_exact_data(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_exact_data("1 B to b/s"),
+            Err(ConversionError::DifferentDimensions)
+        );
+        assert_eq!(
+            convert_exact_data("3 m to cm"),
+            Err(ConversionError::ExactDataUnit)
+        );
+    }
 
     #[test]
     fn calculates_pace_from_distance_and_time_and_converts_between_pace_and_speed() {

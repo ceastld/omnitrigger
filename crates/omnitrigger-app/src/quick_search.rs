@@ -82,7 +82,7 @@ use complex::{calculate_complex, ComplexError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
     calculate_unit_price, conversion_target_input, convert, convert_batch, convert_batch_csv,
-    convert_period, estimate_transfer, suggested_targets, ConversionError,
+    convert_exact_data, convert_period, estimate_transfer, suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
@@ -801,6 +801,7 @@ impl Results {
                     Self::text_value(convert_timecode(term).map_err(ValueError::Timecode))
                 }
                 Scope::TransferTime => Self::conversion_value(estimate_transfer(term), None),
+                Scope::ExactData => Self::conversion_value(convert_exact_data(term), None),
                 Scope::Pace => {
                     Self::text_value(calculate_pace(term).map_err(ValueError::Conversion))
                 }
@@ -3515,7 +3516,14 @@ mod tests {
             "时间戳: 间隔 -1ns 到 1ns to ns",
         ];
         for (query, expected) in [
-            ("？ 速率", &["下载: 600 MB 用时 2分钟", "8Mbps to MB/s"][..]),
+            (
+                "？ 速率",
+                &[
+                    "数据换算: 1 MiB/s to MB/s",
+                    "下载: 600 MB 用时 2分钟",
+                    "8Mbps to MB/s",
+                ][..],
+            ),
             ("? UNIX", &unix_examples[..]),
             ("？ ＵＮＩＸ", &unix_examples[..]),
             (
