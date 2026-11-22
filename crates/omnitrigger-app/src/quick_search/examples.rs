@@ -1477,6 +1477,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从同一份 JSON 按多个指针提取字段",
+        query: r#"JSON: 取多路径 ["/订单/0/商品","/订单/0/价格"] {"订单":[{"商品":"茶","价格":9007199254740993}]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "列出 JSON 对象的顶层键名",
         query: r#"JSON: 键名 {"城市":{"名称":"北京"},"数量":1}"#,
     },

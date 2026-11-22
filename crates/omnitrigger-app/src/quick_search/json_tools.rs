@@ -21,6 +21,7 @@ pub(super) enum JsonError {
     LayoutTooLarge,
     InvalidPointer,
     InvalidPointerSegment,
+    PointerSelection,
     PointerListTooLarge,
     FlattenedObjectTooLarge,
     ExpectedObject,
@@ -52,6 +53,7 @@ impl JsonError {
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
+            Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
             Self::ExpectedObject => "请输入 JSON 对象",
@@ -86,6 +88,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "压缩" | "compact" | "minify" => false,
         "键排序" | "sort-keys" => return sort_json_keys(source),
         "取值" | "get" | "pointer" => return select_json_value(source),
+        "取多路径" | "get-paths" => return select_json_paths(source),
         "取列" | "column" => return select_json_column(source),
         "有路径" | "has-pointer" => return filter_json_by_pointer(source, true),
         "缺路径" | "missing-pointer" => return filter_json_by_pointer(source, false),
@@ -177,8 +180,32 @@ fn json_parse_error(error: serde_json::Error) -> JsonError {
 fn select_json_value(query: &str) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
-    let value = pointer_keys(&pointer)?.try_fold(root, |value, key| select_member(value, &key?))?;
+    let value = select_json_path(root, &pointer)?;
     Ok(value.get().to_owned())
+}
+
+fn select_json_paths(query: &str) -> Result<String, JsonError> {
+    let (pointers, source) = strings_and_source(query, JsonError::PointerSelection)?;
+    if pointers.is_empty() || pointers.iter().collect::<HashSet<_>>().len() != pointers.len() {
+        return Err(JsonError::PointerSelection);
+    }
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let entries = pointers
+        .into_iter()
+        .map(|pointer| {
+            let value = select_json_path(root, &pointer)?;
+            Ok((pointer, value))
+        })
+        .collect::<Result<Vec<_>, JsonError>>()?;
+    let result = write_object_entries(entries)?;
+    if result.len() > MAX_PRETTY_BYTES {
+        return Err(JsonError::LayoutTooLarge);
+    }
+    Ok(result)
+}
+
+fn select_json_path<'a>(root: &'a RawValue, pointer: &str) -> Result<&'a RawValue, JsonError> {
+    pointer_keys(pointer)?.try_fold(root, |value, key| select_member(value, &key?))
 }
 
 fn select_json_column(query: &str) -> Result<String, JsonError> {
@@ -512,7 +539,7 @@ fn write_object_entries<'a>(
     Ok(format!("{{{}}}", entries.join(",")))
 }
 
-fn key_names_and_source(query: &str) -> Result<(Vec<String>, &str), JsonError> {
+fn strings_and_source(query: &str, invalid: JsonError) -> Result<(Vec<String>, &str), JsonError> {
     let mut arguments = serde_json::Deserializer::from_str(query).into_iter::<Vec<String>>();
     let names = arguments
         .next()
@@ -521,7 +548,7 @@ fn key_names_and_source(query: &str) -> Result<(Vec<String>, &str), JsonError> {
             if error.is_eof() {
                 JsonError::Incomplete
             } else {
-                JsonError::KeyArguments
+                invalid
             }
         })?;
     let source = query[arguments.byte_offset()..].trim_start();
@@ -532,7 +559,7 @@ fn key_names_and_source(query: &str) -> Result<(Vec<String>, &str), JsonError> {
 }
 
 fn rename_json_key(query: &str) -> Result<String, JsonError> {
-    let (names, source) = key_names_and_source(query)?;
+    let (names, source) = strings_and_source(query, JsonError::KeyArguments)?;
     let [original, replacement] = names.as_slice() else {
         return Err(JsonError::KeyArguments);
     };
@@ -552,7 +579,7 @@ fn rename_json_key(query: &str) -> Result<String, JsonError> {
 }
 
 fn remove_json_keys(query: &str) -> Result<String, JsonError> {
-    let (names, source) = key_names_and_source(query)?;
+    let (names, source) = strings_and_source(query, JsonError::KeyArguments)?;
     if names.is_empty() {
         return Err(JsonError::KeyArguments);
     }
@@ -575,7 +602,7 @@ fn json_to_csv(source: &str) -> Result<String, JsonError> {
 }
 
 fn pick_json_keys(query: &str) -> Result<String, JsonError> {
-    let (names, source) = key_names_and_source(query)?;
+    let (names, source) = strings_and_source(query, JsonError::KeyArguments)?;
     let wanted: HashSet<_> = names.iter().map(String::as_str).collect();
     if names.is_empty() || names.len() != wanted.len() {
         return Err(JsonError::SelectionKeys);
@@ -1242,6 +1269,29 @@ mod tests {
         );
         assert_eq!(transform_json("展开数组 []").as_deref(), Ok(""));
         assert_eq!(transform_json("展开数组 {}"), Err(JsonError::ExpectedArray));
+    }
+
+    #[test]
+    fn selects_distinct_pointers_in_requested_order_and_preserves_numbers() {
+        assert_eq!(
+            transform_json(r#"取多路径 ["/订单/0/商品","/订单/0/价格"] {"订单":[{"价格":9007199254740993,"商品":"茶"}]}"#).as_deref(),
+            Ok(r#"{"/订单/0/商品":"茶","/订单/0/价格":9007199254740993}"#)
+        );
+        assert_eq!(
+            transform_json(r#"get-paths ["","/a~1b"] {"a/b": {"n":1.20}}"#).as_deref(),
+            Ok(r#"{"":{"a/b":{"n":1.20}},"/a~1b":{"n":1.20}}"#)
+        );
+        for (query, error) in [
+            (
+                r#"get-paths ["/","\u002f"] {"":0}"#,
+                JsonError::PointerSelection,
+            ),
+            (r#"get-paths [] []"#, JsonError::PointerSelection),
+            (r#"get-paths ["/foo~2"] {}"#, JsonError::InvalidPointer),
+            (r#"get-paths ["/missing"] {}"#, JsonError::MissingValue),
+        ] {
+            assert_eq!(transform_json(query), Err(error));
+        }
     }
 
     #[test]
