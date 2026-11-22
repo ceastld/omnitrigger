@@ -346,6 +346,7 @@ enum ValueError {
     BatchTimestamp(BatchError<TimestampError>),
     BatchPath(BatchError<PathError>),
     BatchUrl(BatchError<UrlEncodingError>),
+    BatchDate(BatchError<DateError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -432,6 +433,13 @@ impl ValueError {
                     UrlEncodingError::message,
                 );
             }
+            Self::BatchDate(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入日期操作，例如 2026-11-20 + 1工作日",
+                    DateError::message,
+                );
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -477,6 +485,7 @@ impl ValueError {
                 | Self::BatchTimestamp(BatchError::Empty)
                 | Self::BatchPath(BatchError::Empty)
                 | Self::BatchUrl(BatchError::Empty)
+                | Self::BatchDate(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -654,6 +663,12 @@ impl Results {
                         Self::text_value(
                             map_batch_lines(arguments, convert_url_component)
                                 .map_err(ValueError::BatchUrl),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "日期", "date") {
+                        let today = chrono::Local::now().date_naive();
+                        Self::text_value(
+                            map_batch_lines(arguments, |line| calculate_date(line, today))
+                                .map_err(ValueError::BatchDate),
                         )
                     } else {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
@@ -2234,6 +2249,27 @@ mod tests {
         assert!(for_query("批量换算: 时间", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 时间戳 ")));
+    }
+
+    #[test]
+    fn quick_search_batches_calendar_operations_and_reports_input_lines() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 日期 2026-11-20 + 1工作日\r\n2024-02-29 + 1年\n2027-01-01 第几周",
+                &[],
+            ),
+            Results::Value(Ok(value)) if value.text == "2026-11-23\n2025-02-28\n2026-W53"
+        ));
+        assert!(matches!(
+            for_query(
+                "批量换算: date 2026-11-20 + 1工作日\n\n2026-02-30 第几周",
+                &[]
+            ),
+            Results::Value(Err(ValueError::BatchDate(BatchError::Row { line: 3, .. })))
+        ));
+        assert!(for_query("批量换算: 日", &[])
+            .suggested_input(0)
+            .is_some_and(|query| query.starts_with("批量换算: 日期 ")));
     }
 
     #[test]

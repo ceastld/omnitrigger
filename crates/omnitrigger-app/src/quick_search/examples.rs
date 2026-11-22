@@ -275,6 +275,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 网址 去查询串 https://example.invalid/doc?q=a#part\n表单解码 a%2Bb+c\n源 https://example.invalid:8443/doc",
     },
     Example {
+        icon: Icon::Clock,
+        title: "逐行计算日期、工作日和周号",
+        query: "批量换算: 日期 2026-11-20 + 1工作日\n2024-02-29 + 1年\n2027-01-01 第几周",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
@@ -2255,7 +2260,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::BatchConversion
             if matches!(
                 term,
-                "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址"
+                "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址" | "日" | "日期"
             ) => {}
         Scope::Date
             if !term.is_empty()
