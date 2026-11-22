@@ -27,6 +27,7 @@ pub(super) enum ConversionError {
     InvalidCircuit,
     InvalidResistanceOperands,
     InvalidResistanceList,
+    InvalidEnergyUse,
     InvalidPeriod,
     InvalidPeriodTarget,
     OutOfRange,
@@ -54,6 +55,7 @@ impl ConversionError {
             }
             Self::InvalidResistanceOperands => "求电阻时，电压和电流均须大于零",
             Self::InvalidResistanceList => "输入 2 至 32 个正电阻值，各项用逗号隔开",
+            Self::InvalidEnergyUse => "填写非负功率和用时，例如 耗电 1.5 kW @ 2h",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
             Self::InvalidPeriodTarget => "频率请选择时间单位，周期请选择频率单位",
             Self::OutOfRange => "结果超出换算范围",
@@ -926,6 +928,7 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
         match operation.to_ascii_lowercase().as_str() {
             "串联" | "series" => return equivalent_resistance(values, false),
             "并联" | "parallel" => return equivalent_resistance(values, true),
+            "耗电" | "energy-use" => return calculate_energy_use(values),
             _ => {}
         }
     }
@@ -963,6 +966,34 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
         format_circuit_value(value, unit)?,
         format_circuit_value(power, "W")?
     ))
+}
+
+fn calculate_energy_use(input: &str) -> Result<String, ConversionError> {
+    let (power, time) = input
+        .split_once('@')
+        .ok_or(ConversionError::InvalidEnergyUse)?;
+    let (amount, unit) = parse_quantity(power.trim())?;
+    if unit.dimension != Dimension::Power || amount < 0. {
+        return Err(ConversionError::InvalidEnergyUse);
+    }
+    let seconds = elapsed_duration(time.trim())
+        .map_err(|error| match error {
+            DurationError::OutOfRange => ConversionError::OutOfRange,
+            _ => ConversionError::InvalidEnergyUse,
+        })?
+        .as_secs_f64();
+    let watt_seconds_per_unit = unit.scale * seconds;
+    let kilowatt_hours = amount * (watt_seconds_per_unit / 3_600_000.);
+    let (result, unit) = if kilowatt_hours >= 1. {
+        (kilowatt_hours, "kWh")
+    } else {
+        (amount * (watt_seconds_per_unit / 3600.), "Wh")
+    };
+    if !result.is_finite() || (amount > 0. && seconds > 0. && result == 0.) {
+        return Err(ConversionError::OutOfRange);
+    }
+    let result = format_result(result).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{result} {unit}"))
 }
 
 fn equivalent_resistance(input: &str, parallel: bool) -> Result<String, ConversionError> {
@@ -1746,6 +1777,35 @@ mod tests {
             })
         );
         assert_eq!(convert_batch(" \r\n "), Err(BatchError::Empty));
+    }
+
+    #[test]
+    fn calculates_energy_use_from_power_and_elapsed_duration() {
+        for (query, expected) in [
+            ("耗电 1.5 kW @ 2h", "3 kWh"),
+            ("energy-use 10 W @ PT30M", "5 Wh"),
+            ("耗电 3600 mW @ 00:01", "0.001 Wh"),
+            ("耗电 0 W @ 3h", "0 Wh"),
+            ("耗电 10 W @ 0s", "0 Wh"),
+        ] {
+            assert_eq!(calculate_circuit(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "耗电 1 W",
+            "耗电 12 V @ 2h",
+            "耗电 -1 W @ 2h",
+            "耗电 1 W @ -2h",
+        ] {
+            assert_eq!(
+                calculate_circuit(query),
+                Err(ConversionError::InvalidEnergyUse),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_circuit("耗电 1e308 MW @ 2h"),
+            Err(ConversionError::OutOfRange)
+        );
     }
 
     #[test]

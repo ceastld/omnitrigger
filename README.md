@@ -79,6 +79,7 @@
 - 输入 `文件: C:\工作 | *.pdf | 最近修改` 可把匹配项按最后修改时间从新到旧排列。可留空中间的名称条件，修改时间相同的按名称排列。 [Windows 目录项的最后修改时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw)
 - 输入 `文件: C:\工作 | *.pdf | 最近创建` 可按创建时间从新到旧排列。创建时间相同的按名称排列，缺少创建时间的项排在最后。 [Windows 目录项的创建时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
 - 输入 `文件: C:\工作 | *.pdf | 大小` 可把匹配文件按字节数从大到小排列，并在每个文件下方显示字节数。同样大小的文件按名称排列，匹配的文件夹排在文件之后。 [Windows 目录项的文件大小](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
+- 输入 `文件: C:\工作 | 报告 | 自然排序` 可按名称中的数字值排列匹配项，例如“报告2”排在“报告10”之前。可与名称、扩展名、日期筛选和 `前=N` 一起使用。
 - 输入 `文件: C:\工作 | *.pdf | 大小>=1MiB 大小<=10MiB` 可筛选指定大小范围内的文件。两个条件可单独使用，包含边界，按大小从大到小排列。数字可直接表示字节数，也可与 B、MB 或 MiB 等单位连写，须能精确换算为整数个字节。
 - 输入 `文件: C:\工作 | *.pdf | 修改>=2026-11-01 修改<=2026-11-30` 可按 Windows 本地日期筛选最后修改时间。用 `创建>=` 或 `创建<=` 可筛选创建日期。各条件可单独使用，包含边界日期的全天。
 - 在最后一栏填写 `仅文件` 或 `仅文件夹` 可按类型筛选。可以和排序同时使用，例如 `文件: C:\工作 | *.pdf | 仅文件 最近修改`。名称条件可留空。
@@ -209,6 +210,7 @@
 - 输入 `12 pt to px` 得到 `16 px`。搜索框按 CSS 绝对长度比例换算像素 `px`、点 `pt`、派卡 `pc` 和四分之一毫米 `Q`。 [W3C CSS 绝对长度定义](https://www.w3.org/TR/css-values-4/#absolute-lengths)
 - 输入 `电路: 5 V, 20 Ω` 可求出 `250 mA · 1.25 W`，输入 `电路: 12 V, 1.5 A` 得到 `8 Ω · 18 W`。输入同一电阻上的两种电学量，可计算第三种和功率。求电阻时，电压和电流均须为正。 [欧姆定律与电功率](https://openstax.org/books/university-physics-volume-2/pages/9-5-electrical-energy-and-power)
 - 输入 `电路: 串联 220 Ω,330 Ω,1 kΩ` 得到 `1.55 kΩ`，输入 `电路: 并联 220 Ω,330 Ω` 得到 `132 Ω`。每组可填 2 至 32 个正电阻值，支持不同数量级的欧姆单位。 [OpenStax 串联与并联电阻](https://openstax.org/books/university-physics-volume-2/pages/10-2-resistors-in-series-and-parallel)
+- 输入 `电路: 耗电 1.5 kW @ 2h` 得到 `3 kWh`。用功率乘以时长，适用于恒定功率。时长也可写成 `30min` 或 `01:30:00`。结果满 1000 Wh 时用 kWh 表示。
 - 单位可紧跟括号内的算式。例如 `(2**10)B to KiB` 得到 `1 KiB`，`((2 + 1/2) * 2)km to m` 得到 `5000 m`。只输入带单位的算式，也可选择换算目标。
 - 输入 `周期: 50 Hz to ms` 得到 `20 ms`，输入 `周期: 2.5 ms to Hz` 得到 `400 Hz`。周期与频率互为倒数，省略目标单位时会按结果大小选择单位。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。

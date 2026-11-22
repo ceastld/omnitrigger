@@ -16,8 +16,8 @@ use omnitrigger_windows::{
 };
 
 use super::{
-    conversion::exact_byte_quantity, csv_tools::csv_cell, title_rank, Destination, InputSuggestion,
-    Results, INPUT_CHARACTER_LIMIT,
+    conversion::exact_byte_quantity, csv_tools::csv_cell, text_tools::compare_natural, title_rank,
+    Destination, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
 };
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -32,6 +32,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("最近修改", "按修改时间从新到旧"),
     ("最近创建", "按创建时间从新到旧"),
     ("大小", "按字节数从大到小"),
+    ("自然排序", "名称中的数字按数值排"),
     ("前=10", "取排序后的前 10 项"),
     ("路径列表", "每行一个绝对路径"),
     ("名称列表", "每行一个名称"),
@@ -268,7 +269,11 @@ impl LocalFilesIndex {
         if query.order == DirectoryOrder::Name
             && (query.output != FileOutput::ExtensionCounts || query.limit.is_some())
         {
-            matches.sort_by_key(|(rank, _)| *rank);
+            if query.natural_order {
+                matches.sort_by(|(_, left), (_, right)| compare_natural(&left.name, &right.name));
+            } else {
+                matches.sort_by_key(|(rank, _)| *rank);
+            }
         }
         if let Some(limit) = query.limit {
             matches.truncate(limit);
@@ -502,6 +507,7 @@ struct FileQuery<'a> {
     directory: &'a str,
     filter: &'a str,
     order: DirectoryOrder,
+    natural_order: bool,
     entry_type: DirectoryEntryType,
     size_bounds: Option<(u64, u64)>,
     modified: DateBounds,
@@ -599,6 +605,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let directory = super::path_tools::strip_path_quotes(directory.trim());
     let (filter, options) = filter.split_once('|').unwrap_or((filter, ""));
     let mut order = DirectoryOrder::Name;
+    let mut natural_order = false;
     let mut entry_type = DirectoryEntryType::All;
     let (mut minimum, mut maximum) = (None, None);
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
@@ -616,6 +623,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "大小" | "size" if order == DirectoryOrder::Name => {
                 order = DirectoryOrder::SizeDescending;
             }
+            "自然排序" | "natural-order" if !natural_order => natural_order = true,
             "仅文件" | "files" if entry_type == DirectoryEntryType::All => {
                 entry_type = DirectoryEntryType::File;
             }
@@ -717,18 +725,23 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     } else {
         None
     };
-    (!directory.is_empty() && modified.is_valid() && created.is_valid()).then_some(FileQuery {
-        directory,
-        filter: filter.trim(),
-        order,
-        entry_type,
-        size_bounds,
-        modified,
-        created,
-        extensions,
-        limit,
-        output,
-    })
+    (!directory.is_empty()
+        && modified.is_valid()
+        && created.is_valid()
+        && (!natural_order || order == DirectoryOrder::Name))
+        .then_some(FileQuery {
+            directory,
+            filter: filter.trim(),
+            order,
+            natural_order,
+            entry_type,
+            size_bounds,
+            modified,
+            created,
+            extensions,
+            limit,
+            output,
+        })
 }
 
 fn wildcard_pattern(filter: &str) -> Option<&str> {
@@ -1313,6 +1326,34 @@ mod tests {
         }
         assert!(split_query(r"C:\Work | | 修改月份统计 仅文件夹").is_none());
         assert!(split_query(r"C:\Work | | 修改月份统计 创建月份统计").is_none());
+    }
+
+    #[test]
+    fn sorts_file_names_naturally_before_taking_the_requested_prefix() {
+        let plain = r"C:\Work | report | 名称列表";
+        let sorted = r"C:\Work | report | 自然排序 名称列表 前=2";
+        let mut index = LocalFilesIndex::default();
+        let load = index.request(Some(plain)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("report1.txt", "file"),
+                entry("report10.txt", "file"),
+                entry("report2.txt", "file"),
+                entry("other.txt", "file"),
+            ])
+        ));
+        assert!(index.request(Some(sorted)).is_none());
+        assert!(matches!(
+            index.results(plain),
+            Results::Value(Ok(value)) if value.text == "report1.txt\nreport10.txt\nreport2.txt"
+        ));
+        assert!(matches!(
+            index.results(sorted),
+            Results::Value(Ok(value)) if value.text == "report1.txt\nreport2.txt"
+        ));
+        assert!(split_query(r"C:\Work | | 最近修改 自然排序").is_none());
+        assert!(split_query(r"C:\Work | | 自然排序 大小>=1").is_none());
     }
 
     #[test]
