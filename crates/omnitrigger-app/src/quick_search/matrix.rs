@@ -31,7 +31,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、乘法、乘方、数乘、行列式、迹、特征值、转置、求解、求逆、秩、行最简形和零空间"
+                "可用加法、减法、乘法、乘方、数乘、行列式、迹、特征值、转置、求解、求逆、秩、行最简形、零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -66,6 +66,20 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
             reduced_row_echelon(parse_matrix(input)?).map(|(matrix, _)| format_matrix(matrix))
         }
         "零空间" | "核空间" | "nullspace" => nullspace(parse_matrix(input)?),
+        "行空间" | "row-space" => {
+            let (mut rows, pivots) = reduced_row_echelon(parse_matrix(input)?)?;
+            rows.truncate(pivots.len());
+            Ok(format_basis("行空间", rows))
+        }
+        "列空间" | "column-space" => {
+            let matrix = parse_matrix(input)?;
+            let (_, pivots) = reduced_row_echelon(matrix.clone())?;
+            let columns = pivots
+                .into_iter()
+                .map(|column| matrix.iter().map(|row| row[column].clone()).collect())
+                .collect();
+            Ok(format_basis("列空间", columns))
+        }
         "加法" | "add" | "减法" | "subtract" => {
             let (left, right) = parse_pair(input)?;
             let subtract = matches!(operation.as_str(), "减法" | "subtract");
@@ -301,14 +315,14 @@ fn nullspace(matrix: Matrix) -> Result<String, MatrixError> {
             vector
         })
         .collect::<Matrix>();
+    Ok(format_basis("零空间", basis))
+}
+
+fn format_basis(space: &str, basis: Matrix) -> String {
     if basis.is_empty() {
-        Ok("零空间维数 0".to_owned())
+        format!("{space}维数 0")
     } else {
-        Ok(format!(
-            "零空间维数 {}\n{}",
-            basis.len(),
-            format_matrix(basis)
-        ))
+        format!("{space}维数 {}\n{}", basis.len(), format_matrix(basis))
     }
 }
 
@@ -465,6 +479,25 @@ mod tests {
             ("nullspace 1,2,-1; 0,0,1", "零空间维数 1\n-2, 1, 0"),
             ("核空间 0,0; 0,0", "零空间维数 2\n1, 0\n0, 1"),
             ("零空间 1,2; 3,4; 5,6", "零空间维数 0"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn finds_row_bases_and_selects_pivot_columns_from_the_original_matrix() {
+        for (query, expected) in [
+            (
+                "行空间 1,2,3; 2,4,6; 0,1,1",
+                "行空间维数 2\n1, 0, 1\n0, 1, 1",
+            ),
+            (
+                "column-space 1,2,3; 2,4,6; 0,1,1",
+                "列空间维数 2\n1, 2, 0\n2, 4, 1",
+            ),
+            ("列空间 0,1/2,1; 0,1,2", "列空间维数 1\n1/2, 1"),
+            ("row-space 0,0; 0,0", "行空间维数 0"),
+            ("列空间 0,0,0", "列空间维数 0"),
         ] {
             assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
         }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     path::Path,
     sync::{
@@ -183,10 +183,21 @@ impl LocalFilesIndex {
         } else {
             query.filter.to_lowercase()
         };
+        let extensions = query.extensions.map(|extensions| {
+            extension_options(extensions)
+                .map(str::to_lowercase)
+                .collect::<HashSet<_>>()
+        });
         let mut matches: Vec<_> = entries
             .iter()
             .filter(|entry| {
                 matches!(entry.kind, "file" | "directory")
+                    && extensions.as_ref().is_none_or(|extensions| {
+                        entry.kind == "file"
+                            && file_extension(&entry.name).is_some_and(|extension| {
+                                extensions.contains(&extension.to_lowercase())
+                            })
+                    })
                     && query.matches_dates(entry)
                     && query.size_bounds.is_none_or(|(minimum, maximum)| {
                         entry
@@ -250,11 +261,7 @@ impl LocalFilesIndex {
 fn extension_counts<'a>(names: impl Iterator<Item = &'a str>) -> String {
     let mut counts = HashMap::new();
     for name in names {
-        let extension = Path::new(name)
-            .extension()
-            .and_then(|part| part.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
+        let extension = file_extension(name).unwrap_or_default().to_lowercase();
         *counts.entry(extension).or_insert(0usize) += 1;
     }
     let mut rows = counts.into_iter().collect::<Vec<_>>();
@@ -273,6 +280,15 @@ fn extension_counts<'a>(names: impl Iterator<Item = &'a str>) -> String {
     output
 }
 
+fn file_extension(name: &str) -> Option<&str> {
+    Path::new(name).extension().and_then(|part| part.to_str())
+}
+
+fn extension_options(list: &str) -> impl Iterator<Item = &str> {
+    list.split([',', '，'])
+        .map(|extension| extension.strip_prefix('.').unwrap_or(extension))
+}
+
 #[derive(Clone, Copy)]
 struct FileQuery<'a> {
     directory: &'a str,
@@ -282,6 +298,7 @@ struct FileQuery<'a> {
     size_bounds: Option<(u64, u64)>,
     modified: DateBounds,
     created: DateBounds,
+    extensions: Option<&'a str>,
     output: FileOutput,
 }
 
@@ -361,6 +378,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let mut entry_type = DirectoryEntryType::All;
     let (mut minimum, mut maximum) = (None, None);
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
+    let mut extensions = None;
     let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
         match option.to_ascii_lowercase().as_str() {
@@ -390,6 +408,15 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             _ => {
                 let (comparison, quantity) = option.split_once('=')?;
                 match comparison.to_ascii_lowercase().as_str() {
+                    "后缀" | "ext" if extensions.is_none() => {
+                        if extension_options(quantity).any(|extension| {
+                            extension.is_empty()
+                                || extension.contains(['.', '*', '?', '/', '\\', ':', '|'])
+                        }) {
+                            return None;
+                        }
+                        extensions = Some(quantity);
+                    }
                     "大小>" | "size>" => set_bound(&mut minimum, exact_byte_quantity(quantity)?)?,
                     "大小<" | "size<" => set_bound(&mut maximum, exact_byte_quantity(quantity)?)?,
                     "修改>" | "modified>" => {
@@ -409,7 +436,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             }
         }
     }
-    if output == FileOutput::ExtensionCounts {
+    if output == FileOutput::ExtensionCounts || extensions.is_some() {
         if entry_type == DirectoryEntryType::Directory {
             return None;
         }
@@ -437,6 +464,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
         size_bounds,
         modified,
         created,
+        extensions,
         output,
     })
 }
@@ -759,6 +787,38 @@ mod tests {
         assert!(split_query(r"C:\Work | | 修改>=2026-11-31").is_none());
         assert!(split_query(r"C:\Work | | 创建>=2026-11-22 创建<=2026-11-21").is_none());
         assert!(split_query(r"C:\Work | | 修改>=2026-11-21 modified>=2026-11-21").is_none());
+    }
+
+    #[test]
+    fn filters_several_case_insensitive_file_extensions_without_a_new_read() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | | 后缀=.PDF,md";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("报告.PDF", "file"),
+                entry("说明.MD", "file"),
+                entry("归档.pdf.zip", "file"),
+                entry(".md", "file"),
+                entry("旧资料.pdf", "directory"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query), Results::Destinations(items)
+                if items.iter().filter_map(|item| match item {
+                    Destination::LocalFile { name, .. } => Some(name.as_str()),
+                    _ => None,
+                }).eq(["报告.PDF", "说明.MD"])
+        ));
+        assert!(index.request(Some(r"C:\Work | | ext=zip")).is_none());
+        assert!(
+            matches!(index.results(r"C:\Work | | ext=zip"), Results::Destinations(items)
+            if matches!(items.as_slice(), [Destination::LocalFile { name, .. }] if name == "归档.pdf.zip"))
+        );
+        assert!(split_query(r"C:\Work | | 后缀=pdf,").is_none());
+        assert!(split_query(r"C:\Work | | 后缀=pdf 仅文件夹").is_none());
     }
 
     #[test]

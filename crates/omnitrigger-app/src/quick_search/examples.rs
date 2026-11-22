@@ -255,6 +255,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 零空间 0,2,3; 0,4,6",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算矩阵行空间的维数和基",
+        query: "矩阵: 行空间 1,2,3; 2,4,6; 0,1,1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "从原矩阵主元列得到列空间的基",
+        query: "矩阵: 列空间 1,2,3; 2,4,6; 0,1,1",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算方阵主对角线的和",
         query: "矩阵: 迹 1/2,20; 3,-1/3",
