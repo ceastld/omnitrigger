@@ -70,6 +70,7 @@
 - 输入 `文件夹:` 可浏览桌面、下载、文档、图片、音乐和视频。也可用 `文件夹: 下载` 或 `folder: downloads` 筛选，按回车打开选中的文件夹。 [Windows 已知文件夹](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 输入 `文件: C:\工作 | 报告` 可在指定本地目录的直接子项中按名称查找。按回车复制所选项的完整路径。分隔符后的名称可留空，多个关键词用空格隔开。匹配本地固定卷上的普通文件和文件夹。
 - 在文件搜索中选中文件夹后按 `Tab` 可进入该文件夹，按 `Alt+↑` 可回到上一级。也可用 `文件: C:\工作 | *.pdf` 或 `报告?.docx` 按 Windows 文件名通配规则匹配。 [Windows 文件名通配规则](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew)
+- 找到文件后可按 `Alt+Enter` 或点选中行的「定位」，在资源管理器中选中该文件或文件夹。
 - 输入 `文件: C:\工作 | *.pdf | 最近修改` 可把匹配项按最后修改时间从新到旧排列。可留空中间的名称条件，修改时间相同的按名称排列。 [Windows 目录项的最后修改时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw)
 - 输入 `文件: C:\工作 | *.pdf | 最近创建` 可按创建时间从新到旧排列。创建时间相同的按名称排列，缺少创建时间的项排在最后。 [Windows 目录项的创建时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
 - 输入 `文件: C:\工作 | *.pdf | 大小` 可把匹配文件按字节数从大到小排列，并在每个文件下方显示字节数。同样大小的文件按名称排列，匹配的文件夹排在文件之后。 [Windows 目录项的文件大小](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
@@ -109,6 +110,7 @@
 - 精确算式也支持 `//` 向下取整和 `%` 求余，规则与普通计算器一致。`分数: 计算 2**80//3` 得到 `402975273204876391568725`。
 - 输入 `分数: 计算 pow(2,10,1000)` 可直接算出模幂 `24`。`pow(3,-1,11)` 得到模 `11` 下的乘法逆元 `4`。三参数写法要求参数为整数、模数非零，支持与 Python 一致的负模数结果符号。指数和模数各最多 1024 个二进制位。 [Python `pow` 文档](https://docs.python.org/3/library/functions.html#pow)
 - 输入 `分数: 小数 1/3 to 8` 可舍入为 `0.33333333`。支持 0 至 100 位小数并保留尾零，正好在中点时末位取偶数。
+- 输入 `分数: 计算 round(2.675,2)` 得到精确值 `67/25`，即 `2.68`。位数可用 -100 至 100 的整数，省略时舍入到整数，中点取偶数。可以把舍入结果直接用于精确算式。 [Python 分数舍入规则](https://docs.python.org/3/library/fractions.html#fractions.Fraction.__round__)
 - 输入 `分数: 循环小数 1/7` 得到 `0.(142857)`。括号内为最短循环节，有限小数直接显示，例如 `1/8` 得到 `0.125`。最多展开 512 位小数。
 - 输入 `分数: 取值表 [-2,0,3/2] x**2+1/3` 可在同一算式中依次代入数值，得到 `13/3`、`1/3` 和 `31/12`。方括号内可填写 1 至 12 个整数、小数或分数，结果用制表符分隔两列，保留输入顺序。
 - 输入 `分数: 连分数 355/113` 得到 `[3,7,16]`，用 `分数: 从连分数 [3,7,16]` 可精确还原。第一项为整数，后续项须为正整数，最多 512 项。 [NIST 连分数定义](https://dlmf.nist.gov/1.12.i)

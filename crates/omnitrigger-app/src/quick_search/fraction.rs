@@ -33,6 +33,7 @@ pub(super) enum FractionError {
     CombinatorialDomain,
     CombinatorialRange,
     DecimalPlaces,
+    RoundPlaces,
     RepeatingDecimalLength,
     TableInputs,
     ContinuedFractionArguments,
@@ -57,6 +58,7 @@ impl FractionError {
             Self::CombinatorialDomain => "组合数和排列数的参数必须是非负整数",
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
+            Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::TableInputs => {
                 "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
@@ -333,15 +335,19 @@ fn repeating_decimal(value: &BigRational) -> Result<String, FractionError> {
     Ok(text)
 }
 
-fn rounded_decimal(value: BigRational, places: u32) -> String {
-    let unit = BigUint::from(10u8).pow(places);
-    let numerator = value.numer().magnitude() * unit;
-    let denominator = value.denom().magnitude();
-    let mut rounded = &numerator / denominator;
+fn round_magnitude_to_even(numerator: &BigUint, denominator: &BigUint) -> BigUint {
+    let mut rounded = numerator / denominator;
     let twice_remainder = (numerator - &rounded * denominator) << 1usize;
     if &twice_remainder > denominator || (&twice_remainder == denominator && rounded.bit(0)) {
         rounded += 1u8;
     }
+    rounded
+}
+
+fn rounded_decimal(value: BigRational, places: u32) -> String {
+    let unit = BigUint::from(10u8).pow(places);
+    let numerator = value.numer().magnitude() * unit;
+    let rounded = round_magnitude_to_even(&numerator, value.denom().magnitude());
     let sign = if value.numer().sign() == Sign::Minus && rounded.bits() != 0 {
         "-"
     } else {
@@ -357,6 +363,25 @@ fn rounded_decimal(value: BigRational, places: u32) -> String {
         let (whole, fraction) = digits.split_at(digits.len() - places);
         format!("{sign}{whole}.{fraction}")
     }
+}
+
+fn rational_round(value: BigRational, places: i32) -> Result<BigRational, FractionError> {
+    let unit = BigUint::from(10u8).pow(places.unsigned_abs());
+    let numerator = value.numer().magnitude();
+    let denominator = value.denom().magnitude();
+    let rounded = if places < 0 {
+        round_magnitude_to_even(numerator, &(denominator * &unit)) * &unit
+    } else {
+        round_magnitude_to_even(&(numerator * &unit), denominator)
+    };
+    let integer = BigInt::from_biguint(value.numer().sign(), rounded);
+    let result = if places < 0 {
+        BigRational::from_integer(integer)
+    } else {
+        BigRational::new(integer, unit.into())
+    };
+    ensure_exact_size(&result)?;
+    Ok(result)
 }
 
 pub(super) fn exact_abs_square_root(value: &BigRational) -> Option<BigRational> {
@@ -642,6 +667,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.power_function();
         }
+        if name.eq_ignore_ascii_case("round") {
+            self.remaining = rest;
+            return self.round_function();
+        }
         let function = if name.eq_ignore_ascii_case("comb") {
             CombinatorialFunction::Combination
         } else if name.eq_ignore_ascii_case("perm") {
@@ -685,6 +714,29 @@ impl FractionParser<'_> {
             Some(modulus) => modular_power(base, exponent, modulus),
             None => rational_power(base, exponent),
         }
+    }
+
+    fn round_function(&mut self) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let value = self.sum()?;
+        let places = if self.consume(',') {
+            let places = self.sum()?;
+            if !places.is_integer() {
+                return Err(FractionError::RoundPlaces);
+            }
+            i32::try_from(places.numer())
+                .ok()
+                .filter(|places| places.unsigned_abs() <= MAX_DECIMAL_PLACES)
+                .ok_or(FractionError::RoundPlaces)?
+        } else {
+            0
+        };
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        rational_round(value, places)
     }
 
     fn signed_number(&mut self) -> Result<BigRational, FractionError> {
@@ -919,6 +971,30 @@ mod tests {
             ("计算 comb(8,2,1)", FractionError::Invalid),
         ] {
             assert_eq!(simplify_fraction(input), Err(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn rounds_inside_exact_expressions_to_even_and_accepts_negative_places() {
+        for (expression, expected) in [
+            ("round(1/3,2)*3", "99/100"),
+            ("ROUND(2.675,1+1)", "67/25"),
+            ("round(1250,-2)", "1200"),
+            ("round(-1350,-2)", "-1400"),
+            ("round(5/2)", "2"),
+            ("round(-3/2)", "-2"),
+            ("round(-1/3)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(expression).unwrap().to_string(),
+                expected
+            );
+        }
+        for expression in ["round(1,101)", "round(1,-101)", "round(1,1/2)"] {
+            assert_eq!(
+                calculate_fraction(expression),
+                Err(FractionError::RoundPlaces)
+            );
         }
     }
 

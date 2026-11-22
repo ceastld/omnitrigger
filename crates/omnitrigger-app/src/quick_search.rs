@@ -49,7 +49,7 @@ mod wheel_slots;
 mod wheels;
 mod windows_settings;
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, path::Path, rc::Rc};
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
@@ -1385,6 +1385,18 @@ impl QuickSearch {
         .detach();
     }
 
+    fn reveal_selected_file(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Results::Destinations(items) = &self.results else {
+            return false;
+        };
+        let Some(Destination::LocalFile { path, .. }) = items.get(self.selected) else {
+            return false;
+        };
+        cx.reveal_path(Path::new(path));
+        window.remove_window();
+        true
+    }
+
     fn confirm(&self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.results {
             Results::Value(Ok(result)) => {
@@ -1484,6 +1496,10 @@ impl QuickSearch {
                     PageChange::Last
                 };
                 if self.change_page(page, cx) {
+                    cx.stop_propagation();
+                }
+            } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "enter" {
+                if !event.is_held && self.reveal_selected_file(window, cx) {
                     cx.stop_propagation();
                 }
             } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "up" {
@@ -2123,6 +2139,29 @@ impl QuickSearch {
                                         };
                                         row.child(
                                             div().text_color(rgb(theme::TEXT_MUTED)).child(hint),
+                                        )
+                                        .when(
+                                            matches!(&destination, Destination::LocalFile { .. }),
+                                            |row| {
+                                                row.child(
+                                                    button(
+                                                        "search-reveal-file",
+                                                        "定位",
+                                                        Tone::Ghost,
+                                                        true,
+                                                    )
+                                                    .h(px(25.))
+                                                    .px(px(6.))
+                                                    .flex_none()
+                                                    .tooltip(theme::text_tooltip(
+                                                        "Alt+Enter 在资源管理器中定位".into(),
+                                                    ))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        this.reveal_selected_file(window, cx);
+                                                    })),
+                                                )
+                                            },
                                         )
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| {
