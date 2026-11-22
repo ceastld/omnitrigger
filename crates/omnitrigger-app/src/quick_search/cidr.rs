@@ -4,6 +4,8 @@ use num_bigint::BigUint;
 
 use super::calculator::normalize;
 
+const MAX_SUBNETS: u32 = 128;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CidrError {
     Incomplete,
@@ -11,6 +13,8 @@ pub(super) enum CidrError {
     Prefix,
     DifferentFamilies,
     ReversedRange,
+    ChildPrefix,
+    TooManySubnets,
 }
 
 impl CidrError {
@@ -21,6 +25,8 @@ impl CidrError {
             Self::Prefix => "请输入有效的前缀长度或连续的 IPv4 掩码",
             Self::DifferentFamilies => "地址和网段须使用相同的 IP 版本",
             Self::ReversedRange => "起始地址不得大于结束地址",
+            Self::ChildPrefix => "子网的前缀长度须大于或等于原网段",
+            Self::TooManySubnets => "每次最多列出 128 个子网，请减小前缀差",
         }
     }
 }
@@ -83,6 +89,7 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
         match operation.to_ascii_lowercase().as_str() {
             "覆盖" | "cover" => return range_to_cidr(range, true),
             "分解" | "range-to-cidr" => return range_to_cidr(range, false),
+            "子网" | "subnets" => return split_subnets(range),
             _ => {}
         }
     }
@@ -95,14 +102,8 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
         .map_or((input.as_str(), None), |(network, member)| {
             (network, Some(member.trim()))
         });
-    let (address, prefix) = network.split_once('/').ok_or(CidrError::Incomplete)?;
-    let address = address.trim();
-    if address.is_empty() {
-        return Err(CidrError::Incomplete);
-    }
-    let address = address.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
+    let (address, prefix) = parse_network(network)?;
     let width = address_width(address);
-    let prefix = prefix_length(prefix, width)?;
     let host_bits = width - prefix;
     let host_mask = host_mask(host_bits);
     let first = bits(address) & !host_mask;
@@ -134,6 +135,44 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
         as_address(first, width),
         as_address(last, width)
     ))
+}
+
+fn parse_network(input: &str) -> Result<(IpAddr, u32), CidrError> {
+    let (address, prefix) = input.split_once('/').ok_or(CidrError::Incomplete)?;
+    let address = address.trim();
+    if address.is_empty() {
+        return Err(CidrError::Incomplete);
+    }
+    let address = address.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
+    let prefix = prefix_length(prefix, address_width(address))?;
+    Ok((address, prefix))
+}
+
+fn split_subnets(input: &str) -> Result<String, CidrError> {
+    let (network, target) = input
+        .split_once(['到', '至'])
+        .or_else(|| {
+            let index = input.to_ascii_lowercase().find(" to ")?;
+            Some((&input[..index], &input[index + " to ".len()..]))
+        })
+        .ok_or(CidrError::Incomplete)?;
+    let (address, prefix) = parse_network(network)?;
+    let width = address_width(address);
+    let target = target.trim();
+    let child = prefix_length(target.strip_prefix('/').unwrap_or(target), width)?;
+    let extra = child.checked_sub(prefix).ok_or(CidrError::ChildPrefix)?;
+    let count = 1u32
+        .checked_shl(extra)
+        .filter(|&count| count <= MAX_SUBNETS)
+        .ok_or(CidrError::TooManySubnets)?;
+    let first = bits(address) & !host_mask(width - prefix);
+    let mut subnets = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        // IPv6 /0 的同前缀查询只有首个网段，因此偏移为零。
+        let offset = u128::from(index).checked_shl(width - child).unwrap_or(0);
+        subnets.push(format!("{}/{child}", as_address(first + offset, width)));
+    }
+    Ok(subnets.join("\n"))
 }
 
 fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
@@ -177,6 +216,29 @@ fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_ipv4_and_ipv6_prefixes_into_ordered_subnets_with_bounded_output() {
+        for (query, expected) in [
+            (
+                "子网 192.0.2.137/26 到 /28",
+                "192.0.2.128/28\n192.0.2.144/28\n192.0.2.160/28\n192.0.2.176/28",
+            ),
+            ("subnets 2001:db8::3/126 TO 127", "2001:db8::/127\n2001:db8::2/127"),
+            ("子网 ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/127 至 /128", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/128\nffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"),
+            ("子网 ::/0 到 /0", "::/0"),
+        ] {
+            assert_eq!(calculate_cidr(query).as_deref(), Ok(expected));
+        }
+        for (query, expected) in [
+            ("子网 192.0.2.137/26 到 /25", CidrError::ChildPrefix),
+            ("子网 192.0.2.137/26 到 /33", CidrError::Prefix),
+            ("子网 ::/0 到 /8", CidrError::TooManySubnets),
+            ("子网 ::/0 到 /128", CidrError::TooManySubnets),
+        ] {
+            assert_eq!(calculate_cidr(query), Err(expected));
+        }
+    }
 
     #[test]
     fn converts_ranges_to_one_covering_network_or_exact_cidr_blocks() {

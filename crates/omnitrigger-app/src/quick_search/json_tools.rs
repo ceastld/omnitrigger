@@ -3,6 +3,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     fmt,
+    ops::Range,
 };
 
 use num_bigint::BigInt;
@@ -47,6 +48,7 @@ pub(super) enum JsonError {
     SelectionConflict,
     FilterValue,
     ReplacementValue,
+    RemoveRoot,
     NumberFilter,
     ExpectedScalar,
     ExpectedNumber,
@@ -87,6 +89,7 @@ impl JsonError {
             Self::SelectionConflict => "待选键在同一对象中重复出现",
             Self::FilterValue => "路径后请输入 JSON 字符串、数字、布尔值或 null，再粘贴数组",
             Self::ReplacementValue => "路径后填入一个完整的新 JSON 值，再用空格隔开原 JSON",
+            Self::RemoveRoot => "删路径需要指向一个对象成员或数组项",
             Self::NumberFilter => "路径后填写比较符和 JSON 数字，例如 /价格 >= 1.5",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
@@ -142,6 +145,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "展平" | "flatten" => return write_pointer_leaves(source, true),
         "改键" | "rename-key" => return rename_json_key(source),
         "改值" | "replace" => return replace_json_value(source),
+        "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "转csv" | "to-csv" => return json_to_csv(source),
         "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
@@ -300,19 +304,82 @@ fn replace_json_value(query: &str) -> Result<String, JsonError> {
     let (replacement, source) = json_value_and_source(query, JsonError::ReplacementValue)?;
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let selected = select_json_path(root, &pointer)?.get();
+    let range = raw_value_span(source, selected)?;
+    let mut output = source.to_owned();
+    output.replace_range(range, replacement.get());
+    Ok(output)
+}
+
+fn raw_value_span(source: &str, selected: &str) -> Result<Range<usize>, JsonError> {
     // 借用的 RawValue 直接指向输入切片，可以用字节位置保留其余原文。
     let start = selected
         .as_ptr()
         .addr()
         .checked_sub(source.as_ptr().addr())
         .ok_or(JsonError::Invalid)?;
-    let range = start..start + selected.len();
-    if source.get(range.clone()) != Some(selected) {
-        return Err(JsonError::Invalid);
-    }
+    let end = start
+        .checked_add(selected.len())
+        .ok_or(JsonError::Invalid)?;
+    let range = start..end;
+    (source.get(range.clone()) == Some(selected))
+        .then_some(range)
+        .ok_or(JsonError::Invalid)
+}
+
+fn remove_json_path(query: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let (key, ancestors) = keys.split_last().ok_or(JsonError::RemoveRoot)?;
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let parent = select_pointer_keys(root, ancestors)?.get();
+    let (spans, index) = match parent.as_bytes()[0] {
+        b'[' => {
+            let index = json_array_index(key)?;
+            let items = read_json_array(parent)?;
+            let spans = items
+                .into_iter()
+                .map(|item| raw_value_span(source, item.get()))
+                .collect::<Result<Vec<_>, _>>()?;
+            (spans, index)
+        }
+        b'{' => object_member_spans(source, parent, key)?,
+        _ => return Err(JsonError::MissingValue),
+    };
+    let selected = spans.get(index).ok_or(JsonError::MissingValue)?;
+    let range = if let Some(next) = spans.get(index + 1) {
+        selected.start..next.start
+    } else if index > 0 {
+        spans[index - 1].end..selected.end
+    } else {
+        selected.clone()
+    };
     let mut output = source.to_owned();
-    output.replace_range(range, replacement.get());
+    output.replace_range(range, "");
     Ok(output)
+}
+
+fn object_member_spans(
+    source: &str,
+    parent: &str,
+    key: &str,
+) -> Result<(Vec<Range<usize>>, usize), JsonError> {
+    let mut spans = Vec::new();
+    let mut found = None;
+    let mut previous = raw_value_span(source, parent)?.start + 1;
+    for (name, value) in read_object_entries(parent)? {
+        if name == key && found.replace(spans.len()).is_some() {
+            return Err(JsonError::DuplicateKey);
+        }
+        let value = raw_value_span(source, value.get())?;
+        // 上一项的值到本项的值之间，第一个双引号开始本项的键。
+        let name_offset = source
+            .get(previous..value.start)
+            .and_then(|prefix| prefix.find('"'))
+            .ok_or(JsonError::Invalid)?;
+        spans.push(previous + name_offset..value.end);
+        previous = value.end;
+    }
+    Ok((spans, found.ok_or(JsonError::MissingValue)?))
 }
 
 fn select_json_column(query: &str) -> Result<String, JsonError> {
@@ -1219,17 +1286,19 @@ fn select_member<'a>(value: &'a RawValue, key: &str) -> Result<&'a RawValue, Jso
         )
         .map_err(json_parse_error)?,
         b'[' => {
-            if (key.len() > 1 && key.starts_with('0'))
-                || !key.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                return Err(JsonError::MissingValue);
-            }
-            let index = key.parse::<usize>().map_err(|_| JsonError::MissingValue)?;
+            let index = json_array_index(key)?;
             let items = serde_json::from_str::<Vec<&RawValue>>(raw).map_err(json_parse_error)?;
             items.get(index).copied().ok_or(JsonError::MissingValue)
         }
         _ => Err(JsonError::MissingValue),
     }
+}
+
+fn json_array_index(key: &str) -> Result<usize, JsonError> {
+    if (key.len() > 1 && key.starts_with('0')) || !key.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(JsonError::MissingValue);
+    }
+    key.parse().map_err(|_| JsonError::MissingValue)
 }
 
 fn json_keys(source: &str) -> Result<String, JsonError> {
@@ -2136,6 +2205,36 @@ mod tests {
             (r#"改值 /- 9 [1,2]"#, JsonError::MissingValue),
             (r#"改值 /x {}{"x":1}"#, JsonError::ReplacementValue),
             (r#"改值 /x 1"#, JsonError::Incomplete),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn removes_existing_members_and_items_without_reserializing_other_json() {
+        for (query, expected) in [
+            (
+                r#"删路径 /a~1b/1 {"a/b":[1.50, 2 , 2],"keep":1e2}"#,
+                r#"{"a/b":[1.50, 2],"keep":1e2}"#,
+            ),
+            (
+                r#"remove-path /a {"a": 1,  "\u0062" : 2.0 }"#,
+                r#"{"\u0062" : 2.0 }"#,
+            ),
+            (
+                r#"删路径 /arr/2 {"arr": [10, 20 , 30 ]}"#,
+                r#"{"arr": [10, 20 ]}"#,
+            ),
+            (r#"删路径 /a { "a" : null }"#, "{  }"),
+            (r#"删路径 /0 [null]"#, "[]"),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (r#"删路径 "" {"a":1}"#, JsonError::RemoveRoot),
+            (r#"删路径 /a {"a":1,"\u0061":2}"#, JsonError::DuplicateKey),
+            (r#"删路径 /01 [1,2]"#, JsonError::MissingValue),
+            (r#"删路径 /a/b {"a":null}"#, JsonError::MissingValue),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }

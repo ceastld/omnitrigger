@@ -670,6 +670,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "网段: 分解 192.0.2.1 至 192.0.2.6",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按指定前缀长度划分子网",
+        query: "网段: 子网 192.0.2.137/26 到 /28",
+    },
+    Example {
         icon: Icon::Clock,
         title: "Unix 时间戳",
         query: "时间戳: 1700000000123ms",
@@ -1717,6 +1722,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "删除 JSON 深处的成员或数组项",
+        query: r#"JSON: 删路径 /订单/0/备注 {"订单":[{"金额":1.50,"备注":"草稿"}],"税率":0.10}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除指定的顶层 JSON 键",
         query: r#"JSON: 去键 ["调试","备注"] {"值":1,"调试":true,"备注":"草稿"}"#,
     },
@@ -2352,6 +2362,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
+        Scope::Cidr if !term.is_empty() && "子网".starts_with(term) => {}
         Scope::Duration
             if !term.is_empty()
                 && [
