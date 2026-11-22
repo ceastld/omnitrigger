@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
     path::Path,
     sync::{
@@ -281,6 +281,12 @@ impl LocalFilesIndex {
                 matches.into_iter().map(|(_, entry)| entry),
             )));
         }
+        if let FileOutput::MonthCounts(field) = query.output {
+            return Results::text_value(Ok(file_month_counts(
+                matches.into_iter().map(|(_, entry)| entry),
+                field,
+            )));
+        }
         if query.output == FileOutput::Json
             || (matches!(query.output, FileOutput::Lines | FileOutput::Names)
                 && !matches.is_empty())
@@ -388,6 +394,37 @@ fn format_filetime(ticks: u64) -> String {
         .unwrap_or_default()
 }
 
+fn file_month_counts<'a>(
+    entries: impl Iterator<Item = &'a LocalDirectoryEntry>,
+    field: FileMonth,
+) -> String {
+    let mut counts = BTreeMap::new();
+    for entry in entries.filter(|entry| entry.kind == "file") {
+        let month = entry.metadata.as_ref().and_then(|time| {
+            let (raw, local) = match field {
+                FileMonth::Modified => (time.write_utc_100ns, time.write_local_ticks),
+                FileMonth::Created => (time.creation_utc_100ns, time.creation_local_ticks),
+            };
+            if raw == 0 {
+                return None;
+            }
+            let day = i32::try_from(local / TICKS_PER_DAY + 1).ok()?;
+            let date = NaiveDate::from_num_days_from_ce_opt(day)?;
+            Some((date.year(), date.month()))
+        });
+        *counts.entry(month).or_insert(0usize) += 1;
+    }
+    let mut output = String::from("月份,数量");
+    for (month, count) in counts.into_iter().rev() {
+        match month {
+            Some((year, month)) => write!(output, "\r\n{year:04}-{month:02},{count}"),
+            None => write!(output, "\r\n时间未知,{count}"),
+        }
+        .expect("写入字符串不会失败");
+    }
+    output
+}
+
 fn file_extension(name: &str) -> Option<&str> {
     Path::new(name).extension().and_then(|part| part.to_str())
 }
@@ -413,7 +450,12 @@ struct FileQuery<'a> {
 
 impl FileQuery<'_> {
     fn needs_timestamps(&self) -> bool {
-        self.modified.is_active() || self.created.is_active() || self.output == FileOutput::TimeCsv
+        self.modified.is_active()
+            || self.created.is_active()
+            || matches!(
+                self.output,
+                FileOutput::TimeCsv | FileOutput::MonthCounts(_)
+            )
     }
 
     fn matches_dates(&self, entry: &LocalDirectoryEntry) -> bool {
@@ -471,12 +513,19 @@ fn set_bound(bound: &mut Option<u64>, value: u64) -> Option<()> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum FileMonth {
+    Modified,
+    Created,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FileOutput {
     Entries,
     Lines,
     Names,
     Json,
     TimeCsv,
+    MonthCounts(FileMonth),
     ExtensionCounts,
     ExtensionSizes,
     SizeTotal,
@@ -517,6 +566,12 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             }
             "时间csv" | "time-csv" if output == FileOutput::Entries => {
                 output = FileOutput::TimeCsv
+            }
+            "修改月份统计" | "modified-month-counts" if output == FileOutput::Entries => {
+                output = FileOutput::MonthCounts(FileMonth::Modified)
+            }
+            "创建月份统计" | "created-month-counts" if output == FileOutput::Entries => {
+                output = FileOutput::MonthCounts(FileMonth::Created)
             }
             "后缀统计" | "extension-counts" if output == FileOutput::Entries => {
                 output = FileOutput::ExtensionCounts
@@ -568,7 +623,10 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     }
     if matches!(
         output,
-        FileOutput::ExtensionCounts | FileOutput::ExtensionSizes | FileOutput::SizeTotal
+        FileOutput::ExtensionCounts
+            | FileOutput::ExtensionSizes
+            | FileOutput::MonthCounts(_)
+            | FileOutput::SizeTotal
     ) || extensions.is_some()
     {
         if entry_type == DirectoryEntryType::Directory {
@@ -1135,6 +1193,63 @@ mod tests {
         ] {
             assert!(split_query(invalid).is_none(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn groups_files_by_local_calendar_month_and_keeps_missing_times_separate() {
+        let modified = r"C:\Work | | 修改月份统计";
+        let created = r"C:\Work | | created-month-counts";
+        let mut index = LocalFilesIndex::default();
+        let load = index.request(Some(modified)).unwrap();
+        assert!(load.timestamps);
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        let timed_entry = |name, kind, created, modified| {
+            let mut entry = entry(name, kind);
+            entry.metadata = Some(omnitrigger_windows::LocalDirectoryMetadata {
+                ordinal: 0,
+                attributes: 0,
+                creation_utc_100ns: 116_444_736_000_000_000,
+                access_utc_100ns: 0,
+                write_utc_100ns: 116_444_736_000_000_000,
+                creation_local_ticks: calendar_day(created).unwrap() * TICKS_PER_DAY,
+                access_local_ticks: 0,
+                write_local_ticks: (calendar_day(modified).unwrap() + 1) * TICKS_PER_DAY - 1,
+                time_zone_key: "测试".to_owned(),
+            });
+            entry
+        };
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                timed_entry("a.txt", "file", "2023-12-31", "2024-01-31"),
+                timed_entry("b.txt", "file", "2024-01-01", "2024-02-01"),
+                timed_entry("c.pdf", "file", "2024-01-01", "2024-02-29"),
+                timed_entry("ignored", "directory", "2024-02-01", "2024-02-01"),
+                entry("unknown.txt", "file"),
+            ]),
+        ));
+        assert!(index.request(Some(created)).is_none());
+        for (query, expected) in [
+            (
+                modified,
+                "月份,数量\r\n2024-02,2\r\n2024-01,1\r\n时间未知,1",
+            ),
+            (created, "月份,数量\r\n2024-01,2\r\n2023-12,1\r\n时间未知,1"),
+            (
+                r"C:\Work | | 修改月份统计 修改>=2024-02-01 后缀=txt",
+                "月份,数量\r\n2024-02,1",
+            ),
+            (r"C:\Work | absent | 修改月份统计", "月份,数量"),
+        ] {
+            assert!(
+                matches!(
+                    index.results(query), Results::Value(Ok(value)) if value.text == expected
+                ),
+                "{query}"
+            );
+        }
+        assert!(split_query(r"C:\Work | | 修改月份统计 仅文件夹").is_none());
+        assert!(split_query(r"C:\Work | | 修改月份统计 创建月份统计").is_none());
     }
 
     #[test]
