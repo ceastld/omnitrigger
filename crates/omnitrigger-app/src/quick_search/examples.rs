@@ -3623,6 +3623,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "同时得到向下取整的商和精确余数",
+        query: "分数: 商和余数 -7,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把多项精确数值化为最简整数比",
         query: "分数: 化简比例 0.5,3/4,1",
     },
@@ -3741,6 +3746,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "限分母",
                     "质因数分解",
                     "因数统计",
+                    "商和余数",
                     "化简比例",
                     "就近对齐",
                     "向下对齐",

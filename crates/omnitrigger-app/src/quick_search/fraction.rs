@@ -47,6 +47,7 @@ pub(super) enum FractionError {
     IntegerAggregate,
     PrimeFactorizationDomain,
     PrimeFactorizationRange,
+    QuotientRemainderArguments,
     BitwiseArguments,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
@@ -88,6 +89,7 @@ impl FractionError {
             Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
             Self::PrimeFactorizationDomain => "请填写非零整数",
             Self::PrimeFactorizationRange => "整数的绝对值最多为 1000000000000",
+            Self::QuotientRemainderArguments => "用逗号分开被除数和除数，例如 -7,3",
             Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
@@ -239,6 +241,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "因数统计" || verb.eq_ignore_ascii_case("divisor-stats") {
         return positive_divisor_stats(&calculate_fraction(expression)?);
     }
+    if verb == "商和余数" || verb.eq_ignore_ascii_case("divmod") {
+        return describe_quotient_and_remainder(expression);
+    }
     let alignment = match verb.to_ascii_lowercase().as_str() {
         "就近对齐" | "round-step" => Some(FractionAlignment::Nearest),
         "向下对齐" | "floor-step" => Some(FractionAlignment::Down),
@@ -359,6 +364,34 @@ fn positive_divisor_stats(value: &BigRational) -> Result<String, FractionError> 
         sum *= prime_sum;
     }
     Ok(format!("正因数个数 {count}\n正因数之和 {sum}"))
+}
+
+fn describe_quotient_and_remainder(input: &str) -> Result<String, FractionError> {
+    let mut terms = split_top_level_commas(input);
+    let (Some(dividend), Some(divisor), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(FractionError::QuotientRemainderArguments);
+    };
+    if dividend.trim().is_empty() || divisor.trim().is_empty() {
+        return Err(FractionError::QuotientRemainderArguments);
+    }
+    let dividend = calculate_fraction(dividend)?;
+    let divisor = calculate_fraction(divisor)?;
+    if divisor.numer().sign() == Sign::NoSign {
+        return Err(FractionError::ZeroDenominator);
+    }
+    let (quotient, remainder) = quotient_and_remainder(dividend, divisor);
+    ensure_exact_size(&quotient)?;
+    ensure_exact_size(&remainder)?;
+    Ok(format!("商 {quotient}\n余数 {remainder}"))
+}
+
+fn quotient_and_remainder(
+    dividend: BigRational,
+    divisor: BigRational,
+) -> (BigRational, BigRational) {
+    let quotient = (&dividend / &divisor).floor();
+    let remainder = dividend - divisor * &quotient;
+    (quotient, remainder)
 }
 
 fn simplify_ratio(input: &str) -> Result<String, FractionError> {
@@ -1084,10 +1117,7 @@ impl FractionParser<'_> {
                 Operator::Multiply => value * right,
                 Operator::Divide => value / right,
                 Operator::FloorDivide => (value / right).floor(),
-                Operator::Remainder => {
-                    let quotient = (&value / &right).floor();
-                    value - right * quotient
-                }
+                Operator::Remainder => quotient_and_remainder(value, right).1,
                 _ => unreachable!("这里只处理乘除级运算符"),
             };
             ensure_exact_size(&value)?;
@@ -1519,6 +1549,28 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn reports_floor_quotient_and_exact_remainder_for_both_divisor_signs() {
+        for (query, expected) in [
+            ("商和余数 -7,3", "商 -3\n余数 2"),
+            ("商和余数 7,-3", "商 -3\n余数 -2"),
+            ("divmod 1/2,-1/3", "商 -2\n余数 -1/6"),
+            ("商和余数 7,gcd(8,12)", "商 1\n余数 3"),
+            ("商和余数 0,-3", "商 0\n余数 0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("商和余数 1,0"),
+            Err(FractionError::ZeroDenominator)
+        );
+        assert_eq!(
+            simplify_fraction("商和余数 2,3,4"),
+            Err(FractionError::QuotientRemainderArguments)
+        );
+        assert_eq!(simplify_fraction("计算 -7%3").as_deref(), Ok("2"));
     }
 
     #[test]
