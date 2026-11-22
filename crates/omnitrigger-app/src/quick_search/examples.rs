@@ -240,6 +240,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 行最简形 0,2,3; 1,4,5; 2,8,10",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算矩阵零空间的维数和基",
+        query: "矩阵: 零空间 0,2,3; 0,4,6",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算方阵主对角线的和",
         query: "矩阵: 迹 1/2,20; 3,-1/3",

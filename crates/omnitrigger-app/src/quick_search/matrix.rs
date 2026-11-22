@@ -31,7 +31,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、乘法、乘方、数乘、行列式、迹、特征值、转置、求解、求逆、秩和行最简形"
+                "可用加法、减法、乘法、乘方、数乘、行列式、迹、特征值、转置、求解、求逆、秩、行最简形和零空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -63,8 +63,9 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "特征值" | "eigenvalues" => eigenvalues(&parse_matrix(input)?),
         "秩" | "rank" => matrix_rank(parse_matrix(input)?).map(|value| value.to_string()),
         "行最简形" | "行最简" | "rref" => {
-            reduced_row_echelon(parse_matrix(input)?).map(format_matrix)
+            reduced_row_echelon(parse_matrix(input)?).map(|(matrix, _)| format_matrix(matrix))
         }
+        "零空间" | "核空间" | "nullspace" => nullspace(parse_matrix(input)?),
         "加法" | "add" | "减法" | "subtract" => {
             let (left, right) = parse_pair(input)?;
             let subtract = matches!(operation.as_str(), "减法" | "subtract");
@@ -269,20 +270,46 @@ fn eliminate_below(
     Ok(())
 }
 
-fn reduced_row_echelon(mut matrix: Matrix) -> Result<Matrix, MatrixError> {
-    let mut row = 0;
+fn reduced_row_echelon(mut matrix: Matrix) -> Result<(Matrix, Vec<usize>), MatrixError> {
+    let mut pivot_columns = Vec::new();
     for column in 0..matrix[0].len() {
+        let row = pivot_columns.len();
         let Some(pivot) = find_pivot(&matrix, row, column) else {
             continue;
         };
         matrix.swap(row, pivot);
         reduce_pivot_column(&mut matrix, row, column)?;
-        row += 1;
-        if row == matrix.len() {
+        pivot_columns.push(column);
+        if pivot_columns.len() == matrix.len() {
             break;
         }
     }
-    Ok(matrix)
+    Ok((matrix, pivot_columns))
+}
+
+fn nullspace(matrix: Matrix) -> Result<String, MatrixError> {
+    let (matrix, pivot_columns) = reduced_row_echelon(matrix)?;
+    let width = matrix[0].len();
+    let basis = (0..width)
+        .filter(|column| !pivot_columns.contains(column))
+        .map(|free| {
+            let mut vector = vec![BigRational::default(); width];
+            vector[free] = BigRational::from_integer(1.into());
+            for (&pivot, equation) in pivot_columns.iter().zip(&matrix) {
+                vector[pivot] = -&equation[free];
+            }
+            vector
+        })
+        .collect::<Matrix>();
+    if basis.is_empty() {
+        Ok("零空间维数 0".to_owned())
+    } else {
+        Ok(format!(
+            "零空间维数 {}\n{}",
+            basis.len(),
+            format_matrix(basis)
+        ))
+    }
 }
 
 fn reduce_pivot_column(
@@ -426,6 +453,18 @@ mod tests {
             ("行最简形 0,0,-3", "0, 0, 1"),
             ("行最简形 0,0; 0,0", "0, 0\n0, 0"),
             ("rref 1/3; -2/3; 5", "1\n0\n0"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn finds_an_exact_basis_for_each_free_column() {
+        for (query, expected) in [
+            ("零空间 0,2,3; 0,4,6", "零空间维数 2\n1, 0, 0\n0, -3/2, 1"),
+            ("nullspace 1,2,-1; 0,0,1", "零空间维数 1\n-2, 1, 0"),
+            ("核空间 0,0; 0,0", "零空间维数 2\n1, 0\n0, 1"),
+            ("零空间 1,2; 3,4; 5,6", "零空间维数 0"),
         ] {
             assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
         }

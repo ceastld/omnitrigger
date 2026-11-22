@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{Datelike, NaiveDate};
 use omnitrigger_windows::{
     read_local_directory_with_options, DirectoryEntryType, DirectoryOrder, LocalDirectoryEntry,
     LocalDirectoryOptions, LocalStatError, MAX_DIRECTORY_ENTRIES,
@@ -20,6 +21,7 @@ use super::{
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
 const FOLDER_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const TICKS_PER_DAY: u64 = 864_000_000_000;
 
 #[derive(Default)]
 pub(super) struct LocalFilesIndex {
@@ -43,6 +45,7 @@ pub(super) struct DirectoryLoad {
     pattern: Option<String>,
     order: DirectoryOrder,
     entry_type: DirectoryEntryType,
+    timestamps: bool,
     cancelled: AtomicBool,
 }
 
@@ -52,6 +55,7 @@ impl DirectoryLoad {
             && self.pattern.as_deref() == wildcard_pattern(query.filter)
             && self.order == query.order
             && self.entry_type == query.entry_type
+            && self.timestamps == query.needs_timestamps()
     }
 
     pub(super) fn read(&self) -> Result<Vec<LocalDirectoryEntry>, String> {
@@ -59,7 +63,7 @@ impl DirectoryLoad {
         let options = LocalDirectoryOptions {
             max_entries: MAX_DIRECTORY_ENTRIES,
             order: self.order,
-            metadata: false,
+            metadata: self.timestamps,
             entry_type: self.entry_type,
             search_pattern: self.pattern.clone(),
         };
@@ -131,6 +135,7 @@ impl LocalFilesIndex {
             pattern: wildcard_pattern(query.filter).map(str::to_owned),
             order: query.order,
             entry_type: query.entry_type,
+            timestamps: query.needs_timestamps(),
             cancelled: AtomicBool::new(false),
         });
         self.current = Some(DirectoryRequest {
@@ -182,6 +187,7 @@ impl LocalFilesIndex {
             .iter()
             .filter(|entry| {
                 matches!(entry.kind, "file" | "directory")
+                    && query.matches_dates(entry)
                     && query.size_bounds.is_none_or(|(minimum, maximum)| {
                         entry
                             .size_bytes
@@ -274,7 +280,68 @@ struct FileQuery<'a> {
     order: DirectoryOrder,
     entry_type: DirectoryEntryType,
     size_bounds: Option<(u64, u64)>,
+    modified: DateBounds,
+    created: DateBounds,
     output: FileOutput,
+}
+
+impl FileQuery<'_> {
+    fn needs_timestamps(&self) -> bool {
+        self.modified.is_active() || self.created.is_active()
+    }
+
+    fn matches_dates(&self, entry: &LocalDirectoryEntry) -> bool {
+        !self.needs_timestamps()
+            || entry.metadata.as_ref().is_some_and(|time| {
+                self.modified
+                    .contains(time.write_utc_100ns, time.write_local_ticks)
+                    && self
+                        .created
+                        .contains(time.creation_utc_100ns, time.creation_local_ticks)
+            })
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DateBounds {
+    minimum: Option<u64>,
+    maximum: Option<u64>,
+}
+
+impl DateBounds {
+    fn is_active(self) -> bool {
+        self.minimum.is_some() || self.maximum.is_some()
+    }
+
+    fn is_valid(self) -> bool {
+        self.minimum
+            .zip(self.maximum)
+            .is_none_or(|(first, last)| first <= last)
+    }
+
+    fn contains(self, raw_time: u64, local_ticks: u64) -> bool {
+        let day = local_ticks / TICKS_PER_DAY;
+        !self.is_active()
+            || raw_time != 0
+                && self.minimum.is_none_or(|first| day >= first)
+                && self.maximum.is_none_or(|last| day <= last)
+    }
+}
+
+fn calendar_day(input: &str) -> Option<u64> {
+    if input.len() != 10 {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(input, "%Y-%m-%d").ok()?;
+    u64::try_from(date.num_days_from_ce() - 1).ok()
+}
+
+fn set_bound(bound: &mut Option<u64>, value: u64) -> Option<()> {
+    if bound.is_some() {
+        return None;
+    }
+    *bound = Some(value);
+    Some(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -293,6 +360,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let mut order = DirectoryOrder::Name;
     let mut entry_type = DirectoryEntryType::All;
     let (mut minimum, mut maximum) = (None, None);
+    let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
     let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
         match option.to_ascii_lowercase().as_str() {
@@ -321,12 +389,23 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             }
             _ => {
                 let (comparison, quantity) = option.split_once('=')?;
-                let bound = match comparison.to_ascii_lowercase().as_str() {
-                    "大小>" | "size>" if minimum.is_none() => &mut minimum,
-                    "大小<" | "size<" if maximum.is_none() => &mut maximum,
+                match comparison.to_ascii_lowercase().as_str() {
+                    "大小>" | "size>" => set_bound(&mut minimum, exact_byte_quantity(quantity)?)?,
+                    "大小<" | "size<" => set_bound(&mut maximum, exact_byte_quantity(quantity)?)?,
+                    "修改>" | "modified>" => {
+                        set_bound(&mut modified.minimum, calendar_day(quantity)?)?
+                    }
+                    "修改<" | "modified<" => {
+                        set_bound(&mut modified.maximum, calendar_day(quantity)?)?
+                    }
+                    "创建>" | "created>" => {
+                        set_bound(&mut created.minimum, calendar_day(quantity)?)?
+                    }
+                    "创建<" | "created<" => {
+                        set_bound(&mut created.maximum, calendar_day(quantity)?)?
+                    }
                     _ => return None,
-                };
-                *bound = Some(exact_byte_quantity(quantity)?);
+                }
             }
         }
     }
@@ -350,12 +429,14 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     } else {
         None
     };
-    (!directory.is_empty()).then_some(FileQuery {
+    (!directory.is_empty() && modified.is_valid() && created.is_valid()).then_some(FileQuery {
         directory,
         filter: filter.trim(),
         order,
         entry_type,
         size_bounds,
+        modified,
+        created,
         output,
     })
 }
@@ -625,6 +706,59 @@ mod tests {
         ] {
             assert!(split_query(invalid).is_none(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn filters_file_dates_by_inclusive_local_calendar_days_and_reuses_timestamps() {
+        use omnitrigger_windows::LocalDirectoryMetadata;
+
+        let mut index = LocalFilesIndex::default();
+        let plain = index.request(Some(r"C:\Work |")).unwrap();
+        assert!(!plain.timestamps);
+        let query = r"C:\Work | | 修改>=2026-11-21 修改<=2026-11-22 created<=2026-11-20";
+        let load = index.request(Some(query)).unwrap();
+        assert!(load.timestamps);
+        let first = calendar_day("2026-11-21").unwrap();
+        let with_times = |name, created, modified, available| {
+            let mut file = entry(name, "file");
+            file.metadata = Some(LocalDirectoryMetadata {
+                ordinal: 0,
+                attributes: 0,
+                creation_utc_100ns: 1,
+                access_utc_100ns: 0,
+                write_utc_100ns: u64::from(available),
+                creation_local_ticks: created * TICKS_PER_DAY,
+                access_local_ticks: 0,
+                write_local_ticks: (modified + 1) * TICKS_PER_DAY - 1,
+                time_zone_key: "测试".into(),
+            });
+            file
+        };
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                with_times("lower.txt", first - 1, first, true),
+                with_times("upper.txt", first - 2, first + 1, true),
+                with_times("old.txt", first - 2, first - 1, true),
+                with_times("new.txt", first - 1, first + 2, true),
+                with_times("created.txt", first, first + 1, true),
+                with_times("unknown.txt", first - 1, first, false),
+                entry("unavailable.txt", "file"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query), Results::Destinations(items)
+                if items.iter().filter_map(|item| match item {
+                    Destination::LocalFile { name, .. } => Some(name.as_str()),
+                    _ => None,
+                }).eq(["lower.txt", "upper.txt"])
+        ));
+        assert!(index
+            .request(Some(r"C:\Work | | 创建>=2026-11-09"))
+            .is_none());
+        assert!(split_query(r"C:\Work | | 修改>=2026-11-31").is_none());
+        assert!(split_query(r"C:\Work | | 创建>=2026-11-22 创建<=2026-11-21").is_none());
+        assert!(split_query(r"C:\Work | | 修改>=2026-11-21 modified>=2026-11-21").is_none());
     }
 
     #[test]
