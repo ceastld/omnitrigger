@@ -15,6 +15,7 @@ pub(super) enum MatrixError {
     UnevenRows,
     TooLarge,
     SquareRequired,
+    SumDimensions,
     ProductDimensions,
     SolveDimensions,
     Singular,
@@ -25,10 +26,11 @@ impl MatrixError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
-            Self::UnknownOperation => "可用操作为行列式、乘法、转置、求解、求逆和秩",
+            Self::UnknownOperation => "可用操作为加法、减法、乘法、行列式、转置、求解、求逆和秩",
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
             Self::SquareRequired => "行列式、求解和求逆需要方阵",
+            Self::SumDimensions => "加减法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
             Self::Singular => "系数矩阵不可逆，无法得到唯一解",
@@ -46,17 +48,23 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         .trim()
         .split_once(char::is_whitespace)
         .ok_or(MatrixError::Incomplete)?;
-    match operation.to_ascii_lowercase().as_str() {
+    let operation = operation.to_ascii_lowercase();
+    match operation.as_str() {
         "行列式" | "det" => determinant(parse_matrix(input)?).map(|value| value.to_string()),
         "秩" | "rank" => matrix_rank(parse_matrix(input)?).map(|value| value.to_string()),
+        "加法" | "add" | "减法" | "subtract" => {
+            let (left, right) = parse_pair(input)?;
+            let subtract = matches!(operation.as_str(), "减法" | "subtract");
+            add_or_subtract(left, right, subtract).map(format_matrix)
+        }
         "乘法" | "乘" | "multiply" => {
-            let (left, right) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
-            multiply(&parse_matrix(left)?, &parse_matrix(right)?).map(format_matrix)
+            let (left, right) = parse_pair(input)?;
+            multiply(&left, &right).map(format_matrix)
         }
         "转置" | "transpose" => Ok(format_matrix(transpose(parse_matrix(input)?))),
         "求解" | "solve" => {
-            let (left, right) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
-            solve(parse_matrix(left)?, parse_matrix(right)?).map(format_matrix)
+            let (left, right) = parse_pair(input)?;
+            solve(left, right).map(format_matrix)
         }
         "求逆" | "inverse" => {
             let matrix = parse_matrix(input)?;
@@ -72,6 +80,11 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         }
         _ => Err(MatrixError::UnknownOperation),
     }
+}
+
+fn parse_pair(input: &str) -> Result<(Matrix, Matrix), MatrixError> {
+    let (left, right) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
+    Ok((parse_matrix(left)?, parse_matrix(right)?))
 }
 
 fn parse_matrix(input: &str) -> Result<Matrix, MatrixError> {
@@ -205,6 +218,23 @@ fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
         .collect())
 }
 
+fn add_or_subtract(mut left: Matrix, right: Matrix, subtract: bool) -> Result<Matrix, MatrixError> {
+    if left.len() != right.len() || left[0].len() != right[0].len() {
+        return Err(MatrixError::SumDimensions);
+    }
+    for (left_row, right_row) in left.iter_mut().zip(right) {
+        for (left, right) in left_row.iter_mut().zip(right_row) {
+            if subtract {
+                *left -= right;
+            } else {
+                *left += right;
+            }
+            ensure_exact_size(left).map_err(MatrixError::Evaluation)?;
+        }
+    }
+    Ok(left)
+}
+
 fn multiply(left: &[Vec<BigRational>], right: &[Vec<BigRational>]) -> Result<Matrix, MatrixError> {
     if left[0].len() != right.len() {
         return Err(MatrixError::ProductDimensions);
@@ -251,6 +281,22 @@ fn format_matrix(matrix: Matrix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adds_and_subtracts_equal_shape_matrices_exactly() {
+        for (query, expected) in [
+            ("加法 1/2,2; 3,4 @ 1/3,5; -3,1", "5/6, 7\n0, 5"),
+            ("减法 1/2,2; 3,4 @ 1/3,5; -3,1", "1/6, -3\n6, 3"),
+            ("add 1/500,0.04 @ 3e-3,1/100", "1/200, 1/20"),
+            ("subtract 9007199254740993 @ 9007199254740992", "1"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["加法 1,2 @ 1", "减法 1;2 @ 1", "add 1,2 @ 1;2"] {
+            assert_eq!(calculate_matrix(query), Err(MatrixError::SumDimensions));
+        }
+        assert_eq!(calculate_matrix("加法 1,2"), Err(MatrixError::Incomplete));
+    }
 
     #[test]
     fn finds_exact_matrix_rank_with_skipped_columns_and_dependent_rows() {

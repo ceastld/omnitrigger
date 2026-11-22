@@ -161,6 +161,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按元素精确相加两个矩阵",
+        query: "矩阵: 加法 1/2,2; 3,4 @ 1/3,5; -3,1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按元素精确相减两个矩阵",
+        query: "矩阵: 减法 1/2,2; 3,4 @ 1/3,5; -3,1",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
     },
