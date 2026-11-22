@@ -2638,6 +2638,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "追加每组金额的相邻变化率",
+        query: "CSV: 变化率列 [\"变化率\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5\n南,3/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按组逐行求 CSV 的累计平均值",
         query: "CSV: 累计平均列 [\"累计平均\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },

@@ -5,7 +5,7 @@ use std::{
     hash::Hash,
 };
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 use regex::Regex;
 use serde::{
@@ -396,6 +396,7 @@ enum RunningColumnComputation {
     Sum,
     Average,
     Difference,
+    RelativeChange,
 }
 
 enum RunningColumnState {
@@ -710,7 +711,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "累计平均列"
         | "running-average-column"
         | "差分列"
-        | "difference-column") => {
+        | "difference-column"
+        | "变化率列"
+        | "relative-change-column") => {
             let ((name, source, groups), data) =
                 json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(
                     input,
@@ -723,6 +726,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 groups,
                 computation: match kind {
                     "差分列" | "difference-column" => RunningColumnComputation::Difference,
+                    "变化率列" | "relative-change-column" => {
+                        RunningColumnComputation::RelativeChange
+                    }
                     "累计平均列" | "running-average-column" => {
                         RunningColumnComputation::Average
                     }
@@ -2070,7 +2076,10 @@ fn running_column(
             group_states
                 .entry(column_key(row, &groups))
                 .or_insert_with(|| match computation {
-                    RunningColumnComputation::Difference => RunningColumnState::Previous(None),
+                    RunningColumnComputation::Difference
+                    | RunningColumnComputation::RelativeChange => {
+                        RunningColumnState::Previous(None)
+                    }
                     RunningColumnComputation::Sum | RunningColumnComputation::Average => {
                         RunningColumnState::Accumulation(RunningTotals::default())
                     }
@@ -2090,13 +2099,20 @@ fn running_column(
                 let Some(value) = value else {
                     return Ok(String::new());
                 };
-                let difference = previous.as_ref().map(|previous| &value - previous);
-                *previous = Some(value);
-                let Some(difference) = difference else {
+                let Some(prior) = previous.as_ref() else {
+                    *previous = Some(value);
                     return Ok(String::new());
                 };
-                ensure_exact_size(&difference).map_err(|error| error_at_row(error.message()))?;
-                Ok(difference.to_string())
+                let mut change = &value - prior;
+                if matches!(computation, RunningColumnComputation::RelativeChange) {
+                    if prior.numer().sign() == Sign::NoSign {
+                        return Err(error_at_row(StatisticsError::ZeroPreviousValue.message()));
+                    }
+                    change /= prior;
+                }
+                *previous = Some(value);
+                ensure_exact_size(&change).map_err(|error| error_at_row(error.message()))?;
+                Ok(change.to_string())
             }
         }
     })
@@ -4514,6 +4530,22 @@ mod tests {
             transform_csv("difference-column [\"差\",1,[]]\n金额\n2\n有误"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn appends_grouped_relative_changes_and_reports_the_row_after_a_zero_base() {
+        let query = "变化率列 [\"变化率\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,\n北,0.5\n南,3/2\n北,0";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("部门,金额,变化率\r\n北,1/3,\"\"\r\n南,2,\"\"\r\n北,\"\",\"\"\r\n北,0.5,1/2\r\n南,3/2,-1/4\r\n北,0,-1")
+        );
+        assert_eq!(
+            transform_csv("relative-change-column [\"率\",1,[]]\n金额\n0\n\"\"\n2"),
+            Err(CsvError::DataRowValue {
+                row: 3,
+                cause: StatisticsError::ZeroPreviousValue.message(),
+            })
+        );
     }
 
     #[test]
