@@ -37,6 +37,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("最小优先", "按字节数从小到大"),
     ("自然排序", "名称中的数字按数值排"),
     ("按后缀", "相同扩展名的文件排在一起"),
+    ("排除名称=草稿,副本", "跳过名称中含有指定文字的项"),
     ("前=10", "取排序后的前 10 项"),
     ("路径列表", "每行一个绝对路径"),
     ("名称列表", "每行一个名称"),
@@ -252,6 +253,12 @@ impl LocalFilesIndex {
         };
         let extensions = extension_set(query.extensions);
         let excluded_extensions = extension_set(query.excluded_extensions);
+        let excluded_names: Vec<_> = query
+            .excluded_names
+            .into_iter()
+            .flat_map(|terms| terms.split([',', '，']))
+            .map(str::to_lowercase)
+            .collect();
         let mut matches: Vec<_> = entries
             .iter()
             .filter(|entry| {
@@ -266,10 +273,13 @@ impl LocalFilesIndex {
             })
             .filter_map(|entry| {
                 let name = entry.name.to_lowercase();
-                filter
+                let matches_name = filter
                     .split_whitespace()
-                    .all(|keyword| name.contains(keyword))
-                    .then(|| (title_rank(&name, &filter), entry))
+                    .all(|keyword| name.contains(keyword));
+                let excluded = excluded_names
+                    .iter()
+                    .any(|keyword| name.contains(keyword.as_str()));
+                (matches_name && !excluded).then(|| (title_rank(&name, &filter), entry))
             })
             .collect();
         if query.order == DirectoryOrder::Name
@@ -596,6 +606,7 @@ struct FileQuery<'a> {
     created: DateBounds,
     extensions: Option<&'a str>,
     excluded_extensions: Option<&'a str>,
+    excluded_names: Option<&'a str>,
     limit: Option<usize>,
     output: FileOutput,
 }
@@ -699,6 +710,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
     let mut extensions = None;
     let mut excluded_extensions = None;
+    let mut excluded_names = None;
     let mut limit = None;
     let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
@@ -765,6 +777,12 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
                     "后缀" | "ext" => set_extension_filter(&mut extensions, quantity)?,
                     "排除后缀" | "exclude-ext" => {
                         set_extension_filter(&mut excluded_extensions, quantity)?
+                    }
+                    "排除名称" | "exclude-name" if excluded_names.is_none() => {
+                        if quantity.split([',', '，']).any(str::is_empty) {
+                            return None;
+                        }
+                        excluded_names = Some(quantity);
                     }
                     "前" | "limit" if limit.is_none() => {
                         limit = Some(
@@ -845,6 +863,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             created,
             extensions,
             excluded_extensions,
+            excluded_names,
             limit,
             output,
         })
@@ -1788,6 +1807,30 @@ mod tests {
             );
         }
         assert!(split_query(r"C:\Work | | 大小 最小优先").is_none());
+    }
+
+    #[test]
+    fn excludes_any_name_fragment_without_loading_the_directory_again() {
+        let mut index = LocalFilesIndex::default();
+        let original = r"C:\Work | Budget";
+        let load = index.request(Some(original)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("Budget Final.txt", "file"),
+                entry("Budget Draft.txt", "file"),
+                entry("Budget 副本", "directory"),
+                entry("Notes.txt", "file"),
+            ]),
+        ));
+        for options in ["排除名称=DRAFT，副本", "EXCLUDE-NAME=draft,副本"] {
+            let query = format!("{original} | {options} 名称列表");
+            assert!(index.request(Some(&query)).is_none());
+            assert!(index.results(&query) == Results::text_value(Ok("Budget Final.txt".into())));
+        }
+        for invalid in ["排除名称=", "排除名称=a,,b", "排除名称=a 排除名称=b"] {
+            assert!(split_query(&format!("{original} | {invalid}")).is_none());
+        }
     }
 
     #[test]
