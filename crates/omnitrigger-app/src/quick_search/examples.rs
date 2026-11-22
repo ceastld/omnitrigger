@@ -65,6 +65,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "拟合: 预测 1/2,0,3 @ 0,1; 1,3; 2,5",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "查看拟合直线对每个观测值的残差",
+        query: "拟合: 残差 0,0; 1,1; 2,1",
+    },
+    Example {
         icon: Icon::Layers,
         title: "由三条边求三角形面积和周长",
         query: "三角形: 3,4,5",
@@ -2658,7 +2663,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Equation if !term.is_empty() && "不等式".starts_with(term) => {}
-        Scope::LinearFit if !term.is_empty() && "预测".starts_with(term) => {}
+        Scope::LinearFit
+            if !term.is_empty()
+                && ["预测", "残差"]
+                    .into_iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Cidr
             if !term.is_empty()
                 && ["子网", "排除"]

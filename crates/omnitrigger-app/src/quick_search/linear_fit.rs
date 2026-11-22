@@ -38,10 +38,16 @@ impl LinearFitError {
     }
 }
 
+enum FitOutput {
+    Summary,
+    Predictions(Vec<BigRational>),
+    Residuals,
+}
+
 pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError> {
     let normalized = normalize(input);
     let input = normalized.trim();
-    let (points, predict) = match input.split_once(char::is_whitespace) {
+    let (points, output) = match input.split_once(char::is_whitespace) {
         Some((operation, rest))
             if operation == "预测" || operation.eq_ignore_ascii_case("predict") =>
         {
@@ -59,11 +65,16 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
                 .into_iter()
                 .map(evaluate)
                 .collect::<Result<Vec<_>, _>>()?;
-            (points.trim(), Some(predictions))
+            (points.trim(), FitOutput::Predictions(predictions))
         }
-        _ => (input, None),
+        Some((operation, rest))
+            if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
+        {
+            (rest.trim(), FitOutput::Residuals)
+        }
+        _ => (input, FitOutput::Summary),
     };
-    let sums = paired_sums(points)?;
+    let sums = paired_sums(points, matches!(output, FitOutput::Residuals))?;
     let products = sums.centered_products()?;
     if products.square_x.numer().sign() == Sign::NoSign {
         return Err(LinearFitError::ConstantX);
@@ -71,20 +82,33 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
     let slope = &products.cross / &products.square_x;
     let intercept = (sums.y - &slope * sums.x) / sums.count;
     check_size([&slope, &intercept])?;
-    if let Some(xs) = predict {
-        let predict_y = |x: &BigRational| {
-            let y = &slope * x + &intercept;
-            check_size([&y])?;
-            Ok::<_, LinearFitError>(y)
-        };
-        if let [x] = xs.as_slice() {
-            return predict_y(x).map(|value| value.to_string());
+    let predict_y = |x: &BigRational| {
+        let y = &slope * x + &intercept;
+        check_size([&y])?;
+        Ok::<_, LinearFitError>(y)
+    };
+    match output {
+        FitOutput::Summary => {}
+        FitOutput::Predictions(xs) => {
+            if let [x] = xs.as_slice() {
+                return predict_y(x).map(|value| value.to_string());
+            }
+            let mut rows = vec!["x,预测值".to_owned()];
+            for x in &xs {
+                rows.push(format!("{x},{}", predict_y(x)?));
+            }
+            return Ok(rows.join("\r\n"));
         }
-        let mut rows = vec!["x,预测值".to_owned()];
-        for x in &xs {
-            rows.push(format!("{x},{}", predict_y(x)?));
+        FitOutput::Residuals => {
+            let mut rows = vec!["x,实际值,拟合值,残差".to_owned()];
+            for (x, actual) in sums.points {
+                let fitted = predict_y(&x)?;
+                let residual = &actual - &fitted;
+                check_size([&residual])?;
+                rows.push(format!("{x},{actual},{fitted},{residual}"));
+            }
+            return Ok(rows.join("\r\n"));
         }
-        return Ok(rows.join("\r\n"));
     }
     let r_squared = if products.square_y.numer().sign() == Sign::NoSign {
         "未定义".to_owned()
@@ -95,7 +119,7 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
 }
 
 pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
-    let sums = paired_sums(points.trim())?;
+    let sums = paired_sums(points.trim(), false)?;
     let degrees_of_freedom = &sums.count - BigInt::from(u8::from(sample));
     let covariance = sums.centered_cross_product() / (&sums.count * degrees_of_freedom);
     check_size([&covariance])?;
@@ -103,7 +127,7 @@ pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String,
 }
 
 pub(super) fn calculate_correlation(points: &str) -> Result<String, LinearFitError> {
-    let products = paired_sums(points.trim())?.centered_products()?;
+    let products = paired_sums(points.trim(), false)?.centered_products()?;
     if products.square_x.numer().sign() == Sign::NoSign
         || products.square_y.numer().sign() == Sign::NoSign
     {
@@ -122,6 +146,7 @@ struct PairedSums {
     xx: BigRational,
     xy: BigRational,
     yy: BigRational,
+    points: Vec<(BigRational, BigRational)>,
 }
 
 impl PairedSums {
@@ -155,7 +180,7 @@ impl CenteredProducts {
     }
 }
 
-fn paired_sums(points: &str) -> Result<PairedSums, LinearFitError> {
+fn paired_sums(points: &str, retain_points: bool) -> Result<PairedSums, LinearFitError> {
     let points = points.split([';', '\n']);
     let count = points.clone().count();
     if count < 2 {
@@ -165,6 +190,7 @@ fn paired_sums(points: &str) -> Result<PairedSums, LinearFitError> {
         return Err(LinearFitError::TooManyPoints);
     }
     let [mut sx, mut sy, mut sxx, mut sxy, mut syy]: [BigRational; 5] = Default::default();
+    let mut observations = Vec::new();
     for point in points {
         let mut coordinates = split_top_level_commas(point);
         let (Some(x), Some(y), None) = (coordinates.next(), coordinates.next(), coordinates.next())
@@ -178,9 +204,12 @@ fn paired_sums(points: &str) -> Result<PairedSums, LinearFitError> {
         sxx += &x * &x;
         sxy += &x * &y;
         syy += &y * &y;
-        sx += x;
-        sy += y;
+        sx += &x;
+        sy += &y;
         check_size([&sx, &sy, &sxx, &sxy, &syy])?;
+        if retain_points {
+            observations.push((x, y));
+        }
     }
 
     Ok(PairedSums {
@@ -190,6 +219,7 @@ fn paired_sums(points: &str) -> Result<PairedSums, LinearFitError> {
         xx: sxx,
         xy: sxy,
         yy: syy,
+        points: observations,
     })
 }
 
@@ -206,6 +236,18 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_an_exact_fitted_value_and_residual_for_each_original_point() {
+        assert_eq!(
+            calculate_linear_fit("残差 2,1; 0,0; 1,1").as_deref(),
+            Ok("x,实际值,拟合值,残差\r\n2,1,7/6,-1/6\r\n0,0,1/6,-1/6\r\n1,1,2/3,1/3")
+        );
+        assert_eq!(
+            calculate_linear_fit("residuals 0,1/2; 0,1"),
+            Err(LinearFitError::ConstantX)
+        );
+    }
 
     #[test]
     fn predicts_several_exact_values_in_input_order_without_refitting() {

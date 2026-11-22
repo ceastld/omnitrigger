@@ -255,12 +255,18 @@ impl LocalFilesIndex {
                 None => Results::LocalFilesUnavailable("有文件的大小无法读取".to_owned()),
             };
         }
-        if query.output == FileOutput::ExtensionCounts {
-            let names = matches
+        if matches!(
+            query.output,
+            FileOutput::ExtensionCounts | FileOutput::ExtensionSizes
+        ) {
+            let files = matches
                 .iter()
                 .filter(|(_, entry)| entry.kind == "file")
-                .map(|(_, entry)| entry.name.as_str());
-            return Results::text_value(Ok(extension_counts(names)));
+                .map(|(_, entry)| *entry);
+            return match extension_summary(files, query.output == FileOutput::ExtensionSizes) {
+                Some(output) => Results::text_value(Ok(output)),
+                None => Results::LocalFilesUnavailable("有文件的大小无法读取".to_owned()),
+            };
         }
         if query.order == DirectoryOrder::Name {
             matches.sort_by_key(|(rank, _)| *rank);
@@ -305,26 +311,46 @@ impl LocalFilesIndex {
     }
 }
 
-fn extension_counts<'a>(names: impl Iterator<Item = &'a str>) -> String {
+fn extension_summary<'a>(
+    files: impl Iterator<Item = &'a LocalDirectoryEntry>,
+    include_sizes: bool,
+) -> Option<String> {
     let mut counts = HashMap::new();
-    for name in names {
-        let extension = file_extension(name).unwrap_or_default().to_lowercase();
-        *counts.entry(extension).or_insert(0usize) += 1;
+    for file in files {
+        let extension = file_extension(&file.name)
+            .unwrap_or_default()
+            .to_lowercase();
+        let (count, total) = counts.entry(extension).or_insert((0usize, 0u128));
+        *count += 1;
+        if include_sizes {
+            *total += u128::from(file.size_bytes?);
+        }
     }
     let mut rows = counts.into_iter().collect::<Vec<_>>();
-    rows.sort_unstable_by(|(left, left_count), (right, right_count)| {
-        right_count.cmp(left_count).then_with(|| left.cmp(right))
-    });
+    rows.sort_unstable_by(
+        |(left, (left_count, left_total)), (right, (right_count, right_total))| {
+            right_total
+                .cmp(left_total)
+                .then_with(|| right_count.cmp(left_count))
+                .then_with(|| left.cmp(right))
+        },
+    );
     let mut output = String::from("扩展名,数量");
-    for (extension, count) in rows {
+    if include_sizes {
+        output.push_str(",字节数");
+    }
+    for (extension, (count, total)) in rows {
         let label = if extension.is_empty() {
             "无扩展名".to_owned()
         } else {
             format!(".{extension}")
         };
         write!(output, "\r\n{},{count}", csv_cell(&label)).expect("写入字符串不会失败");
+        if include_sizes {
+            write!(output, ",{total}").expect("写入字符串不会失败");
+        }
     }
-    output
+    Some(output)
 }
 
 fn file_times_csv<'a>(entries: impl Iterator<Item = &'a LocalDirectoryEntry>) -> String {
@@ -446,6 +472,7 @@ enum FileOutput {
     Json,
     TimeCsv,
     ExtensionCounts,
+    ExtensionSizes,
     SizeTotal,
 }
 
@@ -487,6 +514,9 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "后缀统计" | "extension-counts" if output == FileOutput::Entries => {
                 output = FileOutput::ExtensionCounts
             }
+            "后缀大小" | "extension-sizes" if output == FileOutput::Entries => {
+                output = FileOutput::ExtensionSizes
+            }
             "大小合计" | "size-total" if output == FileOutput::Entries => {
                 output = FileOutput::SizeTotal
             }
@@ -521,14 +551,17 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             }
         }
     }
-    if matches!(output, FileOutput::ExtensionCounts | FileOutput::SizeTotal) || extensions.is_some()
+    if matches!(
+        output,
+        FileOutput::ExtensionCounts | FileOutput::ExtensionSizes | FileOutput::SizeTotal
+    ) || extensions.is_some()
     {
         if entry_type == DirectoryEntryType::Directory {
             return None;
         }
         entry_type = DirectoryEntryType::File;
     }
-    if output == FileOutput::SizeTotal {
+    if matches!(output, FileOutput::SizeTotal | FileOutput::ExtensionSizes) {
         if !matches!(order, DirectoryOrder::Name | DirectoryOrder::SizeDescending) {
             return None;
         }
@@ -1037,6 +1070,39 @@ mod tests {
         );
         assert!(split_query(r"C:\Work | | 后缀=pdf,").is_none());
         assert!(split_query(r"C:\Work | | 后缀=pdf 仅文件夹").is_none());
+    }
+
+    #[test]
+    fn totals_bytes_by_extension_and_sorts_groups_from_largest_to_smallest() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | | 后缀大小";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        assert_eq!(load.order, DirectoryOrder::SizeDescending);
+        let with_size = |name, size| {
+            let mut file = entry(name, "file");
+            file.size_bytes = Some(size);
+            file
+        };
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                with_size("a.PDF", u64::MAX),
+                with_size("b.pdf", 1),
+                with_size("a.txt", 5),
+                with_size("README", 5),
+                entry("ignored.txt", "directory"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query),
+            Results::Value(Ok(value)) if value.text ==
+                "扩展名,数量,字节数\r\n.pdf,2,18446744073709551616\r\n无扩展名,1,5\r\n.txt,1,5"
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | | 后缀=txt 后缀大小"),
+            Results::Value(Ok(value)) if value.text == "扩展名,数量,字节数\r\n.txt,1,5"
+        ));
     }
 
     #[test]
