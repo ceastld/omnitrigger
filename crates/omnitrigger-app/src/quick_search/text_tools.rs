@@ -937,33 +937,53 @@ fn strip_line_decoration(input: &str, prefix: bool) -> Result<String, TextError>
     Ok(result)
 }
 
+pub(super) struct GraphemeRange {
+    start: usize,
+    end: usize,
+}
+
+impl GraphemeRange {
+    pub(super) fn parse(input: &str) -> Result<Self, TextError> {
+        let (start, end) = input.split_once('-').unwrap_or((input, input));
+        let start = start
+            .parse::<usize>()
+            .map_err(|_| TextError::InvalidGraphemeRange)?;
+        let end = end
+            .parse::<usize>()
+            .map_err(|_| TextError::InvalidGraphemeRange)?;
+        if start == 0 || end < start {
+            return Err(TextError::InvalidGraphemeRange);
+        }
+        Ok(Self { start, end })
+    }
+
+    pub(super) fn slice<'a>(&self, text: &'a str) -> &'a str {
+        let mut graphemes = text.grapheme_indices(true);
+        let Some((start, _)) = graphemes.nth(self.start - 1) else {
+            return "";
+        };
+        let end = graphemes
+            .nth(self.end - self.start)
+            .map_or(text.len(), |(offset, _)| offset);
+        &text[start..end]
+    }
+}
+
 fn slice_line_graphemes(input: &str) -> Result<String, TextError> {
     let (range, text) = input
         .trim_start()
         .split_once(char::is_whitespace)
         .ok_or(TextError::InvalidGraphemeRange)?;
-    let (start, end) = range.split_once('-').unwrap_or((range, range));
-    let start = start
-        .parse::<usize>()
-        .map_err(|_| TextError::InvalidGraphemeRange)?;
-    let end = end
-        .parse::<usize>()
-        .map_err(|_| TextError::InvalidGraphemeRange)?;
-    if start == 0 || end < start {
-        return Err(TextError::InvalidGraphemeRange);
-    }
+    let range = GraphemeRange::parse(range)?;
     let text = text_payload(text)?;
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
-    let slice = |line: &str, result: &mut String| {
-        result.extend(line.graphemes(true).skip(start - 1).take(end - start + 1));
-    };
     for newline in newline_pattern().find_iter(text) {
-        slice(&text[cursor..newline.start()], &mut result);
+        result.push_str(range.slice(&text[cursor..newline.start()]));
         result.push_str(newline.as_str());
         cursor = newline.end();
     }
-    slice(&text[cursor..], &mut result);
+    result.push_str(range.slice(&text[cursor..]));
     Ok(result)
 }
 

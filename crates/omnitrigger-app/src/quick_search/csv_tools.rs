@@ -40,8 +40,8 @@ use super::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
     text_tools::{
-        compare_natural, compile_regex, newline_pattern, regex_group_index, TextError,
-        TextLengthUnit,
+        compare_natural, compile_regex, newline_pattern, regex_group_index, GraphemeRange,
+        TextError, TextLengthUnit,
     },
 };
 
@@ -103,6 +103,7 @@ pub(super) enum CsvError {
     DateFormatColumnArguments,
     DateFormatColumnPattern,
     TextLengthColumnArguments,
+    TextSliceColumnArguments,
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
@@ -226,6 +227,9 @@ impl CsvError {
             Self::DateFormatColumnPattern => "填写有效的日期格式，例如 %Y-%m-%d 或 %d/%m/%Y",
             Self::TextLengthColumnArguments => {
                 "填写新列名、来源列和单位，单位可用字素、码位、UTF-16 单元或 UTF-8 字节"
+            }
+            Self::TextSliceColumnArguments => {
+                "填写新列名、来源列和字素位置，例如 [\"摘要\",\"文本\",\"2-3\"]"
             }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
@@ -359,7 +363,7 @@ enum Operation {
         amounts: ColumnReference,
         unit: DateOffsetUnit,
     },
-    TextLengthColumn(String, ColumnReference, TextLengthUnit),
+    TextColumn(String, ColumnReference, TextColumnComputation),
     DatePatternColumn {
         name: String,
         source: ColumnReference,
@@ -824,18 +828,27 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 unit: DateOffsetUnit::Workdays(exceptions),
             }
         }
-        "长度列" | "length-column" => {
-            let ((name, source, unit), data) =
-                json_argument_and_data::<(String, ColumnReference, String)>(
-                    input,
-                    CsvError::TextLengthColumnArguments,
-                )?;
+        kind @ ("长度列" | "length-column" | "截取列" | "slice-column") => {
+            let slice = matches!(kind, "截取列" | "slice-column");
+            let invalid = if slice {
+                CsvError::TextSliceColumnArguments
+            } else {
+                CsvError::TextLengthColumnArguments
+            };
+            let ((name, source, argument), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(input, invalid)?;
             if name.trim().is_empty() || name.contains('\0') {
-                return Err(CsvError::TextLengthColumnArguments);
+                return Err(invalid);
             }
-            let unit = TextLengthUnit::parse(&unit).ok_or(CsvError::TextLengthColumnArguments)?;
+            let computation = if slice {
+                TextColumnComputation::Slice(
+                    GraphemeRange::parse(argument.trim()).map_err(|_| invalid)?,
+                )
+            } else {
+                TextColumnComputation::Length(TextLengthUnit::parse(&argument).ok_or(invalid)?)
+            };
             input = data;
-            Operation::TextLengthColumn(name, source, unit)
+            Operation::TextColumn(name, source, computation)
         }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
@@ -1353,12 +1366,16 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amounts,
             unit,
         } => date_offset_column(&rows, &name, source, amounts, unit),
-        Operation::TextLengthColumn(name, source, unit) => {
+        Operation::TextColumn(name, source, computation) => {
             let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
             let source = source.resolve(header)?;
             validate_column_width(&[source], header.len())?;
             write_appended_column(header, records, &name, |row| {
-                Ok(unit.count(&row[source]).to_string())
+                let cell = &row[source];
+                Ok(match &computation {
+                    TextColumnComputation::Length(unit) => Cow::Owned(unit.count(cell).to_string()),
+                    TextColumnComputation::Slice(range) => Cow::Borrowed(range.slice(cell)),
+                })
             })
         }
         Operation::DatePatternColumn {
@@ -2338,6 +2355,11 @@ fn date_pattern_column(
         let date = parse_complete_date(text).map_err(|error| data_error(error.message()))?;
         format_date(date)
     })
+}
+
+enum TextColumnComputation {
+    Length(TextLengthUnit),
+    Slice(GraphemeRange),
 }
 
 #[derive(Deserialize)]
@@ -5190,6 +5212,26 @@ mod tests {
             transform_csv("length-column [\"长度\",2,\"utf8\"] 文本"),
             Err(CsvError::ColumnOutOfRange)
         );
+    }
+
+    #[test]
+    fn appends_slices_of_complete_graphemes_without_splitting_csv_records() {
+        let query = "截取列 [\"摘要\",\"文本\",\"2-3\"]\n编号,文本\n1,A👩‍💻e\u{301}Z\n2,北\n3,\n4,\"甲\r\n乙丙\"";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("编号,文本,摘要\r\n1,A👩‍💻e\u{301}Z,👩‍💻e\u{301}\r\n2,北,\"\"\r\n3,\"\",\"\"\r\n4,\"甲\r\n乙丙\",\"\r\n乙\"")
+        );
+        assert_eq!(
+            transform_csv("slice-column [\"摘要\",1,\"1\"] 文本\n👩‍💻Z").as_deref(),
+            Ok("文本,摘要\r\n👩‍💻Z,👩‍💻")
+        );
+        for range in ["0", "3-2", "2-"] {
+            let query = format!("截取列 [\"摘要\",1,\"{range}\"] 文本");
+            assert_eq!(
+                transform_csv(&query),
+                Err(CsvError::TextSliceColumnArguments)
+            );
+        }
     }
 
     #[test]

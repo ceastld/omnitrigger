@@ -2828,6 +2828,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按字素位置截取 CSV 单元格的内容",
+        query: "CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]\n编号,文本\n1,A👩‍💻e\u{301}Z\n2,北\n3,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按部门逐行累计 CSV 金额",
         query: "CSV: 累计合计列 [\"累计金额\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },
