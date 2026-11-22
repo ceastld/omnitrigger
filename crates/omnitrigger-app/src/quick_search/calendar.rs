@@ -1189,24 +1189,30 @@ fn apply_date_offset(
     let amount = count()?
         .checked_mul(multiplier)
         .ok_or(DateError::OutOfRange)?;
-    let adjusted = if is_months {
-        let months = u32::try_from(amount)
-            .map(Months::new)
-            .map_err(|_| DateError::OutOfRange)?;
-        if subtract {
-            date.checked_sub_months(months)
-        } else {
-            date.checked_add_months(months)
-        }
+    if !is_months {
+        return shift_calendar_days(date, amount, subtract);
+    }
+    let months = u32::try_from(amount)
+        .map(Months::new)
+        .map_err(|_| DateError::OutOfRange)?;
+    in_range(if subtract {
+        date.checked_sub_months(months)
     } else {
-        let days = Days::new(amount);
-        if subtract {
-            date.checked_sub_days(days)
-        } else {
-            date.checked_add_days(days)
-        }
-    };
-    in_range(adjusted)
+        date.checked_add_months(months)
+    })
+}
+
+pub(super) fn shift_calendar_days(
+    date: NaiveDate,
+    amount: u64,
+    subtract: bool,
+) -> Result<NaiveDate, DateError> {
+    let days = Days::new(amount);
+    in_range(if subtract {
+        date.checked_sub_days(days)
+    } else {
+        date.checked_add_days(days)
+    })
 }
 
 fn convert_date_pattern(input: &str, today: NaiveDate, parse: bool) -> Result<String, DateError> {

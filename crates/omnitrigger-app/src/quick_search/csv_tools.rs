@@ -18,7 +18,7 @@ use serde_json::value::RawValue;
 use super::statistics::{parse_bin_edges, report_binned_unweighted};
 use super::{
     calculator::normalize,
-    calendar::parse_complete_date,
+    calendar::{parse_complete_date, shift_calendar_days},
     conversion::{exact_data_converter, ConversionError},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
@@ -83,6 +83,7 @@ pub(super) enum CsvError {
     SplitColumnArguments,
     DataConversionColumnArguments,
     DateDifferenceColumnArguments,
+    DateOffsetColumnArguments,
     DataConversionTarget(ConversionError),
     RunningColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
@@ -184,6 +185,9 @@ impl CsvError {
             }
             Self::DateDifferenceColumnArguments => {
                 "填写新列名、开始日期列和结束日期列，例如 [\"天数\",\"开始\",\"结束\"]"
+            }
+            Self::DateOffsetColumnArguments => {
+                "填写新列名、来源日期列和整数天数列，例如 [\"到期日期\",\"日期\",\"天数\"]"
             }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::RunningColumnArguments => {
@@ -298,6 +302,7 @@ enum Operation {
     },
     ConvertDataColumn(String, ColumnReference, String),
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
+    DateOffsetColumn(String, ColumnReference, ColumnReference),
     RunningColumn {
         name: String,
         source: ColumnReference,
@@ -660,6 +665,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 names,
                 separator,
             }
+        }
+        "日期加天列" | "date-offset-column" => {
+            let ((name, date, days), data) =
+                json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
+                    input,
+                    CsvError::DateOffsetColumnArguments,
+                )?;
+            input = data;
+            Operation::DateOffsetColumn(name, date, days)
         }
         "日期差列" | "date-difference-column" => {
             let ((name, start, end), data) =
@@ -1024,6 +1038,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         Operation::DateDifferenceColumn(name, start, end) => {
             date_difference_column(&rows, &name, start, end)
+        }
+        Operation::DateOffsetColumn(name, date, days) => {
+            date_offset_column(&rows, &name, date, days)
         }
         Operation::RunningColumn {
             name,
@@ -1899,6 +1916,42 @@ fn first_nonempty_csv_column(
             .map(|&index| row[index].as_str())
             .find(|value| !value.is_empty())
             .unwrap_or(""))
+    })
+}
+
+fn date_offset_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    days: ColumnReference,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::DateOffsetColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    let days = days.resolve(header)?;
+    validate_column_width(&[source, days], header.len())?;
+    let mut row_number = 0;
+    write_appended_column(header, records, name, |row| {
+        row_number += 1;
+        let (date, offset) = (row[source].trim(), row[days].trim());
+        if date.is_empty() || offset.is_empty() {
+            return Ok(String::new());
+        }
+        let at_row = |cause| CsvError::DataRowValue {
+            row: row_number,
+            cause,
+        };
+        let date = parse_complete_date(date).map_err(|error| at_row(error.message()))?;
+        let offset = parse_fraction_literal(offset)
+            .ok()
+            .filter(BigRational::is_integer)
+            .and_then(|days| i64::try_from(days.to_integer()).ok())
+            .ok_or_else(|| at_row("天数须为整数且在支持范围内"))?;
+        shift_calendar_days(date, offset.unsigned_abs(), offset < 0)
+            .map(|date| date.to_string())
+            .map_err(|error| at_row(error.message()))
     })
 }
 
@@ -4327,6 +4380,27 @@ mod tests {
             ),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn appends_dates_after_applying_each_records_signed_calendar_day_offset() {
+        let query = "日期加天列 [\"到期日期\",\"日期\",2]\n日期,天数\n2024-02-28,2\n2024-W09-5,-1\n2024年3月1日,2/2\n2024-02-27,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("日期,天数,到期日期\r\n2024-02-28,2,2024-03-01\r\n2024-W09-5,-1,2024-02-29\r\n2024年3月1日,2/2,2024-03-02\r\n2024-02-27,\"\",\"\"")
+        );
+        for (date, offset) in [
+            ("2024-02-30", "1"),
+            ("2024-02-28", "1/2"),
+            ("2024-02-28", "-9223372036854775808"),
+            ("9999-12-31", "1"),
+        ] {
+            let query = format!("日期加天列 [\"结果\",1,2]\n日期,天数\n{date},{offset}");
+            assert!(matches!(
+                transform_csv(&query),
+                Err(CsvError::DataRowValue { row: 1, .. })
+            ));
         }
     }
 
