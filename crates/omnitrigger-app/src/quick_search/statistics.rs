@@ -7,7 +7,9 @@ use super::calculator::normalize;
 use super::fraction::{
     calculate_fraction, ensure_exact_size, format_square_root, rational_power, FractionError,
 };
-use super::linear_fit::{calculate_correlation, calculate_covariance, LinearFitError};
+use super::linear_fit::{
+    calculate_correlation, calculate_covariance, calculate_rank_correlation, LinearFitError,
+};
 use super::operators::split_top_level_commas;
 
 const MAX_VALUES: usize = 128;
@@ -124,6 +126,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "相关系数" | "correlation" => {
             return calculate_correlation(values).map_err(StatisticsError::Paired);
+        }
+        "秩相关" | "斯皮尔曼" | "spearman" => {
+            return calculate_rank_correlation(values).map_err(StatisticsError::Paired);
         }
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
@@ -818,6 +823,25 @@ mod tests {
         assert_eq!(
             calculate_statistics("移动平均 2"),
             Err(StatisticsError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn computes_exact_spearman_correlation_with_average_ranks_for_ties() {
+        for (input, result) in [
+            ("秩相关 0,1; 1,2; 2,100", "1"),
+            ("秩相关 0,0; 1,1; 2,1", "√(3/4)"),
+            ("spearman 1\t3\r\n1\t2\r\n2\t1", "-√(3/4)"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(result),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("秩相关 1,1; 1,2"),
+            Err(StatisticsError::Paired(LinearFitError::ConstantCoordinate))
         );
     }
 

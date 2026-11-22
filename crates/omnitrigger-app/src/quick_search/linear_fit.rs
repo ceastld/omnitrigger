@@ -127,7 +127,37 @@ pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String,
 }
 
 pub(super) fn calculate_correlation(points: &str) -> Result<String, LinearFitError> {
-    let products = paired_sums(points.trim(), false)?.centered_products()?;
+    format_correlation(paired_sums(points.trim(), false)?.centered_products()?)
+}
+
+pub(super) fn calculate_rank_correlation(points: &str) -> Result<String, LinearFitError> {
+    let pairs = parse_paired_points(points.trim())?;
+    let (x, y): (Vec<_>, Vec<_>) = pairs.collect::<Result<Vec<_>, _>>()?.into_iter().unzip();
+    let ranks = doubled_midranks(&x)
+        .into_iter()
+        .zip(doubled_midranks(&y))
+        .map(Ok);
+    format_correlation(summarize_pairs(ranks, false)?.centered_products()?)
+}
+
+fn doubled_midranks(values: &[BigRational]) -> Vec<BigRational> {
+    let mut indices = (0..values.len()).collect::<Vec<_>>();
+    indices.sort_unstable_by(|&a, &b| values[a].cmp(&values[b]));
+    let mut ranks = vec![BigRational::default(); values.len()];
+    let mut first = 0;
+    for tied in indices.chunk_by(|&a, &b| values[a] == values[b]) {
+        let end = first + tied.len();
+        // 名次乘以二后仍是整数，相关系数不受共同缩放影响。
+        let rank = BigRational::from_integer(BigInt::from(first + end + 1));
+        for &index in tied {
+            ranks[index] = rank.clone();
+        }
+        first = end;
+    }
+    ranks
+}
+
+fn format_correlation(products: CenteredProducts) -> Result<String, LinearFitError> {
     if products.square_x.numer().sign() == Sign::NoSign
         || products.square_y.numer().sign() == Sign::NoSign
     {
@@ -146,7 +176,7 @@ struct PairedSums {
     xx: BigRational,
     xy: BigRational,
     yy: BigRational,
-    points: Vec<(BigRational, BigRational)>,
+    points: Vec<Point>,
 }
 
 impl PairedSums {
@@ -180,7 +210,15 @@ impl CenteredProducts {
     }
 }
 
+type Point = (BigRational, BigRational);
+
 fn paired_sums(points: &str, retain_points: bool) -> Result<PairedSums, LinearFitError> {
+    summarize_pairs(parse_paired_points(points)?, retain_points)
+}
+
+fn parse_paired_points(
+    points: &str,
+) -> Result<impl Iterator<Item = Result<Point, LinearFitError>> + '_, LinearFitError> {
     let points = points.split([';', '\n']);
     let count = points.clone().count();
     if count < 2 {
@@ -189,9 +227,7 @@ fn paired_sums(points: &str, retain_points: bool) -> Result<PairedSums, LinearFi
     if count > MAX_POINTS {
         return Err(LinearFitError::TooManyPoints);
     }
-    let [mut sx, mut sy, mut sxx, mut sxy, mut syy]: [BigRational; 5] = Default::default();
-    let mut observations = Vec::new();
-    for point in points {
+    let pairs = points.map(|point| {
         let mut coordinates = split_top_level_commas(point);
         let (x, y) = match (coordinates.next(), coordinates.next(), coordinates.next()) {
             (Some(x), Some(y), None) => (x, y),
@@ -204,7 +240,21 @@ fn paired_sums(points: &str, retain_points: bool) -> Result<PairedSums, LinearFi
         if x.trim().is_empty() || y.trim().is_empty() {
             return Err(LinearFitError::InvalidPoint);
         }
-        let (x, y) = (evaluate(x)?, evaluate(y)?);
+        Ok((evaluate(x)?, evaluate(y)?))
+    });
+    Ok(pairs)
+}
+
+fn summarize_pairs(
+    pairs: impl Iterator<Item = Result<Point, LinearFitError>>,
+    retain_points: bool,
+) -> Result<PairedSums, LinearFitError> {
+    let [mut sx, mut sy, mut sxx, mut sxy, mut syy]: [BigRational; 5] = Default::default();
+    let mut observations = Vec::new();
+    let mut count = 0usize;
+    for pair in pairs {
+        let (x, y) = pair?;
+        count += 1;
         sxx += &x * &x;
         sxy += &x * &y;
         syy += &y * &y;

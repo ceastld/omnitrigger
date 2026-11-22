@@ -200,6 +200,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 相关系数 0,0; 1,-1; 2,-1",
     },
     Example {
+        icon: Icon::Layers,
+        title: "计算带并列名次的斯皮尔曼秩相关",
+        query: "统计: 秩相关 0,0; 1,1; 2,1",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按原顺序计算相邻数值的差",
         query: "统计: 差分 3/2,1,5/2",
@@ -2854,6 +2859,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "相关"
                     | "相关系"
                     | "相关系数"
+                    | "秩"
+                    | "秩相"
+                    | "秩相关"
                     | "差"
                     | "差分"
                     | "变"
