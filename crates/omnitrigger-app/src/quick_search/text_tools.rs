@@ -734,7 +734,7 @@ fn extract_regex_group(input: &str) -> Result<String, TextError> {
         .join("\n"))
 }
 
-fn compile_regex(pattern: &str) -> Result<Regex, TextError> {
+pub(super) fn compile_regex(pattern: &str) -> Result<Regex, TextError> {
     if pattern.is_empty() {
         return Err(TextError::EmptySearchText);
     }

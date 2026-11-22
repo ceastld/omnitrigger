@@ -5,6 +5,7 @@ use std::{
 };
 
 use num_rational::BigRational;
+use regex::Regex;
 use serde::{
     de::DeserializeOwned,
     ser::{Serialize, SerializeMap, Serializer},
@@ -13,7 +14,7 @@ use serde::{
 use super::{
     fraction::{ensure_exact_size, parse_fraction_literal},
     statistics::{summarize_unweighted, StatisticsError},
-    text_tools::compare_natural,
+    text_tools::{compare_natural, compile_regex, TextError},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +32,7 @@ pub(super) enum CsvError {
     RenameArguments,
     RenameConflict,
     InvalidColumnValue,
+    Regex(TextError),
     ColumnOutOfRange,
     InvalidNumber,
     StatisticsColumn,
@@ -56,6 +58,7 @@ impl CsvError {
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
             Self::RenameConflict => "表头中已经有这个新列名",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
+            Self::Regex(error) => error.message(),
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::StatisticsColumn => "列统计需要一个列号，列号从 1 开始",
@@ -81,7 +84,7 @@ enum Operation {
     DeduplicateByColumns(Vec<usize>),
     FilterColumn {
         column: usize,
-        value: String,
+        condition: ColumnCondition,
         keep_matches: bool,
     },
     CountByColumns(Vec<usize>),
@@ -98,6 +101,11 @@ enum Operation {
         descending: bool,
         numeric: bool,
     },
+}
+
+enum ColumnCondition {
+    Exact(String),
+    Regex(Regex),
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
@@ -131,13 +139,21 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             input = data;
             Operation::DeduplicateByColumns(columns)
         }
-        "筛选" | "filter" | "排除" | "exclude" => {
+        "筛选" | "filter" | "排除" | "exclude" | "正则筛选" | "regex-filter" | "正则排除"
+        | "regex-exclude" => {
             let (column, value, data) = column_value_arguments(input)?;
             input = data;
+            let condition = match operation.as_str() {
+                "筛选" | "filter" | "排除" | "exclude" => ColumnCondition::Exact(value),
+                _ => ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
+            };
             Operation::FilterColumn {
                 column,
-                value,
-                keep_matches: matches!(operation.as_str(), "筛选" | "filter"),
+                condition,
+                keep_matches: matches!(
+                    operation.as_str(),
+                    "筛选" | "filter" | "正则筛选" | "regex-filter"
+                ),
             }
         }
         "分组计数" | "group-count" => {
@@ -213,9 +229,9 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::DeduplicateByColumns(columns) => deduplicate_by_columns(&rows, &columns),
         Operation::FilterColumn {
             column,
-            value,
+            condition,
             keep_matches,
-        } => filter_column(&rows, column, &value, keep_matches),
+        } => filter_column(&rows, column, &condition, keep_matches),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
         Operation::SumByColumns { columns, amount } => sum_by_columns(&rows, &columns, amount),
         Operation::ColumnStatistics { column, sample } => summarize_column(&rows, column, sample),
@@ -349,14 +365,18 @@ fn deduplicate_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<Str
 fn filter_column(
     rows: &[Vec<String>],
     column: usize,
-    value: &str,
+    condition: &ColumnCondition,
     keep_matches: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     validate_column_width(&[column], header.len())?;
-    let matched = records
-        .iter()
-        .filter(|row| (row[column] == value) == keep_matches);
+    let matched = records.iter().filter(|row| {
+        let matched = match condition {
+            ColumnCondition::Exact(value) => row[column] == value.as_str(),
+            ColumnCondition::Regex(pattern) => pattern.is_match(&row[column]),
+        };
+        matched == keep_matches
+    });
     Ok(write_rows(std::iter::once(header).chain(matched), ','))
 }
 
@@ -744,6 +764,27 @@ mod tests {
         );
         assert_eq!(
             transform_csv(r#"筛选 3 "值" a,b"#),
+            Err(CsvError::ColumnOutOfRange)
+        );
+    }
+
+    #[test]
+    fn filters_csv_cells_with_regex_while_preserving_quotes_and_order() {
+        let csv = "编号,备注\n001,\"咖啡,热\"\n002,冷茶\n003,\"咖啡\n常温\"\n004,茶";
+        assert_eq!(
+            transform_csv(&format!("正则筛选 2 \"^咖啡\"\n{csv}")).as_deref(),
+            Ok("编号,备注\r\n001,\"咖啡,热\"\r\n003,\"咖啡\n常温\"")
+        );
+        assert_eq!(
+            transform_csv(&format!("regex-exclude 2 \"^咖啡\"\n{csv}")).as_deref(),
+            Ok("编号,备注\r\n002,冷茶\r\n004,茶")
+        );
+        assert_eq!(
+            transform_csv(&format!("regex-filter 2 \"[\"\n{csv}")),
+            Err(CsvError::Regex(TextError::InvalidRegex))
+        );
+        assert_eq!(
+            transform_csv(&format!("regex-filter 3 \"^咖啡\"\n{csv}")),
             Err(CsvError::ColumnOutOfRange)
         );
     }

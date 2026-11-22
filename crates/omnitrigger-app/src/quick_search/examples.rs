@@ -1587,6 +1587,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按第二列的正则匹配筛选 CSV 行",
+        query: "CSV: 正则筛选 2 \"^咖啡\" 编号,备注\n001,\"咖啡,热\"\n002,冷茶\n003,咖啡常温",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "排除第二列符合正则表达式的 CSV 行",
+        query: "CSV: 正则排除 2 \"^咖啡\" 编号,备注\n001,\"咖啡,热\"\n002,冷茶\n003,咖啡常温",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定 CSV 列的组合计数",
         query: "CSV: 分组计数 2 编号,状态\n001,完成\n002,待办\n003,完成",
     },
