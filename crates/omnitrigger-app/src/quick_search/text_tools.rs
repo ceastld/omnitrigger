@@ -78,6 +78,7 @@ pub(super) enum TextError {
     MissingColumn,
     InvalidLineRange,
     EdgeLineCount,
+    InvalidLineStep,
     InvalidGraphemeRange,
     MissingLine,
     InvalidNumberLine,
@@ -123,6 +124,7 @@ impl TextError {
             Self::CsvTextColumns => "用 JSON 数组填写 2 至 128 段文本，每段对应一列",
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::EdgeLineCount => "填写正整数行数，例如 文本: 取末尾行 2",
+            Self::InvalidLineStep => "填写起始行号和正整数步长，例如 文本: 间隔取行 2,3",
             Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
             Self::MissingLine => "指定行号超出了文本行数",
             Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
@@ -194,6 +196,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "取行" | "pick-lines" => return select_text_line_ranges(text, true),
         "取开头行" | "head-lines" => return take_edge_lines(text, false),
         "取末尾行" | "tail-lines" => return take_edge_lines(text, true),
+        "间隔取行" | "stride-lines" => return take_spaced_lines(text),
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
@@ -1099,6 +1102,32 @@ fn take_edge_lines(input: &str, from_end: bool) -> Result<String, TextError> {
     Ok(selected.join("\n"))
 }
 
+fn take_spaced_lines(input: &str) -> Result<String, TextError> {
+    let (arguments, text) = input
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::InvalidLineStep)?;
+    let (start, step) = arguments
+        .split_once([',', '，'])
+        .ok_or(TextError::InvalidLineStep)?;
+    let start = start
+        .parse::<usize>()
+        .ok()
+        .and_then(|row| row.checked_sub(1))
+        .ok_or(TextError::InvalidLineStep)?;
+    let step = step
+        .parse::<usize>()
+        .ok()
+        .filter(|&step| step > 0)
+        .ok_or(TextError::InvalidLineStep)?;
+    let text = text_payload(text)?;
+    let mut lines = text.lines().skip(start).step_by(step);
+    let first = lines.next().ok_or(TextError::MissingLine)?;
+    Ok(std::iter::once(first)
+        .chain(lines)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn select_text_line_ranges(input: &str, keep_selected: bool) -> Result<String, TextError> {
     let (ranges, text) = input
         .split_once(char::is_whitespace)
@@ -1749,6 +1778,37 @@ mod tests {
         for input in ["取末尾行 0 甲", "取开头行 -1 甲", "取末尾行 两 甲"] {
             assert_eq!(transform_text(input), Err(TextError::EdgeLineCount));
         }
+    }
+
+    #[test]
+    fn takes_every_nth_line_from_a_one_based_start_and_preserves_empty_lines() {
+        for (input, expected) in [
+            (
+                "间隔取行 2,3 标题\n甲\n略\n略\n乙\n略\n略\n丙",
+                "甲\n乙\n丙",
+            ),
+            ("stride-lines 2，2 \"a\r\n\r\nb\r\n c \r\nd\"", "\n c "),
+            ("间隔取行 3,1 甲\n乙\n丙\n丁", "丙\n丁"),
+            ("间隔取行 1,99 甲\n乙\n丙", "甲"),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+        for input in [
+            "间隔取行 2 甲",
+            "间隔取行 0,2 甲",
+            "间隔取行 1,0 甲",
+            "间隔取行 1,-1 甲",
+        ] {
+            assert_eq!(
+                transform_text(input),
+                Err(TextError::InvalidLineStep),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            transform_text("间隔取行 5,2 甲\n乙"),
+            Err(TextError::MissingLine)
+        );
     }
 
     #[test]

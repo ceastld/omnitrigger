@@ -2257,6 +2257,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从指定行开始等间隔取行",
+        query: "文本: 间隔取行 2,3 标题\n甲\n备注\n分隔\n乙\n备注\n分隔\n丙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按行号删除指定文本行",
         query: "文本: 删行 1,3-4 标题\n苹果\n草稿\n注释\n梨",
     },
