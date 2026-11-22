@@ -2268,6 +2268,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在分数算式中精确开方并取绝对值",
+        query: "分数: 计算 sqrt(81/16)+abs(-1/2)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "展开精确分数的循环小数",
         query: "分数: 循环小数 1/7",
     },

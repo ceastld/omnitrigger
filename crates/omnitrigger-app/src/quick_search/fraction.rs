@@ -34,6 +34,7 @@ pub(super) enum FractionError {
     CombinatorialRange,
     DecimalPlaces,
     RoundPlaces,
+    RationalSquareRoot,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
     TableInputs,
@@ -60,6 +61,7 @@ impl FractionError {
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
+            Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
             Self::TableInputs => {
@@ -714,6 +716,25 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.round_function();
         }
+        let square_root = name.eq_ignore_ascii_case("sqrt");
+        if square_root || name.eq_ignore_ascii_case("abs") {
+            self.remaining = rest;
+            if !self.consume('(') {
+                return Err(self.expected_token());
+            }
+            let value = self.sum()?;
+            if !self.consume(')') {
+                return Err(self.expected_token());
+            }
+            let negative = value.numer().sign() == Sign::Minus;
+            if !square_root {
+                return Ok(if negative { -value } else { value });
+            }
+            if negative {
+                return Err(FractionError::RationalSquareRoot);
+            }
+            return exact_abs_square_root(&value).ok_or(FractionError::RationalSquareRoot);
+        }
         let function = if name.eq_ignore_ascii_case("comb") {
             CombinatorialFunction::Combination
         } else if name.eq_ignore_ascii_case("perm") {
@@ -1040,6 +1061,28 @@ mod tests {
         ] {
             assert_eq!(simplify_fraction(input), Err(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn evaluates_exact_square_roots_and_absolute_values_inside_expressions() {
+        for (expression, expected) in [
+            ("sqrt(81/16)+abs(-1/2)", "11/4"),
+            ("SQRT(abs(-9/4))", "3/2"),
+            ("abs(-2)**3", "8"),
+            ("sqrt(0)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(expression).unwrap().to_string(),
+                expected
+            );
+        }
+        for expression in ["sqrt(2)", "sqrt(-9/4)", "sqrt(1/2)"] {
+            assert_eq!(
+                calculate_fraction(expression),
+                Err(FractionError::RationalSquareRoot)
+            );
+        }
+        assert_eq!(calculate_fraction("abs(1,2)"), Err(FractionError::Invalid));
     }
 
     #[test]

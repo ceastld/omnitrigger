@@ -1537,13 +1537,21 @@ impl QuickSearch {
             }
             "f5" => {
                 let query = self.input.read(cx).text();
-                if !matches!(scoped_query(query.trim()), Some((Scope::LocalFiles, _))) {
-                    return;
-                }
-                if !event.is_held {
-                    self.index.local_files.invalidate();
-                    self.refresh_results(&query, window, cx);
-                    cx.notify();
+                match scoped_query(query.trim()) {
+                    Some((Scope::LocalFiles | Scope::OpenWindows, _)) if event.is_held => {}
+                    Some((Scope::OpenWindows, _))
+                        if matches!(self.index.open_windows, OpenWindowsIndex::Loading) => {}
+                    Some((Scope::LocalFiles, _)) => {
+                        self.index.local_files.invalidate();
+                        self.refresh_results(&query, window, cx);
+                        cx.notify();
+                    }
+                    Some((Scope::OpenWindows, _)) => {
+                        self.index.open_windows = OpenWindowsIndex::Unloaded;
+                        self.refresh_results(&query, window, cx);
+                        cx.notify();
+                    }
+                    _ => return,
                 }
             }
             "enter" => {
@@ -2761,13 +2769,42 @@ mod tests {
                         })
                         .unwrap();
                     let page_states = visit_search_pages(reopened, cx);
-                    send.send((states, reopened_states, page_states)).unwrap();
+                    let window_refresh = reopened
+                        .update(cx, |search, window, cx| {
+                            search.index.open_windows = OpenWindowsIndex::Ready(Vec::new());
+                            search.fill_query("窗口: 测试", window, cx);
+                            let event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("f5").unwrap(),
+                                is_held: false,
+                            };
+                            let held = KeyDownEvent {
+                                keystroke: event.keystroke.clone(),
+                                is_held: true,
+                            };
+                            search.key_down(&held, window, cx);
+                            let ready =
+                                matches!(search.index.open_windows, OpenWindowsIndex::Ready(_));
+                            search.key_down(&event, window, cx);
+                            let loading =
+                                matches!(search.index.open_windows, OpenWindowsIndex::Loading);
+                            search.key_down(&event, window, cx);
+                            (
+                                ready,
+                                loading,
+                                matches!(search.index.open_windows, OpenWindowsIndex::Loading),
+                            )
+                        })
+                        .unwrap();
+                    send.send((states, reopened_states, page_states, window_refresh))
+                        .unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
             });
-        let (states, reopened_states, (help_pages, output_pages)) = receive.recv().unwrap();
+        let (states, reopened_states, (help_pages, output_pages), window_refresh) =
+            receive.recv().unwrap();
         assert_eq!(reopened_states, ["", "3**4"]);
+        assert_eq!(window_refresh, (true, true, true));
         let last_example_page = (EXAMPLES.len() - 1) / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
         assert_eq!(
             help_pages,
