@@ -1019,12 +1019,7 @@ fn extract_regex_group(input: &str) -> Result<String, TextError> {
         TextError::IncompleteTextArgument => TextError::IncompleteRegexGroup,
         _ => error,
     })?;
-    let index = group
-        .parse::<usize>()
-        .ok()
-        .filter(|&index| index < pattern.captures_len())
-        .or_else(|| pattern.capture_names().position(|name| name == Some(group)))
-        .ok_or(TextError::UnknownRegexGroup)?;
+    let index = regex_group_index(&pattern, group)?;
 
     Ok(pattern
         .captures_iter(text)
@@ -1033,6 +1028,15 @@ fn extract_regex_group(input: &str) -> Result<String, TextError> {
         .map(|matched| matched.as_str())
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+pub(super) fn regex_group_index(pattern: &Regex, group: &str) -> Result<usize, TextError> {
+    group
+        .parse::<usize>()
+        .ok()
+        .filter(|&index| index < pattern.captures_len())
+        .or_else(|| pattern.capture_names().position(|name| name == Some(group)))
+        .ok_or(TextError::UnknownRegexGroup)
 }
 
 fn regex_captures_to_csv(input: &str) -> Result<String, TextError> {

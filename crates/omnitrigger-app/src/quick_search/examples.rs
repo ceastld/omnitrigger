@@ -2722,6 +2722,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从 CSV 指定列提取第一个正则捕获组",
+        query: "CSV: 正则提取列 [\"省份\",\"地址\",\"^(?P<province>[^省]+)省\",\"province\"]\n地址,编号\n江苏省南京,1\n上海市,2\n浙江省杭州,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按分隔符把一列拆到多个新列",
         query: "CSV: 拆分列 [\"地址\",[\"省\",\"市和区\"],\"/\"] 编号,地址\n001,福建/福州/鼓楼\n002,浙江",
     },

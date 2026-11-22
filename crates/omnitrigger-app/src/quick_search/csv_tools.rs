@@ -36,7 +36,7 @@ use super::{
     statistics::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
-    text_tools::{compare_natural, compile_regex, newline_pattern, TextError},
+    text_tools::{compare_natural, compile_regex, newline_pattern, regex_group_index, TextError},
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
@@ -86,6 +86,7 @@ pub(super) enum CsvError {
     RowNumberOverflow,
     ConcatenatedColumnArguments,
     FirstNonemptyColumnArguments,
+    RegexCaptureColumnArguments,
     SplitColumnArguments,
     DataConversionColumnArguments,
     DateDifferenceColumnArguments,
@@ -185,6 +186,9 @@ impl CsvError {
             }
             Self::FirstNonemptyColumnArguments => {
                 "填写新列名和至少两个候选列，例如 [\"联系方式\",[\"手机\",\"座机\"]]"
+            }
+            Self::RegexCaptureColumnArguments => {
+                "填写新列名、来源列、正则表达式和捕获组，捕获组用双引号写名称或编号"
             }
             Self::SplitColumnArguments => {
                 "填写来源列、至少两个不同的新列名和非空分隔符，例如 [\"地址\",[\"省\",\"市\"],\"/\"]"
@@ -309,6 +313,12 @@ enum Operation {
         separator: String,
     },
     FirstNonemptyColumn(String, Vec<ColumnReference>),
+    RegexCaptureColumn {
+        name: String,
+        source: ColumnReference,
+        pattern: String,
+        group: String,
+    },
     SplitColumn {
         source: ColumnReference,
         names: Vec<String>,
@@ -716,6 +726,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             )?;
             input = data;
             Operation::FirstNonemptyColumn(name, columns)
+        }
+        "正则提取列" | "regex-capture-column" => {
+            let ((name, source, pattern, group), data) =
+                json_argument_and_data::<(String, ColumnReference, String, String)>(
+                    input,
+                    CsvError::RegexCaptureColumnArguments,
+                )?;
+            input = data;
+            Operation::RegexCaptureColumn {
+                name,
+                source,
+                pattern,
+                group,
+            }
         }
         "拆分列" | "split-column" => {
             let ((source, names, separator), data) =
@@ -1197,6 +1221,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::FirstNonemptyColumn(name, columns) => {
             first_nonempty_csv_column(&rows, &name, &columns)
         }
+        Operation::RegexCaptureColumn {
+            name,
+            source,
+            pattern,
+            group,
+        } => regex_capture_column(&rows, &name, source, &pattern, &group),
         Operation::SplitColumn {
             source,
             names,
@@ -2115,6 +2145,30 @@ fn concatenate_columns(
             return Err(CsvError::AddedColumnTooLarge);
         }
         Ok(parts.join(separator))
+    })
+}
+
+fn regex_capture_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    pattern: &str,
+    group: &str,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::RegexCaptureColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let pattern = compile_regex(pattern).map_err(CsvError::Regex)?;
+    let group = regex_group_index(&pattern, group).map_err(CsvError::Regex)?;
+    write_appended_column(header, records, name, |row| {
+        let field = &row[source];
+        Ok(pattern
+            .captures(field)
+            .and_then(|captures| captures.get(group))
+            .map_or("", |matched| matched.as_str()))
     })
 }
 
@@ -4210,6 +4264,26 @@ mod tests {
         assert_eq!(
             transform_csv(r#"拼接列 ["省",[1,2],"-"] 省,市"#),
             Err(CsvError::HeaderNameConflict)
+        );
+    }
+
+    #[test]
+    fn appends_first_regex_capture_by_named_or_numbered_group() {
+        let query = "正则提取列 [\"省份\",\"地址\",\"^(?P<province>[^省]+)省\",\"province\"]\n地址,编号\n江苏省南京,1\n上海市,2\n浙江省杭州,3";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("地址,编号,省份\r\n江苏省南京,1,江苏\r\n上海市,2,\"\"\r\n浙江省杭州,3,浙江")
+        );
+        assert_eq!(
+            transform_csv(
+                "regex-capture-column [\"号\",1,\"([A-Z])([0-9]+)?\",\"2\"]\n原文\nA12 A99\nB"
+            )
+            .as_deref(),
+            Ok("原文,号\r\nA12 A99,12\r\nB,\"\"")
+        );
+        assert_eq!(
+            transform_csv("正则提取列 [\"结果\",1,\"(A)\",\"2\"]\n原文"),
+            Err(CsvError::Regex(TextError::UnknownRegexGroup))
         );
     }
 
