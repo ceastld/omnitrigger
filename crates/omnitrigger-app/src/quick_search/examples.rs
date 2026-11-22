@@ -1062,6 +1062,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "列出夏令时回拨时重复出现的两个时刻",
+        query: "时间戳: 时区候选 2026-11-01 01:30 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "输入当地时间和时区",
         query: "时间戳: 1970-01-01 08:00 Asia/Shanghai",
     },
@@ -3294,7 +3299,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
         Scope::Timestamp
             if !term.is_empty()
-                && ["向下对齐", "向上对齐", "时区CSV"]
+                && ["向下对齐", "向上对齐", "时区CSV", "时区候选"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Circuit
