@@ -236,21 +236,13 @@ impl LocalFilesIndex {
         } else {
             query.filter.to_lowercase()
         };
-        let extensions = query.extensions.map(|extensions| {
-            extension_options(extensions)
-                .map(str::to_lowercase)
-                .collect::<HashSet<_>>()
-        });
+        let extensions = extension_set(query.extensions);
+        let excluded_extensions = extension_set(query.excluded_extensions);
         let mut matches: Vec<_> = entries
             .iter()
             .filter(|entry| {
                 matches!(entry.kind, "file" | "directory")
-                    && extensions.as_ref().is_none_or(|extensions| {
-                        entry.kind == "file"
-                            && file_extension(&entry.name).is_some_and(|extension| {
-                                extensions.contains(&extension.to_lowercase())
-                            })
-                    })
+                    && matches_extensions(entry, extensions.as_ref(), excluded_extensions.as_ref())
                     && query.matches_dates(entry)
                     && query.size_bounds.is_none_or(|(minimum, maximum)| {
                         entry
@@ -463,6 +455,38 @@ fn extension_options(list: &str) -> impl Iterator<Item = &str> {
         .map(|extension| extension.strip_prefix('.').unwrap_or(extension))
 }
 
+fn extension_set(list: Option<&str>) -> Option<HashSet<String>> {
+    list.map(|list| extension_options(list).map(str::to_lowercase).collect())
+}
+
+fn matches_extensions(
+    entry: &LocalDirectoryEntry,
+    included: Option<&HashSet<String>>,
+    excluded: Option<&HashSet<String>>,
+) -> bool {
+    if included.is_none() && excluded.is_none() {
+        return true;
+    }
+    if entry.kind != "file" {
+        return false;
+    }
+    let extension = file_extension(&entry.name).map(str::to_lowercase);
+    included.is_none_or(|list| extension.as_ref().is_some_and(|name| list.contains(name)))
+        && excluded.is_none_or(|list| extension.as_ref().is_none_or(|name| !list.contains(name)))
+}
+
+fn set_extension_filter<'a>(target: &mut Option<&'a str>, list: &'a str) -> Option<()> {
+    if target.is_some()
+        || extension_options(list).any(|extension| {
+            extension.is_empty() || extension.contains(['.', '*', '?', '/', '\\', ':', '|'])
+        })
+    {
+        return None;
+    }
+    *target = Some(list);
+    Some(())
+}
+
 pub(super) fn option_help_query(query: &str) -> Option<String> {
     split_query(query)?;
     let separator = if query.split('|').nth(2).is_some() {
@@ -513,6 +537,7 @@ struct FileQuery<'a> {
     modified: DateBounds,
     created: DateBounds,
     extensions: Option<&'a str>,
+    excluded_extensions: Option<&'a str>,
     limit: Option<usize>,
     output: FileOutput,
 }
@@ -610,6 +635,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (mut minimum, mut maximum) = (None, None);
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
     let mut extensions = None;
+    let mut excluded_extensions = None;
     let mut limit = None;
     let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
@@ -656,14 +682,9 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             _ => {
                 let (comparison, quantity) = option.split_once('=')?;
                 match comparison.to_ascii_lowercase().as_str() {
-                    "后缀" | "ext" if extensions.is_none() => {
-                        if extension_options(quantity).any(|extension| {
-                            extension.is_empty()
-                                || extension.contains(['.', '*', '?', '/', '\\', ':', '|'])
-                        }) {
-                            return None;
-                        }
-                        extensions = Some(quantity);
+                    "后缀" | "ext" => set_extension_filter(&mut extensions, quantity)?,
+                    "排除后缀" | "exclude-ext" => {
+                        set_extension_filter(&mut excluded_extensions, quantity)?
                     }
                     "前" | "limit" if limit.is_none() => {
                         limit = Some(
@@ -699,6 +720,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             | FileOutput::MonthCounts(_)
             | FileOutput::SizeTotal
     ) || extensions.is_some()
+        || excluded_extensions.is_some()
     {
         if entry_type == DirectoryEntryType::Directory {
             return None;
@@ -739,6 +761,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             modified,
             created,
             extensions,
+            excluded_extensions,
             limit,
             output,
         })
@@ -1326,6 +1349,41 @@ mod tests {
         }
         assert!(split_query(r"C:\Work | | 修改月份统计 仅文件夹").is_none());
         assert!(split_query(r"C:\Work | | 修改月份统计 创建月份统计").is_none());
+    }
+
+    #[test]
+    fn excludes_file_extensions_case_insensitively_and_keeps_extensionless_files() {
+        let query = r"C:\Work | | 排除后缀=.tmp，BAK 名称列表";
+        let mut index = LocalFilesIndex::default();
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("a.TMP", "file"),
+                entry("b.bak", "file"),
+                entry("c.pdf", "file"),
+                entry("README", "file"),
+                entry("directory", "directory"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query),
+            Results::Value(Ok(value)) if value.text == "c.pdf\nREADME"
+        ));
+        let combined = r"C:\Work | | 后缀=pdf,tmp exclude-ext=tmp 名称列表";
+        assert!(index.request(Some(combined)).is_none());
+        assert!(matches!(
+            index.results(combined),
+            Results::Value(Ok(value)) if value.text == "c.pdf"
+        ));
+        for invalid in [
+            r"C:\Work | | 排除后缀=tmp,",
+            r"C:\Work | | 排除后缀=tmp exclude-ext=bak",
+            r"C:\Work | | 排除后缀=tmp 仅文件夹",
+        ] {
+            assert!(split_query(invalid).is_none(), "{invalid}");
+        }
     }
 
     #[test]

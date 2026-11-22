@@ -13,6 +13,7 @@ use super::operators::{split_top_level_commas, NumberComparison};
 pub(super) enum EquationError {
     Coefficients,
     InequalityArguments,
+    NonQuadratic,
     SystemRows,
     Evaluation(FractionError),
 }
@@ -24,6 +25,7 @@ impl EquationError {
                 "按 a, b, c 输入 ax² + bx + c = 0 的三个系数"
             }
             Self::InequalityArguments => "先填写 >、>=、< 或 <=，再填写 a, b, c",
+            Self::NonQuadratic => "求抛物线顶点时，二次项系数 a 须非零",
             Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
             Self::Evaluation(error) => error.message(),
         }
@@ -36,8 +38,10 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
     }
     let input = normalize(query);
     if let Some((operation, arguments)) = input.trim().split_once(char::is_whitespace) {
-        if operation == "不等式" || operation.eq_ignore_ascii_case("inequality") {
-            return solve_inequality(arguments.trim_start());
+        match operation.to_ascii_lowercase().as_str() {
+            "不等式" | "inequality" => return solve_inequality(arguments.trim_start()),
+            "顶点" | "vertex" => return quadratic_vertex(arguments.trim_start()),
+            _ => {}
         }
     }
     let [a, b, c] = coefficient_row(&input)?;
@@ -63,6 +67,21 @@ fn quadratic_center(a: &BigRational, b: BigRational, c: BigRational) -> (BigRati
     let center = -b / (a * BigInt::from(2));
     let distance_squared = &center * &center - c / a;
     (center, distance_squared)
+}
+
+fn quadratic_vertex(input: &str) -> Result<String, EquationError> {
+    let [a, b, c] = coefficient_row(input)?;
+    let extremum = match a.numer().sign() {
+        Sign::Plus => "最小值",
+        Sign::Minus => "最大值",
+        Sign::NoSign => return Err(EquationError::NonQuadratic),
+    };
+    let (x, distance_squared) = quadratic_center(&a, b, c);
+    let y = -a * distance_squared;
+    for value in [&x, &y] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    Ok(format!("x = {x} · y = {y}（{extremum}）"))
 }
 
 fn solve_inequality(input: &str) -> Result<String, EquationError> {
@@ -280,6 +299,21 @@ mod tests {
         assert_eq!(
             solve_linear_system("1,2; 4,5,6"),
             Err(EquationError::SystemRows)
+        );
+    }
+
+    #[test]
+    fn finds_the_exact_vertex_and_extremum_of_a_quadratic_function() {
+        for (query, expected) in [
+            ("顶点 2,-4,3", "x = 1 · y = 1（最小值）"),
+            ("VERTEX -1/2,3/2,0", "x = 3/2 · y = 9/8（最大值）"),
+            ("顶点 1,0,-5", "x = 0 · y = -5（最小值）"),
+        ] {
+            assert_eq!(solve_equation(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            solve_equation("顶点 0,1,2"),
+            Err(EquationError::NonQuadratic)
         );
     }
 

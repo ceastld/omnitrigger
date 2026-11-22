@@ -46,6 +46,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求二次函数的顶点和极值",
+        query: "方程: 顶点 2,-4,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "联立求解两个二元一次方程",
         query: "联立: 2,1,5; 1,-1,1",
     },
@@ -2760,7 +2765,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["串联", "并联", "耗电"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
-        Scope::Equation if !term.is_empty() && "不等式".starts_with(term) => {}
+        Scope::Equation
+            if !term.is_empty()
+                && ["不等式", "顶点"]
+                    .iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::LinearFit
             if !term.is_empty()
                 && ["预测", "残差"]
