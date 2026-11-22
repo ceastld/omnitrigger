@@ -4,12 +4,13 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use num_rational::BigRational;
 use serde::{
     de::DeserializeOwned,
     ser::{Serialize, SerializeMap, Serializer},
 };
 
-use super::text_tools::compare_natural;
+use super::{fraction::calculate_fraction, text_tools::compare_natural};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -25,6 +26,7 @@ pub(super) enum CsvError {
     AmbiguousColumnName,
     InvalidColumnValue,
     ColumnOutOfRange,
+    InvalidNumber,
     Serialization,
 }
 
@@ -43,6 +45,7 @@ impl CsvError {
             Self::AmbiguousColumnName => "所选列名在表头重复，请改用列号",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
+            Self::InvalidNumber => "数值排序所选列须填写有限小数、整数或分数，例如 -2.5 或 1/3",
             Self::Serialization => "无法生成 JSON",
         }
     }
@@ -68,6 +71,7 @@ enum Operation {
     SortByColumns {
         columns: Vec<usize>,
         descending: bool,
+        numeric: bool,
     },
 }
 
@@ -111,12 +115,20 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             input = data;
             Operation::CountByColumns(columns)
         }
-        "排序" | "sort-columns" | "降序" | "sort-columns-desc" => {
+        "排序" | "sort-columns" | "降序" | "sort-columns-desc" | "数值排序" | "sort-numeric"
+        | "数值降序" | "sort-numeric-desc" => {
             let (columns, data) = column_arguments(input)?;
             input = data;
             Operation::SortByColumns {
                 columns,
-                descending: matches!(operation.as_str(), "降序" | "sort-columns-desc"),
+                descending: matches!(
+                    operation.as_str(),
+                    "降序" | "sort-columns-desc" | "数值降序" | "sort-numeric-desc"
+                ),
+                numeric: matches!(
+                    operation.as_str(),
+                    "数值排序" | "sort-numeric" | "数值降序" | "sort-numeric-desc"
+                ),
             }
         }
         _ => return Err(CsvError::UnknownOperation),
@@ -154,7 +166,8 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::SortByColumns {
             columns,
             descending,
-        } => sort_by_columns(&rows, &columns, descending),
+            numeric,
+        } => sort_by_columns(&rows, &columns, descending, numeric),
     }
 }
 
@@ -308,23 +321,61 @@ fn sort_by_columns(
     rows: &[Vec<String>],
     columns: &[usize],
     descending: bool,
+    numeric: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     validate_column_width(columns, header.len())?;
-    let mut ordered: Vec<_> = records.iter().collect();
-    ordered.sort_by(|left, right| {
-        let order = columns
-            .iter()
-            .map(|&column| compare_natural(&left[column], &right[column]))
-            .find(|order| !order.is_eq())
-            .unwrap_or(Ordering::Equal);
+    let direction = |order: Ordering| {
         if descending {
             order.reverse()
         } else {
             order
         }
-    });
+    };
+    let ordered = if numeric {
+        let mut keyed = records
+            .iter()
+            .map(|row| {
+                let key = columns
+                    .iter()
+                    .map(|&column| numeric_sort_value(&row[column]))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((key, row))
+            })
+            .collect::<Result<Vec<_>, CsvError>>()?;
+        keyed.sort_by(|(left, _), (right, _)| direction(left.cmp(right)));
+        keyed.into_iter().map(|(_, row)| row).collect::<Vec<_>>()
+    } else {
+        let mut ordered: Vec<_> = records.iter().collect();
+        ordered.sort_by(|left, right| {
+            let order = columns
+                .iter()
+                .map(|&column| compare_natural(&left[column], &right[column]))
+                .find(|order| !order.is_eq())
+                .unwrap_or(Ordering::Equal);
+            direction(order)
+        });
+        ordered
+    };
     Ok(write_rows(std::iter::once(header).chain(ordered), ','))
+}
+
+fn numeric_sort_value(input: &str) -> Result<BigRational, CsvError> {
+    let (numerator, denominator) = input
+        .split_once('/')
+        .map_or((input, None), |(left, right)| (left, Some(right)));
+    for part in std::iter::once(numerator).chain(denominator) {
+        let part = part.trim();
+        let digits = part.strip_prefix(['+', '-']).unwrap_or(part);
+        if digits.is_empty()
+            || !digits
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        {
+            return Err(CsvError::InvalidNumber);
+        }
+    }
+    calculate_fraction(input.trim()).map_err(|_| CsvError::InvalidNumber)
 }
 
 fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError> {
@@ -630,6 +681,31 @@ mod tests {
         );
         assert_eq!(transform_csv("排序 1 a,b").as_deref(), Ok("a,b"));
         assert_eq!(transform_csv("降序 3 a,b"), Err(CsvError::ColumnOutOfRange));
+    }
+
+    #[test]
+    fn sorts_csv_by_exact_numeric_keys_without_rewriting_cells() {
+        let data = "编号,金额,优先级\n005,9007199254740993,0\n001,01.50,2\n004,9007199254740992,0\n003,-2.5,0\n002,3/2,1\n006,+1.5,1";
+        assert_eq!(
+            transform_csv(&format!("数值排序 2,3\n{data}")).as_deref(),
+            Ok("编号,金额,优先级\r\n003,-2.5,0\r\n002,3/2,1\r\n006,+1.5,1\r\n001,01.50,2\r\n004,9007199254740992,0\r\n005,9007199254740993,0")
+        );
+        assert_eq!(
+            transform_csv(&format!("sort-numeric-desc 2,3\n{data}")).as_deref(),
+            Ok("编号,金额,优先级\r\n005,9007199254740993,0\r\n004,9007199254740992,0\r\n001,01.50,2\r\n002,3/2,1\r\n006,+1.5,1\r\n003,-2.5,0")
+        );
+        assert_eq!(transform_csv("数值排序 1 a,b").as_deref(), Ok("a,b"));
+        assert_eq!(
+            transform_csv("数值降序 3 a,b"),
+            Err(CsvError::ColumnOutOfRange)
+        );
+        for invalid in ["", "待确认", "1/0", "1/2/3", "1+2", "--2", "1.2.3"] {
+            assert_eq!(
+                transform_csv(&format!("数值排序 2 编号,金额\n001,{invalid}")),
+                Err(CsvError::InvalidNumber),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]
