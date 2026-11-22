@@ -21,6 +21,8 @@ pub(super) enum RadixError {
     ReadByteOrderArguments,
     ReadByteOrderBytes,
     BitRangeArguments,
+    WriteBitsArguments,
+    WriteBitsWidthExceeded,
 }
 
 impl RadixError {
@@ -42,6 +44,10 @@ impl RadixError {
             Self::BitRangeArguments => {
                 "填写位号范围和非负整数，例如 取位 8-15 @ 0x12345678。位号为 0 至 8191"
             }
+            Self::WriteBitsArguments => {
+                "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
+            }
+            Self::WriteBitsWidthExceeded => "新值超出所选位宽",
         }
     }
 }
@@ -141,6 +147,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "取位" || operation.eq_ignore_ascii_case("bit-range") {
         return bit_range(arguments);
     }
+    if operation == "写位" || operation.eq_ignore_ascii_case("write-bits") {
+        return write_bits(arguments);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -176,27 +185,58 @@ fn bit_statistics(input: &str) -> Result<String, RadixError> {
 
 fn bit_range(input: &str) -> Result<String, RadixError> {
     let (range, number) = input.split_once('@').ok_or(RadixError::BitRangeArguments)?;
+    let (start, width) = bit_field_range(range, RadixError::BitRangeArguments)?;
+    let value = unsigned_bit_value(number, RadixError::BitRangeArguments)?;
+    let field = selected_bits(&value, start, width);
+    let hex_digits = width.div_ceil(4) as usize;
+    Ok(format!("十六进制 0x{field:0>hex_digits$X}\n十进制 {field}"))
+}
+
+fn write_bits(input: &str) -> Result<String, RadixError> {
+    let error = RadixError::WriteBitsArguments;
+    let (range, values) = input.split_once('@').ok_or(error)?;
+    let (number, replacement) = values.split_once('@').ok_or(error)?;
+    let (start, width) = bit_field_range(range, error)?;
+    let value = unsigned_bit_value(number, error)?;
+    let replacement = unsigned_bit_value(replacement, error)?;
+    if replacement.bits() > width {
+        return Err(RadixError::WriteBitsWidthExceeded);
+    }
+    let field = selected_bits(&value, start, width);
+    let cleared = value - (field << start);
+    let result = cleared | (replacement << start);
+    Ok(format!("十六进制 0x{result:X}\n十进制 {result}"))
+}
+
+fn bit_field_range(range: &str, error: RadixError) -> Result<(u64, u64), RadixError> {
     let (start, end) = range.split_once('-').unwrap_or((range, range));
     let position = |text: &str| {
         text.trim()
             .parse::<u64>()
             .ok()
             .filter(|&bit| bit < MAX_INTEGER_BITS)
-            .ok_or(RadixError::BitRangeArguments)
+            .ok_or(error)
     };
     let (start, end) = (position(start)?, position(end)?);
+    if start > end {
+        return Err(error);
+    }
+    Ok((start, end - start + 1))
+}
+
+fn unsigned_bit_value(number: &str, error: RadixError) -> Result<BigUint, RadixError> {
     let number = number.trim();
-    if start > end || number.starts_with('-') {
-        return Err(RadixError::BitRangeArguments);
+    if number.starts_with('-') {
+        return Err(error);
     }
     let number = number.strip_prefix('+').unwrap_or(number);
     let (base, digits) = Base::prefixed(number).unwrap_or((Base::Decimal, number));
-    let value = bounded_magnitude(digits, base as u32)?;
-    let width = end - start + 1;
+    bounded_magnitude(digits, base as u32)
+}
+
+fn selected_bits(value: &BigUint, start: u64, width: u64) -> BigUint {
     let mask = (BigUint::from(1_u8) << width) - 1_u8;
-    let field = (value >> start) & mask;
-    let hex_digits = width.div_ceil(4) as usize;
-    Ok(format!("十六进制 0x{field:0>hex_digits$X}\n十进制 {field}"))
+    (value >> start) & mask
 }
 
 fn bounded_magnitude(digits: &str, base: u32) -> Result<BigUint, RadixError> {
@@ -327,6 +367,39 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_bit_ranges_without_changing_surrounding_bits() {
+        for (query, expected) in [
+            (
+                "写位 8-15 @ 0x12345678 @ 0xAB",
+                "十六进制 0x1234AB78\n十进制 305441656",
+            ),
+            (
+                "write-bits 2-5 @ 0b11100011 @ 0",
+                "十六进制 0xC3\n十进制 195",
+            ),
+            ("写位 4 @ 0b11111 @ 0", "十六进制 0xF\n十进制 15"),
+            ("写位 0 @ 0 @ 1", "十六进制 0x1\n十进制 1"),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            convert_arbitrary_radix("写位 8-15 @ 0x12345678 @ 256"),
+            Err(RadixError::WriteBitsWidthExceeded)
+        );
+        for query in [
+            "写位 2-1 @ 0 @ 0",
+            "写位 0 @ -1 @ 0",
+            "写位 0 @ 0 @ -1",
+            "写位 0 @ 0",
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query),
+                Err(RadixError::WriteBitsArguments)
+            );
+        }
+    }
 
     #[test]
     fn extracts_inclusive_integer_bit_fields_and_pads_to_hex_width() {
