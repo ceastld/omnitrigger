@@ -98,6 +98,7 @@ pub(super) enum CsvError {
     DateFormatColumnPattern,
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
+    GroupCountColumnArguments,
     MovingColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
@@ -215,6 +216,9 @@ impl CsvError {
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
+            }
+            Self::GroupCountColumnArguments => {
+                "填写新列名和分组列数组，例如 [\"记录数\",[\"部门\"]]"
             }
             Self::MovingColumnArguments => {
                 "填写新列名、数值列、分组列和窗口大小，例如 [\"近两笔\",\"金额\",[\"部门\"],2]。窗口为 1 至 128"
@@ -364,6 +368,11 @@ enum Operation {
         name: String,
         source: ColumnReference,
         groups: Vec<ColumnReference>,
+    },
+    GroupCountColumn {
+        name: String,
+        groups: Vec<ColumnReference>,
+        running: bool,
     },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
@@ -916,6 +925,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 }
             }
         }
+        kind @ ("组内计数列" | "group-count-column" | "组内序号列" | "group-row-number-column") =>
+        {
+            let ((name, groups), data) = json_argument_and_data::<(String, Vec<ColumnReference>)>(
+                input,
+                CsvError::GroupCountColumnArguments,
+            )?;
+            input = data;
+            Operation::GroupCountColumn {
+                name,
+                groups,
+                running: matches!(kind, "组内序号列" | "group-row-number-column"),
+            }
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -1306,6 +1328,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             source,
             groups,
         } => share_column(&rows, &name, source, &groups),
+        Operation::GroupCountColumn {
+            name,
+            groups,
+            running,
+        } => grouped_count_column(&rows, &name, &groups, running),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -2575,6 +2602,36 @@ fn share_column(
             cause: error.message(),
         })?;
         Ok(share.to_string())
+    })
+}
+
+fn grouped_count_column(
+    rows: &[Vec<String>],
+    name: &str,
+    groups: &[ColumnReference],
+    running: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::GroupCountColumnArguments);
+    }
+    let groups = resolve_distinct_columns(header, groups, CsvError::GroupCountColumnArguments)?;
+    let mut counts = HashMap::<_, usize>::new();
+    if !running {
+        for row in records {
+            *counts.entry(column_key(row, &groups)).or_default() += 1;
+        }
+    }
+    write_appended_column(header, records, name, |row| {
+        let key = column_key(row, &groups);
+        let count = if running {
+            let count = counts.entry(key).or_default();
+            *count += 1;
+            *count
+        } else {
+            counts[&key]
+        };
+        Ok(count.to_string())
     })
 }
 
@@ -5143,6 +5200,31 @@ mod tests {
             transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:00"),
             Err(CsvError::DataRowValue { row: 1, .. })
         ));
+    }
+
+    #[test]
+    fn appends_total_or_running_counts_for_each_group_in_original_row_order() {
+        let csv = "部门,月份,编号\n北,11,001\n南,11,002\n北,12,003\n北,11,004\n,11,005\n,11,006";
+        assert_eq!(
+            transform_csv(&format!("组内计数列 [\"记录数\",[\"部门\",2]]\n{csv}")).as_deref(),
+            Ok("部门,月份,编号,记录数\r\n北,11,001,2\r\n南,11,002,1\r\n北,12,003,1\r\n北,11,004,2\r\n\"\",11,005,2\r\n\"\",11,006,2")
+        );
+        assert_eq!(
+            transform_csv(&format!("组内序号列 [\"序号\",[\"部门\",2]]\n{csv}")).as_deref(),
+            Ok("部门,月份,编号,序号\r\n北,11,001,1\r\n南,11,002,1\r\n北,12,003,1\r\n北,11,004,2\r\n\"\",11,005,1\r\n\"\",11,006,2")
+        );
+        assert_eq!(
+            transform_csv("group-count-column [\"记录数\",[]] 地区\n北\n南").as_deref(),
+            Ok("地区,记录数\r\n北,2\r\n南,2")
+        );
+        assert_eq!(
+            transform_csv("group-row-number-column [\"序号\",[\"地区\",1]] 地区\n北"),
+            Err(CsvError::GroupCountColumnArguments)
+        );
+        assert_eq!(
+            transform_csv("group-count-column [\"地区\",[]] 地区\n北"),
+            Err(CsvError::HeaderNameConflict)
+        );
     }
 
     #[test]

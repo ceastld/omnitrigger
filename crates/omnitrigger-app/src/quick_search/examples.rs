@@ -2843,6 +2843,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在每行追加同一部门和月份的记录数",
+        query: "CSV: 组内计数列 [\"记录数\",[\"部门\",\"月份\"]]\n部门,月份,编号\n北,11,001\n南,11,002\n北,12,003\n北,11,004",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按原表顺序给各组记录编号",
+        query: "CSV: 组内序号列 [\"序号\",[\"部门\",\"月份\"]]\n部门,月份,编号\n北,11,001\n南,11,002\n北,12,003\n北,11,004",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按组逐行求 CSV 的累计平均值",
         query: "CSV: 累计平均列 [\"累计平均\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },
