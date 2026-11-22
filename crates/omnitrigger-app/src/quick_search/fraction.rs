@@ -20,6 +20,7 @@ const MAX_SEQUENCE_VALUES: usize = 128;
 const MAX_APPROXIMATION_DENOMINATOR: u32 = 1_000_000;
 const MAX_RATIO_VALUES: usize = 16;
 const MAX_CONTINUED_FRACTION_TERMS: usize = 512;
+const MAX_CONVERGENT_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_PRIME_FACTORIZATION: u64 = 1_000_000_000_000;
 const MAX_CONGRUENCES: usize = 16;
 
@@ -59,6 +60,7 @@ pub(super) enum FractionError {
     DenominatorLimit,
     ContinuedFractionArguments,
     ContinuedFractionLength,
+    ConvergentOutputTooLarge,
     ComparisonArguments,
     RatioArguments,
     PercentageNotation,
@@ -108,6 +110,7 @@ impl FractionError {
                 "用方括号填写连分数整数项，例如 [3,7,16]。第一项之后须为正整数"
             }
             Self::ContinuedFractionLength => "连分数最多支持 512 项",
+            Self::ConvergentOutputTooLarge => "收敛分数的结果超过 1 MiB",
             Self::ComparisonArguments => "输入两个算式和一个比较符，例如 分数: 比较 1/3 < 0.34",
             Self::RatioArguments => "输入 2 至 16 个非负数，至少一个大于零，例如 0.5,3/4,1",
             Self::PercentageNotation => "请填写带百分号的数值，例如 12.5% 或 33.(3)%",
@@ -210,6 +213,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "连分数" || verb.eq_ignore_ascii_case("continued-fraction") {
         return continued_fraction(calculate_fraction(expression.trim())?);
+    }
+    if verb == "收敛分数" || verb.eq_ignore_ascii_case("convergents") {
+        return fraction_convergents(calculate_fraction(expression.trim())?);
     }
     if verb == "从连分数" || verb.eq_ignore_ascii_case("from-continued-fraction") {
         return from_continued_fraction(expression.trim()).map(|value| value.to_string());
@@ -698,18 +704,48 @@ fn fraction_sequence(input: &str, geometric: bool) -> Result<String, FractionErr
     Ok(values.join("\n"))
 }
 
-fn continued_fraction(mut value: BigRational) -> Result<String, FractionError> {
+fn continued_fraction(value: BigRational) -> Result<String, FractionError> {
+    let terms = continued_fraction_terms(value)?
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    Ok(format!("[{}]", terms.join(",")))
+}
+
+fn continued_fraction_terms(mut value: BigRational) -> Result<Vec<BigInt>, FractionError> {
     let mut terms = Vec::new();
     for _ in 0..MAX_CONTINUED_FRACTION_TERMS {
         let whole = value.floor();
         value -= &whole;
-        terms.push(whole.to_string());
+        terms.push(whole.to_integer());
         if value.numer().sign() == Sign::NoSign {
-            return Ok(format!("[{}]", terms.join(",")));
+            return Ok(terms);
         }
         value = value.recip();
     }
     Err(FractionError::ContinuedFractionLength)
+}
+
+fn fraction_convergents(value: BigRational) -> Result<String, FractionError> {
+    let mut preceding = (BigInt::from(0), BigInt::from(1));
+    let mut current = (BigInt::from(1), BigInt::from(0));
+    let mut output = String::new();
+    for term in continued_fraction_terms(value)? {
+        let next = (
+            &term * &current.0 + &preceding.0,
+            &term * &current.1 + &preceding.1,
+        );
+        preceding = std::mem::replace(&mut current, next);
+        // 简单连分数的相邻收敛分数行列式为 ±1，各分子和分母互素。
+        let line = BigRational::new_raw(current.0.clone(), current.1.clone()).to_string();
+        let separator = if output.is_empty() { "" } else { "\n" };
+        if output.len() + separator.len() + line.len() > MAX_CONVERGENT_OUTPUT_BYTES {
+            return Err(FractionError::ConvergentOutputTooLarge);
+        }
+        output.push_str(separator);
+        output.push_str(&line);
+    }
+    Ok(output)
 }
 
 fn from_continued_fraction(input: &str) -> Result<BigRational, FractionError> {
@@ -1813,6 +1849,19 @@ mod tests {
             simplify_fraction(&overlong),
             Err(FractionError::RepeatingDecimalLength)
         );
+    }
+
+    #[test]
+    fn returns_exact_continued_fraction_convergents_in_expansion_order() {
+        for (query, expected) in [
+            ("收敛分数 355/113", "3\n22/7\n355/113"),
+            ("convergents -7/3", "-3\n-2\n-7/3"),
+            ("收敛分数 1/7", "0\n1/7"),
+            ("收敛分数 -2", "-2"),
+            ("收敛分数 0", "0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected));
+        }
     }
 
     #[test]

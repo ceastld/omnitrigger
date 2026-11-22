@@ -3658,6 +3658,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐项计算有限连分数的收敛分数",
+        query: "分数: 收敛分数 355/113",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "比较两个算式的精确分数值",
         query: "分数: 比较 1/3 < 0.34",
     },
@@ -3808,6 +3813,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "等差数列",
                     "等比数列",
                     "连分数",
+                    "收敛分数",
                     "从连分数",
                     "从循环小数",
                     "比较",
