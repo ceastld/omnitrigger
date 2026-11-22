@@ -96,6 +96,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "用分数或百分数作为权重求平均值",
+        query: "统计: 加权平均 80@30%,90@70%",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用半径计算圆周长和面积",
         query: "圆: 半径 3",
     },
@@ -1805,7 +1810,15 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Statistics
             if matches!(
                 term,
-                "频" | "频数" | "频数表" | "众" | "众数" | "分位" | "分位数" | "四分位"
+                "频" | "频数"
+                    | "频数表"
+                    | "众"
+                    | "众数"
+                    | "分位"
+                    | "分位数"
+                    | "四分位"
+                    | "加权"
+                    | "加权平均"
             ) => {}
         Scope::Json
         | Scope::Csv

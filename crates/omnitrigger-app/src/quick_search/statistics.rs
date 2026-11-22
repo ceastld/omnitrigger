@@ -15,6 +15,8 @@ pub(super) enum StatisticsError {
     TooManyValues,
     InvalidFrequency,
     FrequencyOverflow,
+    InvalidWeight,
+    ZeroTotalWeight,
     InvalidProbability,
     Evaluation(FractionError),
 }
@@ -26,6 +28,8 @@ impl StatisticsError {
             Self::TooManyValues => "最多可统计 128 个值或频数组",
             Self::InvalidFrequency => "每组用 数值@次数，次数须为正整数",
             Self::FrequencyOverflow => "频数合计超出支持范围",
+            Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
+            Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
@@ -54,6 +58,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "四分位" | "quartiles" => (StatisticsOperation::Quartiles, values.trim()),
         "频数表" | "frequency-table" => (StatisticsOperation::FrequencyTable, values.trim()),
         "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
+        "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
             (
@@ -70,18 +75,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
     } else {
         input
     };
-    let terms: Vec<_> = input
-        .lines()
-        .flat_map(split_top_level_commas)
-        .take(MAX_VALUES + 1)
-        .collect();
-    if terms.is_empty() {
-        return Err(StatisticsError::Incomplete);
-    }
-    if terms.len() > MAX_VALUES {
-        return Err(StatisticsError::TooManyValues);
-    }
-    let values = terms
+    let values = observation_terms(input)?
         .into_iter()
         .map(|term| parse_observation(term, use_frequencies))
         .collect::<Result<Vec<_>, _>>()?;
@@ -103,6 +97,45 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         StatisticsOperation::FrequencyTable => Ok(report_frequencies(values, count, false)),
         StatisticsOperation::Mode => Ok(report_frequencies(values, count, true)),
     }
+}
+
+fn observation_terms(input: &str) -> Result<Vec<&str>, StatisticsError> {
+    let terms: Vec<_> = input
+        .lines()
+        .flat_map(split_top_level_commas)
+        .take(MAX_VALUES + 1)
+        .collect();
+    if terms.is_empty() {
+        return Err(StatisticsError::Incomplete);
+    }
+    if terms.len() > MAX_VALUES {
+        return Err(StatisticsError::TooManyValues);
+    }
+    Ok(terms)
+}
+
+fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
+    let mut total_weight = BigRational::default();
+    let mut total_value = BigRational::default();
+    for term in observation_terms(input)? {
+        let (value, weight) = term.split_once('@').ok_or(StatisticsError::InvalidWeight)?;
+        let value = calculate_fraction(value).map_err(StatisticsError::Evaluation)?;
+        let weight = if let Some(percent) = weight.trim().strip_suffix('%') {
+            calculate_fraction(percent).map(|value| value / BigInt::from(100))
+        } else {
+            calculate_fraction(weight)
+        }
+        .map_err(StatisticsError::Evaluation)?;
+        if weight.numer().sign() == Sign::Minus {
+            return Err(StatisticsError::InvalidWeight);
+        }
+        total_value = bounded(total_value + value * &weight)?;
+        total_weight = bounded(total_weight + weight)?;
+    }
+    if total_weight.numer().sign() == Sign::NoSign {
+        return Err(StatisticsError::ZeroTotalWeight);
+    }
+    bounded(total_value / total_weight).map(|value| value.to_string())
 }
 
 fn report_frequencies(values: Vec<(BigRational, u64)>, count: u64, modes_only: bool) -> String {
@@ -295,6 +328,26 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computes_exact_weighted_means_with_fractional_and_percentage_weights() {
+        for (query, expected) in [
+            ("加权平均 80@30%,90@70%", "87"),
+            ("加权平均 1/3@0\n7/3@1/2\n1/3@1/2", "4/3"),
+            ("weighted-mean comb(4,2)@1.5,2@300%", "10/3"),
+            ("加权平均 -2@2e-1,3@3e-1", "1"),
+        ] {
+            assert_eq!(calculate_statistics(query).as_deref(), Ok(expected));
+        }
+        for (query, expected) in [
+            ("加权平均 4@0,8@0%", StatisticsError::ZeroTotalWeight),
+            ("加权平均 4@-1/2,8@1", StatisticsError::InvalidWeight),
+            ("加权平均 4,8@1", StatisticsError::InvalidWeight),
+            ("加权平均", StatisticsError::Incomplete),
+        ] {
+            assert_eq!(calculate_statistics(query), Err(expected), "{query}");
+        }
+    }
 
     #[test]
     fn reports_exact_frequency_tables_and_tied_modes() {
