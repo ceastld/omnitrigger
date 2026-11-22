@@ -46,6 +46,7 @@ enum StatisticsOperation {
     Quantile(BigRational),
     FrequencyTable,
     Mode,
+    RootMeanSquare,
 }
 
 pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsError> {
@@ -58,6 +59,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "四分位" | "quartiles" => (StatisticsOperation::Quartiles, values.trim()),
         "频数表" | "frequency-table" => (StatisticsOperation::FrequencyTable, values.trim()),
         "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
+        "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
@@ -96,6 +98,11 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         StatisticsOperation::FrequencyTable => Ok(report_frequencies(values, count, false)),
         StatisticsOperation::Mode => Ok(report_frequencies(values, count, true)),
+        StatisticsOperation::RootMeanSquare => {
+            let squares = squared_deviation_sum(&values, &BigRational::default())?;
+            let mean_square = bounded(squares / BigInt::from(count))?;
+            Ok(format_square_root(&mean_square))
+        }
     }
 }
 
@@ -211,13 +218,7 @@ fn summarize(
     );
     let variance_divisor = count - u64::from(sample);
     if variance_divisor > 0 {
-        let deviation_sum =
-            values
-                .iter()
-                .try_fold(BigRational::default(), |total, (value, repetitions)| {
-                    let difference = value - &average;
-                    bounded(total + &difference * &difference * BigInt::from(*repetitions))
-                })?;
+        let deviation_sum = squared_deviation_sum(&values, &average)?;
         let variance = bounded(deviation_sum / BigInt::from(variance_divisor))?;
         let label = if sample { "样本" } else { "总体" };
         result.push_str(&format!(
@@ -226,6 +227,18 @@ fn summarize(
         ));
     }
     Ok(result)
+}
+
+fn squared_deviation_sum(
+    values: &[(BigRational, u64)],
+    center: &BigRational,
+) -> Result<BigRational, StatisticsError> {
+    values
+        .iter()
+        .try_fold(BigRational::default(), |total, (value, repetitions)| {
+            let difference = value - center;
+            bounded(total + &difference * &difference * BigInt::from(*repetitions))
+        })
 }
 
 fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
@@ -346,6 +359,18 @@ mod tests {
             ("加权平均", StatisticsError::Incomplete),
         ] {
             assert_eq!(calculate_statistics(query), Err(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn computes_root_mean_square_with_fractions_and_frequency_groups() {
+        for (query, expected) in [
+            ("均方根 1/2,3/2", "√(5/4)"),
+            ("rms -3", "3"),
+            ("均方根 0", "0"),
+            ("均方根 频数 0@2,6@1,-8@1", "5"),
+        ] {
+            assert_eq!(calculate_statistics(query).as_deref(), Ok(expected));
         }
     }
 
