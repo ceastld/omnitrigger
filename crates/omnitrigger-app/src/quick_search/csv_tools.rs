@@ -44,6 +44,7 @@ pub(super) enum CsvError {
     InvalidNumber,
     StatisticsColumn,
     AggregateColumn,
+    GroupingColumns,
     EmptyStatisticsColumn,
     Statistics(StatisticsError),
     Serialization,
@@ -75,7 +76,8 @@ impl CsvError {
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
-            Self::AggregateColumn => "填写一个需要汇总的数值列号，列号从 1 开始",
+            Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
+            Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
@@ -106,10 +108,10 @@ enum Operation {
         condition: ColumnCondition,
         keep_matches: bool,
     },
-    CountByColumns(Vec<usize>),
+    CountByColumns(Vec<ColumnReference>),
     AggregateByColumns {
-        columns: Vec<usize>,
-        amount: usize,
+        columns: Vec<ColumnReference>,
+        amount: ColumnReference,
         average: bool,
     },
     ColumnStatistics {
@@ -257,33 +259,22 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             }
         }
         "分组计数" | "group-count" => {
-            let (columns, data) = column_arguments(input)?;
+            let (columns, data) = grouping_column_arguments(input)?;
             input = data;
             Operation::CountByColumns(columns)
         }
         "分组合计" | "group-sum" | "分组平均" | "group-average" => {
-            let (columns, rest) = column_arguments(input)?;
-            let (amounts, data) = column_arguments(rest)?;
-            let [amount] = amounts.as_slice() else {
-                return Err(CsvError::AggregateColumn);
-            };
+            let (columns, rest) = grouping_column_arguments(input)?;
+            let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
             input = data;
             Operation::AggregateByColumns {
                 columns,
-                amount: *amount,
+                amount,
                 average: matches!(operation.as_str(), "分组平均" | "group-average"),
             }
         }
         "列统计" | "column-stats" | "列总体" | "column-population" => {
-            let (column, data) = if input.trim_start().starts_with('"') {
-                column_reference_argument(input, CsvError::StatisticsColumn)?
-            } else {
-                let (columns, data) = column_arguments(input)?;
-                let [column] = columns.as_slice() else {
-                    return Err(CsvError::StatisticsColumn);
-                };
-                (ColumnReference::Number(*column + 1), data)
-            };
+            let (column, data) = single_column_argument(input, CsvError::StatisticsColumn)?;
             input = data;
             Operation::ColumnStatistics {
                 column,
@@ -370,6 +361,39 @@ fn split_argument(input: &str) -> Option<(&str, &str)> {
 fn column_arguments(input: &str) -> Result<(Vec<usize>, &str), CsvError> {
     let (columns, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
     Ok((column_indices(columns)?, data))
+}
+
+fn grouping_column_arguments(input: &str) -> Result<(Vec<ColumnReference>, &str), CsvError> {
+    if input.trim_start().starts_with('[') {
+        let (columns, data) =
+            json_argument_and_data::<Vec<ColumnReference>>(input, CsvError::GroupingColumns)?;
+        if columns.is_empty() {
+            return Err(CsvError::GroupingColumns);
+        }
+        return Ok((columns, data));
+    }
+    let (columns, data) = column_arguments(input)?;
+    Ok((
+        columns
+            .into_iter()
+            .map(|index| ColumnReference::Number(index + 1))
+            .collect(),
+        data,
+    ))
+}
+
+fn single_column_argument(
+    input: &str,
+    error: CsvError,
+) -> Result<(ColumnReference, &str), CsvError> {
+    if input.trim_start().starts_with('"') {
+        return column_reference_argument(input, error);
+    }
+    let (columns, data) = column_arguments(input)?;
+    let [column] = columns.as_slice() else {
+        return Err(error);
+    };
+    Ok((ColumnReference::Number(*column + 1), data))
 }
 
 fn column_value_arguments(input: &str) -> Result<(ColumnReference, String, &str), CsvError> {
@@ -549,33 +573,53 @@ fn filter_column(
     Ok(write_rows(selected, ','))
 }
 
-fn count_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
+fn resolve_grouping_columns(
+    header: &[String],
+    columns: &[ColumnReference],
+) -> Result<Vec<usize>, CsvError> {
+    let mut seen = HashSet::new();
+    let columns = columns
+        .iter()
+        .map(|column| {
+            let index = column.resolve(header)?;
+            if !seen.insert(index) {
+                return Err(CsvError::GroupingColumns);
+            }
+            Ok(index)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_column_width(&columns, header.len())?;
+    Ok(columns)
+}
+
+fn count_by_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    validate_column_width(columns, header.len())?;
+    let columns = resolve_grouping_columns(header, columns)?;
     let mut groups = HashMap::new();
     for (position, row) in records.iter().enumerate() {
         groups
-            .entry(column_key(row, columns))
+            .entry(column_key(row, &columns))
             .and_modify(|(_, count)| *count += 1)
             .or_insert((position, 1_usize));
     }
-    Ok(grouped_csv(header, columns, groups, "计数"))
+    Ok(grouped_csv(header, &columns, groups, "计数"))
 }
 
 fn aggregate_by_columns(
     rows: &[Vec<String>],
-    columns: &[usize],
-    amount: usize,
+    columns: &[ColumnReference],
+    amount: ColumnReference,
     average: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    validate_column_width(columns, header.len())?;
+    let columns = resolve_grouping_columns(header, columns)?;
+    let amount = amount.resolve(header)?;
     validate_column_width(&[amount], header.len())?;
     let mut groups = HashMap::new();
     for (position, row) in records.iter().enumerate() {
         let value = parse_fraction_literal(&row[amount]).map_err(|_| CsvError::InvalidNumber)?;
         let (_, (total, count)) = groups
-            .entry(column_key(row, columns))
+            .entry(column_key(row, &columns))
             .or_insert_with(|| (position, (BigRational::default(), 0_usize)));
         *total += value;
         *count += 1;
@@ -594,7 +638,7 @@ fn aggregate_by_columns(
         .map(|(key, (position, (value, _)))| (key, (position, value)));
     Ok(grouped_csv(
         header,
-        columns,
+        &columns,
         groups,
         if average { "平均值" } else { "合计" },
     ))
@@ -1168,10 +1212,30 @@ mod tests {
             transform_csv("分组平均 1 2 名称,金额").as_deref(),
             Ok("名称,平均值")
         );
+        assert_eq!(
+            transform_csv(&format!("分组平均 [\"状态\",2] \"金额\"\n{data}")).as_deref(),
+            Ok("状态,地区,平均值\r\n完成,\"东,区\",1\r\n待办,西,5/2\r\n待办,\"东,区\",-1")
+        );
+        assert_eq!(
+            transform_csv(&format!("分组计数 [\"状态\"]\n{data}")).as_deref(),
+            Ok("状态,计数\r\n完成,2\r\n待办,2")
+        );
         for (query, error) in [
             ("分组合计 1 1,2 名称,金额", CsvError::AggregateColumn),
             ("分组合计 1 3 名称,金额", CsvError::ColumnOutOfRange),
             ("分组合计 1 2 名称,金额\n甲,待定", CsvError::InvalidNumber),
+            (
+                r#"分组计数 ["名称",1] 名称,金额"#,
+                CsvError::GroupingColumns,
+            ),
+            (
+                r#"分组计数 ["名称"] 名称,名称"#,
+                CsvError::AmbiguousColumnName,
+            ),
+            (
+                r#"分组平均 ["名称"] "金额" 名称,单价"#,
+                CsvError::MissingColumnName,
+            ),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }

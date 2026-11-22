@@ -1774,7 +1774,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     Example {
         icon: Icon::Terminal,
         title: "按指定列分组求另一列的平均值",
-        query: "CSV: 分组平均 2 3 编号,状态,金额\n001,完成,1/2\n002,待办,2.5e0\n003,完成,2/3",
+        query: "CSV: 分组平均 [\"状态\"] \"金额\" 编号,状态,金额\n001,完成,1/2\n002,待办,2.5e0\n003,完成,2/3",
     },
     Example {
         icon: Icon::Terminal,
