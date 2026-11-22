@@ -32,7 +32,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -86,6 +86,12 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "减法" | "subtract" => elementwise(input, |left, right| *left -= right),
         "逐项乘法" | "hadamard" => elementwise(input, |left, right| *left *= right),
         "f范数" | "frobenius" => frobenius_norm(parse_matrix(input)?),
+        "1范数" | "one-norm" => {
+            max_absolute_row_sum(transpose(parse_matrix(input)?)).map(|norm| norm.to_string())
+        }
+        "无穷范数" | "∞范数" | "infinity-norm" => {
+            max_absolute_row_sum(parse_matrix(input)?).map(|norm| norm.to_string())
+        }
         "乘法" | "乘" | "multiply" => {
             let (left, right) = parse_pair(input)?;
             multiply(&left, &right).map(format_matrix)
@@ -420,6 +426,23 @@ fn frobenius_norm(matrix: Matrix) -> Result<String, MatrixError> {
     Ok(format_square_root(&squared_norm))
 }
 
+fn max_absolute_row_sum(matrix: Matrix) -> Result<BigRational, MatrixError> {
+    let mut maximum = BigRational::default();
+    for row in matrix {
+        let mut sum = BigRational::default();
+        for value in row {
+            sum += if value.numer().sign() == Sign::Minus {
+                -value
+            } else {
+                value
+            };
+            ensure_exact_size(&sum).map_err(MatrixError::Evaluation)?;
+        }
+        maximum = maximum.max(sum);
+    }
+    Ok(maximum)
+}
+
 fn multiply(left: &[Vec<BigRational>], right: &[Vec<BigRational>]) -> Result<Matrix, MatrixError> {
     if left[0].len() != right.len() {
         return Err(MatrixError::ProductDimensions);
@@ -586,6 +609,19 @@ mod tests {
             );
         }
         assert_eq!(calculate_matrix("加法 1,2"), Err(MatrixError::Incomplete));
+    }
+
+    #[test]
+    fn calculates_exact_induced_one_and_infinity_norms_of_rectangular_matrices() {
+        for (query, expected) in [
+            ("1范数 1/2,-2;3,1", "7/2"),
+            ("无穷范数 1/2,-2;3,1", "4"),
+            ("one-norm -1,0,5", "5"),
+            ("infinity-norm -1,0,5", "6"),
+            ("∞范数 0", "0"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected));
+        }
     }
 
     #[test]

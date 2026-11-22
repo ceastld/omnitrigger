@@ -560,6 +560,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: F范数 1/2,1/2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算矩阵各列绝对值之和的最大值",
+        query: "矩阵: 1范数 1/2,-2;3,1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算矩阵各行绝对值之和的最大值",
+        query: "矩阵: 无穷范数 1/2,-2;3,1",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
@@ -3928,7 +3938,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Matrix
             if matches!(term, "乘方" | "特" | "特征" | "特征值")
-                || (!term.is_empty() && "最小二乘".starts_with(term)) => {}
+                || (!term.is_empty()
+                    && ["最小二乘", "1范数", "无穷范数"]
+                        .iter()
+                        .any(|op| op.starts_with(term))) => {}
         Scope::Duration
             if !term.is_empty()
                 && [
