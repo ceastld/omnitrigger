@@ -1300,6 +1300,7 @@ pub(super) struct QuickSearch {
     application_refresh: ApplicationRefresh,
     input_before_help: Option<String>,
     input_before_calculation_history: Option<String>,
+    input_before_bookmarks: Option<String>,
     previous_input: String,
     bookmark_limit_reached: bool,
     bookmark_save_error: Option<String>,
@@ -1407,6 +1408,7 @@ impl QuickSearch {
             application_refresh: ApplicationRefresh::NotRequested,
             input_before_help: None,
             input_before_calculation_history: None,
+            input_before_bookmarks: None,
             previous_input,
             bookmark_limit_reached: false,
             bookmark_save_error: None,
@@ -1465,6 +1467,12 @@ impl QuickSearch {
             })
         {
             self.input_before_calculation_history = None;
+        }
+        if self.input_before_bookmarks.is_some() {
+            let browsing = |input: &str| matches!(scoped_query(input), Some((Scope::Bookmarks, _)));
+            if !browsing(query) && !self.input_before_help.as_deref().is_some_and(browsing) {
+                self.input_before_bookmarks = None;
+            }
         }
         if self.results != next {
             let previous_height = self.results.height(self.value_line_limit());
@@ -1827,10 +1835,22 @@ impl QuickSearch {
         .then_some(query)
     }
 
+    fn toggle_bookmark_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.input.read(cx).text();
+        if matches!(scoped_query(&query), Some((Scope::Bookmarks, _))) {
+            if let Some(previous) = self.input_before_bookmarks.take() {
+                self.fill_query(previous, window, cx);
+            }
+        } else {
+            self.input_before_bookmarks = Some(query);
+            self.fill_query("收藏: ", window, cx);
+        }
+    }
+
     fn toggle_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.input.read(cx).text();
         if query.trim().is_empty() {
-            self.fill_query("收藏: ", window, cx);
+            self.toggle_bookmark_browser(window, cx);
             return;
         }
         let Some(target) = self.bookmark_target(&query) else {
@@ -2091,6 +2111,11 @@ impl QuickSearch {
             "f2" if self.results.value_preview_expandable() => {
                 if !event.is_held {
                     self.toggle_value_preview(window, cx);
+                }
+            }
+            "f4" => {
+                if !event.is_held {
+                    self.toggle_bookmark_browser(window, cx);
                 }
             }
             "f5" => {
@@ -2879,7 +2904,7 @@ impl Render for QuickSearch {
         let bookmark_action = if naming_bookmark {
             None
         } else if query.trim().is_empty() {
-            Some(("查看收藏", "Ctrl+D 查看收藏".to_owned()))
+            Some(("查看收藏 F4", "F4 或 Ctrl+D 查看收藏".to_owned()))
         } else {
             self.bookmark_target(&query).map(|target| {
                 let (label, hint) = if let Some(error) = &self.bookmark_save_error {
@@ -4120,6 +4145,43 @@ mod tests {
                             (menu, restored, removed, name_entry, canceled, named, moved_up && moved_down)
                         })
                         .unwrap();
+                    let bookmark_browser = reopened
+                        .update(cx, |search, window, cx| {
+                            let key = |name, is_held| KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse(name).unwrap(),
+                                is_held,
+                            };
+                            let original = " 2**10 ";
+                            search.fill_query(original, window, cx);
+                            search.refresh_results(original, window, cx);
+                            search.key_down(&key("f4", true), window, cx);
+                            let after_repeat = search.input.read(cx).text();
+                            search.key_down(&key("f4", false), window, cx);
+                            let opened = search.input.read(cx).text();
+                            let filter = "收藏: 每周";
+                            search.fill_query(filter, window, cx);
+                            search.refresh_results(filter, window, cx);
+                            search.key_down(&key("f1", false), window, cx);
+                            let help = search.input.read(cx).text();
+                            search.refresh_results(&help, window, cx);
+                            search.key_down(&key("f1", false), window, cx);
+                            let restored_filter = search.input.read(cx).text();
+                            search.refresh_results(&restored_filter, window, cx);
+                            search.key_down(&key("f4", false), window, cx);
+                            let restored_query = search.input.read(cx).text();
+                            search.fill_query(filter, window, cx);
+                            search.refresh_results(filter, window, cx);
+                            search.key_down(&key("f4", false), window, cx);
+                            let manual_filter = search.input.read(cx).text();
+                            search.fill_query("", window, cx);
+                            search.refresh_results("", window, cx);
+                            search.toggle_bookmark(window, cx);
+                            assert_eq!(search.input.read(cx).text(), "收藏: ");
+                            search.key_down(&key("f4", false), window, cx);
+                            assert_eq!(search.input.read(cx).text(), "");
+                            [after_repeat, opened, restored_filter, restored_query, manual_filter]
+                        })
+                        .unwrap();
                     let history_toggle = reopened
                         .update(cx, |search, window, cx| {
                             let key = |name| KeyDownEvent {
@@ -4172,6 +4234,7 @@ mod tests {
                         scoped_help,
                         directory_help,
                         bookmark_states,
+                        bookmark_browser,
                         history_toggle,
                     ))
                     .unwrap();
@@ -4199,6 +4262,7 @@ mod tests {
                 named,
                 reordered,
             ),
+            [after_repeat, opened, restored_filter, restored_query, manual_filter],
             (
                 history_opened,
                 history_restored,
@@ -4213,6 +4277,11 @@ mod tests {
         assert_eq!(manual_history, "3**4");
         assert_eq!(history_filter_length, INPUT_CHARACTER_LIMIT);
         assert!(matched && long_restored);
+        assert_eq!(after_repeat, " 2**10 ");
+        assert_eq!(opened, "收藏: ");
+        assert_eq!(restored_filter, "收藏: 每周");
+        assert_eq!(restored_query, " 2**10 ");
+        assert_eq!(manual_filter, "收藏: 每周");
         assert_eq!(after_held, "CSV: 截取列");
         assert!(after_fill.starts_with("CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]"));
         assert_eq!(after_edit, "CSV: 截取列 [\"示例\",1,\"1\"]\n标题\n茶");
