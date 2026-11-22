@@ -28,6 +28,7 @@ pub(super) enum TimestampError {
     InvalidDuration,
     IntervalEndpoints,
     IntervalOutput(DurationError),
+    AlignmentArguments,
     UnsupportedPrecision,
     OutOfRange,
 }
@@ -45,6 +46,7 @@ impl TimestampError {
             Self::InvalidDuration => "请输入要加减的时长，例如 时间戳: 现在 + 90分钟",
             Self::IntervalEndpoints => "用 到 或 至 隔开两个带时区的时间",
             Self::IntervalOutput(error) => error.message(),
+            Self::AlignmentArguments => "填写正的时间步长和时间，例如 15分钟 @ 1700000000",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
         }
@@ -174,6 +176,16 @@ fn convert_timestamp_with_local(
             .collect::<Result<Vec<_>, _>>()
             .map(|lines| lines.join("\n")),
     };
+    let round_up = match operation.to_ascii_lowercase().as_str() {
+        "向下对齐" | "floor-time" => Some(false),
+        "向上对齐" | "ceil-time" => Some(true),
+        _ => None,
+    };
+    if let Some(round_up) = round_up {
+        let time = align_timestamp(input[operation.len()..].trim_start(), now, round_up)?;
+        let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
+        return display_time(time, unit.date_format());
+    }
     if let Some((sign, input)) = lower
         .strip_prefix("now")
         .or_else(|| lower.strip_prefix("现在"))
@@ -290,6 +302,31 @@ fn parse_explicit_time(
     Ok(time)
 }
 
+fn align_timestamp(
+    input: &str,
+    now: DateTime<Utc>,
+    round_up: bool,
+) -> Result<DateTime<Utc>, TimestampError> {
+    let (step, value) = input
+        .split_once('@')
+        .ok_or(TimestampError::AlignmentArguments)?;
+    let step = elapsed_duration(step)
+        .ok()
+        .filter(|duration| !duration.is_zero())
+        .ok_or(TimestampError::AlignmentArguments)?;
+    let time = interval_endpoint(value.trim(), now)?;
+    let nanos = unix_nanos(time);
+    let step = step.as_nanos() as i128;
+    let remainder = nanos.rem_euclid(step);
+    let aligned = nanos - remainder + if round_up && remainder != 0 { step } else { 0 };
+    timestamp_from_unix_units(aligned, TimestampUnit::Nanoseconds)
+}
+
+fn unix_nanos(time: DateTime<Utc>) -> i128 {
+    i128::from(time.timestamp()) * NANOS_PER_SECOND as i128
+        + i128::from(time.timestamp_subsec_nanos())
+}
+
 fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
     let (input, output) =
         split_conversion(input).map_or((input, None), |(input, output)| (input, Some(output)));
@@ -301,9 +338,7 @@ fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, Timesta
         if value.is_empty() {
             return Err(TimestampError::IntervalEndpoints);
         }
-        let time = interval_endpoint(value, now)?;
-        Ok(i128::from(time.timestamp()) * NANOS_PER_SECOND as i128
-            + i128::from(time.timestamp_subsec_nanos()))
+        interval_endpoint(value, now).map(unix_nanos)
     };
     let start = timeline_nanos(start)?;
     let end = timeline_nanos(end)?;
@@ -478,6 +513,13 @@ fn parse_unix(input: &str, unit: TimestampUnit) -> Result<DateTime<Utc>, Timesta
         return Err(TimestampError::Invalid);
     }
     let value: i128 = input.parse().map_err(|_| TimestampError::OutOfRange)?;
+    timestamp_from_unix_units(value, unit)
+}
+
+fn timestamp_from_unix_units(
+    value: i128,
+    unit: TimestampUnit,
+) -> Result<DateTime<Utc>, TimestampError> {
     let scale = unit as i128;
     let seconds = i64::try_from(value.div_euclid(scale)).map_err(|_| TimestampError::OutOfRange)?;
     let nanos = (value.rem_euclid(scale) * unit.nanos_per_unit()) as u32;
@@ -495,6 +537,39 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aligns_instants_to_epoch_steps_with_exact_negative_and_subsecond_values() {
+        let now = DateTime::from_timestamp(1000, 250_000_000).unwrap();
+        for (query, expected) in [
+            (
+                "向下对齐 15分钟 @ 1970-01-01T00:17:30Z",
+                "1970-01-01T00:15:00Z",
+            ),
+            (
+                "向上对齐 15分钟 @ 1970-01-01T00:17:30Z",
+                "1970-01-01T00:30:00Z",
+            ),
+            ("floor-time 1秒 @ -1ns", "1969-12-31T23:59:59Z"),
+            ("ceil-time 1秒 @ -1ns", "1970-01-01T00:00:00Z"),
+            ("向上对齐 100ms @ 现在", "1970-01-01T00:16:40.300Z"),
+            ("向下对齐 2ns @ 2ns", "1970-01-01T00:00:00.000000002Z"),
+            (
+                "向上对齐 15分钟 @ 2026-03-08 01:59:59 America/New_York to America/New_York",
+                "2026-03-08T03:00:00-04:00",
+            ),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_timestamp("向下对齐 0秒 @ 1000", now),
+            Err(TimestampError::AlignmentArguments)
+        );
+    }
 
     #[test]
     fn accepts_unix_quantities_and_the_supplied_current_time_as_interval_endpoints() {

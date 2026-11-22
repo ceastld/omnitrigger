@@ -72,6 +72,7 @@
 - 输入 `文件夹:` 可浏览桌面、下载、文档、图片、音乐和视频。也可用 `文件夹: 下载` 或 `folder: downloads` 筛选，按回车打开选中的文件夹。 [Windows 已知文件夹](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 输入 `文件: C:\工作 | 报告` 可在指定本地目录的直接子项中按名称查找。按回车复制所选项的完整路径。分隔符后的名称可留空，多个关键词用空格隔开。匹配本地固定卷上的普通文件和文件夹。
 - 在文件搜索中选中文件夹后按 `Tab` 可进入该文件夹，按 `Alt+↑` 可回到上一级。也可用 `文件: C:\工作 | *.pdf` 或 `报告?.docx` 按 Windows 文件名通配规则匹配。 [Windows 文件名通配规则](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew)
+- 通过 `Tab` 或 `Alt+↑` 切换文件夹后，可在同一个搜索框用 `Alt+←` 返回、用 `Alt+→` 前进。返回时恢复原查询的名称筛选、排序和输出选项。
 - 找到文件后可按 `Alt+Enter` 或点选中行的「定位」，在资源管理器中选中该文件或文件夹。
 - 在文件搜索中按 `F5` 可用当前目录与筛选条件重新读取结果。读取期间保留列表，原选中项仍存在时继续选中它。
 - 输入 `文件: C:\工作 | *.pdf | 最近修改` 可把匹配项按最后修改时间从新到旧排列。可留空中间的名称条件，修改时间相同的按名称排列。 [Windows 目录项的最后修改时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw)
@@ -422,6 +423,7 @@
 - 用 `to +08:00` 或 `to -05:30` 可指定目标时区偏移。Unix 时间戳和带时区的时间都可以换算，例如 `时间戳: 1700000000123ms to +08:00`。
 - 也可输入 IANA 地区时区名。 `时间戳: 1700000000 to America/New_York` 得到 `2023-11-14T17:13:20-05:00`，按该时刻的夏令时和历史规则换算。 [IANA 时区数据库](https://www.iana.org/time-zones)
 - 输入 `时间戳: 2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles` 可在一次换算中查看同一时刻在三个时区的时间。结果按输入顺序显示，每个时区占两行，先列名称，再列完整日期时间。目标用逗号或顿号隔开，最多八个。
+- 输入 `时间戳: 向下对齐 15分钟 @ 1970-01-01T00:17:30Z` 得到 `1970-01-01T00:15:00Z`。用 `向上对齐` 得到 `00:30:00Z`。时间步长从 Unix 纪元起计，已在边界的时刻保持不变。可加目标时区查看对齐后的时间。
 - 可直接输入当地的日期和时间，再写原时区和目标时区。 `时间戳: 2026-07-01 09:00 America/New_York to Asia/Shanghai` 得到 `2026-07-01T21:00:00+08:00`。夏令时跳过或重复的钟表时刻会有对应提示。
 - 时区偏移可精确到秒。把历史查询的结果作为输入，例如 `时间戳: 1900-01-01T00:09:21.123+00:09:21 to UTC`，可还原为 `1900-01-01T00:00:00.123Z`。结果中的毫秒一并保留。
 - 输入 `时间戳: 间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York` 得到 `01:00:00`。间隔按两端对应的 UTC 时间计算，支持地区时区和明确的 UTC 偏移，结果可精确到纳秒。交换两端会反转正负号。 [NIST 夏令时规则](https://www.nist.gov/pml/time-and-frequency-division/popular-links/daylight-saving-time-dst)

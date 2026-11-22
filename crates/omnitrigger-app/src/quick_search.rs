@@ -1582,7 +1582,23 @@ impl QuickSearch {
                 };
                 if !event.is_held {
                     if let Some(parent) = self.index.local_files.parent_query(term) {
+                        self.index.local_files.remember_navigation(query);
                         self.fill_query(parent, window, cx);
+                    }
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1
+                && keystroke.modifiers.alt
+                && matches!(keystroke.key.as_str(), "left" | "right")
+            {
+                let query = self.input.read(cx).text();
+                if !matches!(scoped_query(&query), Some((Scope::LocalFiles, _))) {
+                    return;
+                }
+                if !event.is_held {
+                    let forward = keystroke.key == "right";
+                    if let Some(previous) = self.index.local_files.move_navigation(query, forward) {
+                        self.fill_query(previous, window, cx);
                     }
                 }
                 cx.stop_propagation();
@@ -1643,19 +1659,23 @@ impl QuickSearch {
                 let suggestion = self
                     .results
                     .suggested_input(self.selected)
-                    .map(str::to_owned)
-                    .or_else(|| self.results.subdirectory_query(self.selected));
+                    .map(str::to_owned);
+                let subdirectory = self.results.subdirectory_query(self.selected);
                 let continues_value = matches!(
                     &self.results,
                     Results::Value(Ok(value)) if value.continuation_hint().is_some()
                 );
-                if suggestion.is_none() && !continues_value {
+                if suggestion.is_none() && subdirectory.is_none() && !continues_value {
                     return;
                 }
                 if !event.is_held {
                     if let Some(query) = suggestion {
                         self.remember_selected_example();
                         self.fill_query(query, window, cx);
+                    } else if let Some(target) = subdirectory {
+                        let query = self.input.read(cx).text();
+                        self.index.local_files.remember_navigation(query);
+                        self.fill_query(target, window, cx);
                     } else {
                         self.continue_value(window, cx);
                     }
@@ -3095,6 +3115,8 @@ mod tests {
                     "帧数: 125 帧 @ 25 fps",
                     "帧数: 10秒 @ 30000/1001 fps",
                     "时间戳: 现在 + 90分钟 to UTC+8",
+                    "时间戳: 向下对齐 15分钟 @ 1970-01-01T00:17:30Z",
+                    "时间戳: 向上对齐 15分钟 @ 1970-01-01T00:17:30Z",
                 ][..],
             ),
             ("? 无对应示例", &[][..]),

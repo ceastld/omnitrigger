@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
     path::Path,
     sync::{
@@ -21,6 +21,7 @@ use super::{
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
 const FOLDER_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_NAVIGATION_HISTORY: usize = 16;
 const TICKS_PER_DAY: u64 = 864_000_000_000;
 const FILETIME_TICKS_PER_SECOND: u64 = 10_000_000;
 const FILETIME_UNIX_EPOCH_SECONDS: i64 = 11_644_473_600;
@@ -28,6 +29,8 @@ const FILETIME_UNIX_EPOCH_SECONDS: i64 = 11_644_473_600;
 #[derive(Default)]
 pub(super) struct LocalFilesIndex {
     current: Option<DirectoryRequest>,
+    back: VecDeque<String>,
+    forward: VecDeque<String>,
 }
 
 struct DirectoryRequest {
@@ -87,6 +90,29 @@ impl DirectoryLoad {
 }
 
 impl LocalFilesIndex {
+    pub(super) fn remember_navigation(&mut self, current: String) {
+        Self::push_navigation(&mut self.back, current);
+        self.forward.clear();
+    }
+
+    pub(super) fn move_navigation(&mut self, current: String, forward: bool) -> Option<String> {
+        let (source, destination) = if forward {
+            (&mut self.forward, &mut self.back)
+        } else {
+            (&mut self.back, &mut self.forward)
+        };
+        let query = source.pop_back()?;
+        Self::push_navigation(destination, current);
+        Some(query)
+    }
+
+    fn push_navigation(history: &mut VecDeque<String>, query: String) {
+        if history.len() == MAX_NAVIGATION_HISTORY {
+            history.pop_front();
+        }
+        history.push_back(query);
+    }
+
     fn invalidate(&mut self) {
         self.current = None;
     }
@@ -641,6 +667,52 @@ mod tests {
         let closing = index.request(Some(r"C:\Work |")).unwrap();
         drop(index);
         assert!(closing.cancelled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn navigates_back_and_forward_with_the_exact_filter_query() {
+        let root = r"文件: C:\Work | budget | 仅文件夹 最近修改";
+        let child = r"文件: C:\Work\Budget | *.pdf | 后缀=pdf";
+        let nested = r"文件: C:\Work\Budget\2026 |";
+        let mut index = LocalFilesIndex::default();
+        index.remember_navigation(root.to_owned());
+        index.remember_navigation(child.to_owned());
+        assert_eq!(
+            index.move_navigation(nested.to_owned(), false).as_deref(),
+            Some(child)
+        );
+        assert_eq!(
+            index.move_navigation(child.to_owned(), false).as_deref(),
+            Some(root)
+        );
+        assert_eq!(
+            index.move_navigation(root.to_owned(), true).as_deref(),
+            Some(child)
+        );
+        assert_eq!(
+            index.move_navigation(child.to_owned(), true).as_deref(),
+            Some(nested)
+        );
+        assert_eq!(index.move_navigation(nested.to_owned(), true), None);
+        assert_eq!(
+            index.move_navigation(nested.to_owned(), false).as_deref(),
+            Some(child)
+        );
+        index.remember_navigation(child.to_owned());
+        assert_eq!(
+            index.move_navigation("文件: C:\\Other |".to_owned(), true),
+            None
+        );
+
+        let mut index = LocalFilesIndex::default();
+        for i in 0..=MAX_NAVIGATION_HISTORY {
+            index.remember_navigation(format!("文件: C:\\Work\\{i} |"));
+        }
+        assert_eq!(index.back.len(), MAX_NAVIGATION_HISTORY);
+        assert_eq!(
+            index.back.front().map(String::as_str),
+            Some(r"文件: C:\Work\1 |")
+        );
     }
 
     #[test]
