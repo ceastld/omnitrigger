@@ -259,6 +259,7 @@
 - 输入 `JSON: 加路径 /订单/1 {"金额":3.50}` 后粘贴 JSON，可在数组的第 2 项前插入新值。用 `/订单/-` 可追加到数组末尾。路径也可指向对象字段，已有字段会更新，其他值保留原始写法。 [JSON Patch 的添加规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.1)
 - 输入 `JSON: 复制路径 ["/订单/0","/归档/-"]` 后粘贴 JSON，可把订单的第一项追加到已有的归档数组，保留其中数值和字符串的写法。目标也可指向对象字段。 [JSON Patch 的复制规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.5)
 - 输入 `JSON: 移动路径 ["/订单/0","/归档/-"]` 后粘贴 JSON，可从订单移出第一项并追加到归档数组，保留原值的写法。目标下标以移出后的数组为准。 [JSON Patch 的移动规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.4)
+- 用 `JSON: 应用补丁` 输入补丁数组和原 JSON，可按顺序执行 `add`、`remove`、`replace`、`copy`、`move` 和 `test`。每一步都以当前文档为准，成功时输出完整结果，失败时显示步骤编号。最多 32 步，每步结果须为完整 JSON 且不超过 1 MiB。 [JSON Patch 操作规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4)
 - 输入 `JSON: 对比` 后粘贴两个用空白分隔的 JSON 值，可按指针列出差异。对象按键名比较，数组按位置比较，`1` 与 `1.00` 视为相等。输出保留变化值的写法，某侧缺少路径时省略该侧字段。 [JSON Patch 的值比较规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.6)
 - 输入 `JSON: 删路径 /订单/0/备注` 加上 JSON，可删除该路径对应的对象成员或数组项。结果同时移除相邻的分隔逗号，保留其他值和键的原始写法。 [JSON Patch 的删除规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.2)
 - 输入 `JSON: 转CSV` 加上行数组或对象列表，可生成 CSV。对象的字段按首次出现的顺序写入表头，缺失字段和 `null` 写为空单元格。数字保留原来的拼写，嵌套数组和对象写为紧凑 JSON。
@@ -406,6 +407,7 @@
 - 加上 `本地` 或 `local` 可按系统时区显示带偏移量的时间，例如 `时间戳: 1700000000 本地` 或 `时间戳: 现在 本地`。
 - 用 `to +08:00` 或 `to -05:30` 可指定目标时区偏移。Unix 时间戳和带时区的时间都可以换算，例如 `时间戳: 1700000000123ms to +08:00`。
 - 也可输入 IANA 地区时区名。 `时间戳: 1700000000 to America/New_York` 得到 `2023-11-14T17:13:20-05:00`，按该时刻的夏令时和历史规则换算。 [IANA 时区数据库](https://www.iana.org/time-zones)
+- 输入 `时间戳: 2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles` 可在一次换算中查看同一时刻在三个时区的时间。结果按输入顺序逐行显示。目标用逗号或顿号隔开，最多八个。
 - 可直接输入当地的日期和时间，再写原时区和目标时区。 `时间戳: 2026-07-01 09:00 America/New_York to Asia/Shanghai` 得到 `2026-07-01T21:00:00+08:00`。夏令时跳过或重复的钟表时刻会有对应提示。
 - 时区偏移可精确到秒。把历史查询的结果作为输入，例如 `时间戳: 1900-01-01T00:09:21.123+00:09:21 to UTC`，可还原为 `1900-01-01T00:00:00.123Z`。结果中的毫秒一并保留。
 - 输入 `时间戳: 间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York` 得到 `01:00:00`。间隔按两端对应的 UTC 时间计算，支持地区时区和明确的 UTC 偏移，结果可精确到纳秒。交换两端会反转正负号。 [NIST 夏令时规则](https://www.nist.gov/pml/time-and-frequency-division/popular-links/daylight-saving-time-dst)

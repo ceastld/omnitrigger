@@ -837,6 +837,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "把同一时刻换算到多个时区",
+        query: "时间戳: 2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "输入当地时间和时区",
         query: "时间戳: 1970-01-01 08:00 Asia/Shanghai",
     },
@@ -1839,6 +1844,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按两个 JSON 路径移动值",
         query: r#"JSON: 移动路径 ["/订单/0","/归档/-"] {"订单":[{"金额":1.50,"名字":"\u8336"}],"归档":[]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按顺序应用一组 JSON 补丁",
+        query: r#"JSON: 应用补丁 [{"op":"test","path":"/状态","value":"初稿"},{"op":"replace","path":"/状态","value":"完成"}] {"版本":1.00,"状态":"初稿"}"#,
     },
     Example {
         icon: Icon::Terminal,

@@ -17,6 +17,7 @@ use super::operators::NumberComparison;
 use super::text_tools::compare_natural;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
+const MAX_PATCH_STEPS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JsonError {
@@ -29,6 +30,12 @@ pub(super) enum JsonError {
     PointerSelection,
     SourceAndTargetPaths,
     MoveIntoDescendant,
+    PatchArguments,
+    PatchOperation,
+    PatchLimit,
+    PatchOutputLimit,
+    PatchTestFailed,
+    PatchStep { index: usize, cause: &'static str },
     ComparisonTooLarge,
     PointerListTooLarge,
     FlattenedObjectTooLarge,
@@ -73,6 +80,14 @@ impl JsonError {
             Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
             Self::SourceAndTargetPaths => "用 JSON 数组填写来源和目标两个路径，再粘贴 JSON",
             Self::MoveIntoDescendant => "目标路径不能位于要移动的值内",
+            Self::PatchArguments => {
+                "填写补丁数组和原 JSON，每步填写 op、path 及所需的 value 或 from"
+            }
+            Self::PatchOperation => "op 可用 add、remove、replace、move、copy 或 test",
+            Self::PatchLimit => "补丁最多可包含 32 步",
+            Self::PatchOutputLimit => "补丁中间结果超过 1 MiB",
+            Self::PatchTestFailed => "指定路径上的 JSON 值与预期不同",
+            Self::PatchStep { cause, .. } => cause,
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
@@ -154,6 +169,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "加路径" | "add-path" => return write_json_value(source, true),
         "复制路径" | "copy-path" => return transfer_json_value(source, false),
         "移动路径" | "move-path" => return transfer_json_value(source, true),
+        "应用补丁" | "apply-patch" => return apply_json_patch(source),
         "对比" | "diff" => return compare_json_values(source),
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
@@ -322,6 +338,16 @@ fn transfer_json_value(query: &str, remove_source: bool) -> Result<String, JsonE
         return Err(JsonError::SourceAndTargetPaths);
     };
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    transfer_value(source, root, from, to, remove_source)
+}
+
+fn transfer_value(
+    source: &str,
+    root: &RawValue,
+    from: &str,
+    to: &str,
+    remove_source: bool,
+) -> Result<String, JsonError> {
     if !remove_source {
         let value = select_json_path(root, from)?.get();
         return edit_json_value(source, root, to, value, true);
@@ -338,6 +364,87 @@ fn transfer_json_value(query: &str, remove_source: bool) -> Result<String, JsonE
     let remaining = remove_json_value(source, root, &from_keys)?;
     let remaining_root = serde_json::from_str::<&RawValue>(&remaining).map_err(json_parse_error)?;
     edit_json_value(&remaining, remaining_root, to, value, true)
+}
+
+#[derive(serde::Deserialize)]
+struct JsonPatchStep<'a> {
+    op: String,
+    path: String,
+    from: Option<String>,
+    #[serde(borrow, default, deserialize_with = "present_patch_value")]
+    value: Option<&'a RawValue>,
+}
+
+fn present_patch_value<'de, D>(deserializer: D) -> Result<Option<&'de RawValue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
+fn apply_json_patch(source: &str) -> Result<String, JsonError> {
+    let (patch, source) = json_value_and_source(source, JsonError::PatchArguments)?;
+    let steps = read_json_array(patch.get()).map_err(|_| JsonError::PatchArguments)?;
+    if steps.len() > MAX_PATCH_STEPS {
+        return Err(JsonError::PatchLimit);
+    }
+    serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut document = Cow::Borrowed(source);
+    for (index, step) in steps.into_iter().enumerate() {
+        let result = serde_json::from_str::<JsonPatchStep<'_>>(step.get())
+            .map_err(|_| JsonError::PatchArguments)
+            .and_then(|step| apply_patch_step(&document, step))
+            .map_err(|error| JsonError::PatchStep {
+                index: index + 1,
+                cause: error.message(),
+            })?;
+        if let Some(result) = result {
+            if result.len() > MAX_PRETTY_BYTES {
+                return Err(JsonError::PatchStep {
+                    index: index + 1,
+                    cause: JsonError::PatchOutputLimit.message(),
+                });
+            }
+            document = Cow::Owned(result);
+        }
+    }
+    Ok(document.into_owned())
+}
+
+fn apply_patch_step(source: &str, step: JsonPatchStep<'_>) -> Result<Option<String>, JsonError> {
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let JsonPatchStep {
+        op,
+        path,
+        from,
+        value,
+    } = step;
+    let value = || value.ok_or(JsonError::PatchArguments);
+    let from = || from.as_deref().ok_or(JsonError::PatchArguments);
+    match op.as_str() {
+        "add" | "replace" => {
+            edit_json_value(source, root, &path, value()?.get(), op == "add").map(Some)
+        }
+        "remove" => {
+            let keys = pointer_keys(&path)?.collect::<Result<Vec<_>, _>>()?;
+            remove_json_value(source, root, &keys).map(Some)
+        }
+        "copy" | "move" => transfer_value(source, root, from()?, &path, op == "move").map(Some),
+        "test" => {
+            let actual = select_json_path(root, &path)?;
+            let mut matches = true;
+            compare_json_trees(actual, value()?, |_| {
+                matches = false;
+                Ok(false)
+            })?;
+            if matches {
+                Ok(None)
+            } else {
+                Err(JsonError::PatchTestFailed)
+            }
+        }
+        _ => Err(JsonError::PatchOperation),
+    }
 }
 
 fn edit_json_value(
@@ -1358,9 +1465,29 @@ struct JsonDifference<'a> {
 fn compare_json_values(source: &str) -> Result<String, JsonError> {
     let (left, right) = json_value_and_source(source, JsonError::Invalid)?;
     let right = serde_json::from_str::<&RawValue>(right).map_err(json_parse_error)?;
+    let mut output = String::from("[");
+    compare_json_trees(left, right, |difference| {
+        let encoded = serde_json::to_string(&difference).map_err(json_parse_error)?;
+        if output.len() + encoded.len() + 2 > MAX_PRETTY_BYTES {
+            return Err(JsonError::ComparisonTooLarge);
+        }
+        if output.len() > 1 {
+            output.push(',');
+        }
+        output.push_str(&encoded);
+        Ok(true)
+    })?;
+    output.push(']');
+    Ok(output)
+}
+
+fn compare_json_trees(
+    left: &RawValue,
+    right: &RawValue,
+    mut record: impl for<'a> FnMut(JsonDifference<'a>) -> Result<bool, JsonError>,
+) -> Result<(), JsonError> {
     let mut pending = vec![(Some(left), Some(right), None::<(usize, String)>)];
     let mut pointer = String::new();
-    let mut output = String::from("[");
     while let Some((left, right, key)) = pending.pop() {
         if let Some((parent_length, key)) = key {
             pointer.truncate(parent_length);
@@ -1405,17 +1532,11 @@ fn compare_json_values(source: &str) -> Result<String, JsonError> {
             left,
             right,
         };
-        let encoded = serde_json::to_string(&difference).map_err(json_parse_error)?;
-        if output.len() + encoded.len() + 2 > MAX_PRETTY_BYTES {
-            return Err(JsonError::ComparisonTooLarge);
+        if !record(difference)? {
+            break;
         }
-        if output.len() > 1 {
-            output.push(',');
-        }
-        output.push_str(&encoded);
     }
-    output.push(']');
-    Ok(output)
+    Ok(())
 }
 
 type ComparedJsonMember<'a> = (String, Option<&'a RawValue>, Option<&'a RawValue>);
@@ -2490,6 +2611,42 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn applies_json_patch_steps_in_order_with_exact_test_values() {
+        let patch = r#"应用补丁 [{"op":"test","path":"/a/0","value":1e0},{"op":"remove","path":"/a/0"},{"op":"copy","from":"/a/0","path":"/copy"},{"op":"move","from":"/a/0","path":"/a/-"},{"op":"add","path":"/a/0","value":null},{"op":"replace","path":"/a/1","value":3.50}] {"a":[1.00,2e0,"\\u8336"],"old":0.10}"#;
+        assert_eq!(
+            transform_json(patch).as_deref(),
+            Ok(r#"{"a":[null,3.50,2e0],"old":0.10,"copy":2e0}"#)
+        );
+        assert_eq!(
+            transform_json(r#"apply-patch [] { "a": 1.50 }"#).as_deref(),
+            Ok(r#"{ "a": 1.50 }"#)
+        );
+        let failure = r#"应用补丁 [{"op":"add","path":"/a","value":null},{"op":"test","path":"/a","value":false},{"op":"remove","path":"/a"}] {}"#;
+        assert_eq!(
+            transform_json(failure),
+            Err(JsonError::PatchStep {
+                index: 2,
+                cause: JsonError::PatchTestFailed.message()
+            })
+        );
+        assert_eq!(
+            transform_json(r#"应用补丁 [{"op":"add","path":"/a"}] {}"#),
+            Err(JsonError::PatchStep {
+                index: 1,
+                cause: JsonError::PatchArguments.message()
+            })
+        );
+        let step = r#"{"op":"test","path":"","value":null}"#;
+        let steps = std::iter::repeat_n(step, MAX_PATCH_STEPS + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            transform_json(&format!("应用补丁 [{steps}] null")),
+            Err(JsonError::PatchLimit)
+        );
     }
 
     #[test]

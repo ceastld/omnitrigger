@@ -463,6 +463,9 @@ impl ValueError {
             Self::Identifier(error) => error.message(),
             Self::Color(error) => error.message(),
             Self::Text(error) => error.message(),
+            Self::Json(JsonError::PatchStep { index, cause }) => {
+                return format!("第 {index} 步补丁失败 · {cause}").into();
+            }
             Self::Json(error) => error.message(),
             Self::Csv(error) => error.message(),
             Self::Fraction(error) => error.message(),
@@ -2659,7 +2662,7 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 42);
+        assert_eq!(examples_for("JSON：").len(), 43);
         assert!(examples_for("JSON: 展平")[0].starts_with("JSON: 展平 "));
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 取列")[0].starts_with("JSON: 取列 "));
@@ -2677,6 +2680,7 @@ mod tests {
         assert!(examples_for("JSON: 加路")[0].starts_with("JSON: 加路径 "));
         assert!(examples_for("JSON: 复制路")[0].starts_with("JSON: 复制路径 "));
         assert!(examples_for("JSON: 移动路")[0].starts_with("JSON: 移动路径 "));
+        assert!(examples_for("JSON: 应用补")[0].starts_with("JSON: 应用补丁 "));
         assert!(examples_for("JSON: 对比")[0].starts_with("JSON: 对比 "));
         assert!(examples_for("JSON: 删路")[0].starts_with("JSON: 删路径 "));
         assert!(examples_for("JSON: 去")[0].starts_with("JSON: 去键 "));

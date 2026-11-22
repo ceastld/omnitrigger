@@ -14,11 +14,14 @@ use super::duration::{
     elapsed_duration, format_clock_duration, format_duration_unit, DurationError, NANOS_PER_SECOND,
 };
 
+const MAX_TARGET_ZONES: usize = 8;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
     Incomplete,
     Invalid,
     InvalidOffset,
+    TooManyTargetZones,
     InvalidSourceZone,
     SourceClockGap,
     SourceClockFold,
@@ -35,6 +38,7 @@ impl TimestampError {
             Self::Incomplete => "输入时间戳或带时区的时间，例如 时间戳: 1700000000000ms",
             Self::Invalid => "输入 Unix 时间戳或带 UTC 偏移量或地区时区的日期时间",
             Self::InvalidOffset => "输入目标时区，例如 本地、+08:00 或 Asia/Shanghai",
+            Self::TooManyTargetZones => "可用逗号隔开最多 8 个目标时区",
             Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
             Self::SourceClockGap => "该地区跳过了这一时刻，请检查输入的钟表时间",
             Self::SourceClockFold => "该地区的钟表时间出现两次，请用 UTC 偏移量指定其中一次",
@@ -116,6 +120,11 @@ enum DisplayZone {
     Named(TimeZone),
 }
 
+enum DisplayTargets<'a> {
+    Single(DisplayZone),
+    Multiple(Vec<(&'a str, DisplayZone)>),
+}
+
 pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
     convert_timestamp_with_local(query, now, |time| time.with_timezone(&Local).fixed_offset())
 }
@@ -132,7 +141,7 @@ fn convert_timestamp_with_local(
         return timestamp_interval(argument, now);
     }
     let (input, target_zone) = if let Some((source, target)) = split_conversion(input) {
-        (source, Some(parse_display_zone(target)?))
+        (source, Some(parse_display_targets(target)?))
     } else {
         (input, None)
     };
@@ -145,40 +154,25 @@ fn convert_timestamp_with_local(
     } else {
         None
     };
-    let target_zone = target_zone.or(local_suffix.map(|_| DisplayZone::Local));
+    let target_zone =
+        target_zone.or(local_suffix.map(|_| DisplayTargets::Single(DisplayZone::Local)));
     let lower = local_suffix.unwrap_or(&lower).trim_end();
     let input = &input[..lower.len()];
     if matches!(input, "" | "+" | "-") {
         return Err(TimestampError::Incomplete);
     }
 
-    let display_time = |time: DateTime<Utc>, format| {
-        ensure_four_digit_year(time.year())?;
-        let zoned = match &target_zone {
-            None | Some(DisplayZone::Utc) => return Ok(time.to_rfc3339_opts(format, true)),
-            Some(DisplayZone::Local) => to_local(time),
-            Some(DisplayZone::Offset(offset)) => time.with_timezone(offset),
-            Some(DisplayZone::Named(zone)) => {
-                let nanos = i128::from(time.timestamp()) * 1_000_000_000
-                    + i128::from(time.timestamp_subsec_nanos());
-                let instant =
-                    Timestamp::from_nanosecond(nanos).map_err(|_| TimestampError::OutOfRange)?;
-                let offset = FixedOffset::east_opt(zone.to_offset(instant).seconds())
-                    .ok_or(TimestampError::OutOfRange)?;
-                time.with_timezone(&offset)
-            }
-        };
-        ensure_four_digit_year(zoned.year())?;
-        if zoned.offset().local_minus_utc() % 60 == 0 {
-            return Ok(zoned.to_rfc3339_opts(format, false));
-        }
-        // 旧时区偏移可能包含秒，保留实际偏移量。
-        let clock = zoned.naive_local().and_utc().to_rfc3339_opts(format, true);
-        Ok(format!(
-            "{}{}",
-            clock.trim_end_matches('Z'),
-            zoned.format("%::z")
-        ))
+    let display_time = |time: DateTime<Utc>, format| match &target_zone {
+        None => format_display_time(time, format, &DisplayZone::Utc, &to_local),
+        Some(DisplayTargets::Single(zone)) => format_display_time(time, format, zone, &to_local),
+        Some(DisplayTargets::Multiple(zones)) => zones
+            .iter()
+            .map(|(name, zone)| {
+                format_display_time(time, format, zone, &to_local)
+                    .map(|clock| format!("{name}\t{clock}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|lines| lines.join("\n")),
     };
     if let Some((sign, input)) = lower
         .strip_prefix("now")
@@ -230,6 +224,40 @@ fn convert_timestamp_with_local(
     } else {
         Ok(unit.format_unix(time))
     }
+}
+
+fn format_display_time(
+    time: DateTime<Utc>,
+    format: SecondsFormat,
+    zone: &DisplayZone,
+    to_local: &impl Fn(DateTime<Utc>) -> DateTime<FixedOffset>,
+) -> Result<String, TimestampError> {
+    ensure_four_digit_year(time.year())?;
+    let zoned = match zone {
+        DisplayZone::Utc => return Ok(time.to_rfc3339_opts(format, true)),
+        DisplayZone::Local => to_local(time),
+        DisplayZone::Offset(offset) => time.with_timezone(offset),
+        DisplayZone::Named(zone) => {
+            let nanos = i128::from(time.timestamp()) * 1_000_000_000
+                + i128::from(time.timestamp_subsec_nanos());
+            let instant =
+                Timestamp::from_nanosecond(nanos).map_err(|_| TimestampError::OutOfRange)?;
+            let offset = FixedOffset::east_opt(zone.to_offset(instant).seconds())
+                .ok_or(TimestampError::OutOfRange)?;
+            time.with_timezone(&offset)
+        }
+    };
+    ensure_four_digit_year(zoned.year())?;
+    if zoned.offset().local_minus_utc() % 60 == 0 {
+        return Ok(zoned.to_rfc3339_opts(format, false));
+    }
+    // 旧时区偏移可能包含秒，保留实际偏移量。
+    let clock = zoned.naive_local().and_utc().to_rfc3339_opts(format, true);
+    Ok(format!(
+        "{}{}",
+        clock.trim_end_matches('Z'),
+        zoned.format("%::z")
+    ))
 }
 
 fn named_time_source(input: &str) -> Option<(&str, &str)> {
@@ -370,6 +398,25 @@ fn parse_offset_time(input: &str) -> Result<DateTime<Utc>, TimestampError> {
         .single()
         .map(|date| date.with_timezone(&Utc))
         .ok_or(TimestampError::OutOfRange)
+}
+
+fn parse_display_targets(input: &str) -> Result<DisplayTargets<'_>, TimestampError> {
+    if !input.contains([',', '、']) {
+        return parse_display_zone(input).map(DisplayTargets::Single);
+    }
+    let zones = input
+        .split([',', '、'])
+        .map(str::trim)
+        .take(MAX_TARGET_ZONES + 1)
+        .collect::<Vec<_>>();
+    if zones.len() > MAX_TARGET_ZONES {
+        return Err(TimestampError::TooManyTargetZones);
+    }
+    zones
+        .into_iter()
+        .map(|name| Ok((name, parse_display_zone(name)?)))
+        .collect::<Result<Vec<_>, _>>()
+        .map(DisplayTargets::Multiple)
 }
 
 fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
@@ -530,6 +577,31 @@ mod tests {
         ] {
             assert_eq!(convert_timestamp(query, now), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn converts_one_instant_to_several_ordered_time_zones() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        assert_eq!(
+            convert_timestamp("2026-07-01 09:00 America/New_York to UTC, Asia/Shanghai, America/Los_Angeles", now)
+                .as_deref(),
+            Ok("UTC\t2026-07-01T13:00:00Z\nAsia/Shanghai\t2026-07-01T21:00:00+08:00\nAmerica/Los_Angeles\t2026-07-01T06:00:00-07:00")
+        );
+        let offset = FixedOffset::east_opt(8 * 3_600).unwrap();
+        assert_eq!(
+            convert_timestamp_with_local("现在 + 0.5s to 本地、UTC", now, |time| time
+                .with_timezone(&offset))
+            .as_deref(),
+            Ok("本地\t1970-01-01T08:00:00.500+08:00\nUTC\t1970-01-01T00:00:00.500Z")
+        );
+        assert_eq!(
+            convert_timestamp("0 to UTC, nowhere", now),
+            Err(TimestampError::InvalidOffset)
+        );
+        assert_eq!(
+            convert_timestamp("0 to UTC,UTC,UTC,UTC,UTC,UTC,UTC,UTC,UTC", now),
+            Err(TimestampError::TooManyTargetZones)
+        );
     }
 
     #[test]
