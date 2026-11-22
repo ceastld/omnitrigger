@@ -32,6 +32,7 @@ pub(super) enum CsvError {
     InvalidHeader,
     InvalidColumns,
     InvalidColumnNames,
+    NamedColumnArguments,
     InvalidRowRange,
     MissingDataRow,
     MissingColumnName,
@@ -67,6 +68,7 @@ impl CsvError {
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
             Self::InvalidColumnNames => "用 JSON 字符串数组输入互不重复的列名",
+            Self::NamedColumnArguments => "用 JSON 数组填写互不重复的列名或列号，例如 [\"地区\",2]",
             Self::InvalidRowRange => "填写从 1 开始的数据行号或区间，例如 2,4-6",
             Self::MissingDataRow => "指定行号超出了表头之后的数据行数",
             Self::MissingColumnName => "表头中找不到所选列名",
@@ -115,7 +117,7 @@ enum Operation {
         arithmetic: ColumnArithmetic,
     },
     DeduplicateRows,
-    DeduplicateByColumns(Vec<usize>),
+    DeduplicateByColumns(Vec<ColumnReference>),
     FilterColumn {
         column: ColumnReference,
         condition: ColumnCondition,
@@ -133,7 +135,7 @@ enum Operation {
         sample: bool,
     },
     SortByColumns {
-        columns: Vec<usize>,
+        columns: Vec<ColumnReference>,
         descending: bool,
         numeric: bool,
     },
@@ -238,7 +240,8 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             }
         }
         "按列去重" | "deduplicate-columns" => {
-            let (columns, data) = column_arguments(input)?;
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::DeduplicateByColumns(columns)
         }
@@ -278,12 +281,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             }
         }
         "分组计数" | "group-count" => {
-            let (columns, data) = grouping_column_arguments(input)?;
+            let (columns, data) = column_reference_arguments(input, CsvError::GroupingColumns)?;
             input = data;
             Operation::CountByColumns(columns)
         }
         "分组合计" | "group-sum" | "分组平均" | "group-average" => {
-            let (columns, rest) = grouping_column_arguments(input)?;
+            let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
             let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
             input = data;
             Operation::AggregateByColumns {
@@ -307,7 +310,8 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         }
         "排序" | "sort-columns" | "降序" | "sort-columns-desc" | "数值排序" | "sort-numeric"
         | "数值降序" | "sort-numeric-desc" => {
-            let (columns, data) = column_arguments(input)?;
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::SortByColumns {
                 columns,
@@ -389,12 +393,14 @@ fn column_arguments(input: &str) -> Result<(Vec<usize>, &str), CsvError> {
     Ok((column_indices(columns)?, data))
 }
 
-fn grouping_column_arguments(input: &str) -> Result<(Vec<ColumnReference>, &str), CsvError> {
+fn column_reference_arguments(
+    input: &str,
+    invalid: CsvError,
+) -> Result<(Vec<ColumnReference>, &str), CsvError> {
     if input.trim_start().starts_with('[') {
-        let (columns, data) =
-            json_argument_and_data::<Vec<ColumnReference>>(input, CsvError::GroupingColumns)?;
+        let (columns, data) = json_argument_and_data::<Vec<ColumnReference>>(input, invalid)?;
         if columns.is_empty() {
-            return Err(CsvError::GroupingColumns);
+            return Err(invalid);
         }
         return Ok((columns, data));
     }
@@ -572,13 +578,16 @@ fn compute_column(
     Ok(write_rows(&rows, ','))
 }
 
-fn deduplicate_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
+fn deduplicate_by_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    validate_column_width(columns, header.len())?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
     let mut seen = HashSet::new();
     let unique_records = records
         .iter()
-        .filter(|row| seen.insert(column_key(row, columns)));
+        .filter(|row| seen.insert(column_key(row, &columns)));
     Ok(write_rows(
         std::iter::once(header).chain(unique_records),
         ',',
@@ -612,9 +621,10 @@ fn filter_column(
     Ok(write_rows(selected, ','))
 }
 
-fn resolve_grouping_columns(
+fn resolve_distinct_columns(
     header: &[String],
     columns: &[ColumnReference],
+    duplicate: CsvError,
 ) -> Result<Vec<usize>, CsvError> {
     let mut seen = HashSet::new();
     let columns = columns
@@ -622,7 +632,7 @@ fn resolve_grouping_columns(
         .map(|column| {
             let index = column.resolve(header)?;
             if !seen.insert(index) {
-                return Err(CsvError::GroupingColumns);
+                return Err(duplicate);
             }
             Ok(index)
         })
@@ -633,7 +643,7 @@ fn resolve_grouping_columns(
 
 fn count_by_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_grouping_columns(header, columns)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
     let mut groups = HashMap::new();
     for (position, row) in records.iter().enumerate() {
         groups
@@ -651,7 +661,7 @@ fn aggregate_by_columns(
     average: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_grouping_columns(header, columns)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
     let amount = amount.resolve(header)?;
     validate_column_width(&[amount], header.len())?;
     let mut groups = HashMap::new();
@@ -709,10 +719,7 @@ fn column_key<'a>(row: &'a [String], columns: &[usize]) -> Vec<&'a str> {
 
 fn pivot_sum(rows: &[Vec<String>], columns: &[ColumnReference; 3]) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_grouping_columns(header, columns).map_err(|error| match error {
-        CsvError::GroupingColumns => CsvError::PivotColumns,
-        error => error,
-    })?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::PivotColumns)?;
     let (row_column, column_column, amount_column) = (columns[0], columns[1], columns[2]);
     let mut row_labels = Vec::new();
     let mut column_labels = Vec::new();
@@ -765,12 +772,12 @@ fn pivot_sum(rows: &[Vec<String>], columns: &[ColumnReference; 3]) -> Result<Str
 
 fn sort_by_columns(
     rows: &[Vec<String>],
-    columns: &[usize],
+    columns: &[ColumnReference],
     descending: bool,
     numeric: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    validate_column_width(columns, header.len())?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
     let direction = |order: Ordering| {
         if descending {
             order.reverse()
@@ -998,6 +1005,43 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_named_columns_for_stable_sorting_and_deduplication() {
+        let data = "编号,文件名,金额\n001,文件10,1.50\n002,文件2,3/2\n003,文件2,7/5\n004,文件1,2e0";
+        for (operation, expected) in [
+            (
+                r#"排序 ["文件名",1]"#,
+                "编号,文件名,金额\r\n004,文件1,2e0\r\n002,文件2,3/2\r\n003,文件2,7/5\r\n001,文件10,1.50",
+            ),
+            (
+                r#"数值降序 ["金额"]"#,
+                "编号,文件名,金额\r\n004,文件1,2e0\r\n001,文件10,1.50\r\n002,文件2,3/2\r\n003,文件2,7/5",
+            ),
+            (
+                r#"按列去重 ["文件名"]"#,
+                "编号,文件名,金额\r\n001,文件10,1.50\r\n002,文件2,3/2\r\n004,文件1,2e0",
+            ),
+        ] {
+            assert_eq!(transform_csv(&format!("{operation}\n{data}")).as_deref(), Ok(expected));
+        }
+        for (query, expected) in [
+            (
+                r#"排序 ["编号",1] 编号,金额"#,
+                CsvError::NamedColumnArguments,
+            ),
+            (
+                r#"数值排序 ["金额"] 编号,金额,金额"#,
+                CsvError::AmbiguousColumnName,
+            ),
+            (
+                r#"按列去重 ["名称"] 编号,金额"#,
+                CsvError::MissingColumnName,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(expected), "{query}");
+        }
+    }
 
     #[test]
     fn selects_csv_records_in_input_order_preserving_multiline_fields() {

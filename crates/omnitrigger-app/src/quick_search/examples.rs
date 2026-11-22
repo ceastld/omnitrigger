@@ -1843,6 +1843,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按命名列对 CSV 数值降序排列",
+        query: "CSV: 数值降序 [\"金额\"] 编号,金额\n001,1.50\n002,3/2\n003,2e0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定列数值降序排列 CSV 行",
         query: "CSV: 数值降序 2 编号,金额\n001,12.50\n002,-2.75\n003,3/2",
     },
