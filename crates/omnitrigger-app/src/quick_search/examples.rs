@@ -1141,6 +1141,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 下季度",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "以本月第一天为起点计算",
+        query: "日期: 本月初 + 1天",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用月初和月底指定完整的日期范围",
+        query: "日期: 按月拆分CSV 本月初至本月底",
+    },
+    Example {
         icon: Icon::Clock,
         title: "查询 ISO 周号的日期范围",
         query: "日期: 2026-W47",
@@ -2369,6 +2379,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "统计 CSV 各列的空单元格",
         query: "CSV: 空值统计 [\"备注\",1] 编号,备注\n001,\n,\" \"\n002,茶",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "定位数值列里的文本或空单元格",
+        query: "CSV: 检查数值列 [\"金额\"] 编号,金额\n001,1.50\n002,待确认\n003,\n004,1/3",
     },
     Example {
         icon: Icon::Terminal,

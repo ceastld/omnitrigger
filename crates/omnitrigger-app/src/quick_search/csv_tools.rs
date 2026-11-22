@@ -84,6 +84,7 @@ pub(super) enum CsvError {
     Regex(TextError),
     ColumnOutOfRange,
     InvalidNumber,
+    NumericIssuesTooLarge,
     StatisticsColumn,
     AggregateColumn,
     GroupingColumns,
@@ -162,6 +163,7 @@ impl CsvError {
             Self::Regex(error) => error.message(),
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
+            Self::NumericIssuesTooLarge => "数值列检查结果超过 1 MiB，请缩小表格范围",
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
@@ -198,6 +200,7 @@ enum Operation {
     TrimColumns(Vec<ColumnReference>),
     FillDown(Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
+    CheckNumericColumns(Vec<ColumnReference>),
     DropEmptyRecords,
     SelectRows {
         ranges: String,
@@ -420,6 +423,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::CountEmptyCells(columns)
+        }
+        "检查数值列" | "check-numeric-columns" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::CheckNumericColumns(columns)
         }
         "改列名" | "rename-header" => {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
@@ -701,6 +710,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
         Operation::FillDown(columns) => fill_down_csv(&rows, &columns),
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
+        Operation::CheckNumericColumns(columns) => check_numeric_columns(&rows, &columns),
         Operation::DropEmptyRecords => drop_empty_csv_records(&rows),
         Operation::SelectRows {
             ranges,
@@ -1308,6 +1318,37 @@ fn count_empty_cells(
         ]);
     }
     Ok(write_rows(&output, ','))
+}
+
+fn check_numeric_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let mut output = String::from("数据行,列号,列名,内容");
+    for (index, record) in records.iter().enumerate() {
+        let row_number = (index + 1).to_string();
+        for &column in &columns {
+            let cell = &record[column];
+            if parse_fraction_literal(cell).is_ok() {
+                continue;
+            }
+            let column_number = (column + 1).to_string();
+            append_bounded_csv_row(
+                &mut output,
+                [
+                    row_number.as_str(),
+                    column_number.as_str(),
+                    header[column].as_str(),
+                    cell.as_str(),
+                ]
+                .into_iter(),
+                CsvError::NumericIssuesTooLarge,
+            )?;
+        }
+    }
+    Ok(output)
 }
 
 fn fill_down_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
@@ -2226,6 +2267,32 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_invalid_exact_csv_values_by_data_row_and_requested_column_order() {
+        assert_eq!(
+            transform_csv(concat!(
+                r#"检查数值列 [3,"金额"] 编号,金额,数量"#,
+                "\n001,1.50,2\n002,\"待,看\", \n003,1/3,\"未\n录\"\n004,3e-2,",
+            ))
+            .as_deref(),
+            Ok(concat!(
+                "数据行,列号,列名,内容\r\n",
+                "2,3,数量, \r\n",
+                "2,2,金额,\"待,看\"\r\n",
+                "3,3,数量,\"未\n录\"\r\n",
+                "4,3,数量,\"\"",
+            ))
+        );
+        assert_eq!(
+            transform_csv("check-numeric-columns 2 编号,金额\n001,9007199254740993").as_deref(),
+            Ok("数据行,列号,列名,内容")
+        );
+        assert_eq!(
+            transform_csv(r#"检查数值列 ["金额",2] 编号,金额"#),
+            Err(CsvError::NamedColumnArguments)
+        );
+    }
 
     #[test]
     fn applies_csv_commands_in_order_and_reports_the_first_failing_step() {

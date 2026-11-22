@@ -169,6 +169,15 @@ fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), Date
         let date = today.checked_add_signed(TimeDelta::days(days));
         return Ok((in_range(date)?, rest));
     }
+    if let Some((offset, last_day, rest)) = relative_month_edge(input) {
+        let start = relative_month_start(today, offset)?;
+        let date = if last_day {
+            month_end(start, 1)?
+        } else {
+            start
+        };
+        return Ok((date, rest));
+    }
     if let Some((year, month, day, rest)) = written_date_prefix(input) {
         let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(DateError::InvalidDate)?;
         return Ok((date, rest));
@@ -323,6 +332,20 @@ fn chinese_weekday(input: &str) -> Option<Weekday> {
     })
 }
 
+fn relative_month_edge(input: &str) -> Option<(i8, bool, &str)> {
+    [("本月", 0), ("上月", -1), ("下月", 1), ("月", 0)]
+        .into_iter()
+        .find_map(|(prefix, offset)| {
+            let mut rest = input.strip_prefix(prefix)?.chars();
+            let last_day = match rest.next()? {
+                '初' => false,
+                '底' | '末' => true,
+                _ => return None,
+            };
+            Some((offset, last_day, rest.as_str().trim_start()))
+        })
+}
+
 pub(super) fn looks_like_date_query(query: &str) -> bool {
     let input = normalize(query);
     let input = input.trim();
@@ -349,6 +372,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
         return date.is_empty()
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
             || relative_weekday(date).is_some_and(|(_, _, rest)| date_tail(rest))
+            || relative_month_edge(date).is_some_and(|(_, _, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_week_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || written_date_prefix(date).is_some_and(|(_, _, _, rest)| date_tail(rest));
@@ -360,6 +384,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
             .is_some()
         || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
         || relative_weekday(input).is_some_and(|(_, _, rest)| date_tail(rest))
+        || relative_month_edge(input).is_some_and(|(_, _, rest)| date_tail(rest))
         || (input.get(4..).is_some_and(|rest| rest.starts_with('年'))
             && written_date_prefix(input).is_some_and(|(_, _, _, rest)| date_tail(rest)))
 }
@@ -1246,6 +1271,36 @@ mod tests {
         assert_eq!(
             calculate_date("days-csv 9999-12-31 至 9999-12-31", today).as_deref(),
             Ok("日期,星期,工作日\r\n9999-12-31,星期五,1")
+        );
+    }
+
+    #[test]
+    fn uses_relative_month_boundaries_in_date_expressions_and_ranges() {
+        let today = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        for (query, expected) in [
+            ("月初", "2024-01-01"),
+            ("本月底", "2024-01-31"),
+            ("上月初", "2023-12-01"),
+            ("下月末", "2024-02-29"),
+            ("下月底 星期几", "星期四"),
+            ("本月初 + 1天", "2024-01-02"),
+        ] {
+            assert!(looks_like_date_query(query), "{query}");
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("按月拆分CSV 下月初至下月底", today).as_deref(),
+            Ok("开始,结束,天数,工作日\r\n2024-02-01,2024-02-29,29,21")
+        );
+        assert!(!looks_like_date_query("本月初稿"));
+        let last_month = NaiveDate::from_ymd_opt(9999, 12, 16).unwrap();
+        assert_eq!(
+            calculate_date("下月初", last_month),
+            Err(DateError::OutOfRange)
         );
     }
 
