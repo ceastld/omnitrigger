@@ -191,6 +191,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看每个窗口的精确样本标准差",
+        query: "统计: 移动样本标准差 2 1/2,1,2,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看每个窗口的精确总体标准差",
+        query: "统计: 移动总体标准差 2 1/2,1,2,4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按固定窗口计算精确移动中位数",
         query: "统计: 移动中位数 3 1/2,100,2,3,-1",
     },
@@ -4034,6 +4044,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "移动合计",
                     "移动样本方差",
                     "移动总体方差",
+                    "移动样本标准差",
+                    "移动总体标准差",
                     "移动最小",
                     "移动最大",
                     "移动极差",

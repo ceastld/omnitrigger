@@ -62,7 +62,7 @@ impl StatisticsError {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
             }
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
-            Self::SampleWindowWidth => "移动样本方差的窗口至少需要两个数值",
+            Self::SampleWindowWidth => "移动样本方差与样本标准差至少需要两个数值",
             Self::AdjacentValueCount => "计算相邻项的变化至少需要两个数值",
             Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
             Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
@@ -187,10 +187,16 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "移动合计" | "moving-sum" => return moving_sum_or_average(values.trim(), false),
         "移动平均" | "moving-average" => return moving_sum_or_average(values.trim(), true),
         "移动样本方差" | "moving-sample-variance" => {
-            return moving_variance(values.trim(), true)
+            return moving_dispersion(values.trim(), true, ToString::to_string)
         }
         "移动总体方差" | "moving-population-variance" => {
-            return moving_variance(values.trim(), false)
+            return moving_dispersion(values.trim(), false, ToString::to_string)
+        }
+        "移动样本标准差" | "moving-sample-standard-deviation" => {
+            return moving_dispersion(values.trim(), true, format_square_root)
+        }
+        "移动总体标准差" | "moving-population-standard-deviation" => {
+            return moving_dispersion(values.trim(), false, format_square_root)
         }
         "移动中位数" | "moving-median" => return moving_median(values.trim()),
         "移动最小" | "moving-min" => {
@@ -441,7 +447,11 @@ fn moving_sum_or_average(input: &str, average: bool) -> Result<String, Statistic
     Ok(results.join("\n"))
 }
 
-fn moving_variance(input: &str, sample: bool) -> Result<String, StatisticsError> {
+fn moving_dispersion(
+    input: &str,
+    sample: bool,
+    format: fn(&BigRational) -> String,
+) -> Result<String, StatisticsError> {
     let (width, values) = sliding_window_values(input)?;
     let divisor = width - usize::from(sample);
     if divisor == 0 {
@@ -450,13 +460,13 @@ fn moving_variance(input: &str, sample: bool) -> Result<String, StatisticsError>
     let count = BigRational::from_integer(BigInt::from(width));
     let divisor = BigRational::from_integer(BigInt::from(divisor));
     let observations: Vec<_> = values.into_iter().map(|value| (value, 1)).collect();
-    let mut variances = Vec::with_capacity(observations.len() - width + 1);
+    let mut results = Vec::with_capacity(observations.len() - width + 1);
     for window in observations.windows(width) {
         let mean = bounded(observation_sum(window)? / &count)?;
         let sum = squared_deviation_sum(window, &mean)?;
-        variances.push(bounded(sum / &divisor)?.to_string());
+        results.push(format(&bounded(sum / &divisor)?));
     }
-    Ok(variances.join("\n"))
+    Ok(results.join("\n"))
 }
 
 fn moving_median(input: &str) -> Result<String, StatisticsError> {
@@ -1007,6 +1017,29 @@ mod tests {
         assert_eq!(
             calculate_statistics("移动总体方差 3 5,6"),
             Err(StatisticsError::InvalidWindowWidth)
+        );
+    }
+
+    #[test]
+    fn computes_exact_sample_and_population_standard_deviation_for_each_complete_window() {
+        for (query, expected) in [
+            ("移动样本标准差 2 1/2,1,2,4", "√(1/8)\n√(1/2)\n√2"),
+            ("移动总体标准差 2 1/2,1,2,4", "1/4\n1/2\n1"),
+            ("moving-population-standard-deviation 1 -3/2,5", "0\n0"),
+            (
+                "moving-sample-standard-deviation 2 9007199254740992,9007199254740993",
+                "√(1/2)",
+            ),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("移动样本标准差 1 5,6"),
+            Err(StatisticsError::SampleWindowWidth)
         );
     }
 
