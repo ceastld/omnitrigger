@@ -326,6 +326,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "从一组时长中取中位数",
+        query: "时长: 中位数 01:25,02:40,00:55",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按帧率把视频帧数换成时长",
         query: "帧数: 125 帧 @ 25 fps",
     },
@@ -1831,7 +1836,8 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
         Scope::Date if matches!(term, "列" | "列出") => {}
-        Scope::Duration if matches!(term, "合" | "合计" | "平" | "平均") => {}
+        Scope::Duration if matches!(term, "合" | "合计" | "平" | "平均" | "中位" | "中位数") =>
+            {}
         Scope::Statistics
             if matches!(
                 term,

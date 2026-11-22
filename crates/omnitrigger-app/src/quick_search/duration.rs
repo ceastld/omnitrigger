@@ -46,6 +46,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
+        "中位数" | "median" => (median_duration_list(values)?, false),
         _ => duration_value(input)?,
     };
     let nanos = bounded_duration(Some(total.unsigned_abs()))?;
@@ -73,16 +74,24 @@ fn duration_value(input: &str) -> Result<(i128, bool), DurationError> {
     }
 }
 
+fn duration_list_values(input: &str) -> impl Iterator<Item = Result<i128, DurationError>> + '_ {
+    input
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .flat_map(|line| line.split(','))
+        .map(|term| {
+            let (nanos, _) = duration_value(term.trim())?;
+            bounded_duration(Some(nanos.unsigned_abs()))?;
+            Ok(nanos)
+        })
+}
+
 fn aggregate_duration_list(input: &str, average: bool) -> Result<i128, DurationError> {
     let mut total = 0_i128;
     let mut count = 0_i128;
-    for line in input.lines().filter(|line| !line.trim().is_empty()) {
-        for term in line.split(',') {
-            let (nanos, _) = duration_value(term.trim())?;
-            bounded_duration(Some(nanos.unsigned_abs()))?;
-            total = total.checked_add(nanos).ok_or(DurationError::OutOfRange)?;
-            count += 1;
-        }
+    for nanos in duration_list_values(input) {
+        total = total.checked_add(nanos?).ok_or(DurationError::OutOfRange)?;
+        count += 1;
     }
     if count == 0 {
         return Err(DurationError::Incomplete);
@@ -94,6 +103,23 @@ fn aggregate_duration_list(input: &str, average: bool) -> Result<i128, DurationE
         return Err(DurationError::Precision);
     }
     Ok(total / count)
+}
+
+fn median_duration_list(input: &str) -> Result<i128, DurationError> {
+    let mut values = duration_list_values(input).collect::<Result<Vec<_>, _>>()?;
+    values.sort_unstable();
+    let middle = values.len() / 2;
+    let &right = values.get(middle).ok_or(DurationError::Incomplete)?;
+    if !values.len().is_multiple_of(2) {
+        return Ok(right);
+    }
+    let sum = values[middle - 1]
+        .checked_add(right)
+        .ok_or(DurationError::OutOfRange)?;
+    if sum % 2 != 0 {
+        return Err(DurationError::Precision);
+    }
+    Ok(sum / 2)
 }
 
 pub(super) fn format_clock_duration(nanos: u128, sign: &str) -> String {
@@ -440,6 +466,24 @@ fn parse_units(mut input: &str) -> Result<u128, DurationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_exact_middle_duration_in_mixed_lists() {
+        for (query, expected) in [
+            ("中位数 01:25,02:40,00:55", "00:01:25"),
+            ("median 1s,3s to ms", "2000 ms"),
+            ("中位数 -2ns,0ns to ns", "-1 ns"),
+            ("中位数 23:50 到 00:10\n10分钟\n0ns to iso", "PT10M"),
+            ("中位数 05:20", "00:05:20"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(convert_duration("中位数"), Err(DurationError::Incomplete));
+        assert_eq!(
+            convert_duration("中位数 0ns,1ns"),
+            Err(DurationError::Precision)
+        );
+    }
 
     #[test]
     fn aggregates_duration_lists_exactly_with_existing_unit_and_clock_rules() {
