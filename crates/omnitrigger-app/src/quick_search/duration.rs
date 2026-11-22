@@ -17,6 +17,8 @@ pub(super) enum DurationError {
     Incomplete,
     Invalid,
     InvalidClockTime,
+    InvalidBreakArguments,
+    BreakOutOfRange,
     InvalidUnit,
     OutOfRange,
     Precision,
@@ -30,6 +32,10 @@ impl DurationError {
             Self::Incomplete => "输入时长，例如 时长: 01:30:00 或 时长: 5400秒",
             Self::Invalid => "使用分:秒、时:分:秒、带单位的时长或 PnDTnHnMnS",
             Self::InvalidClockTime => "输入两个 24 小时时刻，例如 23:45 到 01:15",
+            Self::InvalidBreakArguments => {
+                "用竖线分隔时刻区间和休息时长，例如 23:45 到 01:15 | 30分钟"
+            }
+            Self::BreakOutOfRange => "休息时长须在零和区间总时长之间",
             Self::InvalidUnit => "请选择 s、ms、µs、ns、min、h、d 或 iso",
             Self::OutOfRange => "时长超出可转换范围",
             Self::Precision => "时长最小可精确到 1 纳秒",
@@ -59,6 +65,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
         "频数平均" | "frequency-average" => (frequency_average(values)?, false),
+        "扣除休息" | "subtract-break" => (elapsed_after_break(values)?, false),
         "中位数" | "median" => (median_duration_list(values)?, false),
         "最短" | "min" => (duration_extremes(values)?.0, false),
         "最长" | "max" => (duration_extremes(values)?.1, false),
@@ -96,6 +103,19 @@ fn duration_value(input: &str) -> Result<(i128, bool), DurationError> {
     } else {
         signed_duration(input)
     }
+}
+
+fn elapsed_after_break(input: &str) -> Result<i128, DurationError> {
+    let (interval, break_duration) = input
+        .split_once('|')
+        .filter(|(interval, _)| interval.contains(['到', '至']))
+        .ok_or(DurationError::InvalidBreakArguments)?;
+    let (elapsed, _) = duration_value(interval)?;
+    let (break_duration, _) = signed_duration(break_duration.trim())?;
+    if !(0..=elapsed).contains(&break_duration) {
+        return Err(DurationError::BreakOutOfRange);
+    }
+    Ok(elapsed - break_duration)
 }
 
 fn duration_terms(input: &str) -> impl Iterator<Item = &str> {
@@ -652,6 +672,38 @@ mod tests {
             convert_duration("平均 1ns,2ns"),
             Err(DurationError::Precision)
         );
+    }
+
+    #[test]
+    fn subtracts_exact_break_duration_from_elapsed_time_across_midnight() {
+        for (query, expected) in [
+            ("扣除休息 23:45 到 01:15 | 20分钟 + 10分钟", "01:00:00"),
+            ("扣除休息 23:59:59.999999998 至 00:00 ｜ 1ns to ns", "1 ns"),
+            ("subtract-break 08:00 到 08:30 | PT30M", "00:00:00"),
+            ("扣除休息 08:00 到 08:30 | 15:00 to min", "15 min"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, expected) in [
+            (
+                "扣除休息 08:00 到 08:15",
+                DurationError::InvalidBreakArguments,
+            ),
+            (
+                "扣除休息 08:00 | 10分钟",
+                DurationError::InvalidBreakArguments,
+            ),
+            (
+                "扣除休息 08:00 到 08:15 | -1s",
+                DurationError::BreakOutOfRange,
+            ),
+            (
+                "扣除休息 08:00 到 08:15 | 16min",
+                DurationError::BreakOutOfRange,
+            ),
+        ] {
+            assert_eq!(convert_duration(query), Err(expected), "{query}");
+        }
     }
 
     #[test]

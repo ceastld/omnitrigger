@@ -198,6 +198,8 @@ fn convert_timestamp_with_local(
             DurationError::Precision => TimestampError::UnsupportedPrecision,
             DurationError::Invalid
             | DurationError::InvalidClockTime
+            | DurationError::InvalidBreakArguments
+            | DurationError::BreakOutOfRange
             | DurationError::InvalidUnit
             | DurationError::InvalidFrequency
             | DurationError::DivisionByZero => TimestampError::InvalidDuration,

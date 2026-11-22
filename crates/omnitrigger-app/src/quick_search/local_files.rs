@@ -33,6 +33,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("最近创建", "按创建时间从新到旧"),
     ("大小", "按字节数从大到小"),
     ("自然排序", "名称中的数字按数值排"),
+    ("按后缀", "相同扩展名的文件排在一起"),
     ("前=10", "取排序后的前 10 项"),
     ("路径列表", "每行一个绝对路径"),
     ("名称列表", "每行一个名称"),
@@ -262,10 +263,25 @@ impl LocalFilesIndex {
         if query.order == DirectoryOrder::Name
             && (query.output != FileOutput::ExtensionCounts || query.limit.is_some())
         {
-            if query.natural_order {
-                matches.sort_by(|(_, left), (_, right)| compare_natural(&left.name, &right.name));
-            } else {
-                matches.sort_by_key(|(rank, _)| *rank);
+            match query.name_order {
+                NameOrder::Matching => matches.sort_by_key(|(rank, _)| *rank),
+                NameOrder::Natural => {
+                    matches
+                        .sort_by(|(_, left), (_, right)| compare_natural(&left.name, &right.name));
+                }
+                NameOrder::Extension => matches.sort_by_cached_key(|(_, entry)| {
+                    let is_directory = entry.kind == "directory";
+                    let extension = if is_directory {
+                        None
+                    } else {
+                        file_extension(&entry.name).filter(|part| !part.is_empty())
+                    };
+                    (
+                        is_directory,
+                        extension.is_none(),
+                        extension.map(str::to_lowercase),
+                    )
+                }),
             }
         }
         if let Some(limit) = query.limit {
@@ -528,11 +544,18 @@ fn file_option_suggestions(prefix: &str, current: FileQuery<'_>) -> Vec<InputSug
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum NameOrder {
+    Matching,
+    Natural,
+    Extension,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct FileQuery<'a> {
     directory: &'a str,
     filter: &'a str,
     order: DirectoryOrder,
-    natural_order: bool,
+    name_order: NameOrder,
     entry_type: DirectoryEntryType,
     size_bounds: Option<(u64, u64)>,
     modified: DateBounds,
@@ -631,7 +654,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let directory = super::path_tools::strip_path_quotes(directory.trim());
     let (filter, options) = filter.split_once('|').unwrap_or((filter, ""));
     let mut order = DirectoryOrder::Name;
-    let mut natural_order = false;
+    let mut name_order = NameOrder::Matching;
     let mut entry_type = DirectoryEntryType::All;
     let (mut minimum, mut maximum) = (None, None);
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
@@ -650,7 +673,12 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "大小" | "size" if order == DirectoryOrder::Name => {
                 order = DirectoryOrder::SizeDescending;
             }
-            "自然排序" | "natural-order" if !natural_order => natural_order = true,
+            "自然排序" | "natural-order" if name_order == NameOrder::Matching => {
+                name_order = NameOrder::Natural;
+            }
+            "按后缀" | "extension-order" if name_order == NameOrder::Matching => {
+                name_order = NameOrder::Extension;
+            }
             "仅文件" | "files" if entry_type == DirectoryEntryType::All => {
                 entry_type = DirectoryEntryType::File;
             }
@@ -751,12 +779,13 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     (!directory.is_empty()
         && modified.is_valid()
         && created.is_valid()
-        && (!natural_order || order == DirectoryOrder::Name))
+        && (name_order == NameOrder::Matching || order == DirectoryOrder::Name)
+        && (name_order != NameOrder::Extension || entry_type != DirectoryEntryType::Directory))
         .then_some(FileQuery {
             directory,
             filter: filter.trim(),
             order,
-            natural_order,
+            name_order,
             entry_type,
             size_bounds,
             modified,
@@ -1425,6 +1454,38 @@ mod tests {
             r"C:\Work | | 排除后缀=tmp 仅文件夹",
         ] {
             assert!(split_query(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn sorts_by_extension_within_the_snapshot_before_taking_the_requested_prefix() {
+        let mut index = LocalFilesIndex::default();
+        let load = index.request(Some(r"C:\Work |")).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("a.PDF", "file"),
+                entry("archive.zip", "file"),
+                entry("b.DOCX", "file"),
+                entry("c.pdf", "file"),
+                entry("folder.docx", "directory"),
+                entry("README", "file"),
+                entry("z.docx", "file"),
+            ])
+        ));
+        let limited = r"C:\Work | | 按后缀 前=4 名称列表";
+        assert!(index.request(Some(limited)).is_none());
+        assert!(matches!(
+            index.results(limited),
+            Results::Value(Ok(value)) if value.text == "b.DOCX\nz.docx\na.PDF\nc.pdf"
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | | extension-order 名称列表"),
+            Results::Value(Ok(value))
+                if value.text == "b.DOCX\nz.docx\na.PDF\nc.pdf\narchive.zip\nREADME\nfolder.docx"
+        ));
+        for options in ["按后缀 仅文件夹", "按后缀 大小", "按后缀 自然排序"] {
+            assert!(split_query(&format!(r"C:\Work | | {options}")).is_none());
         }
     }
 

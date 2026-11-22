@@ -606,6 +606,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "扣掉休息计算净时长",
+        query: "时长: 扣除休息 23:45 到 01:15 | 20分钟 + 10分钟",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "合计多个时长",
         query: "时长: 合计 01:25,02:40,00:55",
     },
@@ -2833,6 +2838,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "合计",
                     "平均",
                     "频数平均",
+                    "扣除休息",
                     "中位数",
                     "最短",
                     "最长",
