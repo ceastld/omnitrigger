@@ -1087,6 +1087,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "把时间戳对齐到最近的时间边界",
+        query: "时间戳: 就近对齐 15分钟 @ 1970-01-01T00:22:30Z",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "将时间戳换算成本地时间",
         query: "时间戳: 1700000000 本地",
     },
@@ -3420,7 +3425,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
         Scope::Timestamp
             if !term.is_empty()
-                && ["向下对齐", "向上对齐", "时区CSV", "时区候选"]
+                && ["向下对齐", "向上对齐", "就近对齐", "时区CSV", "时区候选"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Circuit

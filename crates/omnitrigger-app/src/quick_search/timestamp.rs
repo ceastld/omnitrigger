@@ -136,6 +136,12 @@ enum DisplayTargets<'a> {
     Multiple(Vec<(&'a str, DisplayZone)>),
 }
 
+enum TimestampAlignment {
+    Floor,
+    Ceil,
+    Nearest,
+}
+
 pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
     convert_timestamp_with_local(query, now, |time| time.with_timezone(&Local).fixed_offset())
 }
@@ -209,13 +215,14 @@ fn convert_timestamp_with_local(
         }
     };
     let operation = input.split_whitespace().next().unwrap_or("");
-    let round_up = match operation.to_ascii_lowercase().as_str() {
-        "向下对齐" | "floor-time" => Some(false),
-        "向上对齐" | "ceil-time" => Some(true),
+    let alignment = match operation.to_ascii_lowercase().as_str() {
+        "向下对齐" | "floor-time" => Some(TimestampAlignment::Floor),
+        "向上对齐" | "ceil-time" => Some(TimestampAlignment::Ceil),
+        "就近对齐" | "nearest-time" => Some(TimestampAlignment::Nearest),
         _ => None,
     };
-    if let Some(round_up) = round_up {
-        let time = align_timestamp(input[operation.len()..].trim_start(), now, round_up)?;
+    if let Some(alignment) = alignment {
+        let time = align_timestamp(input[operation.len()..].trim_start(), now, alignment)?;
         let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
         return display_time(time, unit.date_format());
     }
@@ -375,7 +382,7 @@ fn validate_explicit_time(
 fn align_timestamp(
     input: &str,
     now: DateTime<Utc>,
-    round_up: bool,
+    alignment: TimestampAlignment,
 ) -> Result<DateTime<Utc>, TimestampError> {
     let (step, value) = input
         .split_once('@')
@@ -388,7 +395,12 @@ fn align_timestamp(
     let nanos = unix_nanos(time);
     let step = step.as_nanos() as i128;
     let remainder = nanos.rem_euclid(step);
-    let aligned = nanos - remainder + if round_up && remainder != 0 { step } else { 0 };
+    let use_later_boundary = match alignment {
+        TimestampAlignment::Floor => false,
+        TimestampAlignment::Ceil => remainder != 0,
+        TimestampAlignment::Nearest => remainder >= step - remainder,
+    };
+    let aligned = nanos - remainder + if use_later_boundary { step } else { 0 };
     timestamp_from_unix_units(aligned, TimestampUnit::Nanoseconds)
 }
 
@@ -632,6 +644,17 @@ mod tests {
             ),
             ("floor-time 1秒 @ -1ns", "1969-12-31T23:59:59Z"),
             ("ceil-time 1秒 @ -1ns", "1970-01-01T00:00:00Z"),
+            (
+                "就近对齐 15分钟 @ 1970-01-01T00:22:29Z",
+                "1970-01-01T00:15:00Z",
+            ),
+            (
+                "就近对齐 15分钟 @ 1970-01-01T00:22:30Z",
+                "1970-01-01T00:30:00Z",
+            ),
+            ("nearest-time 1秒 @ -501ms", "1969-12-31T23:59:59Z"),
+            ("nearest-time 1秒 @ -500ms", "1970-01-01T00:00:00Z"),
+            ("nearest-time 2ns @ 2ns", "1970-01-01T00:00:00.000000002Z"),
             ("向上对齐 100ms @ 现在", "1970-01-01T00:16:40.300Z"),
             ("向下对齐 2ns @ 2ns", "1970-01-01T00:00:00.000000002Z"),
             (
