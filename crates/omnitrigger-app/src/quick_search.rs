@@ -26,6 +26,8 @@ mod operators;
 mod paper;
 mod path_tools;
 mod percentage;
+mod plane;
+mod polygon;
 mod presets;
 mod radix;
 mod ratio_allocation;
@@ -104,6 +106,7 @@ use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
 use path_tools::{path_component, PathError};
 use percentage::{compare_percentages, PercentageError};
+use polygon::{calculate_polygon, PolygonError};
 use presets::matching_presets;
 use radix::{convert_arbitrary_radix, RadixError};
 use ratio_allocation::{allocate_ratio, RatioAllocationError};
@@ -406,6 +409,7 @@ enum ValueError {
     Vector(VectorError),
     Matrix(MatrixError),
     Circle(CircleError),
+    Polygon(PolygonError),
     Complex(ComplexError),
     Path(PathError),
 }
@@ -525,6 +529,7 @@ impl ValueError {
             Self::Vector(error) => error.message(),
             Self::Matrix(error) => error.message(),
             Self::Circle(error) => error.message(),
+            Self::Polygon(error) => error.message(),
             Self::Complex(error) => error.message(),
             Self::Path(error) => error.message(),
         };
@@ -591,6 +596,7 @@ impl ValueError {
                 | Self::Vector(VectorError::Incomplete)
                 | Self::Matrix(MatrixError::Incomplete)
                 | Self::Circle(CircleError::Incomplete)
+                | Self::Polygon(PolygonError::Incomplete)
                 | Self::Complex(ComplexError::Incomplete)
                 | Self::Path(PathError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
@@ -966,6 +972,9 @@ impl Results {
                 Scope::Path => Self::text_value(path_component(term).map_err(ValueError::Path)),
                 Scope::Circle => {
                     Self::text_value(calculate_circle(term).map_err(ValueError::Circle))
+                }
+                Scope::Polygon => {
+                    Self::text_value(calculate_polygon(term).map_err(ValueError::Polygon))
                 }
                 Scope::Complex => {
                     Self::text_value(calculate_complex(term).map_err(ValueError::Complex))

@@ -3,7 +3,7 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
-use super::operators::split_top_level_commas;
+use super::plane::{parse_point, Point2, PointError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CircleError {
@@ -162,18 +162,11 @@ fn render_coordinate_circle(
     ))
 }
 
-fn circle_point(input: &str) -> Result<[BigRational; 2], CircleError> {
-    let mut axes = split_top_level_commas(input);
-    let (Some(x), Some(y), None) = (axes.next(), axes.next(), axes.next()) else {
-        return Err(CircleError::PointArguments);
-    };
-    if x.trim().is_empty() || y.trim().is_empty() {
-        return Err(CircleError::PointArguments);
-    }
-    Ok([
-        calculate_fraction(x).map_err(CircleError::Evaluation)?,
-        calculate_fraction(y).map_err(CircleError::Evaluation)?,
-    ])
+fn circle_point(input: &str) -> Result<Point2, CircleError> {
+    parse_point(input).map_err(|error| match error {
+        PointError::Arguments => CircleError::PointArguments,
+        PointError::Evaluation(error) => CircleError::Evaluation(error),
+    })
 }
 
 fn multiple_of_pi(value: &BigRational) -> String {

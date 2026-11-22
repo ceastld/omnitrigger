@@ -325,6 +325,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "圆: 直径端点 -1,0; 3,2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "由顶点坐标计算凹多边形的精确面积",
+        query: "多边形: 0,0;4,0;2,2;4,4;0,4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算两个向量的点积",
         query: "向量: 点积 1,2,3; 4,5,6",
@@ -3834,6 +3839,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::LinearFit
         | Scope::Statistics
         | Scope::Triangle
+        | Scope::Polygon
         | Scope::RatioAllocation
             if term.is_empty() => {}
         _ => return None,
