@@ -1542,6 +1542,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "同时移除多个 URL 参数",
+        query: r#"URL: 去参数组 ["source","campaign"] https://example.invalid/doc?source=mail&q=a%20b&campaign=autumn#part"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "给网址追加一个查询参数",
         query: r#"URL: 加参数 ["tag","茶 + 咖啡"] https://example.invalid/doc?tag=first#part"#,
     },

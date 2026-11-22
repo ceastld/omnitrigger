@@ -1,4 +1,7 @@
+use std::collections::HashSet;
+
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use serde::de::DeserializeOwned;
 use url::Url;
 
 const URL_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -22,6 +25,7 @@ pub(super) enum UrlEncodingError {
     MissingParameters,
     InvalidUrl,
     InvalidParameterPair,
+    InvalidParameterNames,
     InvalidFilePath,
     InvalidFileUrl,
     OpaqueOrigin,
@@ -38,6 +42,7 @@ impl UrlEncodingError {
             Self::MissingParameters => "没有可解析的查询参数",
             Self::InvalidUrl => "输入带协议的 URL，例如 https://example.invalid/",
             Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
+            Self::InvalidParameterNames => "用 JSON 字符串数组填写参数名，再输入 URL",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
             Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
             Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
@@ -77,6 +82,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
             Ok(url.into())
         }
         "去参数" | "strip-param" => remove_parameter(value),
+        "去参数组" | "strip-params" => remove_parameter_group(value),
         "加参数" | "append-param" => write_parameter(value, false),
         "设参数" | "set-param" => write_parameter(value, true),
         "文件链接" | "file-url" => encode_file_path(value),
@@ -159,14 +165,30 @@ fn remove_parameter(value: &str) -> Result<String, UrlEncodingError> {
         .split_once(char::is_whitespace)
         .ok_or(UrlEncodingError::Incomplete)?;
     let name = decode_form_value(name)?;
-    let mut url = Url::parse(address.trim_start()).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    remove_query_parameters(address.trim_start(), |key| key == name.as_str())
+}
+
+fn remove_parameter_group(input: &str) -> Result<String, UrlEncodingError> {
+    let (names, address) =
+        parameter_argument::<HashSet<String>>(input, UrlEncodingError::InvalidParameterNames)?;
+    if names.iter().any(|name| name.contains('\0')) {
+        return Err(UrlEncodingError::InvalidParameterNames);
+    }
+    remove_query_parameters(address, |key| names.contains(key))
+}
+
+fn remove_query_parameters(
+    address: &str,
+    matches_name: impl Fn(&str) -> bool,
+) -> Result<String, UrlEncodingError> {
+    let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
     let Some(query) = url.query() else {
         return Ok(url.into());
     };
     let mut parts = Vec::new();
     let mut removed = false;
     for part in query.split('&') {
-        if parameter_name_matches(part, &name) {
+        if parameter_name(part).is_some_and(|key| matches_name(&key)) {
             removed = true;
         } else {
             parts.push(part);
@@ -182,31 +204,43 @@ fn remove_parameter(value: &str) -> Result<String, UrlEncodingError> {
     Ok(url.into())
 }
 
-fn parameter_name_matches(part: &str, name: &str) -> bool {
+fn parameter_name(part: &str) -> Option<String> {
+    if part.is_empty() {
+        return None;
+    }
     let key = part.split_once('=').map_or(part, |(key, _)| key);
-    !part.is_empty() && decode_form_value(key).is_ok_and(|key| key == name)
+    decode_form_value(key).ok()
 }
 
-fn write_parameter(input: &str, replace_existing: bool) -> Result<String, UrlEncodingError> {
-    let mut pairs = serde_json::Deserializer::from_str(input).into_iter::<[String; 2]>();
-    let [name, value] = pairs
+fn parameter_argument<T: DeserializeOwned>(
+    input: &str,
+    invalid_arguments: UrlEncodingError,
+) -> Result<(T, &str), UrlEncodingError> {
+    let mut arguments = serde_json::Deserializer::from_str(input).into_iter::<T>();
+    let value = arguments
         .next()
         .ok_or(UrlEncodingError::Incomplete)?
         .map_err(|error| {
             if error.is_eof() {
                 UrlEncodingError::Incomplete
             } else {
-                UrlEncodingError::InvalidParameterPair
+                invalid_arguments
             }
         })?;
-    let address = &input[pairs.byte_offset()..];
+    let address = &input[arguments.byte_offset()..];
     if address.is_empty() {
         return Err(UrlEncodingError::Incomplete);
     }
     if !address.starts_with(char::is_whitespace) {
-        return Err(UrlEncodingError::InvalidParameterPair);
+        return Err(invalid_arguments);
     }
-    let mut url = Url::parse(address.trim_start()).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    Ok((value, address.trim_start()))
+}
+
+fn write_parameter(input: &str, replace_existing: bool) -> Result<String, UrlEncodingError> {
+    let ([name, value], address) =
+        parameter_argument::<[String; 2]>(input, UrlEncodingError::InvalidParameterPair)?;
+    let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer.append_pair(&name, &value);
     let pair = serializer.finish();
@@ -214,7 +248,7 @@ fn write_parameter(input: &str, replace_existing: bool) -> Result<String, UrlEnc
     let mut inserted = false;
     if let Some(query) = url.query().filter(|query| !query.is_empty()) {
         for part in query.split('&') {
-            if replace_existing && parameter_name_matches(part, &name) {
+            if replace_existing && parameter_name(part).is_some_and(|key| key == name) {
                 if !inserted {
                     parts.push(&pair);
                     inserted = true;
@@ -415,6 +449,49 @@ mod tests {
             convert_url_component("源 /doc"),
             Err(UrlEncodingError::InvalidUrl)
         );
+    }
+
+    #[test]
+    fn removes_multiple_decoded_query_names_without_reserializing_other_pairs() {
+        for (input, expected) in [
+            (
+                r#"去参数组 ["source","campaign"] https://example.invalid/doc?source=mail&q=a%20b&campaign=autumn&%73ource=extra#part"#,
+                "https://example.invalid/doc?q=a%20b#part",
+            ),
+            (
+                r#"strip-params ["a b","a+b",""] https://example.invalid/?a+b=1&a%20b=2&a%2Bb=3&=0&x=%2f&x=1+2&%FF=kept"#,
+                "https://example.invalid/?x=%2f&x=1+2&%FF=kept",
+            ),
+            (
+                r#"去参数组 ["Tag"] https://example.invalid/?Tag&tag=keep"#,
+                "https://example.invalid/?tag=keep",
+            ),
+            (
+                r#"strip-params [] https://example.invalid/?#part"#,
+                "https://example.invalid/?#part",
+            ),
+            (
+                r#"去参数组 ["x","x"] https://example.invalid/?x=1&x=2#part"#,
+                "https://example.invalid/#part",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            r#"去参数组 ["x",1] https://example.invalid/"#,
+            r#"去参数组 ["x"]https://example.invalid/"#,
+            r#"去参数组 ["\u0000"] https://example.invalid/"#,
+        ] {
+            assert_eq!(
+                convert_url_component(input),
+                Err(UrlEncodingError::InvalidParameterNames),
+                "{input}"
+            );
+        }
     }
 
     #[test]
