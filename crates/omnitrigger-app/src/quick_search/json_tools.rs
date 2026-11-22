@@ -155,7 +155,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "筛选" | "filter" => return filter_json_by_scalar(source, true),
         "排除" | "exclude" => return filter_json_by_scalar(source, false),
         "数值筛选" | "filter-numeric" => return filter_json_numbers(source),
-        "多条件筛选" | "filter-all" => return filter_json_conditions(source),
+        "多条件筛选" | "filter-all" => return filter_json_conditions(source, true),
+        "任一条件筛选" | "filter-any" => return filter_json_conditions(source, false),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "分组计数" | "group-count" => return count_json_by_scalar(source),
         "分组明细" | "group-records" => return group_json_records(source),
@@ -726,7 +727,7 @@ impl JsonCondition {
     }
 }
 
-fn filter_json_conditions(query: &str) -> Result<String, JsonError> {
+fn filter_json_conditions(query: &str, match_all: bool) -> Result<String, JsonError> {
     let (input, source) = json_value_and_source(query, JsonError::FilterConditions)?;
     let conditions = serde_json::from_str::<Vec<(String, String, &RawValue)>>(input.get())
         .map_err(|_| JsonError::FilterConditions)?;
@@ -756,11 +757,12 @@ fn filter_json_conditions(query: &str) -> Result<String, JsonError> {
         .collect::<Result<Vec<_>, _>>()?;
     retain_json_items(read_json_array(source)?, |item| {
         for condition in &conditions {
-            if !condition.matches(item)? {
-                return Ok(false);
+            let matches = condition.matches(item)?;
+            if matches != match_all {
+                return Ok(matches);
             }
         }
-        Ok(true)
+        Ok(match_all)
     })
 }
 
@@ -2194,6 +2196,25 @@ mod tests {
         ] {
             assert_eq!(transform_json(input), Err(error), "{input}");
         }
+    }
+
+    #[test]
+    fn filters_json_items_that_match_at_least_one_condition_in_original_order() {
+        assert_eq!(
+            transform_json(
+                r#"任一条件筛选 [["/状态","=","完成"],["/金额",">=",9007199254740993]] [{"金额":9007199254740993.0},{"状态":"完成"},{"状态":"待办","金额":9007199254740992},{"状态":"完成","金额":9007199254740994},{}]"#
+            )
+            .as_deref(),
+            Ok(r#"[{"金额":9007199254740993.0},{"状态":"完成"},{"状态":"完成","金额":9007199254740994}]"#)
+        );
+        assert_eq!(
+            transform_json(r#"filter-any [["/批准","=",null],["/完成","=",true]] [{},{"批准":null},{"批准":false},{"完成":true}]"#).as_deref(),
+            Ok(r#"[{"批准":null},{"完成":true}]"#)
+        );
+        assert_eq!(
+            transform_json(r#"filter-any [] []"#),
+            Err(JsonError::FilterConditions)
+        );
     }
 
     #[test]

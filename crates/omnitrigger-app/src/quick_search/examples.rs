@@ -2082,6 +2082,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按任一条件筛选 JSON 数组",
+        query: r#"JSON: 任一条件筛选 [["/状态","=","完成"],["/金额",">=",1.5]] [{"状态":"完成"},{"状态":"待办","金额":2e0},{"状态":"待办","金额":1.49}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "排除路径上具有指定标量值的 JSON 项",
         query: r#"JSON: 排除 /状态 "完成" [{"编号":"001","状态":"完成"},{"编号":"002","状态":"待办"}]"#,
     },
@@ -2688,6 +2693,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把多项精确数值化为最简整数比",
+        query: "分数: 化简比例 0.5,3/4,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将有限连分数还原为精确分数",
         query: "分数: 从连分数 [3,7,16]",
     },
@@ -2782,6 +2792,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "从连分数",
                     "从循环小数",
                     "比较",
+                    "化简比例",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

@@ -5,7 +5,7 @@ use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::conversion::split_conversion;
-use super::operators::{NumberComparison, Operator};
+use super::operators::{split_top_level_commas, NumberComparison, Operator};
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_MODULAR_POWER_BITS: u64 = 1024;
@@ -15,6 +15,7 @@ const MAX_EXACT_BITS: u64 = 8192;
 const MAX_DECIMAL_PLACES: u32 = 100;
 const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
 const MAX_TABLE_INPUTS: usize = 12;
+const MAX_RATIO_VALUES: usize = 16;
 const MAX_CONTINUED_FRACTION_TERMS: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +44,7 @@ pub(super) enum FractionError {
     ContinuedFractionArguments,
     ContinuedFractionLength,
     ComparisonArguments,
+    RatioArguments,
     ExactRange,
 }
 
@@ -77,6 +79,7 @@ impl FractionError {
             }
             Self::ContinuedFractionLength => "连分数最多支持 512 项",
             Self::ComparisonArguments => "输入两个算式和一个比较符，例如 分数: 比较 1/3 < 0.34",
+            Self::RatioArguments => "输入 2 至 16 个非负数，至少一个大于零，例如 0.5,3/4,1",
             Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -159,6 +162,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "比较" || verb.eq_ignore_ascii_case("compare") {
         return compare_fraction_expressions(expression);
     }
+    if verb == "化简比例" || verb.eq_ignore_ascii_case("ratio") {
+        return simplify_ratio(expression);
+    }
     if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
         let (source, places) =
             split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
@@ -207,6 +213,52 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     } else {
         format!("{sign}{numerator}/{denominator}")
     })
+}
+
+fn simplify_ratio(input: &str) -> Result<String, FractionError> {
+    let terms: Vec<_> = split_top_level_commas(input)
+        .take(MAX_RATIO_VALUES + 1)
+        .collect();
+    if !(2..=MAX_RATIO_VALUES).contains(&terms.len()) {
+        return Err(FractionError::RatioArguments);
+    }
+    let values = terms
+        .into_iter()
+        .map(calculate_fraction)
+        .collect::<Result<Vec<_>, _>>()?;
+    if values
+        .iter()
+        .any(|value| value.numer().sign() == Sign::Minus)
+    {
+        return Err(FractionError::RatioArguments);
+    }
+    let mut denominator = BigUint::from(1u8);
+    for value in &values {
+        let part = value.denom().magnitude();
+        let divisor = exact_gcd(denominator.clone(), part.clone());
+        denominator = (denominator / divisor) * part;
+        if denominator.bits() > MAX_EXACT_BITS {
+            return Err(FractionError::ExactRange);
+        }
+    }
+    let mut scaled = Vec::with_capacity(values.len());
+    let mut divisor = BigUint::default();
+    for value in values {
+        let numerator = value.numer().magnitude() * (&denominator / value.denom().magnitude());
+        if numerator.bits() > MAX_EXACT_BITS {
+            return Err(FractionError::ExactRange);
+        }
+        divisor = exact_gcd(divisor, numerator.clone());
+        scaled.push(numerator);
+    }
+    if divisor.bits() == 0 {
+        return Err(FractionError::RatioArguments);
+    }
+    Ok(scaled
+        .into_iter()
+        .map(|numerator| (numerator / &divisor).to_string())
+        .collect::<Vec<_>>()
+        .join(":"))
 }
 
 fn compare_fraction_expressions(input: &str) -> Result<String, FractionError> {
@@ -982,6 +1034,28 @@ mod tests {
         assert_eq!(
             simplify_fraction("比较 2/0 = 1"),
             Err(FractionError::ZeroDenominator)
+        );
+    }
+
+    #[test]
+    fn reduces_exact_nonnegative_values_to_the_smallest_integer_ratio() {
+        for (query, expected) in [
+            ("化简比例 0.5,3/4,1", "2:3:4"),
+            ("ratio 0,gcd(6,9)/4,1/2", "0:3:2"),
+            ("化简比例 2**100,3*2**100,0", "1:3:0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["ratio 0,0", "ratio 2,-1", "ratio 1"] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::RatioArguments),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            simplify_fraction("化简比例 1/1e1500,1/(1e1500-1)"),
+            Err(FractionError::ExactRange)
         );
     }
 
