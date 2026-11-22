@@ -27,7 +27,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、乘法、数乘、行列式、迹、转置、求解、求逆和秩"
+                "可用加法、减法、乘法、数乘、行列式、迹、转置、求解、求逆、秩和行最简形"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -55,6 +55,9 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "行列式" | "det" => determinant(parse_matrix(input)?).map(|value| value.to_string()),
         "迹" | "trace" => trace(&parse_matrix(input)?).map(|value| value.to_string()),
         "秩" | "rank" => matrix_rank(parse_matrix(input)?).map(|value| value.to_string()),
+        "行最简形" | "行最简" | "rref" => {
+            reduced_row_echelon(parse_matrix(input)?).map(format_matrix)
+        }
         "加法" | "add" | "减法" | "subtract" => {
             let (left, right) = parse_pair(input)?;
             let subtract = matches!(operation.as_str(), "减法" | "subtract");
@@ -208,6 +211,47 @@ fn eliminate_below(
     Ok(())
 }
 
+fn reduced_row_echelon(mut matrix: Matrix) -> Result<Matrix, MatrixError> {
+    let mut row = 0;
+    for column in 0..matrix[0].len() {
+        let Some(pivot) = find_pivot(&matrix, row, column) else {
+            continue;
+        };
+        matrix.swap(row, pivot);
+        reduce_pivot_column(&mut matrix, row, column)?;
+        row += 1;
+        if row == matrix.len() {
+            break;
+        }
+    }
+    Ok(matrix)
+}
+
+fn reduce_pivot_column(
+    matrix: &mut [Vec<BigRational>],
+    row: usize,
+    column: usize,
+) -> Result<(), MatrixError> {
+    let (before, remaining) = matrix.split_at_mut(row);
+    let (pivot, after) = remaining.split_first_mut().expect("主元行存在");
+    let scale = pivot[column].clone();
+    for cell in &mut pivot[column..] {
+        *cell /= &scale;
+        ensure_exact_size(cell).map_err(MatrixError::Evaluation)?;
+    }
+    for row in before.iter_mut().chain(after) {
+        let factor = std::mem::take(&mut row[column]);
+        if factor.numer().sign() == Sign::NoSign {
+            continue;
+        }
+        for (target, source) in row.iter_mut().zip(pivot.iter()).skip(column + 1) {
+            *target -= &factor * source;
+            ensure_exact_size(target).map_err(MatrixError::Evaluation)?;
+        }
+    }
+    Ok(())
+}
+
 fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
     let dimension = left.len();
     if left[0].len() != dimension {
@@ -222,23 +266,7 @@ fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
     for column in 0..dimension {
         let pivot = find_pivot(&left, column, column).ok_or(MatrixError::Singular)?;
         left.swap(column, pivot);
-        let (before, remaining) = left.split_at_mut(column);
-        let (pivot_row, after) = remaining.split_first_mut().expect("主元行存在");
-        let scale = pivot_row[column].clone();
-        for cell in &mut pivot_row[column..] {
-            *cell /= &scale;
-            ensure_exact_size(cell).map_err(MatrixError::Evaluation)?;
-        }
-        for row in before.iter_mut().chain(after) {
-            let factor = std::mem::take(&mut row[column]);
-            if factor.numer().sign() == Sign::NoSign {
-                continue;
-            }
-            for (target, source) in row.iter_mut().zip(pivot_row.iter()).skip(column + 1) {
-                *target -= &factor * source;
-                ensure_exact_size(target).map_err(MatrixError::Evaluation)?;
-            }
-        }
+        reduce_pivot_column(&mut left, column, column)?;
     }
     Ok(left
         .into_iter()
@@ -309,6 +337,22 @@ fn format_matrix(matrix: Matrix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduces_rectangular_and_singular_matrices_with_exact_pivot_columns() {
+        for (query, expected) in [
+            (
+                "行最简形 0,2,3; 1,4,5; 2,8,10",
+                "1, 0, -1\n0, 1, 3/2\n0, 0, 0",
+            ),
+            ("rref 0,2,3; 0,4,6", "0, 1, 3/2\n0, 0, 0"),
+            ("行最简形 0,0,-3", "0, 0, 1"),
+            ("行最简形 0,0; 0,0", "0, 0\n0, 0"),
+            ("rref 1/3; -2/3; 5", "1\n0\n0"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
 
     #[test]
     fn calculates_exact_matrix_trace_and_scales_rectangular_matrices() {

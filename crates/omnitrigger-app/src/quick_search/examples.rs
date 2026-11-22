@@ -206,6 +206,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "用精确消元求矩阵的行最简形",
+        query: "矩阵: 行最简形 0,2,3; 1,4,5; 2,8,10",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算方阵主对角线的和",
         query: "矩阵: 迹 1/2,20; 3,-1/3",
     },
