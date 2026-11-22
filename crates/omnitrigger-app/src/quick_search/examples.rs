@@ -1622,6 +1622,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "根据基准网址生成相对链接",
+        query: r#"URL: 相对 ["https://example.invalid/docs/api/","https://example.invalid/docs/guide?lang=zh#intro"]"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "给网址追加一个查询参数",
         query: r#"URL: 加参数 ["tag","茶 + 咖啡"] https://example.invalid/doc?tag=first#part"#,
     },

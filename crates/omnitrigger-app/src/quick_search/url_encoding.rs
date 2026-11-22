@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::de::DeserializeOwned;
-use url::Url;
+use url::{Position, Url};
 
 const URL_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -26,6 +26,9 @@ pub(super) enum UrlEncodingError {
     InvalidUrl,
     InvalidUrlPair,
     InvalidUrlReference,
+    InvalidAbsoluteUrlPair,
+    RelativeUrlOrigin,
+    RelativeUrlUnavailable,
     InvalidParameterPair,
     InvalidParameterNames,
     InvalidFilePath,
@@ -45,6 +48,9 @@ impl UrlEncodingError {
             Self::InvalidUrl => "输入带协议的 URL，例如 https://example.invalid/",
             Self::InvalidUrlPair => "用 JSON 字符串数组填写基准网址和相对链接",
             Self::InvalidUrlReference => "无法用该基准网址解析链接",
+            Self::InvalidAbsoluteUrlPair => "用 JSON 字符串数组填写两个完整网址，基准网址在前",
+            Self::RelativeUrlOrigin => "两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息",
+            Self::RelativeUrlUnavailable => "无法用该基准网址生成可还原的相对链接",
             Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
             Self::InvalidParameterNames => "用 JSON 字符串数组填写参数名，再输入 URL",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
@@ -72,6 +78,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "参数" | "查询参数" | "params" => decode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
         "拼接" | "resolve" => resolve_url(value),
+        "相对" | "relative" => relative_url(value),
         "源" | "源站" | "origin" => {
             let url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
             let origin = url.origin();
@@ -118,17 +125,58 @@ fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
 }
 
 fn resolve_url(input: &str) -> Result<String, UrlEncodingError> {
-    let [base, reference] = serde_json::from_str::<[String; 2]>(input).map_err(|error| {
-        if error.is_eof() {
-            UrlEncodingError::Incomplete
-        } else {
-            UrlEncodingError::InvalidUrlPair
-        }
-    })?;
+    let [base, reference] = url_pair(input, UrlEncodingError::InvalidUrlPair)?;
     let base = Url::parse(&base).map_err(|_| UrlEncodingError::InvalidUrl)?;
     base.join(&reference)
         .map(Into::into)
         .map_err(|_| UrlEncodingError::InvalidUrlReference)
+}
+
+fn url_pair(input: &str, invalid_pair: UrlEncodingError) -> Result<[String; 2], UrlEncodingError> {
+    serde_json::from_str(input).map_err(|error| {
+        if error.is_eof() {
+            UrlEncodingError::Incomplete
+        } else {
+            invalid_pair
+        }
+    })
+}
+
+fn relative_url(input: &str) -> Result<String, UrlEncodingError> {
+    let [base, target] = url_pair(input, UrlEncodingError::InvalidAbsoluteUrlPair)?;
+    let base = Url::parse(&base).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let target = Url::parse(&target).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.scheme() != target.scheme()
+        || base.authority() != target.authority()
+    {
+        return Err(UrlEncodingError::RelativeUrlOrigin);
+    }
+    let round_trips = |reference: &str| {
+        !reference.is_empty()
+            && Url::parse(reference).is_err()
+            && base
+                .join(reference)
+                .is_ok_and(|resolved| resolved == target)
+    };
+    if let Some(reference) = base
+        .make_relative(&target)
+        .filter(|reference| round_trips(reference))
+    {
+        return Ok(reference);
+    }
+    let suffix = &target[Position::BeforePath..];
+    let reference = if suffix.starts_with("//") {
+        // 先写点目录，避免把路径开头的双斜杠解析成另一台主机。
+        format!("/.{suffix}")
+    } else {
+        suffix.to_owned()
+    };
+    if round_trips(&reference) {
+        Ok(reference)
+    } else {
+        Err(UrlEncodingError::RelativeUrlUnavailable)
+    }
 }
 
 fn encode_file_path(input: &str) -> Result<String, UrlEncodingError> {
@@ -468,6 +516,67 @@ mod tests {
             convert_url_component("源 /doc"),
             Err(UrlEncodingError::InvalidUrl)
         );
+    }
+
+    #[test]
+    fn makes_copyable_relative_urls_that_resolve_back_to_the_target() {
+        assert_eq!(
+            convert_url_component(r#"相对 ["https://example.invalid/docs/api/","https://example.invalid/docs/guide?lang=zh#intro"]"#).as_deref(),
+            Ok("../guide?lang=zh#intro")
+        );
+        for (base, target) in [
+            (
+                "https://example.invalid/docs/?q=1",
+                "https://example.invalid/docs/",
+            ),
+            (
+                "https://example.invalid/docs/",
+                "https://example.invalid/docs/",
+            ),
+            (
+                "https://example.invalid/docs/",
+                "https://example.invalid/docs/a:b",
+            ),
+            (
+                "https://example.invalid/",
+                "https://example.invalid//guide%20one#part",
+            ),
+            (
+                "https://example.invalid/doc",
+                "https://example.invalid/doc?#",
+            ),
+        ] {
+            let pair = serde_json::to_string(&[base, target]).unwrap();
+            let reference = convert_url_component(&format!("relative {pair}")).unwrap();
+            assert!(!reference.is_empty());
+            assert!(Url::parse(&reference).is_err());
+            let joined = Url::parse(base).unwrap().join(&reference).unwrap();
+            assert_eq!(joined, Url::parse(target).unwrap());
+        }
+        for (query, error) in [
+            (
+                r#"相对 ["https://example.invalid/"]"#,
+                UrlEncodingError::InvalidAbsoluteUrlPair,
+            ),
+            (
+                r#"相对 ["https://example.invalid/","/docs"]"#,
+                UrlEncodingError::InvalidUrl,
+            ),
+            (
+                r#"相对 ["http://example.invalid/","https://example.invalid/"]"#,
+                UrlEncodingError::RelativeUrlOrigin,
+            ),
+            (
+                r#"相对 ["https://example.invalid/","https://example.invalid:444/"]"#,
+                UrlEncodingError::RelativeUrlOrigin,
+            ),
+            (
+                r#"相对 ["https://example.invalid/","https://a@example.invalid/"]"#,
+                UrlEncodingError::RelativeUrlOrigin,
+            ),
+        ] {
+            assert_eq!(convert_url_component(query), Err(error), "{query}");
+        }
     }
 
     #[test]
