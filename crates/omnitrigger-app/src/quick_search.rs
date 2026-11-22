@@ -699,10 +699,22 @@ impl Results {
                             map_batch_lines(arguments, |line| convert_timestamp(line, now))
                                 .map_err(ValueError::BatchTimestamp),
                         )
+                    } else if let Some(arguments) = batch_arguments(term, "路径对照", "path-csv")
+                    {
+                        Self::text_value(
+                            map_batch_csv(arguments, "输入", path_component)
+                                .map_err(ValueError::BatchPath),
+                        )
                     } else if let Some(arguments) = batch_arguments(term, "路径", "path") {
                         Self::text_value(
                             map_batch_lines(arguments, path_component)
                                 .map_err(ValueError::BatchPath),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "网址对照", "url-csv")
+                    {
+                        Self::text_value(
+                            map_batch_csv(arguments, "输入", convert_url_component)
+                                .map_err(ValueError::BatchUrl),
                         )
                     } else if let Some(arguments) = batch_arguments(term, "网址", "url") {
                         Self::text_value(
@@ -2644,6 +2656,25 @@ mod tests {
     }
 
     #[test]
+    fn exports_url_transformations_and_original_inputs_as_csv() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 网址对照 去查询串 https://example.invalid/doc?q=a#part\n表单解码 a%2Bb+c",
+                &[]
+            ),
+            Results::Value(Ok(value)) if value.text == concat!(
+                "输入,结果\r\n",
+                "去查询串 https://example.invalid/doc?q=a#part,https://example.invalid/doc#part\r\n",
+                "表单解码 a%2Bb+c,a+b c"
+            )
+        ));
+        assert_eq!(
+            for_query("批量换算: 网址对", &[]).suggested_input(0),
+            Some("批量换算: 网址对照 去查询串 https://example.invalid/doc?q=a#part\n表单解码 a%2Bb+c")
+        );
+    }
+
+    #[test]
     fn quick_search_batches_different_url_operations_and_reports_the_input_line() {
         assert!(matches!(
             for_query(
@@ -2663,6 +2694,22 @@ mod tests {
         assert!(for_query("批量换算: 网", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 网址 ")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn exports_path_results_and_quotes_the_original_inputs_as_csv() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 路径对照 文件名 \"C:\\工作\\报告 集.txt\"\n转文件网址 C:\\docs\\report 2026.txt",
+                &[]
+            ),
+            Results::Value(Ok(value)) if value.text == concat!(
+                "输入,结果\r\n",
+                "\"文件名 \"\"C:\\工作\\报告 集.txt\"\"\",报告 集.txt\r\n",
+                "转文件网址 C:\\docs\\report 2026.txt,file:///C:/docs/report%202026.txt"
+            )
+        ));
     }
 
     #[test]

@@ -450,9 +450,19 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 路径 文件名 \"C:\\工作\\报告 集.txt\"\n转文件网址 C:\\docs\\report 2026.txt\n扩展名 C:\\资料\\图.png",
     },
     Example {
+        icon: Icon::Layers,
+        title: "以 CSV 导出路径操作的输入和结果",
+        query: "批量换算: 路径对照 文件名 \"C:\\工作\\报告 集.txt\"\n转文件网址 C:\\docs\\report 2026.txt",
+    },
+    Example {
         icon: Icon::Browser,
         title: "逐行处理网址、编码和查询参数",
         query: "批量换算: 网址 去查询串 https://example.invalid/doc?q=a#part\n表单解码 a%2Bb+c\n源 https://example.invalid:8443/doc",
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "以 CSV 导出网址操作的输入和结果",
+        query: "批量换算: 网址对照 去查询串 https://example.invalid/doc?q=a#part\n表单解码 a%2Bb+c",
     },
     Example {
         icon: Icon::Clock,
@@ -2876,9 +2886,16 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 term,
                 "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址" | "日" | "日期"
             ) || (!term.is_empty()
-                && ["对照", "时长对照", "时间戳对照", "日期对照"]
-                    .into_iter()
-                    .any(|operation| operation.starts_with(term))) => {}
+                && [
+                    "对照",
+                    "时长对照",
+                    "时间戳对照",
+                    "路径对照",
+                    "网址对照",
+                    "日期对照",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term))) => {}
         Scope::Date
             if !term.is_empty()
                 && [
