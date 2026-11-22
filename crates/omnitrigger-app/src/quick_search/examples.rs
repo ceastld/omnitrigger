@@ -396,6 +396,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "从一组时长中找出最短值",
+        query: "时长: 最短 01:25,02:40,00:55",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "从一组时长中找出最长值",
+        query: "时长: 最长 01:25,02:40,00:55",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "求最长和最短时长的差",
+        query: "时长: 极差 01:25,02:40,00:55",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按实际时长从短到长排列",
         query: "时长: 排序 02:40,PT2M,00:55,02:00",
     },
@@ -2053,10 +2068,19 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Duration
-            if matches!(
-                term,
-                "合" | "合计" | "平" | "平均" | "中位" | "中位数" | "排" | "排序" | "降" | "降序"
-            ) => {}
+            if !term.is_empty()
+                && [
+                    "合计",
+                    "平均",
+                    "中位数",
+                    "最短",
+                    "最长",
+                    "极差",
+                    "排序",
+                    "降序",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
             if matches!(
                 term,

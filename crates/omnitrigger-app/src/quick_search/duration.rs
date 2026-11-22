@@ -55,6 +55,17 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
         "中位数" | "median" => (median_duration_list(values)?, false),
+        "最短" | "min" => (duration_extremes(values)?.0, false),
+        "最长" | "max" => (duration_extremes(values)?.1, false),
+        "极差" | "range" => {
+            let (shortest, longest) = duration_extremes(values)?;
+            (
+                longest
+                    .checked_sub(shortest)
+                    .ok_or(DurationError::OutOfRange)?,
+                false,
+            )
+        }
         _ => duration_value(input)?,
     };
     let nanos = bounded_duration(Some(total.unsigned_abs()))?;
@@ -141,6 +152,15 @@ fn aggregate_duration_list(input: &str, average: bool) -> Result<i128, DurationE
         return Err(DurationError::Precision);
     }
     Ok(total / count)
+}
+
+fn duration_extremes(input: &str) -> Result<(i128, i128), DurationError> {
+    let mut values = duration_list_values(input);
+    let first = values.next().ok_or(DurationError::Incomplete)??;
+    values.try_fold((first, first), |(shortest, longest), current| {
+        let current = current?;
+        Ok((shortest.min(current), longest.max(current)))
+    })
 }
 
 fn median_duration_list(input: &str) -> Result<i128, DurationError> {
@@ -519,6 +539,24 @@ mod tests {
         assert_eq!(
             convert_duration("排序 0.5ns,1ns"),
             Err(DurationError::Precision)
+        );
+    }
+
+    #[test]
+    fn finds_shortest_longest_and_spread_of_signed_durations() {
+        for (query, expected) in [
+            ("最短 01:25,PT2M,00:55", "00:00:55"),
+            ("最长 01:25,02:40,00:55 to s", "160 s"),
+            ("极差 01:25,02:40,00:55", "00:01:45"),
+            ("range -2ns\n1ns to ns", "3 ns"),
+            ("range 03:20", "00:00:00"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(convert_duration("最短"), Err(DurationError::Incomplete));
+        assert_eq!(
+            convert_duration("range -18446744073709551615s,18446744073709551615s"),
+            Err(DurationError::OutOfRange)
         );
     }
 
