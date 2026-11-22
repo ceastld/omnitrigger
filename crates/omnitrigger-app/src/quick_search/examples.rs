@@ -131,6 +131,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求各值到样本平均值的平均距离",
+        query: "统计: 平均绝对偏差 0,1/2,1,10",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "去掉两端的观测后求截尾平均",
         query: "统计: 截尾平均 25% 1,2,3,100",
     },
@@ -3709,6 +3714,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "中位绝对"
                     | "中位绝对偏"
                     | "中位绝对偏差"
+                    | "平均绝对偏差"
                     | "加权"
                     | "加权平均"
                     | "移"

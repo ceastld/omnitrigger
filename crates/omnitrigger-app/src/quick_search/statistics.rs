@@ -100,6 +100,7 @@ enum StatisticsOperation {
         sample: bool,
     },
     MedianAbsoluteDeviation,
+    MeanAbsoluteDeviation,
     TrimmedMean(BigRational),
 }
 
@@ -178,6 +179,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         ),
         "中位绝对偏差" | "mad" | "median-absolute-deviation" => {
             (StatisticsOperation::MedianAbsoluteDeviation, values.trim())
+        }
+        "平均绝对偏差" | "aad" | "average-absolute-deviation" | "mean-absolute-deviation" => {
+            (StatisticsOperation::MeanAbsoluteDeviation, values.trim())
         }
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "移动合计" | "moving-sum" => return moving_sum_or_average(values.trim(), false),
@@ -279,6 +283,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         StatisticsOperation::Bins(edges) => Ok(report_binned_frequencies(values, count, &edges)),
         StatisticsOperation::MedianAbsoluteDeviation => {
             median_absolute_deviation(values, count).map(|value| value.to_string())
+        }
+        StatisticsOperation::MeanAbsoluteDeviation => {
+            mean_absolute_deviation(values, count).map(|value| value.to_string())
         }
         StatisticsOperation::TrimmedMean(share) => {
             trimmed_mean(values, count, share).map(|value| value.to_string())
@@ -759,16 +766,34 @@ fn median_absolute_deviation(
 ) -> Result<BigRational, StatisticsError> {
     values.sort_by(|(left, _), (right, _)| left.cmp(right));
     let center = sorted_median(&values, count)?;
-    for (value, _) in &mut values {
-        let deviation = std::mem::take(value) - &center;
+    replace_with_absolute_deviations(&mut values, &center)?;
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    sorted_median(&values, count)
+}
+
+fn mean_absolute_deviation(
+    mut values: Vec<(BigRational, u64)>,
+    count: u64,
+) -> Result<BigRational, StatisticsError> {
+    let divisor = BigInt::from(count);
+    let center = bounded(observation_sum(&values)? / &divisor)?;
+    replace_with_absolute_deviations(&mut values, &center)?;
+    bounded(observation_sum(&values)? / divisor)
+}
+
+fn replace_with_absolute_deviations(
+    values: &mut [(BigRational, u64)],
+    center: &BigRational,
+) -> Result<(), StatisticsError> {
+    for (value, _) in values {
+        let deviation = std::mem::take(value) - center;
         *value = bounded(if deviation.numer().sign() == Sign::Minus {
             -deviation
         } else {
             deviation
         })?;
     }
-    values.sort_by(|(left, _), (right, _)| left.cmp(right));
-    sorted_median(&values, count)
+    Ok(())
 }
 
 fn squared_deviation_sum(
@@ -1055,6 +1080,27 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn computes_mean_absolute_deviation_at_the_mean_with_exact_frequencies() {
+        for (query, expected) in [
+            ("平均绝对偏差 0,1/2,1,10", "57/16"),
+            ("平均绝对偏差 频数 0@2,3@2,100@1", "788/25"),
+            ("AAD frequency -3@1000000000,2@1000000000", "5/2"),
+            ("mean-absolute-deviation 0,1/2,3/2", "5/9"),
+            ("average-absolute-deviation 2**80", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("平均绝对偏差"),
+            Err(StatisticsError::Incomplete)
+        );
     }
 
     #[test]
