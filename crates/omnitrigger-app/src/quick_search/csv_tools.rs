@@ -33,7 +33,7 @@ use super::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
         rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
     },
-    json_tools::{json_cell_at_pointer, json_pointer_tokens, JsonError},
+    json_tools::{json_cell_at_pointer, json_pointer_tokens, JsonCellContent, JsonError},
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
@@ -387,7 +387,7 @@ enum Operation {
         unit: DateOffsetUnit,
     },
     TextColumn(String, ColumnReference, TextColumnComputation),
-    JsonPointerColumn(String, ColumnReference, Vec<String>),
+    JsonPointerColumn(String, ColumnReference, Vec<String>, JsonCellContent),
     DatePatternColumn {
         name: String,
         source: ColumnReference,
@@ -929,7 +929,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::TextColumn(name, source, TextColumnComputation::RegexCount(pattern))
         }
-        "json取值列" | "json-pointer-column" => {
+        kind @ ("json取值列" | "json-pointer-column" | "json类型列" | "json-type-column") => {
             let ((name, source, pointer), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
                     input,
@@ -940,7 +940,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             }
             let keys = json_pointer_tokens(&pointer).map_err(CsvError::JsonPointerColumn)?;
             input = data;
-            Operation::JsonPointerColumn(name, source, keys)
+            let content = match kind {
+                "json类型列" | "json-type-column" => JsonCellContent::Type,
+                _ => JsonCellContent::Value,
+            };
+            Operation::JsonPointerColumn(name, source, keys, content)
         }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
@@ -1458,16 +1462,18 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amounts,
             unit,
         } => date_offset_column(&rows, &name, source, amounts, unit),
-        Operation::JsonPointerColumn(name, source, keys) => {
+        Operation::JsonPointerColumn(name, source, keys, content) => {
             let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
             let source = source.resolve(header)?;
             validate_column_width(&[source], header.len())?;
             let mut row_number = 0;
             write_appended_column(header, records, &name, |row| {
                 row_number += 1;
-                json_cell_at_pointer(&row[source], &keys).map_err(|error| CsvError::DataRowValue {
-                    row: row_number,
-                    cause: error.message(),
+                json_cell_at_pointer(&row[source], &keys, content).map_err(|error| {
+                    CsvError::DataRowValue {
+                        row: row_number,
+                        cause: error.message(),
+                    }
                 })
             })
         }
@@ -5402,6 +5408,40 @@ mod tests {
             "a".repeat(1100)
         );
         assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
+    }
+
+    #[test]
+    fn reports_json_pointer_cell_types_and_distinguishes_null_from_missing_values() {
+        let query = r#"JSON类型列 ["类型","数据","/金额"]
+编号,数据
+1,"{""金额"":9007199254740993.00}"
+2,"{""金额"":""12""}"
+3,"{""金额"":null}"
+4,{}
+5,"{""金额"":[]}"
+6,"{""金额"":false}"
+7,"{""金额"":{}}""#;
+        let expected = [
+            r#"编号,数据,类型"#,
+            r#"1,"{""金额"":9007199254740993.00}",number"#,
+            r#"2,"{""金额"":""12""}",string"#,
+            r#"3,"{""金额"":null}",null"#,
+            r#"4,{},"""#,
+            r#"5,"{""金额"":[]}",array"#,
+            r#"6,"{""金额"":false}",boolean"#,
+            r#"7,"{""金额"":{}}",object"#,
+        ]
+        .join("\r\n");
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected.as_str()));
+        assert_eq!(
+            transform_csv(
+                r#"json-type-column ["类型",1,""] 原列
+true
+null"#
+            )
+            .as_deref(),
+            Ok("原列,类型\r\ntrue,boolean\r\nnull,null")
+        );
     }
 
     #[test]

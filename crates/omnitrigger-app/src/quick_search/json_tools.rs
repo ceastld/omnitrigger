@@ -400,15 +400,18 @@ fn json_value_type(query: &str) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let value = select_json_path(root, &pointer)?;
-    let kind = match value.get().as_bytes()[0] {
+    serde_json::to_string(json_type_name(value)).map_err(json_parse_error)
+}
+
+fn json_type_name(value: &RawValue) -> &'static str {
+    match value.get().as_bytes()[0] {
         b'{' => "object",
         b'[' => "array",
         b'"' => "string",
         b't' | b'f' => "boolean",
         b'n' => "null",
         _ => "number",
-    };
-    serde_json::to_string(kind).map_err(json_parse_error)
+    }
 }
 
 fn select_json_paths(query: &str) -> Result<String, JsonError> {
@@ -1782,16 +1785,26 @@ fn json_csv_cell(value: &RawValue) -> Result<String, JsonError> {
     Ok(csv_cell(&text).into_owned())
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum JsonCellContent {
+    Value,
+    Type,
+}
+
 pub(super) fn json_cell_at_pointer<'a>(
     source: &'a str,
     keys: &[String],
+    content: JsonCellContent,
 ) -> Result<Cow<'a, str>, JsonError> {
     if source.trim().is_empty() {
         return Ok(Cow::Borrowed(""));
     }
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     match select_pointer_keys(root, keys) {
-        Ok(value) => json_csv_text(value),
+        Ok(value) => match content {
+            JsonCellContent::Value => json_csv_text(value),
+            JsonCellContent::Type => Ok(Cow::Borrowed(json_type_name(value))),
+        },
         Err(JsonError::MissingValue) => Ok(Cow::Borrowed("")),
         Err(error) => Err(error),
     }

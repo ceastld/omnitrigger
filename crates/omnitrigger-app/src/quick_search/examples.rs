@@ -2928,6 +2928,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "检查 CSV 单元格中 JSON 字段的类型",
+        query: "CSV: JSON类型列 [\"类型\",\"数据\",\"/金额\"]\n编号,数据\n1,\"{\"\"金额\"\":1.50}\"\n2,\"{\"\"金额\"\":\"\"1.50\"\"}\"\n3,\"{\"\"金额\"\":null}\"\n4,{}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按部门逐行累计 CSV 金额",
         query: "CSV: 累计合计列 [\"累计金额\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },
