@@ -40,6 +40,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("最小优先", "按字节数从小到大"),
     ("自然排序", "名称中的数字按数值排"),
     ("按后缀", "相同扩展名的文件排在一起"),
+    ("任一名称=预算,发票", "名称只需包含其中一个片段"),
     ("排除名称=草稿,副本", "跳过名称中含有指定文字的项"),
     ("前=10", "取排序后的前 10 项"),
     ("路径列表", "每行一个绝对路径"),
@@ -261,12 +262,8 @@ impl LocalFilesIndex {
         };
         let extensions = extension_set(query.extensions);
         let excluded_extensions = extension_set(query.excluded_extensions);
-        let excluded_names: Vec<_> = query
-            .excluded_names
-            .into_iter()
-            .flat_map(|terms| terms.split([',', '，']))
-            .map(str::to_lowercase)
-            .collect();
+        let any_names = name_fragments(query.any_names);
+        let excluded_names = name_fragments(query.excluded_names);
         let mut matches: Vec<_> = entries
             .iter()
             .filter(|entry| {
@@ -283,7 +280,9 @@ impl LocalFilesIndex {
                 let name = entry.name.to_lowercase();
                 let matches_name = filter
                     .split_whitespace()
-                    .all(|keyword| name.contains(keyword));
+                    .all(|keyword| name.contains(keyword))
+                    && (any_names.is_empty()
+                        || any_names.iter().any(|term| name.contains(term.as_str())));
                 let excluded = excluded_names
                     .iter()
                     .any(|keyword| name.contains(keyword.as_str()));
@@ -585,6 +584,21 @@ fn set_extension_filter<'a>(target: &mut Option<&'a str>, list: &'a str) -> Opti
     Some(())
 }
 
+fn name_fragments(list: Option<&str>) -> Vec<String> {
+    list.into_iter()
+        .flat_map(|terms| terms.split([',', '，']))
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn set_name_filter<'a>(target: &mut Option<&'a str>, list: &'a str) -> Option<()> {
+    if target.is_some() || list.split([',', '，']).any(str::is_empty) {
+        return None;
+    }
+    *target = Some(list);
+    Some(())
+}
+
 pub(super) fn option_help_query(query: &str) -> Option<String> {
     split_query(query)?;
     let separator = if query.split('|').nth(2).is_some() {
@@ -643,6 +657,7 @@ struct FileQuery<'a> {
     created: DateBounds,
     extensions: Option<&'a str>,
     excluded_extensions: Option<&'a str>,
+    any_names: Option<&'a str>,
     excluded_names: Option<&'a str>,
     limit: Option<usize>,
     output: FileOutput,
@@ -777,6 +792,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
     let mut extensions = None;
     let mut excluded_extensions = None;
+    let mut any_names = None;
     let mut excluded_names = None;
     let mut limit = None;
     let mut output = FileOutput::Entries;
@@ -860,11 +876,9 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
                     "排除后缀" | "exclude-ext" => {
                         set_extension_filter(&mut excluded_extensions, quantity)?
                     }
-                    "排除名称" | "exclude-name" if excluded_names.is_none() => {
-                        if quantity.split([',', '，']).any(str::is_empty) {
-                            return None;
-                        }
-                        excluded_names = Some(quantity);
+                    "任一名称" | "any-name" => set_name_filter(&mut any_names, quantity)?,
+                    "排除名称" | "exclude-name" => {
+                        set_name_filter(&mut excluded_names, quantity)?
                     }
                     "前" | "limit" if limit.is_none() => {
                         limit = Some(
@@ -947,6 +961,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             created,
             extensions,
             excluded_extensions,
+            any_names,
             excluded_names,
             limit,
             output,
@@ -1960,6 +1975,44 @@ mod tests {
             assert!(index.results(&query) == Results::text_value(Ok("Budget Final.txt".into())));
         }
         for invalid in ["排除名称=", "排除名称=a,,b", "排除名称=a 排除名称=b"] {
+            assert!(split_query(&format!("{original} | {invalid}")).is_none());
+        }
+    }
+
+    #[test]
+    fn includes_any_name_fragment_and_combines_with_required_and_excluded_terms() {
+        let mut index = LocalFilesIndex::default();
+        let original = r"C:\Work | 2026";
+        let load = index.request(Some(original)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("2026 Budget.txt", "file"),
+                entry("2026 发票", "directory"),
+                entry("2026 Budget Draft.txt", "file"),
+                entry("2026 Notes.txt", "file"),
+                entry("2025 发票", "directory"),
+            ]),
+        ));
+        for options in ["任一名称=BUDGET，发票", "ANY-NAME=budget,发票"] {
+            let query = format!("{original} | {options} 排除名称=draft 名称列表");
+            assert!(index.request(Some(&query)).is_none());
+            assert!(
+                index.results(&query)
+                    == Results::text_value(Ok("2026 Budget.txt\n2026 发票".into()))
+            );
+        }
+        let unmatched = format!("{original} | 任一名称=receipt 路径JSON");
+        assert!(index.request(Some(&unmatched)).is_none());
+        assert!(index.results(&unmatched) == Results::text_value(Ok("[]".into())));
+        let help = format!("{original} | 任一名称=budget ?");
+        let Results::FileOptions(items) = index.results(&help) else {
+            panic!("缺少文件选项");
+        };
+        assert!(!items
+            .iter()
+            .any(|item| item.label == Some("任一名称=预算,发票")));
+        for invalid in ["任一名称=", "任一名称=a，，b", "任一名称=a any-name=b"] {
             assert!(split_query(&format!("{original} | {invalid}")).is_none());
         }
     }
