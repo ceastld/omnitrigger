@@ -47,6 +47,7 @@ mod vector;
 mod video_frames;
 mod wheel_slots;
 mod wheels;
+mod windows_settings;
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -200,6 +201,10 @@ pub(super) enum Destination {
     Page(Page),
     InstalledApp(ShellApp),
     KnownFolder(SearchFolder),
+    WindowsSetting {
+        title: &'static str,
+        page: omnitrigger_windows::WindowsSettingsPage,
+    },
     LocalFile {
         name: String,
         path: String,
@@ -664,6 +669,9 @@ impl Results {
                 ),
                 Scope::Applications => applications.results(term),
                 Scope::Folders => Self::Destinations(matching_folders(term)),
+                Scope::WindowsSettings => {
+                    Self::Destinations(windows_settings::matching_windows_settings(term))
+                }
                 Scope::LocalFiles => local_files.results(term),
                 Scope::OpenWindows => open_windows.results(term),
                 Scope::Actions => {
@@ -1936,6 +1944,11 @@ impl QuickSearch {
                                 Destination::KnownFolder(folder) => {
                                     (Icon::Layers, folder.title.to_owned(), None)
                                 }
+                                Destination::WindowsSetting { title, .. } => (
+                                    Page::Settings.icon(),
+                                    (*title).to_owned(),
+                                    Some("Windows 设置".to_owned()),
+                                ),
                                 Destination::LocalFile {
                                     name,
                                     is_directory,
@@ -2904,6 +2917,36 @@ mod tests {
         }
         assert!(matches!(
             index.results("文件夹: 无匹配"),
+            Results::Destinations(items) if items.is_empty()
+        ));
+    }
+
+    #[test]
+    fn searches_windows_settings_pages_by_label_and_alias() {
+        use omnitrigger_windows::WindowsSettingsPage;
+
+        for (query, page) in [
+            ("系统设置: 蓝牙", WindowsSettingsPage::Bluetooth),
+            (
+                "windows settings: ＳＣＲＥＥＮ 分辨率",
+                WindowsSettingsPage::Display,
+            ),
+            ("系统设置: default apps", WindowsSettingsPage::DefaultApps),
+        ] {
+            assert!(matches!(
+                for_query(query, &[]),
+                Results::Destinations(items) if matches!(
+                    items.as_slice(),
+                    [Destination::WindowsSetting { page: matched, .. }] if *matched == page
+                )
+            ));
+        }
+        assert!(matches!(
+            for_query("系统设置:", &[]),
+            Results::Destinations(items) if items.len() == 8
+        ));
+        assert!(matches!(
+            for_query("系统设置: 现有热键", &[]),
             Results::Destinations(items) if items.is_empty()
         ));
     }

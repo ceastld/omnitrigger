@@ -290,6 +290,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "窗口:",
     },
     Example {
+        icon: Icon::Grid,
+        title: "打开 Windows 的蓝牙设置",
+        query: "系统设置: 蓝牙",
+    },
+    Example {
         icon: Icon::Layers,
         title: "打开 Windows 常用文件夹",
         query: "文件夹:",

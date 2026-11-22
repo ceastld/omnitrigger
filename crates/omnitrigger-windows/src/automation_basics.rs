@@ -741,6 +741,37 @@ pub fn open_target(target: &str) -> Result<(), String> {
     native::open(target, None)
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowsSettingsPage {
+    Display,
+    Sound,
+    Notifications,
+    Bluetooth,
+    Storage,
+    InstalledApps,
+    DefaultApps,
+    StartupApps,
+}
+
+#[cfg(windows)]
+impl WindowsSettingsPage {
+    /// 在工作线程上向 Windows 提交打开固定设置页的请求。
+    pub fn open(self) -> Result<(), String> {
+        let target = match self {
+            Self::Display => "ms-settings:display",
+            Self::Sound => "ms-settings:sound",
+            Self::Notifications => "ms-settings:notifications",
+            Self::Bluetooth => "ms-settings:bluetooth",
+            Self::Storage => "ms-settings:storagesense",
+            Self::InstalledApps => "ms-settings:appsfeatures",
+            Self::DefaultApps => "ms-settings:defaultapps",
+            Self::StartupApps => "ms-settings:startupapps",
+        };
+        native::open(target, None)
+    }
+}
+
 /// 仅打开已复验的普通本地文件，工作目录固定为该文件父目录。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenFileInParentError {

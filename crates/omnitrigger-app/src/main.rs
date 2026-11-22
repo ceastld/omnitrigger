@@ -2778,6 +2778,10 @@ impl Workspace {
                 Self::open_shell_search_target(move || folder.kind.open(), cx);
                 return;
             }
+            quick_search::Destination::WindowsSetting { page, .. } => {
+                Self::open_shell_search_target(move || page.open(), cx);
+                return;
+            }
             quick_search::Destination::TextHistoryQuery(query) => {
                 self.text_history.search_from_quick_search(query, cx);
                 self.open_page(Page::TextHistory, cx);
