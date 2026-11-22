@@ -570,7 +570,7 @@ fn month_calendar(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let blank_days = start.weekday().num_days_from_monday() as usize;
     let mut cells = vec!["  ".to_owned(); blank_days];
     cells.extend((1..=last).map(|day| format!("{day:>2}")));
-    let mut grid = format!("一  二  三  四  五  六  日    {}", start.format("%Y-%m"));
+    let mut grid = format!("Mo  Tu  We  Th  Fr  Sa  Su    {}", start.format("%Y-%m"));
     for week in cells.chunks(7) {
         grid.push('\n');
         grid.push_str(&week.join("  "));
@@ -869,7 +869,7 @@ mod tests {
     fn lays_out_a_monday_first_calendar_with_leap_days_and_relative_months() {
         let today = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
         let expected = concat!(
-            "一  二  三  四  五  六  日    2024-02\n",
+            "Mo  Tu  We  Th  Fr  Sa  Su    2024-02\n",
             "             1   2   3   4\n",
             " 5   6   7   8   9  10  11\n",
             "12  13  14  15  16  17  18\n",
