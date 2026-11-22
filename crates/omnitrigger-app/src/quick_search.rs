@@ -72,7 +72,7 @@ use applications::{ApplicationCache, ApplicationIndex};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use batch::{batch_arguments, map_batch_csv, map_batch_lines, BatchError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
-use calendar::{calculate_date, looks_like_date_query, DateError};
+use calendar::{calculate_date, looks_like_date_query, parse_complete_date, DateError};
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
 use color::{
@@ -191,6 +191,7 @@ impl ResultValue {
                 Some("Tab 继续计算")
             }
             ValueKind::Conversion(Some(_)) => Some("Tab 换目标"),
+            ValueKind::CalendarDate => Some("Tab 继续日期计算"),
             _ => None,
         }
     }
@@ -199,6 +200,7 @@ impl ResultValue {
 #[derive(PartialEq, Eq)]
 enum ValueKind {
     Text,
+    CalendarDate,
     Calculation,
     ExactCalculation { can_continue: bool },
     Conversion(Option<String>),
@@ -808,10 +810,7 @@ impl Results {
                     );
                     Self::Destinations(entries)
                 }
-                Scope::Date => Self::text_value(
-                    calculate_date(term, chrono::Local::now().date_naive())
-                        .map_err(ValueError::Date),
-                ),
+                Scope::Date => Self::date_value(term),
                 Scope::Duration => {
                     Self::text_value(convert_duration(term).map_err(ValueError::Duration))
                 }
@@ -1021,10 +1020,7 @@ impl Results {
         );
         if destinations.is_empty() {
             if is_date {
-                return Self::text_value(
-                    calculate_date(&query, chrono::Local::now().date_naive())
-                        .map_err(ValueError::Date),
-                );
+                return Self::date_value(&query);
             }
             if let Some(examples) = function_examples(&query) {
                 return Self::Help(examples);
@@ -1045,6 +1041,20 @@ impl Results {
         Self::Value(result.map(|text| ResultValue {
             text,
             kind: ValueKind::Text,
+        }))
+    }
+
+    fn date_value(query: &str) -> Self {
+        let result =
+            calculate_date(query, chrono::Local::now().date_naive()).map_err(ValueError::Date);
+        Self::Value(result.map(|text| {
+            let date = text.trim();
+            let kind = if date.chars().nth(11).is_none() && parse_complete_date(date).is_ok() {
+                ValueKind::CalendarDate
+            } else {
+                ValueKind::Text
+            };
+            ResultValue { text, kind }
         }))
     }
 
@@ -1095,6 +1105,7 @@ impl Results {
                 Some(format!("分数: 计算 ({text})"))
             }
             ValueKind::Conversion(Some(query)) => Some(query.clone()),
+            ValueKind::CalendarDate => Some(format!("日期: {}", text.trim())),
             _ => None,
         }
     }
@@ -2973,6 +2984,27 @@ mod tests {
     }
 
     #[test]
+    fn continues_an_absolute_date_without_changing_other_calendar_results() {
+        for (query, expected) in [
+            ("日期: 2024-02-28 + 2天", Some("日期: 2024-03-01")),
+            ("日期: 2024-03-01 周日期", Some("日期: 2024-W09-5")),
+            (
+                r#"日期: 格式化 ["2024-03-01","          ２０２４年０３月０１日          "]"#,
+                Some("日期: ２０２４年０３月０１日"),
+            ),
+            ("日期: 2024-02", None),
+            ("日期: 2024-03-01 第几周", None),
+            ("批量换算: 日期 2024-02-28 + 2天", None),
+        ] {
+            assert_eq!(
+                for_query(query, &[]).continuation_query().as_deref(),
+                expected,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn quick_search_batches_calendar_operations_and_reports_input_lines() {
         assert!(matches!(
             for_query(
@@ -4237,7 +4269,7 @@ mod tests {
         }
         for query in [
             "2+",
-            "日期: 今天",
+            "日期: 今天星期几",
             "颜色: #3A86FF",
             "下载: 1 GB 按 100 Mbps",
         ] {
