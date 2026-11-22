@@ -324,6 +324,7 @@ enum Operation {
         source: ColumnReference,
         groups: Vec<ColumnReference>,
         ascending: bool,
+        dense: bool,
     },
     ShareColumn {
         name: String,
@@ -798,6 +799,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "rank-column"
         | "升序排名列"
         | "ascending-rank-column"
+        | "密集排名列"
+        | "dense-rank-column"
+        | "升序密集排名列"
+        | "ascending-dense-rank-column"
         | "占比列"
         | "share-column") => {
             let ((name, source, groups), data) =
@@ -817,7 +822,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     name,
                     source,
                     groups,
-                    ascending: matches!(kind, "升序排名列" | "ascending-rank-column"),
+                    ascending: matches!(
+                        kind,
+                        "升序排名列"
+                            | "ascending-rank-column"
+                            | "升序密集排名列"
+                            | "ascending-dense-rank-column"
+                    ),
+                    dense: matches!(
+                        kind,
+                        "密集排名列"
+                            | "dense-rank-column"
+                            | "升序密集排名列"
+                            | "ascending-dense-rank-column"
+                    ),
                 }
             }
         }
@@ -1189,7 +1207,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             source,
             groups,
             ascending,
-        } => rank_column(&rows, &name, source, &groups, ascending),
+            dense,
+        } => rank_column(&rows, &name, source, &groups, ascending, dense),
         Operation::ShareColumn {
             name,
             source,
@@ -2272,6 +2291,7 @@ fn rank_column(
     source: ColumnReference,
     groups: &[ColumnReference],
     ascending: bool,
+    dense: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -2307,7 +2327,7 @@ fn rank_column(
         let mut rank = 1;
         for (position, (value, index)) in group.iter().enumerate() {
             if position > 0 && *value != group[position - 1].0 {
-                rank = position + 1;
+                rank = if dense { rank + 1 } else { position + 1 };
             }
             ranks[*index] = Some(rank);
         }
@@ -4852,6 +4872,21 @@ mod tests {
         assert_eq!(
             transform_csv("占比列 [\"占比\",1,[]]\n金额\n\"\"").as_deref(),
             Ok("金额,占比\r\n\"\",\"\"")
+        );
+    }
+
+    #[test]
+    fn dense_ranks_keep_equal_exact_values_tied_and_do_not_skip_numbers() {
+        let query =
+            "密集排名列 [\"名次\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/2\n南,2\n北,3/2\n北,0.50\n南,1\n北,0\n北,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("部门,金额,名次\r\n北,1/2,2\r\n南,2,1\r\n北,3/2,1\r\n北,0.50,2\r\n南,1,2\r\n北,0,3\r\n北,\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("ascending-dense-rank-column [\"名次\",1,[]]\n金额\n1/2\n0.50\n3/2")
+                .as_deref(),
+            Ok("金额,名次\r\n1/2,1\r\n0.50,1\r\n3/2,2")
         );
     }
 

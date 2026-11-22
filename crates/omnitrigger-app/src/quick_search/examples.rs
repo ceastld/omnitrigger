@@ -2748,6 +2748,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "并列值后按连续名次排名",
+        query: "CSV: 升序密集排名列 [\"名次\",\"金额\",[]]\n金额\n1/2\n0.50\n3/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算每行金额占本部门合计的比例",
         query: "CSV: 占比列 [\"占比\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,2/3\n南,6",
     },
