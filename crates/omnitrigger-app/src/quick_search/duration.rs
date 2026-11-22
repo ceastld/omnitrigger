@@ -303,6 +303,10 @@ pub(super) fn format_clock_duration(nanos: u128, sign: &str) -> String {
     format!("{sign}{hours:02}:{minutes:02}:{remainder:02}{suffix}")
 }
 
+pub(super) fn is_clock_duration(text: &str) -> bool {
+    text.contains(':') && parse_clock(text.strip_prefix('-').unwrap_or(text)).is_ok()
+}
+
 fn signed_duration(input: &str) -> Result<(i128, bool), DurationError> {
     let mut negative = input.starts_with('-');
     let mut remaining = input.strip_prefix(['-', '+']).unwrap_or(input);

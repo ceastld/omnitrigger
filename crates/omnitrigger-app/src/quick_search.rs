@@ -85,7 +85,7 @@ use conversion::{
     convert_exact_data, convert_period, estimate_transfer, suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
-use duration::{convert_duration, DurationError};
+use duration::{convert_duration, is_clock_duration, DurationError};
 use equation::{solve_equation, solve_linear_system, EquationError};
 use examples::{
     function_examples, matching_examples, tool_index_examples, tool_operation_examples, EXAMPLES,
@@ -192,6 +192,7 @@ impl ResultValue {
             }
             ValueKind::Conversion(Some(_)) => Some("Tab 换目标"),
             ValueKind::CalendarDate => Some("Tab 继续日期计算"),
+            ValueKind::ClockDuration => Some("Tab 继续时长计算"),
             _ => None,
         }
     }
@@ -201,6 +202,7 @@ impl ResultValue {
 enum ValueKind {
     Text,
     CalendarDate,
+    ClockDuration,
     Calculation,
     ExactCalculation { can_continue: bool },
     Conversion(Option<String>),
@@ -811,9 +813,7 @@ impl Results {
                     Self::Destinations(entries)
                 }
                 Scope::Date => Self::date_value(term),
-                Scope::Duration => {
-                    Self::text_value(convert_duration(term).map_err(ValueError::Duration))
-                }
+                Scope::Duration => Self::duration_value(term),
                 Scope::VideoFrames => {
                     Self::text_value(convert_video_frames(term).map_err(ValueError::VideoFrames))
                 }
@@ -1058,6 +1058,21 @@ impl Results {
         }))
     }
 
+    fn duration_value(query: &str) -> Self {
+        Self::Value(
+            convert_duration(query)
+                .map_err(ValueError::Duration)
+                .map(|text| {
+                    let kind = if is_clock_duration(&text) {
+                        ValueKind::ClockDuration
+                    } else {
+                        ValueKind::Text
+                    };
+                    ResultValue { text, kind }
+                }),
+        )
+    }
+
     fn conversion_value(result: Result<String, ConversionError>, query: Option<&str>) -> Self {
         Self::Value(
             result
@@ -1106,6 +1121,7 @@ impl Results {
             }
             ValueKind::Conversion(Some(query)) => Some(query.clone()),
             ValueKind::CalendarDate => Some(format!("日期: {}", text.trim())),
+            ValueKind::ClockDuration => Some(format!("时长: {text}")),
             _ => None,
         }
     }
@@ -2998,6 +3014,27 @@ mod tests {
         assert!(matches!(
             for_query("批量换算: 颜色对照 #abc\n\nrgb(300,0,0)", &[]),
             Results::Value(Err(ValueError::BatchColor(BatchError::Row { line: 3, .. })))
+        ));
+    }
+
+    #[test]
+    fn continues_single_clock_durations_without_reusing_ratios_or_lists() {
+        for (query, expected) in [
+            ("时长: 缩放 01:30:00 @ 2/3", Some("时长: 01:00:00")),
+            ("时长: 1ns - 2ns", Some("时长: -00:00:00.000000001")),
+            ("时长: 01:30:00 to min", None),
+            ("时长: 比率 1ns @ 3ns", None),
+            ("时长: 排序 02:00,01:00", None),
+        ] {
+            assert_eq!(
+                for_query(query, &[]).continuation_query().as_deref(),
+                expected,
+                "{query}"
+            );
+        }
+        assert!(matches!(
+            for_query("时长: -00:00:00.000000001 + 2ns", &[]),
+            Results::Value(Ok(value)) if value.text == "00:00:00.000000001"
         ));
     }
 
