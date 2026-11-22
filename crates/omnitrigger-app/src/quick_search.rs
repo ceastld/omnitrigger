@@ -695,6 +695,13 @@ impl Results {
                             map_batch_lines(arguments, convert_url_component)
                                 .map_err(ValueError::BatchUrl),
                         )
+                    } else if let Some(arguments) = batch_arguments(term, "日期对照", "date-csv")
+                    {
+                        let today = chrono::Local::now().date_naive();
+                        Self::text_value(
+                            map_batch_csv(arguments, "输入", |line| calculate_date(line, today))
+                                .map_err(ValueError::BatchDate),
+                        )
                     } else if let Some(arguments) = batch_arguments(term, "日期", "date") {
                         let today = chrono::Local::now().date_naive();
                         Self::text_value(
@@ -2556,6 +2563,26 @@ mod tests {
         assert!(for_query("批量换算: 日", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 日期 ")));
+    }
+
+    #[test]
+    fn exports_batch_date_queries_and_results_as_csv() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 日期对照 2024-02-29 + 1年\r\n2027-01-01 第几周",
+                &[]
+            ),
+            Results::Value(Ok(value))
+                if value.text == "输入,结果\r\n2024-02-29 + 1年,2025-02-28\r\n2027-01-01 第几周,2026-W53"
+        ));
+        assert!(matches!(
+            for_query("批量换算: date-csv 2027-01-01 第几周\n\n2024-02-30", &[]),
+            Results::Value(Err(ValueError::BatchDate(BatchError::Row { line: 3, .. })))
+        ));
+        assert_eq!(
+            for_query("批量换算: 日期对", &[]).suggested_input(0),
+            Some("批量换算: 日期对照 2024-02-29 + 1年\n2027-01-01 第几周")
+        );
     }
 
     #[test]
