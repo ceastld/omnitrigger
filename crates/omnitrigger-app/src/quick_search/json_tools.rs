@@ -84,6 +84,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
     let pretty = match operation.to_ascii_lowercase().as_str() {
         "格式化" | "format" | "pretty" => true,
         "压缩" | "compact" | "minify" => false,
+        "键排序" | "sort-keys" => return sort_json_keys(source),
         "取值" | "get" | "pointer" => return select_json_value(source),
         "取列" | "column" => return select_json_column(source),
         "有路径" | "has-pointer" => return filter_json_by_pointer(source, true),
@@ -436,6 +437,65 @@ fn read_object_entries(source: &str) -> Result<Vec<(String, &RawValue)>, JsonErr
         .map_err(json_parse_error)?;
     parser.end().map_err(json_parse_error)?;
     Ok(entries)
+}
+
+fn sort_json_keys(source: &str) -> Result<String, JsonError> {
+    enum Part<'a> {
+        Value(&'a RawValue),
+        Key(String),
+        Symbol(char),
+    }
+
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut pending = vec![Part::Value(root)];
+    let mut result = String::new();
+    while let Some(part) = pending.pop() {
+        match part {
+            Part::Symbol(symbol) => result.push(symbol),
+            Part::Key(key) => {
+                let key = serde_json::to_string(&key).expect("JSON 键名可以序列化");
+                result.push_str(&key);
+            }
+            Part::Value(value) => {
+                let raw = value.get();
+                match raw.as_bytes()[0] {
+                    b'{' => {
+                        let mut entries = read_object_entries(raw)?;
+                        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                            return Err(JsonError::DuplicateKey);
+                        }
+                        result.push('{');
+                        pending.push(Part::Symbol('}'));
+                        for (index, (key, child)) in entries.into_iter().enumerate().rev() {
+                            pending.push(Part::Value(child));
+                            pending.push(Part::Symbol(':'));
+                            pending.push(Part::Key(key));
+                            if index != 0 {
+                                pending.push(Part::Symbol(','));
+                            }
+                        }
+                    }
+                    b'[' => {
+                        let elements = read_json_array(raw)?;
+                        result.push('[');
+                        pending.push(Part::Symbol(']'));
+                        for (index, child) in elements.into_iter().enumerate().rev() {
+                            pending.push(Part::Value(child));
+                            if index != 0 {
+                                pending.push(Part::Symbol(','));
+                            }
+                        }
+                    }
+                    _ => result.push_str(raw),
+                }
+            }
+        }
+        if result.len() > MAX_PRETTY_BYTES {
+            return Err(JsonError::LayoutTooLarge);
+        }
+    }
+    Ok(result)
 }
 
 fn write_object_entries<'a>(
@@ -909,6 +969,30 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorts_object_keys_through_arrays_and_preserves_raw_literal_values() {
+        let input = r#"键排序 {"z":[{"b":9007199254740993,"a":1.20e2},{}],"\u0061":{"t":"\u0062","b":null},"A":[]}"#;
+        assert_eq!(
+            transform_json(input).as_deref(),
+            Ok(
+                r#"{"A":[],"a":{"b":null,"t":"\u0062"},"z":[{"a":1.20e2,"b":9007199254740993},{}]}"#
+            )
+        );
+        assert_eq!(
+            transform_json(r#"sort-keys [{"a":1,"\u0061":2}]"#),
+            Err(JsonError::DuplicateKey)
+        );
+        let query = format!(
+            "sort-keys {}{{\"z\":1,\"a\":2}}{}",
+            "[".repeat(256),
+            "]".repeat(256)
+        );
+        assert_eq!(
+            transform_json(&query).unwrap(),
+            format!("{}{{\"a\":2,\"z\":1}}{}", "[".repeat(256), "]".repeat(256))
+        );
+    }
 
     #[test]
     fn enumerates_resolvable_leaf_pointers_in_document_order() {

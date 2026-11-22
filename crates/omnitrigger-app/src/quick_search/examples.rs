@@ -1437,6 +1437,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "排序 JSON 对象中的键名",
+        query: r#"JSON: 键排序 {"z":1.20,"a":{"y":2,"b":3}}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计 JSON 顶层条目数",
         query: r#"JSON: 长度 [1,{"数量":2},null]"#,
     },

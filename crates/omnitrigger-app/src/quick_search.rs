@@ -2205,11 +2205,12 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 24);
+        assert_eq!(examples_for("JSON：").len(), 25);
         assert!(examples_for("JSON: 展平")[0].starts_with("JSON: 展平 "));
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 取列")[0].starts_with("JSON: 取列 "));
         assert!(examples_for("JSON: 键")[0].starts_with("JSON: 键名 "));
+        assert!(examples_for("JSON: 键排")[0].starts_with("JSON: 键排序 "));
         assert!(examples_for("JSON: 长")[0].starts_with("JSON: 长度 "));
         assert!(examples_for("JSON: 展")[0].starts_with("JSON: 展开数组 "));
         assert!(examples_for("JSON: 合")[0].starts_with("JSON: 合并行 "));
