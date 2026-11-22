@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use std::{collections::HashMap, fmt::Write as _};
 
 use omnitrigger_windows::{list_open_windows, OpenWindow};
 use serde::Serialize;
@@ -10,6 +10,7 @@ const MAX_WINDOW_EXPORT_BYTES: usize = 1024 * 1024;
 enum WindowExport {
     Json,
     Csv,
+    ProcessCounts,
 }
 
 #[derive(Serialize)]
@@ -89,6 +90,9 @@ impl OpenWindowsIndex {
         let (export, filter) = match format {
             "输出=json" | "output=json" => (Some(WindowExport::Json), rest.trim_start()),
             "输出=csv" | "output=csv" => (Some(WindowExport::Csv), rest.trim_start()),
+            "输出=进程统计" | "output=process-counts" => {
+                (Some(WindowExport::ProcessCounts), rest.trim_start())
+            }
             _ => (None, query.as_str()),
         };
         let Some(filter) = window_query(filter) else {
@@ -151,6 +155,30 @@ fn export_windows<'a>(
                     csv_cell(window.process.unwrap_or_default())
                 )
                 .expect("写入 String 不会出错");
+                if csv.len() > MAX_WINDOW_EXPORT_BYTES {
+                    return too_large();
+                }
+            }
+            Results::text_value(Ok(csv))
+        }
+        WindowExport::ProcessCounts => {
+            let mut counts = HashMap::new();
+            for window in windows {
+                let key = window.process.map(str::to_lowercase);
+                let (_, count) = counts.entry(key).or_insert((window.process, 0usize));
+                *count += 1;
+            }
+            let mut groups: Vec<_> = counts.into_iter().collect();
+            groups.sort_unstable_by(|(left, (_, left_count)), (right, (_, right_count))| {
+                right_count
+                    .cmp(left_count)
+                    .then_with(|| left.is_none().cmp(&right.is_none()))
+                    .then_with(|| left.cmp(right))
+            });
+            let mut csv = String::from("程序文件名,窗口数");
+            for (_, (process, count)) in groups {
+                write!(csv, "\r\n{},{count}", csv_cell(process.unwrap_or_default()))
+                    .expect("写入 String 不会出错");
                 if csv.len() > MAX_WINDOW_EXPORT_BYTES {
                     return too_large();
                 }
@@ -220,6 +248,36 @@ fn window_rank(title: &str, process: &str, query: &str, terms: &[&str]) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_matching_windows_by_process_and_orders_equal_counts_by_name() {
+        let windows = [
+            WindowSummary {
+                title: "甲",
+                process: Some("Notepad.exe"),
+            },
+            WindowSummary {
+                title: "乙",
+                process: Some("notepad.exe"),
+            },
+            WindowSummary {
+                title: "丙",
+                process: None,
+            },
+            WindowSummary {
+                title: "丁",
+                process: Some("code.exe"),
+            },
+        ];
+        assert!(matches!(
+            export_windows(WindowExport::ProcessCounts, windows.into_iter()),
+            Results::Value(Ok(value)) if value.text == "程序文件名,窗口数\r\nNotepad.exe,2\r\ncode.exe,1\r\n\"\",1"
+        ));
+        assert!(matches!(
+            OpenWindowsIndex::Ready(Vec::new()).results("输出＝进程统计　进程=notepad.exe 标题"),
+            Results::Value(Ok(value)) if value.text == "程序文件名,窗口数"
+        ));
+    }
 
     #[test]
     fn exports_window_titles_and_process_names_as_csv_in_match_order() {

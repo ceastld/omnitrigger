@@ -630,6 +630,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "窗口: 输出=CSV 进程=notepad.exe",
     },
     Example {
+        icon: Icon::Grid,
+        title: "按程序统计匹配窗口的数量",
+        query: "窗口: 输出=进程统计",
+    },
+    Example {
         icon: Icon::Search,
         title: "按程序文件名排除窗口",
         query: "窗口: 排除进程=notepad.exe 报告",
