@@ -32,6 +32,7 @@ pub(super) enum CsvError {
     RenameArguments,
     RenameConflict,
     InvalidColumnValue,
+    InvalidNumberFilter,
     Regex(TextError),
     ColumnOutOfRange,
     InvalidNumber,
@@ -58,6 +59,7 @@ impl CsvError {
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
             Self::RenameConflict => "表头中已经有这个新列名",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
+            Self::InvalidNumberFilter => "输入列号、比较符和数值，例如 CSV: 数值筛选 3 >= 1.5",
             Self::Regex(error) => error.message(),
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
@@ -106,6 +108,42 @@ enum Operation {
 enum ColumnCondition {
     Exact(String),
     Regex(Regex),
+    Number(NumberComparison, BigRational),
+}
+
+#[derive(Clone, Copy)]
+enum NumberComparison {
+    Less,
+    LessOrEqual,
+    Equal,
+    Different,
+    GreaterOrEqual,
+    Greater,
+}
+
+impl NumberComparison {
+    fn parse(operator: &str) -> Result<Self, CsvError> {
+        match operator {
+            "<" => Ok(Self::Less),
+            "<=" | "≤" => Ok(Self::LessOrEqual),
+            "=" | "==" => Ok(Self::Equal),
+            "!=" | "≠" => Ok(Self::Different),
+            ">=" | "≥" => Ok(Self::GreaterOrEqual),
+            ">" => Ok(Self::Greater),
+            _ => Err(CsvError::InvalidNumberFilter),
+        }
+    }
+
+    fn accepts(self, order: Ordering) -> bool {
+        match self {
+            Self::Less => order.is_lt(),
+            Self::LessOrEqual => order.is_le(),
+            Self::Equal => order.is_eq(),
+            Self::Different => !order.is_eq(),
+            Self::GreaterOrEqual => order.is_ge(),
+            Self::Greater => order.is_gt(),
+        }
+    }
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
@@ -154,6 +192,23 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                     operation.as_str(),
                     "筛选" | "filter" | "正则筛选" | "regex-filter"
                 ),
+            }
+        }
+        "数值筛选" | "filter-numeric" => {
+            let (column, rest) =
+                split_argument(input.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
+            let (operator, rest) =
+                split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
+            let (threshold, data) =
+                split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
+            let comparison = NumberComparison::parse(operator)?;
+            let threshold =
+                parse_fraction_literal(threshold).map_err(|_| CsvError::InvalidNumber)?;
+            input = data;
+            Operation::FilterColumn {
+                column: column_index(column)?,
+                condition: ColumnCondition::Number(comparison, threshold),
+                keep_matches: true,
             }
         }
         "分组计数" | "group-count" => {
@@ -370,14 +425,22 @@ fn filter_column(
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     validate_column_width(&[column], header.len())?;
-    let matched = records.iter().filter(|row| {
+    let mut selected = vec![header];
+    for row in records {
         let matched = match condition {
             ColumnCondition::Exact(value) => row[column] == value.as_str(),
             ColumnCondition::Regex(pattern) => pattern.is_match(&row[column]),
+            ColumnCondition::Number(comparison, threshold) => {
+                let value =
+                    parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber)?;
+                comparison.accepts(value.cmp(threshold))
+            }
         };
-        matched == keep_matches
-    });
-    Ok(write_rows(std::iter::once(header).chain(matched), ','))
+        if matched == keep_matches {
+            selected.push(row);
+        }
+    }
+    Ok(write_rows(selected, ','))
 }
 
 fn count_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
@@ -786,6 +849,35 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("regex-filter 3 \"^咖啡\"\n{csv}")),
             Err(CsvError::ColumnOutOfRange)
+        );
+    }
+
+    #[test]
+    fn filters_numeric_cells_exactly_and_keeps_original_text() {
+        let table = "编号,价格\n001,1.50\n002,1.499999999999999999\n003,3/2\n004,2e0";
+        for (operator, expected) in [
+            ("<", "编号,价格\r\n002,1.499999999999999999"),
+            (
+                "≤",
+                "编号,价格\r\n001,1.50\r\n002,1.499999999999999999\r\n003,3/2",
+            ),
+            ("=", "编号,价格\r\n001,1.50\r\n003,3/2"),
+            ("!=", "编号,价格\r\n002,1.499999999999999999\r\n004,2e0"),
+            (">=", "编号,价格\r\n001,1.50\r\n003,3/2\r\n004,2e0"),
+            (">", "编号,价格\r\n004,2e0"),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("数值筛选 2 {operator} 3/2\n{table}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            transform_csv("filter-numeric 2 >= 1e1\n编号,价格\n001,未知"),
+            Err(CsvError::InvalidNumber)
+        );
+        assert_eq!(
+            transform_csv("filter-numeric 2 => 1\n编号,价格\n001,2"),
+            Err(CsvError::InvalidNumberFilter)
         );
     }
 
