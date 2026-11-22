@@ -61,6 +61,7 @@
 - 输入 `动作: 浏览器` 可打开动作库并填入筛选词。动作包和插件动作也会按名称出现在快速搜索结果中，回车可在动作库中查看。只输入 `动作:` 可清空筛选。
 - 输入 `应用:` 后加应用名可从 Windows 应用目录查找程序。用方向键选择，按回车启动。也可用 `app:`。 [Windows 应用目录](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 直接输入两个字符以上的应用名也可查找程序。快速搜索会先匹配工作台内容和工具，再从 Windows 应用目录查找。
+- 应用名称中的英文单词也可用首字母检索，例如 `应用: vsc` 查找 Visual Studio Code。名称和应用标识中的直接匹配会优先显示。
 - 输入 `文件夹:` 可浏览桌面、下载、文档、图片、音乐和视频。也可用 `文件夹: 下载` 或 `folder: downloads` 筛选，按回车打开选中的文件夹。 [Windows 已知文件夹](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 输入 `文件: C:\工作 | 报告` 可在指定本地目录的直接子项中按名称查找。按回车复制所选项的完整路径。分隔符后的名称可留空，多个关键词用空格隔开。匹配本地固定卷上的普通文件和文件夹。
 - 在文件搜索中选中文件夹后按 `Tab` 可进入该文件夹，按 `Alt+↑` 可回到上一级。也可用 `文件: C:\工作 | *.pdf` 或 `报告?.docx` 按 Windows 文件名通配规则匹配。 [Windows 文件名通配规则](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew)

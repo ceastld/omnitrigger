@@ -15,6 +15,7 @@ pub(super) struct SearchApplication {
     app: ShellApp,
     title_key: String,
     identifier_key: String,
+    initials: String,
 }
 
 #[derive(Clone, Default)]
@@ -54,6 +55,7 @@ impl ApplicationIndex {
             .map(|app| SearchApplication {
                 title_key: app.title().to_lowercase(),
                 identifier_key: app.identifier().to_lowercase(),
+                initials: application_initials(app.title()),
                 app,
             })
             .collect();
@@ -85,17 +87,17 @@ impl ApplicationIndex {
         let query = query.to_lowercase();
         let mut matches: Vec<_> = apps
             .iter()
-            .filter(|app| {
-                query
-                    .split_whitespace()
-                    .all(|word| app.title_key.contains(word) || app.identifier_key.contains(word))
+            .filter_map(|app| {
+                let rank =
+                    application_rank(&app.title_key, &app.identifier_key, &app.initials, &query)?;
+                Some((rank, app))
             })
             .collect();
-        matches.sort_by_key(|app| title_rank(&app.title_key, &query));
+        matches.sort_by_key(|(rank, _)| *rank);
         Results::Destinations(
             matches
                 .into_iter()
-                .map(|app| Destination::InstalledApp(app.app.clone()))
+                .map(|(_, app)| Destination::InstalledApp(app.app.clone()))
                 .collect(),
         )
     }
@@ -107,9 +109,49 @@ impl ApplicationIndex {
     }
 }
 
+fn application_initials(title: &str) -> String {
+    title
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(|word| word.chars().next())
+        .map(|initial| initial.to_ascii_lowercase())
+        .collect()
+}
+
+fn application_rank(title: &str, identifier: &str, initials: &str, query: &str) -> Option<u8> {
+    if query
+        .split_whitespace()
+        .all(|word| title.contains(word) || identifier.contains(word))
+    {
+        return Some(title_rank(title, query));
+    }
+    if query.len() >= 2 && initials.starts_with(query) {
+        return Some(if initials == query { 4 } else { 5 });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranks_name_and_identifier_matches_before_initials() {
+        let title = "Visual Studio Code";
+        let initials = application_initials(title);
+        assert_eq!(initials, "vsc");
+        assert_eq!(application_initials("Windows PowerShell (x86)"), "wpx");
+        assert_eq!(application_initials("7-Zip File Manager"), "7zfm");
+
+        let rank = |query| application_rank("visual studio code", "installer", &initials, query);
+        assert_eq!(rank("visual studio code"), Some(0));
+        assert_eq!(rank("visual"), Some(1));
+        assert_eq!(rank("studio"), Some(2));
+        assert_eq!(rank("code installer"), Some(3));
+        assert_eq!(rank("vsc"), Some(4));
+        assert_eq!(rank("vs"), Some(5));
+        assert_eq!(rank("sc"), None);
+        assert_eq!(rank("vs code"), None);
+    }
 
     #[test]
     fn retains_the_last_catalog_and_refreshes_it_without_hiding_matches() {
