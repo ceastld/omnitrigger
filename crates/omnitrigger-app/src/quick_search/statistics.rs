@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
@@ -38,6 +40,8 @@ enum StatisticsOperation {
     Population,
     Quartiles,
     Quantile(BigRational),
+    FrequencyTable,
+    Mode,
 }
 
 pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsError> {
@@ -48,6 +52,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "总体" | "population" => (StatisticsOperation::Population, values.trim()),
         "样本" | "sample" => (StatisticsOperation::Sample, values.trim()),
         "四分位" | "quartiles" => (StatisticsOperation::Quartiles, values.trim()),
+        "频数表" | "frequency-table" => (StatisticsOperation::FrequencyTable, values.trim()),
+        "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
             (
@@ -94,7 +100,37 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         StatisticsOperation::Quantile(probability) => {
             report_quantiles(values, count, Some(&probability))
         }
+        StatisticsOperation::FrequencyTable => Ok(report_frequencies(values, count, false)),
+        StatisticsOperation::Mode => Ok(report_frequencies(values, count, true)),
     }
+}
+
+fn report_frequencies(values: Vec<(BigRational, u64)>, count: u64, modes_only: bool) -> String {
+    let mut frequencies = BTreeMap::<_, u64>::new();
+    for (value, repetitions) in values {
+        // 频数合计已在调用前检查，任一分组都不会超过合计。
+        *frequencies.entry(value).or_default() += repetitions;
+    }
+    if modes_only {
+        let highest = *frequencies.values().max().expect("至少有一个观测值");
+        if highest == 1 {
+            return "无众数 · 各值仅出现一次".to_owned();
+        }
+        let modes = frequencies
+            .into_iter()
+            .filter(|(_, repetitions)| *repetitions == highest)
+            .map(|(value, _)| value.to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        return format!("众数 {modes} · 各出现 {highest} 次");
+    }
+    std::iter::once("值\t次数\t频率".to_owned())
+        .chain(frequencies.into_iter().map(|(value, repetitions)| {
+            let share = BigRational::new(repetitions.into(), count.into());
+            format!("{value}\t{repetitions}\t{share}")
+        }))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn summarize(
@@ -241,6 +277,32 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_exact_frequency_tables_and_tied_modes() {
+        for (query, expected) in [
+            (
+                "频数表 3,1/2,0.5,3,5",
+                "值\t次数\t频率\n1/2\t2\t2/5\n3\t2\t2/5\n5\t1\t1/5",
+            ),
+            (
+                "频数表 频数 5@2,1/3@3,5@1",
+                "值\t次数\t频率\n1/3\t3\t1/2\n5\t3\t1/2",
+            ),
+            ("众数 3,1/2,0.5,3,5", "众数 1/2、3 · 各出现 2 次"),
+            (
+                "mode 频数 2@18446744073709551615",
+                "众数 2 · 各出现 18446744073709551615 次",
+            ),
+            ("众数 1,2,3", "无众数 · 各值仅出现一次"),
+        ] {
+            assert_eq!(calculate_statistics(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            calculate_statistics("频数表 频数 5@18446744073709551615,5@1"),
+            Err(StatisticsError::FrequencyOverflow)
+        );
+    }
 
     #[test]
     fn uses_population_variance_when_explicitly_selected() {

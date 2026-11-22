@@ -86,6 +86,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按精确数值列出次数和频率",
+        query: "统计: 频数表 3,1/2,0.5,3,5",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "找出出现次数最多的数值",
+        query: "统计: 众数 3,1/2,0.5,3,5",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用半径计算圆周长和面积",
         query: "圆: 半径 3",
     },
@@ -1757,8 +1767,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
     match scope {
         Scope::Date if matches!(term, "列" | "列出") => {}
         Scope::Duration if matches!(term, "合" | "合计" | "平" | "平均") => {}
-        Scope::Statistics if matches!(term, "频" | "频数" | "分位" | "分位数" | "四分位") =>
-            {}
+        Scope::Statistics
+            if matches!(
+                term,
+                "频" | "频数" | "频数表" | "众" | "众数" | "分位" | "分位数" | "四分位"
+            ) => {}
         Scope::Json
         | Scope::Csv
         | Scope::TextTools
