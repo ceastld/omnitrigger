@@ -2205,7 +2205,8 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 23);
+        assert_eq!(examples_for("JSON：").len(), 24);
+        assert!(examples_for("JSON: 展平")[0].starts_with("JSON: 展平 "));
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 取列")[0].starts_with("JSON: 取列 "));
         assert!(examples_for("JSON: 键")[0].starts_with("JSON: 键名 "));

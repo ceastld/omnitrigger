@@ -1472,6 +1472,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用 JSON 指针作键展平数据",
+        query: r#"JSON: 展平 {"订单":[{"a/b":9007199254740993},{}]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留存在指定路径的 JSON 数组项",
         query: r#"JSON: 有路径 /状态 [{"编号":"001","状态":null},{"编号":"002"}]"#,
     },
