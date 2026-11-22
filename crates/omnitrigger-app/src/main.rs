@@ -1456,7 +1456,11 @@ impl Workspace {
             toast_time: None,
             panel: None,
             quick_search: None,
-            quick_search_recent: quick_search::RecentSearch::default(),
+            quick_search_recent: if mode.owns_input_engine() {
+                quick_search::RecentSearch::from_bindings_path(&settings::path())
+            } else {
+                quick_search::RecentSearch::default()
+            },
             panel_prepared: false,
             panel_registered: None,
             panel_show_generation: 0,

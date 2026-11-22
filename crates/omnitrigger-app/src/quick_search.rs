@@ -167,6 +167,7 @@ enum Results {
     ConversionTargets(Vec<InputSuggestion>),
     FileOptions(Vec<InputSuggestion>),
     Bookmarks(Vec<InputSuggestion>),
+    BookmarksUnavailable(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +262,15 @@ pub(super) struct RecentSearch {
     bookmarks: QueryBookmarks,
     applications: ApplicationCache,
     last_input: Rc<RefCell<String>>,
+}
+
+impl RecentSearch {
+    pub(super) fn from_bindings_path(bindings: &Path) -> Self {
+        Self {
+            bookmarks: QueryBookmarks::from_bindings_path(bindings),
+            ..Self::default()
+        }
+    }
 }
 
 impl SearchIndex {
@@ -612,7 +622,10 @@ impl Results {
             return match scope {
                 Scope::ToolIndex => Self::Help(tool_index_examples(term)),
                 Scope::ExampleHistory => Self::Help(recent.examples.matching(term)),
-                Scope::Bookmarks => Self::Bookmarks(recent.bookmarks.matching(term)),
+                Scope::Bookmarks => recent.bookmarks.load_error().map_or_else(
+                    || Self::Bookmarks(recent.bookmarks.matching(term)),
+                    Self::BookmarksUnavailable,
+                ),
                 Scope::Triggers(filter) => Self::Destinations(
                     matching_triggers(triggers, term, filter)
                         .into_iter()
@@ -1201,6 +1214,7 @@ pub(super) struct QuickSearch {
     input_before_help: Option<String>,
     previous_input: String,
     bookmark_limit_reached: bool,
+    bookmark_save_error: Option<String>,
     _input_changes: Subscription,
     _activation: Subscription,
 }
@@ -1258,6 +1272,7 @@ impl QuickSearch {
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
             let query = input.read(cx).text();
             this.bookmark_limit_reached = false;
+            this.bookmark_save_error = None;
             if !query.trim().is_empty() {
                 this.index.recent.last_input.borrow_mut().clone_from(&query);
             }
@@ -1299,6 +1314,7 @@ impl QuickSearch {
             input_before_help: None,
             previous_input,
             bookmark_limit_reached: false,
+            bookmark_save_error: None,
             _input_changes: input_changes,
             _activation: activation,
         }
@@ -1631,7 +1647,9 @@ impl QuickSearch {
             && !trimmed.starts_with(['?', '？'])
             && !matches!(
                 self.results,
-                Results::FileOptions(_) | Results::Value(Err(ValueError::InputTooLong))
+                Results::FileOptions(_)
+                    | Results::BookmarksUnavailable(_)
+                    | Results::Value(Err(ValueError::InputTooLong))
             ))
         .then_some(query)
     }
@@ -1645,7 +1663,9 @@ impl QuickSearch {
         let Some(target) = self.bookmark_target(&query) else {
             return;
         };
-        self.bookmark_limit_reached = !self.index.recent.bookmarks.toggle(target);
+        let saved = self.index.recent.bookmarks.toggle(target);
+        self.bookmark_limit_reached = matches!(&saved, Ok(false));
+        self.bookmark_save_error = saved.err();
         if matches!(self.results, Results::Bookmarks(_)) {
             let selected = self.selected;
             self.refresh_results(&query, window, cx);
@@ -1845,7 +1865,8 @@ impl QuickSearch {
                     | Results::LocalFilesPrompt
                     | Results::DirectoryInput(_)
                     | Results::LocalFilesLoading
-                    | Results::LocalFilesUnavailable(_) => 0,
+                    | Results::LocalFilesUnavailable(_)
+                    | Results::BookmarksUnavailable(_) => 0,
                 };
                 if count == 0 {
                     return;
@@ -2287,6 +2308,7 @@ impl QuickSearch {
             }
             Results::ApplicationsUnavailable(error)
             | Results::OpenWindowsUnavailable(error)
+            | Results::BookmarksUnavailable(error)
             | Results::LocalFilesUnavailable(error) => row
                 .text_color(rgb(theme::DANGER_TEXT))
                 .child(div().truncate().child(error.clone())),
@@ -2502,10 +2524,12 @@ impl Render for QuickSearch {
         let focused = self.input.focus_handle(cx).is_focused(window);
         let query = self.input.read(cx).text();
         let bookmark_action = if query.trim().is_empty() {
-            Some(("查看收藏", "Ctrl+D 查看收藏"))
+            Some(("查看收藏", "Ctrl+D 查看收藏".to_owned()))
         } else {
             self.bookmark_target(&query).map(|target| {
-                if matches!(self.results, Results::Bookmarks(_)) {
+                let (label, hint) = if let Some(error) = &self.bookmark_save_error {
+                    ("收藏保存失败", error.as_str())
+                } else if matches!(self.results, Results::Bookmarks(_)) {
                     ("移除所选", "Ctrl+D 移除所选查询")
                 } else if self.index.recent.bookmarks.contains(target) {
                     ("已收藏", "Ctrl+D 取消收藏")
@@ -2513,7 +2537,8 @@ impl Render for QuickSearch {
                     ("最多收藏 12 项", "在收藏列表移除一项后再添加")
                 } else {
                     ("收藏", "Ctrl+D 收藏当前查询")
-                }
+                };
+                (label, hint.to_owned())
             })
         };
         div()
@@ -3754,7 +3779,7 @@ mod tests {
     fn quick_search_preserves_bookmarked_queries_when_the_index_is_reopened() {
         let index = SearchIndex::default();
         let query = "CSV: 选择 1\n编号,金额\n001,20  ";
-        assert!(index.recent.bookmarks.toggle(query));
+        assert!(index.recent.bookmarks.toggle(query).unwrap());
         let resumed = SearchIndex {
             recent: index.recent.clone(),
             ..SearchIndex::default()

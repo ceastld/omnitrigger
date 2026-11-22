@@ -1387,7 +1387,7 @@ pub(crate) fn lock_config(destination: &Path, kind: &str) -> Result<std::fs::Fil
     Ok(lock)
 }
 
-fn config_lock_path(destination: &Path) -> Result<PathBuf, String> {
+pub(crate) fn config_lock_path(destination: &Path) -> Result<PathBuf, String> {
     let mut name = destination
         .file_name()
         .ok_or("配置路径不可用")?
