@@ -9,9 +9,11 @@ use crate::{
 };
 
 use super::{
-    csv_tools::append_bounded_csv_row, examples::search_key, operators::query_option_value,
-    text_tools::compile_regex, Destination, InputSuggestion, Results, ValueError,
-    INPUT_CHARACTER_LIMIT,
+    csv_tools::append_bounded_csv_row,
+    examples::search_key,
+    operators::query_option_value,
+    text_tools::{compare_natural, compile_regex},
+    Destination, InputSuggestion, Results, ValueError, INPUT_CHARACTER_LIMIT,
 };
 
 const TRIGGER_CSV_HEADER: &str = "名称,组合与条件,输入,动作,范围,启用状态";
@@ -52,6 +54,8 @@ pub(super) enum TriggerSearchError {
     JsonExport,
     InvalidExport,
     TitleRegex,
+    SortOrder,
+    RepeatedSortOrder,
 }
 
 impl TriggerSearchError {
@@ -68,6 +72,8 @@ impl TriggerSearchError {
             Self::JsonExport => "生成触发器 JSON 失败",
             Self::InvalidExport => "触发器导出格式可用 CSV 或 JSON",
             Self::TitleRegex => "填写一个有效的名称正则表达式，含空格时用双引号包住",
+            Self::SortOrder => "触发器排序可用 名称 或 动作",
+            Self::RepeatedSortOrder => "触发器排序条件填写一次",
         }
     }
 }
@@ -120,6 +126,35 @@ struct TriggerQuery<'a> {
     filter: Filter,
     term: &'a str,
     title_regex: Option<Regex>,
+    order: Option<TriggerOrder>,
+}
+
+#[derive(Clone, Copy)]
+enum TriggerOrder {
+    Name,
+    Action,
+}
+
+impl TriggerOrder {
+    fn sort(self, matches: Vec<&SearchTrigger>) -> Vec<&SearchTrigger> {
+        let mut entries: Vec<_> = matches
+            .into_iter()
+            .map(|trigger| (search_key(&trigger.title), trigger))
+            .collect();
+        entries.sort_by(|(left_name, left), (right_name, right)| {
+            let by_name = || compare_natural(left_name, right_name);
+            match self {
+                Self::Name => by_name(),
+                Self::Action => left
+                    .row
+                    .action
+                    .label()
+                    .cmp(right.row.action.label())
+                    .then_with(by_name),
+            }
+        });
+        entries.into_iter().map(|(_, trigger)| trigger).collect()
+    }
 }
 
 fn facet_values(facet: Facet) -> impl Iterator<Item = FacetValue> {
@@ -174,6 +209,7 @@ fn parse_trigger_query(
     let query_len = query.len();
     let mut filter = Filter::default();
     let mut title_regex = None;
+    let mut order = None;
     if let Some(value) = inherited {
         filter.set(value.facet(), Some(value));
     }
@@ -183,6 +219,19 @@ fn parse_trigger_query(
             "范围" | "scope" => Facet::Scope,
             "输入" | "input" => Facet::Input,
             "动作" | "action" => Facet::Action,
+            "排序" | "sort" | "order" => {
+                if order.is_some() {
+                    return Err(TriggerSearchError::RepeatedSortOrder);
+                }
+                let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+                order = Some(match search_key(value).as_str() {
+                    "名称" | "name" => TriggerOrder::Name,
+                    "动作" | "action" => TriggerOrder::Action,
+                    _ => return Err(TriggerSearchError::SortOrder),
+                });
+                query = rest.trim_start();
+                continue;
+            }
             "名称正则" | "标题正则" | "name-regex" => {
                 if title_regex.is_some() {
                     return Err(TriggerSearchError::TitleRegex);
@@ -214,6 +263,7 @@ fn parse_trigger_query(
         filter,
         term: query,
         title_regex,
+        order,
     })
 }
 
@@ -264,12 +314,15 @@ pub(super) fn search_triggers(
         }
         Err(error) => return Results::Value(Err(ValueError::TriggerSearch(error))),
     };
-    let matches = matching_triggers(
+    let mut matches = matching_triggers(
         triggers,
         query.term,
         &query.filter,
         query.title_regex.as_ref(),
     );
+    if let Some(order) = query.order {
+        matches = order.sort(matches);
+    }
     match export {
         Some(TriggerExport::Csv) => {
             Results::text_value(export_trigger_csv(matches).map_err(ValueError::TriggerSearch))

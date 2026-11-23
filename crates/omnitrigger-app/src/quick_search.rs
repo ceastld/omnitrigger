@@ -5598,6 +5598,53 @@ mod tests {
     }
 
     #[test]
+    fn sorts_triggers_by_name_and_reuses_the_order_in_both_exports() {
+        let mut bindings = crate::settings::defaults();
+        let bindings = &mut bindings[..2];
+        bindings[0].message = "项目10".into();
+        bindings[1].message = "项目２".into();
+        bindings[0].enabled = true;
+        bindings[1].enabled = true;
+        bindings[0].action = crate::settings::ActionSpec::ShowSearch;
+        bindings[1].action = crate::settings::ActionSpec::ShowPanel;
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        let first = Destination::Trigger(bindings[0].spec.id);
+        let second = Destination::Trigger(bindings[1].spec.id);
+        for (query, expected) in [
+            ("触发器: 项目", vec![first.clone(), second.clone()]),
+            (
+                "触发器: 排序=动作 项目",
+                vec![first.clone(), second.clone()],
+            ),
+            ("触发器: 状态=已启用 排序=名称 项目", vec![second, first]),
+        ] {
+            let Results::Destinations(items) = for_query(query, &triggers) else {
+                panic!("缺少触发器列表：{query}");
+            };
+            assert_eq!(items, expected, "{query}");
+        }
+        let Results::Value(Ok(csv)) =
+            for_query(r"触发器: 输出=CSV 排序=名称 名称正则=^项目\d+$", &triggers)
+        else {
+            panic!("缺少触发器 CSV");
+        };
+        assert!(csv.text.lines().nth(1).unwrap().starts_with("项目２,"));
+        let Results::Value(Ok(json)) = for_query("触发器: 输出=JSON SORT=NAME 项目", &triggers)
+        else {
+            panic!("缺少触发器 JSON");
+        };
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&json.text).unwrap();
+        assert_eq!(rows[0]["name"], "项目２");
+        assert_eq!(rows[1]["name"], "项目10");
+        for invalid in ["触发器: 排序=未知", "触发器: 排序=名称 排序=动作"] {
+            assert!(matches!(
+                for_query(invalid, &triggers),
+                Results::Value(Err(ValueError::TriggerSearch(_)))
+            ));
+        }
+    }
+
+    #[test]
     fn trigger_search_keeps_matches_for_later_pages() {
         let bindings = crate::settings::defaults();
         let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
