@@ -3384,6 +3384,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按相邻行的相同内容给连续段编号",
+        query: "CSV: 连续分组列 [\"分组\",[\"部门\"]]\n部门,金额\n北,1\n北,2\n南,3\n北,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "为每段相同的相邻行从头编号",
+        query: "CSV: 段内序号列 [\"位置\",[\"部门\"]]\n部门,金额\n北,1\n北,2\n南,3\n北,4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "从同组前一行取值并追加到 CSV",
         query: "CSV: 前值列 [\"上期\",2,1,[\"部门\"]] 部门,编号\n研发,001\n销售,101\n研发,002\n销售,\n研发,003",
     },

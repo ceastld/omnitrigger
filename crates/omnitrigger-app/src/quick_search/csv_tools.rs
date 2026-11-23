@@ -501,6 +501,11 @@ enum Operation {
         groups: Vec<ColumnReference>,
         running: bool,
     },
+    ContiguousGroupColumn {
+        name: String,
+        groups: Vec<ColumnReference>,
+        position_in_run: bool,
+    },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
     DuplicatesByColumns(Vec<ColumnReference>),
@@ -1372,6 +1377,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 running: matches!(kind, "组内序号列" | "group-row-number-column"),
             }
         }
+        kind @ ("连续分组列" | "run-id-column" | "段内序号列" | "run-row-number-column") =>
+        {
+            let ((name, groups), data) = json_argument_and_data::<(String, Vec<ColumnReference>)>(
+                input,
+                CsvError::GroupCountColumnArguments,
+            )?;
+            input = data;
+            Operation::ContiguousGroupColumn {
+                name,
+                groups,
+                position_in_run: matches!(kind, "段内序号列" | "run-row-number-column"),
+            }
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -1917,6 +1935,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             groups,
             running,
         } => grouped_count_column(&rows, &name, &groups, running),
+        Operation::ContiguousGroupColumn {
+            name,
+            groups,
+            position_in_run,
+        } => contiguous_group_column(&rows, &name, &groups, position_in_run),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -3477,6 +3500,32 @@ fn grouped_count_column(
             counts[&key]
         };
         Ok(count.to_string())
+    })
+}
+
+fn contiguous_group_column(
+    rows: &[Vec<String>],
+    name: &str,
+    groups: &[ColumnReference],
+    position_in_run: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::GroupCountColumnArguments);
+    }
+    let groups = resolve_distinct_columns(header, groups, CsvError::GroupCountColumnArguments)?;
+    let mut previous = None;
+    let (mut run, mut position) = (0_usize, 0_usize);
+    write_appended_column(header, records, name, |row| {
+        let key = column_key(row, &groups);
+        if previous.as_ref() != Some(&key) {
+            run += 1;
+            position = 0;
+            previous = Some(key);
+        }
+        position += 1;
+        let number = if position_in_run { position } else { run };
+        Ok(number.to_string())
     })
 }
 
@@ -6712,6 +6761,27 @@ null"#
             transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:00"),
             Err(CsvError::DataRowValue { row: 1, .. })
         ));
+    }
+
+    #[test]
+    fn groups_consecutive_rows_and_restarts_positions_when_the_key_changes() {
+        let csv = "部门,月份,编号\n北,11,001\n北,11,002\n南,11,003\n北,11,004\n北,12,005\n,12,006\n,12,007";
+        assert_eq!(
+            transform_csv(&format!("连续分组列 [\"分组\",[\"部门\",2]]\n{csv}")).as_deref(),
+            Ok("部门,月份,编号,分组\r\n北,11,001,1\r\n北,11,002,1\r\n南,11,003,2\r\n北,11,004,3\r\n北,12,005,4\r\n\"\",12,006,5\r\n\"\",12,007,5"),
+        );
+        assert_eq!(
+            transform_csv(&format!("段内序号列 [\"位置\",[\"部门\",2]]\n{csv}")).as_deref(),
+            Ok("部门,月份,编号,位置\r\n北,11,001,1\r\n北,11,002,2\r\n南,11,003,1\r\n北,11,004,1\r\n北,12,005,1\r\n\"\",12,006,1\r\n\"\",12,007,2"),
+        );
+        assert_eq!(
+            transform_csv("run-row-number-column [\"位置\",[]] 地区\n北\n南").as_deref(),
+            Ok("地区,位置\r\n北,1\r\n南,2"),
+        );
+        assert_eq!(
+            transform_csv("run-id-column [\"地区\",[]] 地区"),
+            Err(CsvError::HeaderNameConflict),
+        );
     }
 
     #[test]
