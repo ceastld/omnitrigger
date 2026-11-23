@@ -8,11 +8,13 @@ use super::fraction::{
     calculate_fraction, ensure_exact_size, format_signed_square_root, format_square_root,
     FractionError,
 };
+use super::matrix::{least_squares, MatrixError};
 use super::operators::split_top_level_commas;
 
 const MAX_POINTS: usize = 64;
 const MAX_PREDICTIONS: usize = 64;
 const MAX_INTERPOLATION_POINTS: usize = 16;
+const MAX_REGRESSION_DEGREE: usize = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LinearFitError {
@@ -22,6 +24,8 @@ pub(super) enum LinearFitError {
     TooManyPredictions,
     TooManyInterpolationPoints,
     RepeatedInterpolationX,
+    PolynomialFitArguments,
+    PolynomialFitRank,
     ConstantX,
     ZeroX,
     ConstantCoordinate,
@@ -37,6 +41,8 @@ impl LinearFitError {
             Self::TooManyPredictions => "每次最多可预测 64 个 x 值",
             Self::TooManyInterpolationPoints => "多项式插值最多可输入 16 对数值",
             Self::RepeatedInterpolationX => "多项式插值中的数据点须有不同的横坐标",
+            Self::PolynomialFitArguments => "填写 0 至 5 的整数次数，用 @ 隔开数据点",
+            Self::PolynomialFitRank => "不同横坐标的个数须大于多项式次数",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
             Self::ZeroX => "过原点拟合至少需要一个非零 x",
             Self::ConstantCoordinate => "x 和 y 各自至少需要两个不同的值才能计算相关系数",
@@ -87,6 +93,11 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
                 || operation.eq_ignore_ascii_case("interpolation-expression") =>
         {
             return interpolation_expression(rest.trim());
+        }
+        Some((operation, rest))
+            if operation == "多项式" || operation.eq_ignore_ascii_case("polynomial-fit") =>
+        {
+            return fit_polynomial(rest.trim());
         }
         Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
@@ -273,7 +284,42 @@ fn interpolation_coefficients(points: &str) -> Result<String, LinearFitError> {
 }
 
 fn interpolation_expression(points: &str) -> Result<String, LinearFitError> {
-    let coefficients = interpolation_power_coefficients(points)?;
+    interpolation_power_coefficients(points).map(format_power_expression)
+}
+
+fn fit_polynomial(input: &str) -> Result<String, LinearFitError> {
+    let invalid = LinearFitError::PolynomialFitArguments;
+    let (degree, points) = input.split_once('@').ok_or(invalid)?;
+    let degree: usize = degree.trim().parse().map_err(|_| invalid)?;
+    if degree > MAX_REGRESSION_DEGREE {
+        return Err(invalid);
+    }
+    let mut design = Vec::new();
+    let mut observations = Vec::new();
+    for point in parse_paired_points(points.trim())? {
+        let (x, y) = point?;
+        let mut row = vec![BigRational::from_integer(1.into())];
+        for _ in 0..degree {
+            let power = row.last().expect("初始行含常数项") * &x;
+            check_size([&power])?;
+            row.push(power);
+        }
+        design.push(row);
+        observations.push(vec![y]);
+    }
+    let coefficients = least_squares(design, observations).map_err(|error| match error {
+        MatrixError::LeastSquaresRank => LinearFitError::PolynomialFitRank,
+        MatrixError::Evaluation(cause) => LinearFitError::Evaluation(cause),
+        _ => invalid,
+    })?;
+    let coefficients = coefficients
+        .into_iter()
+        .map(|row| row.into_iter().next().expect("每项只有一个响应系数"))
+        .collect();
+    Ok(format_power_expression(coefficients))
+}
+
+fn format_power_expression(coefficients: Vec<BigRational>) -> String {
     let one = BigInt::from(1u8);
     let mut expression = String::new();
     for (degree, coefficient) in coefficients.into_iter().enumerate().rev() {
@@ -311,7 +357,7 @@ fn interpolation_expression(points: &str) -> Result<String, LinearFitError> {
     if expression.is_empty() {
         expression.push('0');
     }
-    Ok(expression)
+    expression
 }
 
 pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
@@ -509,6 +555,29 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fits_exact_polynomials_to_more_points_than_the_degree_requires() {
+        for (input, expected) in [
+            ("多项式 2 @ -1,2; 0,0; 1,2; 0,2", "x**2 + 1"),
+            ("polynomial-fit 0 @ 0,1; 1,2", "3/2"),
+            ("多项式 1 @ 0,1; 1,3; 2,5", "2*x + 1"),
+        ] {
+            assert_eq!(
+                calculate_linear_fit(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_linear_fit("多项式 2 @ 0,1; 0,2; 0,3"),
+            Err(LinearFitError::PolynomialFitRank)
+        );
+        assert_eq!(
+            calculate_linear_fit("多项式 6 @ 0,1; 1,2"),
+            Err(LinearFitError::PolynomialFitArguments)
+        );
+    }
 
     #[test]
     fn renders_an_exact_expression_that_the_fraction_calculator_can_reuse() {

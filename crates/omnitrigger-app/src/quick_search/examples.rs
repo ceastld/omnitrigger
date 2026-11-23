@@ -277,6 +277,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用最小二乘拟合二次多项式",
+        query: "拟合: 多项式 2 @ -1,2; 0,0; 1,2; 0,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用同一条拟合直线预测多个 x",
         query: "拟合: 预测 1/2,0,3 @ 0,1; 1,3; 2,5",
     },
@@ -5105,7 +5110,16 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "区间极值",
         ],
         Scope::LinearSystem => &["通解", "三元"],
-        Scope::LinearFit => &["插值", "插值系数", "插值式"],
+        Scope::LinearFit => &[
+            "预测",
+            "插值",
+            "插值系数",
+            "插值式",
+            "多项式",
+            "残差",
+            "误差",
+            "过原点",
+        ],
         Scope::Matrix => &["通解"],
         Scope::Date => &[
             "列出",
@@ -5227,6 +5241,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Solid
         | Scope::Equation
         | Scope::LinearSystem
+        | Scope::LinearFit
             if !term.is_empty()
                 && replaceable_tool_operations(scope).iter().any(|operation| {
                     operation
@@ -5317,19 +5332,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "偏移变更",
                     "每日同刻",
                     "序列",
-                ]
-                .into_iter()
-                .any(|operation| operation.starts_with(term)) => {}
-        Scope::LinearFit
-            if !term.is_empty()
-                && [
-                    "预测",
-                    "插值",
-                    "插值系数",
-                    "插值式",
-                    "残差",
-                    "误差",
-                    "过原点",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
@@ -5669,6 +5671,7 @@ mod tests {
             (Scope::Json, "改键", "改键 ["),
             (Scope::Date, "月末", "月末序列 2024-01,3"),
             (Scope::Statistics, "箱线", "箱线摘要 1,2,3"),
+            (Scope::LinearFit, "多项", "多项式 2"),
             (Scope::TextTools, "取列", "取列 \"x\""),
         ] {
             assert!(tool_operation_examples(scope, prefix).is_some());

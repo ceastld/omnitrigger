@@ -510,7 +510,7 @@ fn append_parameter(expression: &mut String, coefficient: BigRational, parameter
     expression.push_str(&format_exact_multiple(&magnitude, parameter));
 }
 
-fn least_squares(left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
+pub(super) fn least_squares(left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
     if left.len() != right.len() {
         return Err(MatrixError::SolveDimensions);
     }
