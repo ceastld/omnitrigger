@@ -393,7 +393,7 @@ fn permutations(values: &[f64]) -> f64 {
     result as f64
 }
 
-fn average(values: &[f64]) -> f64 {
+pub(super) fn average(values: &[f64]) -> f64 {
     let count = values.len() as f64;
     let total: f64 = values.iter().sum();
     if total.is_finite() {
@@ -464,7 +464,7 @@ fn harmonic_mean(values: &[f64]) -> f64 {
     (minimum / scaled).clamp(minimum, maximum)
 }
 
-fn median(values: &[f64]) -> f64 {
+pub(super) fn median(values: &[f64]) -> f64 {
     let sorted = sorted_samples(values);
     let middle = sorted.len() / 2;
     if sorted.len().is_multiple_of(2) {

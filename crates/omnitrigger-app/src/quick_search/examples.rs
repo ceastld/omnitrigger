@@ -4268,6 +4268,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计函数值的范围、均值、中位数和空值个数",
+        query: "CSV: 函数摘要 [[\"角度\",\"权重\"],\"cosd(x)*y\"]\n角度,权重\n0,2\n180,3\n90,4\n,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按精确数值比较两列并标记是否达标",
         query: "CSV: 数值比较列 [\"达标\",\"实测\",2,\">=\"] 实测,门槛\n1.50,3/2\n1,2\n,0",
     },

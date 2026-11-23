@@ -20,6 +20,7 @@ use serde::{
 };
 use serde_json::value::RawValue;
 
+use super::scientific::{average, median};
 use super::statistics::{
     interpolate_ordered_quantile, parse_bin_edges, parse_probability, plot_binned_unweighted,
     report_binned_unweighted, unweighted_box_fences,
@@ -170,6 +171,8 @@ pub(super) enum CsvError {
     FunctionFilterArguments,
     FunctionSortArguments,
     FunctionRankArguments,
+    FunctionSummaryArguments,
+    FunctionSummaryRange,
     FunctionColumnLimit,
     ComputedDivisionByZero,
     ComputedNumberRange,
@@ -410,6 +413,10 @@ impl CsvError {
             Self::FunctionRankArguments => {
                 "填写新列名、一至两列、算式和数值排序方向，例如 [\"名次\",[1,2],\"x*y\",\"数值降序\"]"
             }
+            Self::FunctionSummaryArguments => {
+                "填写一至两列和算式，例如 [[1,2],\"cosd(x)*y\"]"
+            }
+            Self::FunctionSummaryRange => "函数统计结果超出计算范围",
             Self::FunctionColumnLimit => "CSV 函数运算每次最多处理 128 条数据",
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
@@ -1021,6 +1028,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "函数筛选" | "filter-function" => return filter_function_rows(input),
         "函数排序" | "sort-function" => return sort_function_rows(input),
         "函数排名列" | "rank-function-column" => return rank_function_rows(input),
+        "函数摘要" | "summary-function" => return summarize_function_rows(input),
         operation if is_scatter_operation(operation) => {
             return parse_scatter_table(input)?.to_csv();
         }
@@ -4157,6 +4165,43 @@ fn rank_function_rows(input: &str) -> Result<String, CsvError> {
         .collect();
     assign_csv_ranks(&mut ranked_values, ascending, false, &mut ranks);
     write_csv_ranks(&rows[0], &rows[1..], &name, ranks)
+}
+
+fn summarize_function_rows(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::FunctionSummaryArguments;
+    let ((columns, expression), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, String)>(input, invalid)?;
+    let FunctionRows { values, .. } = read_function_rows(data, &columns, &expression, invalid)?;
+    let total = values.len();
+    let values: Vec<_> = values.into_iter().flatten().collect();
+    let count = values.len();
+    let stats = [
+        values.iter().copied().min_by(f64::total_cmp),
+        values.iter().copied().max_by(f64::total_cmp),
+        (count > 0).then(|| average(&values)),
+        (count > 0).then(|| median(&values)),
+    ];
+    let mut row = vec![
+        total.to_string(),
+        count.to_string(),
+        (total - count).to_string(),
+    ];
+    for value in stats {
+        row.push(
+            value
+                .map(format_result)
+                .transpose()
+                .map_err(|_| CsvError::FunctionSummaryRange)?
+                .unwrap_or_default(),
+        );
+    }
+    let mut csv = String::from("数据行,有效,空值,最小值,最大值,平均值,中位数");
+    append_bounded_csv_row(
+        &mut csv,
+        row.iter().map(String::as_str),
+        CsvError::FunctionSummaryRange,
+    )?;
+    Ok(csv)
 }
 
 struct FunctionRows {
@@ -9699,6 +9744,24 @@ null"#
             transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
             Err(CsvError::NumericComparisonColumnArguments)
         );
+    }
+
+    #[test]
+    fn summarizes_finite_function_values_and_counts_the_blank_or_undefined_rows() {
+        let header = "数据行,有效,空值,最小值,最大值,平均值,中位数";
+        assert_eq!(
+            transform_csv("函数摘要 [[\"角度\",2],\"cosd(x)*y\"] 角度,权重\n0,2\n180,3\n90,4\n,2")
+                .unwrap(),
+            format!("{header}\r\n4,3,1,-3,2,-0.333333333333333,0")
+        );
+        assert_eq!(
+            transform_csv("summary-function [[1],\"sqrt(x)\"] 数值\n-1").unwrap(),
+            format!("{header}\r\n1,0,1,\"\",\"\",\"\",\"\"")
+        );
+        assert!(matches!(
+            transform_csv("函数摘要 [[1],\"x\"] 数值\n1\n错误"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
