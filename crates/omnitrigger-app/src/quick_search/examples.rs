@@ -237,6 +237,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐个窗口计算精确分位数",
+        query: "统计: 移动分位数 3,25% 4,1,3,2,5",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看相邻数值各窗口的最小值",
         query: "统计: 移动最小 3 1/2,100,2,3,-1",
     },
@@ -4249,6 +4254,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "移动最小",
                     "移动最大",
                     "移动极差",
+                    "移动分位数",
                     "变异系数",
                     "样本变异系数",
                     "总体变异系数",

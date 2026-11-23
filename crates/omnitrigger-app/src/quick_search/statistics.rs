@@ -32,6 +32,7 @@ pub(super) enum StatisticsError {
     BinomialArguments,
     HypergeometricArguments,
     InvalidWindowWidth,
+    WindowQuantileArguments,
     SampleWindowWidth,
     AdjacentValueCount,
     ZeroPreviousValue,
@@ -62,6 +63,7 @@ impl StatisticsError {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
             }
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
+            Self::WindowQuantileArguments => "先填窗口宽度和分位概率，例如 3,25%，再输入数值",
             Self::SampleWindowWidth => "移动样本方差与样本标准差至少需要两个数值",
             Self::AdjacentValueCount => "计算相邻项的变化至少需要两个数值",
             Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
@@ -205,6 +207,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             return moving_dispersion(values.trim(), false, format_square_root)
         }
         "移动中位数" | "moving-median" => return moving_median(values.trim()),
+        "移动分位数" | "moving-quantile" => return moving_quantile(values.trim()),
         "移动最小" | "moving-min" => {
             return moving_extrema(values.trim(), MovingExtrema::Minimum)
         }
@@ -421,6 +424,13 @@ fn adjacent_changes(input: &str, relative: bool) -> Result<String, StatisticsErr
 
 fn sliding_window_values(input: &str) -> Result<(usize, Vec<BigRational>), StatisticsError> {
     let (width, input) = operation_and_arguments(input);
+    parse_window_values(width, input)
+}
+
+fn parse_window_values(
+    width: &str,
+    input: &str,
+) -> Result<(usize, Vec<BigRational>), StatisticsError> {
     let width = width
         .parse::<usize>()
         .ok()
@@ -490,6 +500,27 @@ fn moving_median(input: &str) -> Result<String, StatisticsError> {
         ordered.clear();
     }
     Ok(medians.join("\n"))
+}
+
+fn moving_quantile(input: &str) -> Result<String, StatisticsError> {
+    let (parameters, source) = operation_and_arguments(input);
+    let (width, probability) = parameters
+        .split_once(',')
+        .ok_or(StatisticsError::WindowQuantileArguments)?;
+    let probability = parse_probability(probability)?;
+    let (width, values) = parse_window_values(width, source)?;
+    let mut ordered: Vec<&BigRational> = Vec::with_capacity(width);
+    let mut results = Vec::with_capacity(values.len() - width + 1);
+    for window in values.windows(width) {
+        ordered.extend(window);
+        ordered.sort_unstable();
+        let result = interpolate_ordered_quantile(width as u64, &probability, |rank| {
+            ordered[rank as usize]
+        })?;
+        results.push(result.to_string());
+        ordered.clear();
+    }
+    Ok(results.join("\n"))
 }
 
 pub(super) fn median_sorted_values(
@@ -1016,14 +1047,22 @@ fn interpolate_quantile(
     count: u64,
     probability: &BigRational,
 ) -> Result<BigRational, StatisticsError> {
+    interpolate_ordered_quantile(count, probability, |rank| observation_at(values, rank))
+}
+
+fn interpolate_ordered_quantile<'a>(
+    count: u64,
+    probability: &BigRational,
+    at_rank: impl Fn(u64) -> &'a BigRational,
+) -> Result<BigRational, StatisticsError> {
     let position = probability * BigInt::from(count - 1);
     let rank =
         u64::try_from(position.to_integer()).expect("quantile rank within observation count");
-    let lower = observation_at(values, rank);
+    let lower = at_rank(rank);
     if position.is_integer() {
         return Ok(lower.clone());
     }
-    let upper = observation_at(values, rank + 1);
+    let upper = at_rank(rank + 1);
     let fraction = position - BigInt::from(rank);
     bounded(lower + (upper - lower) * fraction)
 }
@@ -1297,6 +1336,35 @@ mod tests {
             calculate_statistics("移动最大 3 1,2"),
             Err(StatisticsError::InvalidWindowWidth)
         );
+    }
+
+    #[test]
+    fn interpolates_exact_quantiles_for_complete_sliding_windows() {
+        for (query, expected) in [
+            ("移动分位数 3,25% 4,1,3,2,5", "2\n3/2\n5/2"),
+            ("moving-quantile 3,3/4 4,1,3,2,5", "7/2\n5/2\n4"),
+            ("移动分位数 1,0 1/3,0.5,-2", "1/3\n1/2\n-2"),
+            ("移动分位数 2,100% 1,3,2", "3\n3"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            (
+                "移动分位数 3 4,1,3,2,5",
+                StatisticsError::WindowQuantileArguments,
+            ),
+            (
+                "移动分位数 3,101% 1,2,3",
+                StatisticsError::InvalidProbability,
+            ),
+            ("移动分位数 3,25% 1,2", StatisticsError::InvalidWindowWidth),
+        ] {
+            assert_eq!(calculate_statistics(query), Err(error), "{query}");
+        }
     }
 
     #[test]
