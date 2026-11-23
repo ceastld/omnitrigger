@@ -2862,6 +2862,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把分号分隔的表格转换成逗号分隔",
+        query: "CSV: 分隔符转换 [\";\",\",\"] 编号;金额;备注\n001;1,50;\"茶;浓\"\n002;;待确认",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定顺序选取 CSV 的列",
         query: "CSV: 选列 3,1 编号,名称,备注\n001,茶,\"含,逗号\"",
     },

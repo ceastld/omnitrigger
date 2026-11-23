@@ -66,6 +66,7 @@ pub(super) enum CsvError {
     UnknownOperation,
     UnclosedQuote,
     InvalidSeparator,
+    DelimiterArguments,
     DifferentColumnCount,
     TooManyAddedCells,
     InvalidHeader,
@@ -169,6 +170,7 @@ impl CsvError {
             Self::UnknownOperation => "输入 ? CSV 查看可用操作",
             Self::UnclosedQuote => "字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
+            Self::DelimiterArguments => "用 JSON 数组填写原分隔符和目标分隔符，例如 [\";\",\",\"]",
             Self::DifferentColumnCount => "每行的列数须一致",
             Self::TooManyAddedCells => "每次最多补齐 16384 个空单元格，请缩小表格范围",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
@@ -344,8 +346,10 @@ enum Operation {
     JsonNumericObjects(Vec<ColumnReference>),
     Markdown(Option<Vec<MarkdownAlignment>>),
     Transpose,
-    ToTsv,
-    FromTsv,
+    ConvertDelimiter {
+        from: char,
+        to: char,
+    },
     SelectColumns(Vec<usize>),
     SelectNamedColumns(Vec<String>),
     DropColumns(Vec<ColumnReference>),
@@ -657,8 +661,26 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             Operation::Markdown(Some(alignments))
         }
         "转置" | "transpose" => Operation::Transpose,
-        "转tsv" | "tsv" => Operation::ToTsv,
-        "从tsv" | "from-tsv" => Operation::FromTsv,
+        "转tsv" | "tsv" => Operation::ConvertDelimiter {
+            from: ',',
+            to: '\t',
+        },
+        "从tsv" | "from-tsv" => Operation::ConvertDelimiter {
+            from: '\t',
+            to: ',',
+        },
+        "分隔符转换" | "convert-delimiter" => {
+            let ([from, to], data) =
+                json_argument_and_data::<[char; 2]>(input, CsvError::DelimiterArguments)?;
+            if [from, to]
+                .into_iter()
+                .any(|separator| matches!(separator, '\0' | '\r' | '\n' | '"'))
+            {
+                return Err(CsvError::DelimiterArguments);
+            }
+            input = data;
+            Operation::ConvertDelimiter { from, to }
+        }
         "去重" | "deduplicate" => Operation::DeduplicateRows,
         "去空行" | "drop-empty-rows" => Operation::DropEmptyRecords,
         operation @ ("取行" | "pick-rows" | "删行" | "drop-rows") => {
@@ -1417,7 +1439,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     }
 
     let delimiter = match kind {
-        Operation::FromTsv => '\t',
+        Operation::ConvertDelimiter { from, .. } => from,
         _ => ',',
     };
     let rows = if matches!(
@@ -1447,8 +1469,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::JsonNumericObjects(columns) => json_objects(&rows, Some(&columns)),
         Operation::Markdown(alignments) => markdown_table(&rows, alignments.as_deref()),
         Operation::Transpose => Ok(transpose(&rows)),
-        Operation::ToTsv => Ok(write_rows(&rows, '\t')),
-        Operation::FromTsv => Ok(write_rows(&rows, ',')),
+        Operation::ConvertDelimiter { to, .. } => Ok(write_rows(&rows, to)),
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::DropColumns(columns) => drop_columns(&rows, &columns),
@@ -6411,6 +6432,36 @@ null"#
             (r#"选列名 ["a"] a,a"#, CsvError::AmbiguousColumnName),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn converts_explicit_delimiters_while_preserving_quotes_and_leading_empty_fields() {
+        let semicolons =
+            "分隔符转换 [\";\",\",\"] 编号;金额;备注\n001;1,50;\"茶;浓\"\n002;;\"甲\n乙\"";
+        assert_eq!(
+            transform_csv(semicolons).as_deref(),
+            Ok("编号,金额,备注\r\n001,\"1,50\",茶;浓\r\n002,\"\",\"甲\n乙\"")
+        );
+        let tab_to_pipe = "convert-delimiter [\"\\t\",\"|\"]\r\n\t备注\r\n001\t茶|梨";
+        assert_eq!(
+            transform_csv(tab_to_pipe).as_deref(),
+            Ok("\"\"|备注\r\n001|\"茶|梨\"")
+        );
+        assert_eq!(
+            transform_csv("分隔符转换 [\"、\",\"|\"] 编号、名称\n001、茶").as_deref(),
+            Ok("编号|名称\r\n001|茶")
+        );
+        for arguments in [
+            r#"["",","]"#,
+            r#"["||",","]"#,
+            r#"["\"",";"]"#,
+            r#"[";","\n"]"#,
+        ] {
+            assert_eq!(
+                transform_csv(&format!("分隔符转换 {arguments} 编号;数量")),
+                Err(CsvError::DelimiterArguments)
+            );
         }
     }
 
