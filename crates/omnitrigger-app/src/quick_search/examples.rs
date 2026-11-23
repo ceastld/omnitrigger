@@ -4904,6 +4904,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "精确计算同一百分比重复变动后的值",
+        query: "百分比: 重复变化 100 @ +10%,3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "由重复百分比变动后的结果反推初值",
+        query: "百分比: 重复原值 1331/10 @ +10%,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按折扣反推折前价",
         query: "百分比: 折前价 170 按 8.5折",
     },

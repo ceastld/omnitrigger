@@ -5,8 +5,8 @@ use super::{
     calculator::{evaluate, format_result, normalize},
     conversion::split_conversion,
     fraction::{
-        calculate_fraction, ensure_exact_size, format_exact_percentage, repeating_decimal,
-        FractionError,
+        calculate_fraction, ensure_exact_size, format_exact_percentage, rational_power,
+        repeating_decimal, FractionError,
     },
     operators::split_top_level_commas,
 };
@@ -88,6 +88,7 @@ pub(super) enum PercentageError {
     InvalidOperands,
     InvalidDiscount,
     InvalidCompoundOperands,
+    InvalidRepeatedOperands,
     NonInvertibleChange,
     ZeroReference,
     OutOfRange,
@@ -102,6 +103,9 @@ impl PercentageError {
             Self::InvalidOperands => "请输入两个有效的数值，计算百分点时加上 %",
             Self::InvalidDiscount => "折后金额须非负，折扣须大于 0% 且不超过 100%",
             Self::InvalidCompoundOperands => "输入数值和带百分号的变动，例如 100 @ +10%, -10%",
+            Self::InvalidRepeatedOperands => {
+                "填写数值、带百分号的变动和正整数次数，例如 100 @ +10%,3"
+            }
             Self::NonInvertibleChange => "存在 -100% 的变动，无法唯一反推原值",
             Self::ZeroReference => "原值或总量不能为零",
             Self::OutOfRange => "结果超出可计算范围",
@@ -130,6 +134,15 @@ pub(super) fn compare_percentages(input: &str) -> Result<String, PercentageError
     }
     if matches!(operation, "原值" | "reverse-compound") {
         return compound_percentages(operands, true);
+    }
+    if matches!(
+        operation,
+        "重复变化" | "repeat-change" | "重复原值" | "reverse-repeat-change"
+    ) {
+        return repeated_percentage(
+            operands,
+            matches!(operation, "重复原值" | "reverse-repeat-change"),
+        );
     }
     let (comparison, exact) = match operation {
         "变化" | "change" => (Comparison::Change, false),
@@ -229,30 +242,59 @@ fn compound_percentages(operands: &str, reverse: bool) -> Result<String, Percent
         .split_once('@')
         .ok_or(PercentageError::InvalidCompoundOperands)?;
     let mut value = calculate_fraction(base).map_err(PercentageError::Evaluation)?;
-    let one = BigRational::from_integer(BigInt::from(1));
-    let hundred = BigInt::from(100);
     let mut rates: Vec<_> = split_top_level_commas(rates).collect();
     if reverse {
         rates.reverse();
     }
     for rate in rates {
-        let amount = rate
-            .trim()
-            .strip_suffix('%')
-            .ok_or(PercentageError::InvalidCompoundOperands)?;
-        let amount = calculate_fraction(amount).map_err(PercentageError::Evaluation)?;
-        let factor = &one + amount / &hundred;
-        if reverse {
-            if factor.numer().sign() == Sign::NoSign {
-                return Err(PercentageError::NonInvertibleChange);
-            }
-            value /= factor;
-        } else {
-            value *= factor;
-        }
-        ensure_exact_size(&value).map_err(PercentageError::Evaluation)?;
+        let factor = percentage_factor(rate, PercentageError::InvalidCompoundOperands)?;
+        apply_compound_factor(&mut value, factor, reverse)?;
     }
     Ok(value.to_string())
+}
+
+fn repeated_percentage(operands: &str, reverse: bool) -> Result<String, PercentageError> {
+    let invalid = PercentageError::InvalidRepeatedOperands;
+    let (base, settings) = operands.split_once('@').ok_or(invalid)?;
+    let mut settings = split_top_level_commas(settings);
+    let (Some(rate), Some(times), None) = (settings.next(), settings.next(), settings.next())
+    else {
+        return Err(invalid);
+    };
+    let times = times
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|&times| times > 0)
+        .ok_or(invalid)?;
+    let mut value = calculate_fraction(base).map_err(PercentageError::Evaluation)?;
+    let factor = percentage_factor(rate, invalid)?;
+    let repeated = rational_power(factor, BigRational::from_integer(times.into()))
+        .map_err(PercentageError::Evaluation)?;
+    apply_compound_factor(&mut value, repeated, reverse)?;
+    Ok(value.to_string())
+}
+
+fn percentage_factor(rate: &str, invalid: PercentageError) -> Result<BigRational, PercentageError> {
+    let amount = rate.trim().strip_suffix('%').ok_or(invalid)?;
+    let amount = calculate_fraction(amount).map_err(PercentageError::Evaluation)?;
+    Ok(BigRational::from_integer(1.into()) + amount / BigInt::from(100u8))
+}
+
+fn apply_compound_factor(
+    value: &mut BigRational,
+    factor: BigRational,
+    reverse: bool,
+) -> Result<(), PercentageError> {
+    if reverse {
+        if factor.numer().sign() == Sign::NoSign {
+            return Err(PercentageError::NonInvertibleChange);
+        }
+        *value /= factor;
+    } else {
+        *value *= factor;
+    }
+    ensure_exact_size(value).map_err(PercentageError::Evaluation)
 }
 
 fn ratio_percent(value: f64, reference: f64) -> f64 {
@@ -298,6 +340,37 @@ fn original_price(operands: &str) -> Result<String, PercentageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeats_the_same_percentage_exactly_and_recovers_the_original() {
+        for (query, expected) in [
+            ("重复变化 100 @ +10%,3", "1331/10"),
+            ("重复原值 1331/10 @ +10%,3", "100"),
+            ("repeat-change 1 @ 100%,10", "1024"),
+            ("重复变化 100 @ -10%,4", "6561/100"),
+            ("重复变化 4 @ -100%,3", "0"),
+        ] {
+            assert_eq!(compare_percentages(query).as_deref(), Ok(expected));
+        }
+        for query in [
+            "重复变化 4 @ 10%,0",
+            "重复变化 4 @ 10%,1,2",
+            "重复变化 4 @ 10,3",
+        ] {
+            assert_eq!(
+                compare_percentages(query),
+                Err(PercentageError::InvalidRepeatedOperands)
+            );
+        }
+        assert_eq!(
+            compare_percentages("重复原值 0 @ -100%,2"),
+            Err(PercentageError::NonInvertibleChange)
+        );
+        assert_eq!(
+            compare_percentages("重复变化 4 @ 10%,1025"),
+            Err(PercentageError::Evaluation(FractionError::ExactRange))
+        );
+    }
 
     #[test]
     fn reverses_successive_percentage_changes_with_exact_factors() {
