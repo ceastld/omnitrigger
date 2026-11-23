@@ -292,6 +292,7 @@
 - 输入 `统计: 协方差 0,0; 1,1; 2,1` 可求样本协方差 `1/2`。用 `总体协方差` 得到 `1/3`。输入 2 至 64 对数值，每对填 `x,y`，用分号或换行分组，结果保留精确分数。
 - 输入 `统计: 相关系数 0,0; 1,-1; 2,-1` 得到精确的皮尔逊相关系数 `-√(3/4)`。输入格式与协方差相同，两个变量均须有变化。
 - 输入 `统计: 秩相关 0,0; 1,1; 2,1` 得到斯皮尔曼秩相关系数 `√(3/4)`。分别对两列排序，并列值使用平均名次，再求名次的皮尔逊相关系数。输入 2 至 64 对数值，两列都须有变化。 [R 相关系数文档](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/cor.html) [R 名次规则](https://stat.ethz.ch/R-manual/R-devel/library/base/html/rank.html)
+- 输入 `统计: 肯德尔 0,0; 1,1; 2,1` 得到肯德尔 τ-b `√(2/3)`。根据两列的排序方向计算一致与不一致的配对，分别校正两列中的并列值。输入 2 至 64 对数值，两列都须有变化。 [SciPy 肯德尔 τ-b 定义](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.kendalltau.html#notes)
 - 输入 `rms(0,6,0,-8)` 可求均方根 `5`。`corr(1,2,2,4,3,6)` 得到皮尔逊相关系数 `1`，输入至少两对数值，且两个变量都须有变化。 [NIST 相关系数公式](https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/correlat.htm)
 - 输入 `quantile(0.25,4,1,3,2)` 或 `percentile(25,4,1,3,2)` 得到下四分位数 `1.75`，`iqr(4,1,3,2)` 得到四分位距 `1.5`。分位数使用排序后相邻样本间的线性插值。[R 的 Type 7 定义](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/quantile.html#types)
 - `degrees(asin(0.5))` 得到 `30`。用 `round(2.5)` 取最近整数时，恰好在中点会取偶数，结果为 `2`。`trunc(-1.8)` 向零取整得到 `-1`。

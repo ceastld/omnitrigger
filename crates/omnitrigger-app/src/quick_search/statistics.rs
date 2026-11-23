@@ -9,7 +9,8 @@ use super::fraction::{
     format_square_root, rational_power, FractionError, MAX_COMBINATORIAL_ARGUMENT,
 };
 use super::linear_fit::{
-    calculate_correlation, calculate_covariance, calculate_rank_correlation, LinearFitError,
+    calculate_correlation, calculate_covariance, calculate_kendall_correlation,
+    calculate_rank_correlation, LinearFitError,
 };
 use super::operators::split_top_level_commas;
 
@@ -240,6 +241,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "秩相关" | "斯皮尔曼" | "spearman" => {
             return calculate_rank_correlation(values).map_err(StatisticsError::Paired);
+        }
+        "肯德尔" | "肯德尔秩相关" | "kendall" => {
+            return calculate_kendall_correlation(values).map_err(StatisticsError::Paired);
         }
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
@@ -1472,6 +1476,30 @@ mod tests {
             calculate_statistics("秩相关 1,1; 1,2"),
             Err(StatisticsError::Paired(LinearFitError::ConstantCoordinate))
         );
+    }
+
+    #[test]
+    fn computes_exact_kendall_tau_b_with_ties_in_one_or_both_coordinates() {
+        for (input, expected) in [
+            ("肯德尔 0,0; 1,1; 2,1", "√(2/3)"),
+            ("肯德尔秩相关 0,0; 0,0; 1,1; 2,1", "√(4/5)"),
+            ("肯德尔 0,0; 1,1; 2,0", "0"),
+            ("kendall 1\t3\r\n1\t2\r\n2\t1", "-√(2/3)"),
+            ("肯德尔 12,1; 2,4; 1,7; 12,1; 2,0", "-√(2/9)"),
+            ("肯德尔 9007199254740992,1/2; 9007199254740993,-1/2", "-1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in ["肯德尔 1,1; 1,2", "肯德尔 1,2; 2,2", "肯德尔 1,1; 1,1"] {
+            assert_eq!(
+                calculate_statistics(input),
+                Err(StatisticsError::Paired(LinearFitError::ConstantCoordinate)),
+            );
+        }
     }
 
     #[test]

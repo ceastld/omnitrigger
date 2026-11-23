@@ -361,6 +361,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 秩相关 0,0; 1,1; 2,1",
     },
     Example {
+        icon: Icon::Layers,
+        title: "计算考虑并列值的肯德尔秩相关",
+        query: "统计: 肯德尔 0,0; 1,1; 2,1",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按原顺序计算相邻数值的差",
         query: "统计: 差分 3/2,1,5/2",
@@ -4337,6 +4342,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "秩"
                     | "秩相"
                     | "秩相关"
+                    | "肯"
+                    | "肯德"
+                    | "肯德尔"
                     | "差"
                     | "差分"
                     | "变"

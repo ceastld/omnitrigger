@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
@@ -182,6 +184,29 @@ pub(super) fn calculate_rank_correlation(points: &str) -> Result<String, LinearF
         .zip(doubled_midranks(&y))
         .map(Ok);
     format_correlation(summarize_pairs(ranks, false)?.centered_products()?)
+}
+
+pub(super) fn calculate_kendall_correlation(points: &str) -> Result<String, LinearFitError> {
+    let pairs = parse_paired_points(points.trim())?.collect::<Result<Vec<_>, _>>()?;
+    let (mut distinct_x, mut distinct_y, mut score) = (0_u32, 0_u32, 0_i32);
+    for (index, (x, y)) in pairs.iter().enumerate() {
+        for (other_x, other_y) in &pairs[index + 1..] {
+            let (x_order, y_order) = (x.cmp(other_x), y.cmp(other_y));
+            distinct_x += u32::from(x_order != Ordering::Equal);
+            distinct_y += u32::from(y_order != Ordering::Equal);
+            score += match (x_order, y_order) {
+                (Ordering::Equal, _) | (_, Ordering::Equal) => 0,
+                (left, right) if left == right => 1,
+                _ => -1,
+            };
+        }
+    }
+    if distinct_x == 0 || distinct_y == 0 {
+        return Err(LinearFitError::ConstantCoordinate);
+    }
+    let score = BigInt::from(score);
+    let squared = BigRational::new(&score * &score, BigInt::from(distinct_x) * distinct_y);
+    Ok(format_signed_square_root(&squared, score.sign()))
 }
 
 fn doubled_midranks(values: &[BigRational]) -> Vec<BigRational> {
