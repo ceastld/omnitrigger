@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde::Serialize;
 
 use crate::{
     assets::Icon,
@@ -14,12 +15,29 @@ use super::{
 };
 
 const TRIGGER_CSV_HEADER: &str = "名称,组合与条件,输入,动作,范围,启用状态";
+const MAX_TRIGGER_JSON_BYTES: usize = 1024 * 1024;
+
+enum TriggerExport {
+    Csv,
+    Json,
+}
+
+#[derive(Serialize)]
+struct TriggerSummary<'a> {
+    name: &'a str,
+    detail: &'a str,
+    input: &'static str,
+    action: &'static str,
+    scope: &'static str,
+    enabled: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TriggerSearchError {
     InvalidValue { facet: Facet, start: usize },
     RepeatedFacet,
-    CsvTooLarge,
+    ExportTooLarge,
+    JsonExport,
     TitleRegex,
 }
 
@@ -33,7 +51,8 @@ impl TriggerSearchError {
                 Facet::Action => "动作填写触发器页的分类名称，例如 快速搜索",
             },
             Self::RepeatedFacet => "每类筛选条件填写一次",
-            Self::CsvTooLarge => "触发器 CSV 超过 1 MiB，请缩小筛选范围",
+            Self::ExportTooLarge => "导出的触发器超过 1 MiB，请缩小筛选范围",
+            Self::JsonExport => "生成触发器 JSON 失败",
             Self::TitleRegex => "填写一个有效的名称正则表达式，含空格时用双引号包住",
         }
     }
@@ -187,8 +206,11 @@ pub(super) fn search_triggers(
     inherited: Option<FacetValue>,
 ) -> Results {
     let (format, rest) = term.split_once(char::is_whitespace).unwrap_or((term, ""));
-    let export = matches!(search_key(format).as_str(), "输出=csv" | "output=csv");
-    let query = if export { rest.trim_start() } else { term };
+    let (export, query) = match search_key(format).as_str() {
+        "输出=csv" | "output=csv" => (Some(TriggerExport::Csv), rest.trim_start()),
+        "输出=json" | "output=json" => (Some(TriggerExport::Json), rest.trim_start()),
+        _ => (None, term),
+    };
     let query = match parse_trigger_query(query, inherited) {
         Ok(parsed) => parsed,
         Err(error @ TriggerSearchError::InvalidValue { facet, start }) => {
@@ -208,18 +230,23 @@ pub(super) fn search_triggers(
         &query.filter,
         query.title_regex.as_ref(),
     );
-    if export {
-        return Results::text_value(export_triggers(matches).map_err(ValueError::TriggerSearch));
+    match export {
+        Some(TriggerExport::Csv) => {
+            Results::text_value(export_trigger_csv(matches).map_err(ValueError::TriggerSearch))
+        }
+        Some(TriggerExport::Json) => {
+            Results::text_value(export_trigger_json(matches).map_err(ValueError::TriggerSearch))
+        }
+        None => Results::Destinations(
+            matches
+                .into_iter()
+                .map(|trigger| Destination::Trigger(trigger.id()))
+                .collect(),
+        ),
     }
-    Results::Destinations(
-        matches
-            .into_iter()
-            .map(|trigger| Destination::Trigger(trigger.id()))
-            .collect(),
-    )
 }
 
-fn export_triggers(triggers: Vec<&SearchTrigger>) -> Result<String, TriggerSearchError> {
+fn export_trigger_csv(triggers: Vec<&SearchTrigger>) -> Result<String, TriggerSearchError> {
     let mut csv = String::from(TRIGGER_CSV_HEADER);
     for entry in triggers {
         append_bounded_csv_row(
@@ -233,10 +260,30 @@ fn export_triggers(triggers: Vec<&SearchTrigger>) -> Result<String, TriggerSearc
                 entry.row.status.label(),
             ]
             .into_iter(),
-            TriggerSearchError::CsvTooLarge,
+            TriggerSearchError::ExportTooLarge,
         )?;
     }
     Ok(csv)
+}
+
+fn export_trigger_json(triggers: Vec<&SearchTrigger>) -> Result<String, TriggerSearchError> {
+    let summaries: Vec<_> = triggers
+        .into_iter()
+        .map(|entry| TriggerSummary {
+            name: &entry.title,
+            detail: &entry.detail,
+            input: entry.row.input.label(),
+            action: entry.row.action.label(),
+            scope: entry.row.scope.label(),
+            enabled: entry.row.status == StatusKind::Enabled,
+        })
+        .collect();
+    let json =
+        serde_json::to_string_pretty(&summaries).map_err(|_| TriggerSearchError::JsonExport)?;
+    if json.len() > MAX_TRIGGER_JSON_BYTES {
+        return Err(TriggerSearchError::ExportTooLarge);
+    }
+    Ok(json)
 }
 
 pub(super) fn matching_triggers<'a>(

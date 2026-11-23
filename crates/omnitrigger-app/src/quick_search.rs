@@ -5530,6 +5530,46 @@ mod tests {
     }
 
     #[test]
+    fn exports_trigger_json_with_boolean_status_and_escaped_names() {
+        let mut bindings = crate::settings::defaults();
+        let bindings = &mut bindings[..2];
+        bindings[0].message = "发送\"正文\"".into();
+        bindings[0].enabled = true;
+        bindings[1].message = "发送已停用".into();
+        bindings[1].enabled = false;
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        let Results::Value(Ok(result)) =
+            for_query("触发器: 输出＝ＪＳＯＮ 状态=已启用 发送", &triggers)
+        else {
+            panic!("未生成触发器 JSON");
+        };
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result.text).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["name"], "发送\"正文\"");
+        assert_eq!(
+            rows[0]["detail"].as_str(),
+            Some(triggers[0].detail.as_str())
+        );
+        assert_eq!(rows[0]["enabled"].as_bool(), Some(true));
+        for (query, expected) in [
+            ("已停用触发器: output=json 不存在", "[]"),
+            ("触发器: 输出=JSON 名称正则=^不存在$", "[]"),
+        ] {
+            assert!(matches!(
+                for_query(query, &triggers),
+                Results::Value(Ok(value)) if value.text == expected
+            ));
+        }
+        let Results::Value(Ok(result)) = for_query("已停用触发器: output=json", &triggers)
+        else {
+            panic!("未生成已停用触发器 JSON");
+        };
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result.text).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
     fn trigger_search_keeps_matches_for_later_pages() {
         let bindings = crate::settings::defaults();
         let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();

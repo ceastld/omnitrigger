@@ -944,6 +944,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "触发器: 输出=CSV 状态=已启用 输入=键盘",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把筛选后的触发器导出为 JSON",
+        query: "触发器: 输出=JSON 状态=已启用 输入=键盘",
+    },
+    Example {
         icon: Icon::Search,
         title: "用正则表达式查找触发器名称",
         query: r"触发器: 名称正则=^打开触发",
