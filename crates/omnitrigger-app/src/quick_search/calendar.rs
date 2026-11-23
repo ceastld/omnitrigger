@@ -33,6 +33,7 @@ pub(super) enum DateError {
     MissingWeekdayOccurrence,
     InvalidWorkdayOrdinal,
     MissingWorkdayOrdinal,
+    InvalidWorkdaySeries,
     InvalidOperation,
     InvalidDateList,
     DateSeriesArguments,
@@ -70,6 +71,9 @@ impl DateError {
                 "填写月份和工作日序号，例如 2026-11 @ 3。用 -1 表示最后一个工作日"
             }
             Self::MissingWorkdayOrdinal => "该月的工作日不足指定序号",
+            Self::InvalidWorkdaySeries => {
+                "填写起始月份、1 至 366 个月和工作日序号，例如 2026-11,3 @ -1"
+            }
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
             Self::DateSeriesArguments => "用逗号填写起始日期和 1 至 366 个日期，例如 2024-01,3",
@@ -1012,22 +1016,24 @@ fn month_calendar(input: &str, today: NaiveDate) -> Result<String, DateError> {
     Ok(grid)
 }
 
+fn date_series_parts(input: &str, error: DateError) -> Result<(&str, u32), DateError> {
+    let (start, count) = input.split_once(',').ok_or(error)?;
+    let count = count
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|count| (1..=MAX_LISTED_DATES as u32).contains(count))
+        .ok_or(error)?;
+    Ok((start.trim(), count))
+}
+
 fn date_boundary_series(
     input: &str,
     today: NaiveDate,
     months: u32,
     last_day: bool,
 ) -> Result<String, DateError> {
-    let (start, count) = input
-        .split_once(',')
-        .ok_or(DateError::DateSeriesArguments)?;
-    let count = count
-        .trim()
-        .parse::<u32>()
-        .ok()
-        .filter(|count| (1..=MAX_LISTED_DATES as u32).contains(count))
-        .ok_or(DateError::DateSeriesArguments)?;
-    let start = start.trim();
+    let (start, count) = date_series_parts(input, DateError::DateSeriesArguments)?;
     let date = match calendar_month_start(start, today) {
         Ok(date) => date,
         Err(DateError::InvalidMonthCalendar) => {
@@ -1059,17 +1065,46 @@ fn workday_by_ordinal(input: &str, today: NaiveDate) -> Result<String, DateError
         .split_once('@')
         .ok_or(DateError::InvalidWorkdayOrdinal)?;
     let start = calendar_month_start(month.trim(), today)?;
-    let ordinal = ordinal
+    let ordinal = parse_workday_ordinal(ordinal)?;
+    let exceptions = parse_workday_exceptions(exceptions)?;
+    month_workday(start, ordinal, &exceptions).map(|date| date.to_string())
+}
+
+fn workday_series(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let (query, exceptions) = split_workday_exceptions(input.trim());
+    let (range, ordinal) = query
+        .split_once('@')
+        .ok_or(DateError::InvalidWorkdaySeries)?;
+    let (month, count) = date_series_parts(range, DateError::InvalidWorkdaySeries)?;
+    let start = calendar_month_start(month, today)?;
+    let ordinal = parse_workday_ordinal(ordinal)?;
+    let exceptions = parse_workday_exceptions(exceptions)?;
+    let mut dates = Vec::with_capacity(count as usize);
+    for offset in 0..count {
+        let month = in_range(start.checked_add_months(Months::new(offset)))?;
+        dates.push(month_workday(month, ordinal, &exceptions)?.to_string());
+    }
+    Ok(dates.join("\n"))
+}
+
+fn parse_workday_ordinal(input: &str) -> Result<i32, DateError> {
+    input
         .trim()
         .parse::<i32>()
         .ok()
         .filter(|ordinal| (1..=31).contains(&ordinal.unsigned_abs()))
-        .ok_or(DateError::InvalidWorkdayOrdinal)?;
-    let exceptions = parse_workday_exceptions(exceptions)?;
+        .ok_or(DateError::InvalidWorkdayOrdinal)
+}
+
+fn month_workday(
+    start: NaiveDate,
+    ordinal: i32,
+    exceptions: &HashMap<NaiveDate, bool>,
+) -> Result<NaiveDate, DateError> {
     let last_day = month_end(start, 1)?.day();
     let workdays: Vec<_> = (1..=last_day)
         .filter_map(|day| start.with_day(day))
-        .filter(|date| is_workday(date, &exceptions))
+        .filter(|date| is_workday(date, exceptions))
         .collect();
     let distance = ordinal.unsigned_abs() as usize;
     let index = if ordinal.is_negative() {
@@ -1079,7 +1114,7 @@ fn workday_by_ordinal(input: &str, today: NaiveDate) -> Result<String, DateError
     };
     index
         .and_then(|index| workdays.get(index))
-        .map(ToString::to_string)
+        .copied()
         .ok_or(DateError::MissingWorkdayOrdinal)
 }
 
@@ -1335,6 +1370,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         }
         "季末序列" | "quarter-end-series" => return date_boundary_series(rest, today, 3, true),
         "工作日序号" | "nth-workday" => return workday_by_ordinal(rest, today),
+        "工作日序列" | "workday-series" => return workday_series(rest, today),
         "合并区间" | "merge-ranges" => {
             return combine_date_ranges(rest, today, DateRangeOperation::Merge);
         }
@@ -2147,6 +2183,46 @@ mod tests {
         assert_eq!(
             calculate_date("明年", NaiveDate::from_ymd_opt(9999, 12, 1).unwrap()),
             Err(DateError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn generates_workday_ordinals_across_months_with_shared_exceptions() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        for (input, expected) in [
+            (
+                "工作日序列 本月,3 @ -1",
+                "2026-11-30\n2026-12-31\n2027-01-29",
+            ),
+            ("WORKDAY-SERIES 2024-02,2 @ 1", "2024-02-01\n2024-03-01"),
+            (
+                r#"工作日序列 2026-11,3 @ -1 例外 [["2026-12-31"],["2027-01-30"]]"#,
+                "2026-11-30\n2026-12-30\n2027-01-30",
+            ),
+        ] {
+            assert_eq!(
+                calculate_date(input, today).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "工作日序列 2026-11 @ -1",
+            "工作日序列 2026-11,0 @ -1",
+            "工作日序列 2026-11,367 @ -1",
+        ] {
+            assert_eq!(
+                calculate_date(input, today),
+                Err(DateError::InvalidWorkdaySeries)
+            );
+        }
+        assert_eq!(
+            calculate_date("工作日序列 2026-11,2 @ 31", today),
+            Err(DateError::MissingWorkdayOrdinal),
+        );
+        assert_eq!(
+            calculate_date("工作日序列 9999-12,2 @ 1", today),
+            Err(DateError::OutOfRange),
         );
     }
 

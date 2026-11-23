@@ -1472,6 +1472,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 工作日序号 2026-11 @ -1",
     },
     Example {
+        icon: Icon::Clock,
+        title: "列出连续几个月的最后一个工作日",
+        query: "日期: 工作日序列 2026-11,3 @ -1",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "将相邻或重叠的日期区间合并",
         query: "日期: 合并区间 2026-11-01 至 2026-11-04; 2026-11-05 至 2026-11-08",
@@ -4160,6 +4165,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "解析",
                     "月历",
                     "工作日序号",
+                    "工作日序列",
                     "合并区间",
                     "区间交集",
                     "扣除区间",
