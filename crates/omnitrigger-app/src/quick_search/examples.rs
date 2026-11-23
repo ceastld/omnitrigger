@@ -1067,6 +1067,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "就近舍入到指定的时长步长",
+        query: "时长: 舍入 01:07:30 @ 15分钟",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "将时长向下取整到指定步长",
+        query: "时长: 向下取整 01:07:30 @ 15分钟",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "将时长向上取整到指定步长",
+        query: "时长: 向上取整 01:01:00 @ 15分钟",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "合计多个时长",
         query: "时长: 合计 01:25,02:40,00:55",
     },
@@ -4329,6 +4344,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "扣除休息",
                     "比率",
                     "缩放",
+                    "舍入",
+                    "向下取整",
+                    "向上取整",
                     "中位数",
                     "最短",
                     "最长",

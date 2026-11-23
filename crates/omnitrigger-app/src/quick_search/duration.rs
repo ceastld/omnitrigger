@@ -27,6 +27,7 @@ pub(super) enum DurationError {
     DivisionByZero,
     InvalidFrequency,
     InvalidScaleFactor,
+    InvalidRoundingArguments,
 }
 
 impl DurationError {
@@ -45,6 +46,7 @@ impl DurationError {
             Self::DivisionByZero => "时长不能除以零",
             Self::InvalidFrequency => "按 时长@次数 填写每组，次数须为正整数",
             Self::InvalidScaleFactor => "用 @ 分隔时长和缩放系数，系数可写 2/3、50% 或精确算式",
+            Self::InvalidRoundingArguments => "用 @ 分隔时长和正的舍入步长，例如 01:07:30 @ 15分钟",
         }
     }
 }
@@ -74,6 +76,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
         "缩放" | "scale" => (scaled_duration(values)?, false),
+        "舍入" | "round" => (round_duration(values, DurationRounding::Nearest)?, false),
+        "向下取整" | "floor" => (round_duration(values, DurationRounding::Floor)?, false),
+        "向上取整" | "ceil" => (round_duration(values, DurationRounding::Ceiling)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
         "频数平均" | "frequency-average" => (frequency_average(values)?, false),
         "频数中位数" | "frequency-median" => (median_duration_list(values, true)?, false),
@@ -162,6 +167,36 @@ fn scaled_duration(input: &str) -> Result<i128, DurationError> {
         return Err(DurationError::Precision);
     }
     i128::try_from(scaled.numer()).map_err(|_| DurationError::OutOfRange)
+}
+
+enum DurationRounding {
+    Nearest,
+    Floor,
+    Ceiling,
+}
+
+fn round_duration(input: &str, rounding: DurationRounding) -> Result<i128, DurationError> {
+    let (value, step) = input
+        .split_once('@')
+        .filter(|(value, step)| !value.trim().is_empty() && !step.trim().is_empty())
+        .ok_or(DurationError::InvalidRoundingArguments)?;
+    let value = bounded_duration_value(value.trim())?;
+    let step = bounded_duration_value(step.trim())?;
+    if step <= 0 {
+        return Err(DurationError::InvalidRoundingArguments);
+    }
+    let remainder = value.rem_euclid(step);
+    let increase = match rounding {
+        DurationRounding::Floor => false,
+        DurationRounding::Ceiling => remainder > 0,
+        DurationRounding::Nearest => {
+            let distance_to_upper = step - remainder;
+            remainder > distance_to_upper || (remainder == distance_to_upper && value > 0)
+        }
+    };
+    (value.div_euclid(step) + i128::from(increase))
+        .checked_mul(step)
+        .ok_or(DurationError::OutOfRange)
 }
 
 fn duration_ratio(input: &str) -> Result<String, DurationError> {
@@ -744,6 +779,32 @@ mod tests {
         ] {
             assert_eq!(convert_duration(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn rounds_signed_durations_to_multiples_of_an_exact_step() {
+        for (query, expected) in [
+            ("舍入 01:07:30 @ 15分钟", "01:15:00"),
+            ("舍入 01:07:29 @ 15分钟", "01:00:00"),
+            ("舍入 -01:07:30 @ 15分钟", "-01:15:00"),
+            ("向上取整 -01:07:30 @ 15分钟", "-01:00:00"),
+            ("向下取整 -01:07:30 @ 15分钟", "-01:15:00"),
+            ("ceil 01:15:00 @ 15分钟 to min", "75 min"),
+            ("ROUND 3ns @ 2ns", "00:00:00.000000004"),
+            ("舍入 -1ns @ 3ns", "00:00:00"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["舍入 3s @ 0s", "舍入 3s @ -2s", "舍入 3s @", "舍入 3s"] {
+            assert_eq!(
+                convert_duration(query),
+                Err(DurationError::InvalidRoundingArguments)
+            );
+        }
+        assert_eq!(
+            convert_duration("ceil 18446744073709551615秒 @ 2秒"),
+            Err(DurationError::OutOfRange),
+        );
     }
 
     #[test]
