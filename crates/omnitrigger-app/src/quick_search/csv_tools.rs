@@ -596,7 +596,7 @@ enum MarkdownAlignment {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
-enum ColumnReference {
+pub(super) enum ColumnReference {
     Number(usize),
     Name(String),
 }
@@ -3670,25 +3670,50 @@ fn contiguous_group_column(
     })
 }
 
-fn write_appended_column<'a, T: AsRef<str>>(
+pub(super) fn append_transformed_csv_column<E: Copy + From<CsvError>>(
+    input: &str,
+    name: &str,
+    source: ColumnReference,
+    mut transform: impl FnMut(usize, &str) -> Result<String, E>,
+) -> Result<String, E> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    if input.is_empty() {
+        return Err(CsvError::MissingInput.into());
+    }
+    let rows = read_rows(input, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let mut row_number = 0;
+    write_appended_column(header, records, name, |row| {
+        row_number += 1;
+        let value = &row[source];
+        if value.trim().is_empty() {
+            return Ok(String::new());
+        }
+        transform(row_number, value)
+    })
+}
+
+fn write_appended_column<'a, T: AsRef<str>, E: Copy + From<CsvError>>(
     header: &[String],
     records: &'a [Vec<String>],
     name: &str,
-    mut cell_for: impl FnMut(&'a [String]) -> Result<T, CsvError>,
-) -> Result<String, CsvError> {
+    mut cell_for: impl FnMut(&'a [String]) -> Result<T, E>,
+) -> Result<String, E> {
     write_expanded_column(header, records, name, |row| {
         cell_for(row).map(std::iter::once)
     })
 }
 
-fn write_expanded_column<'a, T: AsRef<str>, I: IntoIterator<Item = T>>(
+fn write_expanded_column<'a, T: AsRef<str>, I: IntoIterator<Item = T>, E: Copy + From<CsvError>>(
     header: &[String],
     records: &'a [Vec<String>],
     name: &str,
-    mut cells_for: impl FnMut(&'a [String]) -> Result<I, CsvError>,
-) -> Result<String, CsvError> {
+    mut cells_for: impl FnMut(&'a [String]) -> Result<I, E>,
+) -> Result<String, E> {
     if header.iter().any(|cell| cell == name) {
-        return Err(CsvError::HeaderNameConflict);
+        return Err(CsvError::HeaderNameConflict.into());
     }
     let mut output = String::new();
     append_bounded_csv_row(
@@ -3697,7 +3722,7 @@ fn write_expanded_column<'a, T: AsRef<str>, I: IntoIterator<Item = T>>(
             .iter()
             .map(String::as_str)
             .chain(std::iter::once(name)),
-        CsvError::AddedColumnTooLarge,
+        E::from(CsvError::AddedColumnTooLarge),
     )?;
     for row in records {
         for cell in cells_for(row)? {
@@ -3706,7 +3731,7 @@ fn write_expanded_column<'a, T: AsRef<str>, I: IntoIterator<Item = T>>(
                 row.iter()
                     .map(String::as_str)
                     .chain(std::iter::once(cell.as_ref())),
-                CsvError::AddedColumnTooLarge,
+                E::from(CsvError::AddedColumnTooLarge),
             )?;
         }
     }

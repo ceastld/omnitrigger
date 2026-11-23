@@ -553,6 +553,13 @@ impl ValueError {
             Self::DataPipeline(DataPipelineError::Arguments) => {
                 "填写 1 至 8 条单行命令，再粘贴要处理的数据"
             }
+            Self::DataPipeline(DataPipelineError::CsvColumnArguments) => {
+                "填写 [\"新列名\",源列,[\"步骤一\",\"步骤二\"]]，再粘贴含表头的 CSV"
+            }
+            Self::DataPipeline(DataPipelineError::Csv(error)) => error.message(),
+            Self::DataPipeline(DataPipelineError::CsvRowStep { row, index, cause }) => {
+                return format!("第 {row} 个数据行的第 {index} 步失败 · {cause}").into();
+            }
             Self::DataPipeline(DataPipelineError::RowStep { line, index, cause }) => {
                 return format!("第 {line} 行的第 {index} 步失败 · {cause}").into();
             }

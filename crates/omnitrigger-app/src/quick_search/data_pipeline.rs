@@ -4,7 +4,10 @@ use chrono::NaiveDate;
 
 use super::{
     calendar::calculate_date,
-    csv_tools::{append_bounded_csv_row, transform_csv},
+    csv_tools::{
+        append_bounded_csv_row, append_transformed_csv_column, transform_csv, ColumnReference,
+        CsvError,
+    },
     decibel::convert_decibels,
     duration::convert_duration,
     fraction::simplify_fraction,
@@ -30,6 +33,8 @@ const STEP_SYNTAX: &str =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
     Arguments,
+    CsvColumnArguments,
+    Csv(CsvError),
     Step {
         index: usize,
         cause: &'static str,
@@ -42,6 +47,17 @@ pub(super) enum DataPipelineError {
     RowOutputTooLarge {
         line: usize,
     },
+    CsvRowStep {
+        row: usize,
+        index: usize,
+        cause: &'static str,
+    },
+}
+
+impl From<CsvError> for DataPipelineError {
+    fn from(error: CsvError) -> Self {
+        Self::Csv(error)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,6 +66,14 @@ pub(super) enum DataPipelineMode {
     StepsCsv,
     Rows,
     RowsCsv,
+    ColumnCsv,
+}
+
+#[derive(Clone, Copy)]
+enum PipelineLocation {
+    Whole,
+    Line(usize),
+    CsvRow(usize),
 }
 
 pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
@@ -59,6 +83,7 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
         "步骤csv" | "steps-csv" => (DataPipelineMode::StepsCsv, arguments),
         "逐行" | "rows" => (DataPipelineMode::Rows, arguments),
         "逐行csv" | "rows-csv" => (DataPipelineMode::RowsCsv, arguments),
+        "csv列" | "csv-column" => (DataPipelineMode::ColumnCsv, arguments),
         _ => (DataPipelineMode::LastResult, input),
     }
 }
@@ -68,12 +93,34 @@ pub(super) fn transform_data_pipeline(
     today: NaiveDate,
 ) -> Result<String, DataPipelineError> {
     let (mode, input) = split_pipeline_input(input);
+    let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
+    if mode == DataPipelineMode::ColumnCsv {
+        let ((name, column, steps), source) =
+            json_argument_and_tail::<(String, ColumnReference, Vec<String>)>(input)
+                .ok_or(DataPipelineError::CsvColumnArguments)?;
+        if name.trim().is_empty()
+            || name.contains('\0')
+            || !(1..=MAX_PIPELINE_STEPS).contains(&steps.len())
+            || source.trim().is_empty()
+        {
+            return Err(DataPipelineError::CsvColumnArguments);
+        }
+        return append_transformed_csv_column(source, &name, column, |row, value| {
+            run_pipeline_steps(
+                &steps,
+                value,
+                today,
+                false,
+                PipelineLocation::CsvRow(row),
+                &mut remaining_work,
+            )
+        });
+    }
     let (steps, source) =
         json_argument_and_tail::<Vec<String>>(input).ok_or(DataPipelineError::Arguments)?;
     if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len()) || source.trim().is_empty() {
         return Err(DataPipelineError::Arguments);
     }
-    let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
     if matches!(mode, DataPipelineMode::Rows | DataPipelineMode::RowsCsv) {
         run_pipeline_rows(
             &steps,
@@ -88,7 +135,7 @@ pub(super) fn transform_data_pipeline(
             source,
             today,
             mode == DataPipelineMode::StepsCsv,
-            None,
+            PipelineLocation::Whole,
             &mut remaining_work,
         )
     }
@@ -112,7 +159,14 @@ fn run_pipeline_rows(
             continue;
         }
         let line = index + 1;
-        let output = run_pipeline_steps(steps, input, today, false, Some(line), remaining_work)?;
+        let output = run_pipeline_steps(
+            steps,
+            input,
+            today,
+            false,
+            PipelineLocation::Line(line),
+            remaining_work,
+        )?;
         let error = DataPipelineError::RowOutputTooLarge { line };
         if csv {
             append_bounded_csv_row(&mut result, [input, output.as_str()].into_iter(), error)?;
@@ -133,16 +187,17 @@ fn run_pipeline_steps(
     source: &str,
     today: NaiveDate,
     trace_steps: bool,
-    line: Option<usize>,
+    location: PipelineLocation,
     remaining_work: &mut usize,
 ) -> Result<String, DataPipelineError> {
     let mut current = Cow::Borrowed(source);
     let mut trace = trace_steps.then(|| String::from("步骤,命令,结果"));
     for (index, step) in steps.iter().enumerate() {
         let index = index + 1;
-        let error = |cause| match line {
-            Some(line) => DataPipelineError::RowStep { line, index, cause },
-            None => DataPipelineError::Step { index, cause },
+        let error = |cause| match location {
+            PipelineLocation::Whole => DataPipelineError::Step { index, cause },
+            PipelineLocation::Line(line) => DataPipelineError::RowStep { line, index, cause },
+            PipelineLocation::CsvRow(row) => DataPipelineError::CsvRowStep { row, index, cause },
         };
         if step.contains(['\r', '\n', '\0']) {
             return Err(error(STEP_SYNTAX));
@@ -194,7 +249,7 @@ fn run_pipeline_steps(
         }
         *remaining_work = remaining_work
             .checked_sub(output.len())
-            .ok_or_else(|| error("逐行处理中间结果合计超过 8 MiB，请缩小数据范围"))?;
+            .ok_or_else(|| error("中间结果合计超过 8 MiB，请缩小数据范围"))?;
         if let Some(trace) = &mut trace {
             let number = index.to_string();
             append_bounded_csv_row(
@@ -362,6 +417,43 @@ mod tests {
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn appends_csv_pipeline_results_without_changing_source_fields_or_blank_cells() {
+        let input = concat!(
+            r#"CSV列 ["精确金额","明细",["JSON: 取值 /金额","分数:"]]"#,
+            "\r\n编号,明细\r\n001,\"{\"\"金额\"\":0.50}\"\r\n002,\"{\"\"金额\"\":1.25}\"\r\n003,"
+        );
+        assert_eq!(
+            run_pipeline(input).as_deref(),
+            Ok(concat!(
+                "编号,明细,精确金额",
+                "\r\n001,\"{\"\"金额\"\":0.50}\",1/2",
+                "\r\n002,\"{\"\"金额\"\":1.25}\",5/4",
+                "\r\n003,\"\",\"\""
+            ))
+        );
+
+        let multiline = "csv-column [\"大写\",2,[\"文本: 大写\"]]\n编号,文本\n001,\"a,b\ncd\"";
+        assert_eq!(
+            run_pipeline(multiline).as_deref(),
+            Ok("编号,文本,大写\r\n001,\"a,b\ncd\",\"A,B\nCD\"")
+        );
+        assert!(matches!(
+            run_pipeline(
+                "csv-column [\"精确值\",2,[\"JSON: 取值 /金额\",\"分数:\"]]\n编号,文本\n001,\"{\n\"\"金额\"\":1\n}\"\n002,\n003,\"{\"\"金额\"\":null}\""
+            ),
+            Err(DataPipelineError::CsvRowStep { row: 3, index: 2, .. })
+        ));
+        assert_eq!(
+            run_pipeline("CSV列 [\"编号\",1,[\"文本: 大写\"]]\n编号\n001"),
+            Err(DataPipelineError::Csv(CsvError::HeaderNameConflict))
+        );
+        assert_eq!(
+            run_pipeline("CSV列 [\"大写\",3,[\"文本: 大写\"]]\n编号,文本\n001,abc"),
+            Err(DataPipelineError::Csv(CsvError::ColumnOutOfRange))
+        );
     }
 
     #[test]

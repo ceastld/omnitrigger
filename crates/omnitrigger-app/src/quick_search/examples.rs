@@ -32,7 +32,7 @@ impl Example {
         let scope = parse_scope(prefix)?;
         if scope == Scope::DataPipeline {
             let (_, arguments) = split_pipeline_input(input);
-            let (_, data) = json_argument_and_tail::<Vec<String>>(arguments)?;
+            let (_, data) = json_argument_and_tail::<Vec<serde::de::IgnoredAny>>(arguments)?;
             return (!data.is_empty()).then_some(self.query.len() - data.len());
         }
         let (operation, arguments) = input.trim_start().split_once(char::is_whitespace)?;
@@ -877,6 +877,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "逐条提取 JSON 金额并输出精确分数",
         query: "处理: 逐行CSV [\"JSON: 取值 /金额\",\"分数:\"]\n{\"金额\":0.50}\n{\"金额\":1.25}",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "逐个处理 CSV 单元格并添加精确金额列",
+        query: "处理: CSV列 [\"精确金额\",\"明细\",[\"JSON: 取值 /金额\",\"分数:\"]]\n编号,明细\n001,\"{\"\"金额\"\":0.50}\"\n002,\"{\"\"金额\"\":1.25}\"\n003,",
     },
     Example {
         icon: Icon::Browser,
@@ -4883,11 +4888,13 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::DataPipeline
-            if ["步骤csv", "逐行", "逐行csv"].into_iter().any(|operation| {
-                operation
-                    .get(..term.len())
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(term))
-            }) => {}
+            if ["步骤csv", "逐行", "逐行csv", "csv列"]
+                .into_iter()
+                .any(|operation| {
+                    operation
+                        .get(..term.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(term))
+                }) => {}
         Scope::Date
         | Scope::Duration
         | Scope::BatchConversion
@@ -5025,6 +5032,16 @@ mod tests {
             assert!(tool_operation_examples(scope, prefix).is_some());
             assert_eq!(tool_operation_examples(scope, with_argument), None);
         }
+    }
+
+    #[test]
+    fn selects_only_the_table_in_the_csv_column_pipeline_example() {
+        let items = tool_operation_examples(Scope::DataPipeline, "CSV列").unwrap();
+        assert_eq!(items.len(), 1);
+        let example = &EXAMPLES[items[0]];
+        let start = example.argument_start().unwrap();
+        assert!(example.query[..start].ends_with("\"分数:\"]]\n"));
+        assert!(example.query[start..].starts_with("编号,明细\n"));
     }
 
     #[test]
