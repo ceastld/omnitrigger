@@ -3309,6 +3309,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按部门计算最近两笔金额的分位数",
+        query: "CSV: 移动分位数列 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]\n部门,金额\n北,4\n南,8\n北,1\n南,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "给每个部门追加精确数值排名",
         query: "CSV: 排名列 [\"名次\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/2\n南,2\n北,3/2\n北,0.50\n南,1\n北,0",
     },

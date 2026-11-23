@@ -20,7 +20,10 @@ use serde::{
 };
 use serde_json::value::RawValue;
 
-use super::statistics::{parse_bin_edges, report_binned_unweighted, unweighted_box_fences};
+use super::statistics::{
+    interpolate_ordered_quantile, parse_bin_edges, parse_probability, report_binned_unweighted,
+    unweighted_box_fences,
+};
 use super::{
     calculator::normalize,
     calendar::{
@@ -134,6 +137,7 @@ pub(super) enum CsvError {
     GroupCountColumnArguments,
     ShiftedColumnArguments,
     MovingColumnArguments,
+    MovingQuantileColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
     StackArguments,
@@ -304,6 +308,9 @@ impl CsvError {
             }
             Self::MovingColumnArguments => {
                 "填写新列名、数值列、分组列和窗口大小，例如 [\"近两笔\",\"金额\",[\"部门\"],2]。窗口为 1 至 128"
+            }
+            Self::MovingQuantileColumnArguments => {
+                "填写新列名、数值列、分组列、窗口大小和分位概率，例如 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]"
             }
             Self::DataRowValue { cause, .. } => cause,
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
@@ -570,16 +577,22 @@ enum ColumnArithmetic {
     Formula(String),
 }
 
-#[derive(Clone, Copy)]
 enum RunningColumnComputation {
     Sum,
     Average,
     Difference,
     RelativeChange,
-    Moving { width: usize, average: bool },
+    Moving {
+        width: usize,
+        average: bool,
+    },
+    MovingQuantile {
+        width: usize,
+        probability: BigRational,
+    },
 }
 
-enum RunningColumnState {
+enum RunningColumnState<'a> {
     Accumulation(RunningTotals),
     Previous(Option<BigRational>),
     Moving {
@@ -587,6 +600,11 @@ enum RunningColumnState {
         sum: BigRational,
         width: usize,
         average: bool,
+    },
+    MovingQuantile {
+        values: VecDeque<BigRational>,
+        width: usize,
+        probability: &'a BigRational,
     },
 }
 
@@ -1236,6 +1254,28 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     width,
                     average: matches!(kind, "移动平均列" | "moving-average-column"),
                 },
+            }
+        }
+        "移动分位数列" | "moving-quantile-column" => {
+            let ((name, source, groups, width, probability), data) =
+                json_argument_and_data::<(
+                    String,
+                    ColumnReference,
+                    Vec<ColumnReference>,
+                    usize,
+                    String,
+                )>(input, CsvError::MovingQuantileColumnArguments)?;
+            if !(1..=MAX_VALUES).contains(&width) || name.trim().is_empty() || name.contains('\0') {
+                return Err(CsvError::MovingQuantileColumnArguments);
+            }
+            let probability =
+                parse_probability(probability.trim()).map_err(CsvError::Statistics)?;
+            input = data;
+            Operation::RunningColumn {
+                name,
+                source,
+                groups,
+                computation: RunningColumnComputation::MovingQuantile { width, probability },
             }
         }
         kind @ ("排名列"
@@ -3094,26 +3134,29 @@ fn running_column(
             .then(|| parse_fraction_literal(value))
             .transpose()
             .map_err(|error| error_at_row(error.message()))?;
-        let state =
-            group_states
-                .entry(column_key(row, &groups))
-                .or_insert_with(|| match computation {
-                    RunningColumnComputation::Difference
-                    | RunningColumnComputation::RelativeChange => {
-                        RunningColumnState::Previous(None)
+        let state = group_states
+            .entry(column_key(row, &groups))
+            .or_insert_with(|| match &computation {
+                RunningColumnComputation::Difference | RunningColumnComputation::RelativeChange => {
+                    RunningColumnState::Previous(None)
+                }
+                RunningColumnComputation::Sum | RunningColumnComputation::Average => {
+                    RunningColumnState::Accumulation(RunningTotals::default())
+                }
+                RunningColumnComputation::Moving { width, average } => RunningColumnState::Moving {
+                    values: VecDeque::new(),
+                    sum: BigRational::default(),
+                    width: *width,
+                    average: *average,
+                },
+                RunningColumnComputation::MovingQuantile { width, probability } => {
+                    RunningColumnState::MovingQuantile {
+                        values: VecDeque::new(),
+                        width: *width,
+                        probability,
                     }
-                    RunningColumnComputation::Sum | RunningColumnComputation::Average => {
-                        RunningColumnState::Accumulation(RunningTotals::default())
-                    }
-                    RunningColumnComputation::Moving { width, average } => {
-                        RunningColumnState::Moving {
-                            values: VecDeque::new(),
-                            sum: BigRational::default(),
-                            width,
-                            average,
-                        }
-                    }
-                });
+                }
+            });
         match state {
             RunningColumnState::Accumulation(total) => {
                 if let Some(value) = value {
@@ -3168,6 +3211,29 @@ fn running_column(
                 let mean = &*sum / BigInt::from(*width);
                 ensure_exact_size(&mean).map_err(|error| error_at_row(error.message()))?;
                 Ok(mean.to_string())
+            }
+            RunningColumnState::MovingQuantile {
+                values,
+                width,
+                probability,
+            } => {
+                let Some(value) = value else {
+                    return Ok(String::new());
+                };
+                if values.len() == *width {
+                    let _ = values.pop_front();
+                }
+                values.push_back(value);
+                if values.len() < *width {
+                    return Ok(String::new());
+                }
+                let mut ordered: Vec<_> = values.iter().collect();
+                ordered.sort_unstable();
+                let quantile = interpolate_ordered_quantile(*width as u64, probability, |rank| {
+                    ordered[rank as usize]
+                })
+                .map_err(|error| error_at_row(error.message()))?;
+                Ok(quantile.to_string())
             }
         }
     })
@@ -6540,6 +6606,29 @@ null"#
                 row: 3,
                 cause: StatisticsError::ZeroPreviousValue.message(),
             })
+        );
+    }
+
+    #[test]
+    fn appends_grouped_moving_quantiles_without_counting_blank_rows() {
+        assert_eq!(
+            transform_csv(
+                "移动分位数列 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]\n部门,金额\n北,4\n南,8\n北,1\n北,\n南,2\n北,3",
+            ).as_deref(),
+            Ok("部门,金额,P25\r\n北,4,\"\"\r\n南,8,\"\"\r\n北,1,7/4\r\n北,\"\",\"\"\r\n南,2,7/2\r\n北,3,3/2"),
+        );
+        assert_eq!(
+            transform_csv("moving-quantile-column [\"P100\",1,[],1,\"100%\"]\n金额\n-2/3")
+                .as_deref(),
+            Ok("金额,P100\r\n-2/3,-2/3"),
+        );
+        assert_eq!(
+            transform_csv("移动分位数列 [\"P25\",1,[],0,\"25%\"] 金额"),
+            Err(CsvError::MovingQuantileColumnArguments),
+        );
+        assert_eq!(
+            transform_csv("移动分位数列 [\"P25\",1,[],2,\"125%\"] 金额"),
+            Err(CsvError::Statistics(StatisticsError::InvalidProbability)),
         );
     }
 

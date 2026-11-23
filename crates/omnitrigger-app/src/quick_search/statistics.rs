@@ -1051,7 +1051,7 @@ fn contingency_table(input: &str, show_expected: bool) -> Result<String, Statist
     Ok(format!("χ² {chi_square}\n自由度 {degrees_of_freedom}"))
 }
 
-fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
+pub(super) fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
     let probability = if let Some(percent) = input.strip_suffix('%') {
         calculate_fraction(percent).map(|value| value / BigInt::from(100))
     } else {
@@ -1155,7 +1155,7 @@ fn interpolate_quantile(
     interpolate_ordered_quantile(count, probability, |rank| observation_at(values, rank))
 }
 
-fn interpolate_ordered_quantile<'a>(
+pub(super) fn interpolate_ordered_quantile<'a>(
     count: u64,
     probability: &BigRational,
     at_rank: impl Fn(u64) -> &'a BigRational,
