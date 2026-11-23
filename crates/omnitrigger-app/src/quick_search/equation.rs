@@ -129,7 +129,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
 
 fn expanded_equation_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
     let Some((left, right)) = input.split_once('=') else {
-        return expanded_polynomial(input, PolynomialForm::Quadratic);
+        return polynomial_expression(input, PolynomialForm::Quadratic);
     };
     move_polynomial_terms(left, right, PolynomialForm::Quadratic)
 }
@@ -145,13 +145,28 @@ fn move_polynomial_terms(
     right: &str,
     form: PolynomialForm,
 ) -> Result<[BigRational; 3], EquationError> {
-    let [a, b, c] = expanded_polynomial(left, form)?;
-    let [right_a, right_b, right_c] = expanded_polynomial(right, form)?;
+    let [a, b, c] = polynomial_expression(left, form)?;
+    let [right_a, right_b, right_c] = polynomial_expression(right, form)?;
     let coefficients = [a - right_a, b - right_b, c - right_c];
     for value in &coefficients {
         ensure_exact_size(value).map_err(EquationError::Evaluation)?;
     }
     Ok(coefficients)
+}
+
+fn polynomial_expression(
+    input: &str,
+    form: PolynomialForm,
+) -> Result<[BigRational; 3], EquationError> {
+    match expanded_polynomial(input, form) {
+        Err(EquationError::ExpressionArguments) if matches!(form, PolynomialForm::Quadratic) => {
+            factored_polynomial(input).map_err(|error| match error {
+                EquationError::ProductArguments => EquationError::ExpressionArguments,
+                _ => error,
+            })
+        }
+        result => result,
+    }
 }
 
 fn expanded_polynomial(
@@ -599,22 +614,17 @@ fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
 }
 
 fn expand_polynomial(input: &str) -> Result<String, EquationError> {
-    let coefficients = match function_coefficients(input) {
-        Err(EquationError::ExpressionArguments) => factored_polynomial(input)?,
-        result => result?,
-    };
+    let coefficients = function_coefficients(input).map_err(|error| match error {
+        EquationError::ExpressionArguments => EquationError::ProductArguments,
+        _ => error,
+    })?;
     let expression = format_polynomial_terms(coefficients, ["x²", "x", ""])?;
     Ok(format!("y = {expression}"))
 }
 
 fn factored_polynomial(input: &str) -> Result<[BigRational; 3], EquationError> {
     let invalid = EquationError::ProductArguments;
-    let input = match input.split_once('=') {
-        Some((name, expression)) if name.trim().eq_ignore_ascii_case("y") => expression,
-        Some(_) => return Err(invalid),
-        None => input,
-    }
-    .trim();
+    let input = input.trim();
     let (negative, input) = if let Some(input) = input.strip_prefix('-') {
         (true, input)
     } else {
@@ -1034,12 +1044,12 @@ fn function_coefficients(input: &str) -> Result<[BigRational; 3], EquationError>
         if !output.trim().eq_ignore_ascii_case("y") {
             return Err(EquationError::ExpressionArguments);
         }
-        return expanded_polynomial(expression, PolynomialForm::Quadratic);
+        return polynomial_expression(expression, PolynomialForm::Quadratic);
     }
     if split_top_level_commas(input).nth(1).is_some() {
         return coefficient_row(input);
     }
-    expanded_polynomial(input, PolynomialForm::Quadratic)
+    polynomial_expression(input, PolynomialForm::Quadratic)
 }
 
 fn coefficient_row(input: &str) -> Result<[BigRational; 3], EquationError> {
@@ -1191,6 +1201,23 @@ mod tests {
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn accepts_factored_inputs_in_equations_inequalities_and_function_tools() {
+        for (input, expected) in [
+            ("(2x - 1)(x - 2) = 0", "x₁ = 1/2 · x₂ = 2"),
+            ("不等式 (x-1)(x-2) < 0", "(1, 2)"),
+            ("定积分 y = (x - 1)^2 @ 0 到 2", "2/3"),
+            ("求导 (x+1)**2", "2x + 2"),
+            ("取系数 (x + 1)(x - 1) = x", "1,-1,-1"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            solve_equation("(x²+1)(x+1)=0"),
+            Err(EquationError::ProductDegree)
+        );
     }
 
     #[test]
@@ -1391,6 +1418,7 @@ mod tests {
             ("x ** 2 - 3*x + 2 = 0", "x₁ = 1 · x₂ = 2"),
             ("x² = 3*x - 2", "x₁ = 1 · x₂ = 2"),
             ("x² = 3×x - 2", "x₁ = 1 · x₂ = 2"),
+            ("(x + 1)*(x - 1) = 0", "x₁ = -1 · x₂ = 1"),
             ("x² = x×-3 - 2", "x₁ = -2 · x₂ = -1"),
             ("x²×(1/2) = 2", "x₁ = -2 · x₂ = 2"),
             ("X/2 + 1 = X", "x = 2"),
@@ -1403,7 +1431,6 @@ mod tests {
         }
         for invalid in [
             "x^3 = 1",
-            "(x + 1)*(x - 1) = 0",
             "x² = 0 = 2",
             "x² =",
             "x/2*3 = 1",

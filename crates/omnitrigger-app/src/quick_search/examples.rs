@@ -162,6 +162,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从因式乘积直接求根",
+        query: "方程: (2x - 1)(x - 2) = 0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用函数展开式直接求积分",
         query: "方程: 定积分 y = x**2 @ 0 到 2",
     },
