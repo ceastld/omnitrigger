@@ -361,6 +361,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "由两个函数值求区间平均变化率",
+        query: "方程: 平均变化率 x² @ 1..3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "估算计算器函数在一点处的二阶导数",
         query: "方程: 数值二阶导数 x² @ 2; 0.5",
     },
@@ -5621,6 +5626,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "数值面积",
             "数值弧长",
             "数值导数",
+            "平均变化率",
             "数值二阶导数",
             "导数采样",
             "导数采样图",

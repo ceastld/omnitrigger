@@ -69,6 +69,7 @@ pub(super) enum EquationError {
     NumericAreaArguments,
     NumericArcLengthArguments,
     NumericDerivativeArguments,
+    AverageRateArguments,
     NumericDerivativeStep,
     DerivativeSampleArguments,
     NumericExtremumArguments,
@@ -160,6 +161,9 @@ impl EquationError {
             }
             Self::NumericDerivativeArguments => {
                 "填写要估算导数的算式和横坐标，可在分号后填写正步长"
+            }
+            Self::AverageRateArguments => {
+                "填写函数算式和两个不同的横坐标，例如 x² @ 1..3"
             }
             Self::NumericDerivativeStep => "该步长下无法取到两个不同的有限横坐标",
             Self::DerivativeSampleArguments => {
@@ -297,6 +301,7 @@ fn solve_equation_text(
                 return format_function_samples(&integral_samples(arguments)?, "累计积分");
             }
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
+            "平均变化率" | "average-rate" => return function_average_rate(arguments),
             "数值二阶导数" | "numeric-second-derivative" => {
                 return numeric_second_derivative(arguments)
             }
@@ -1587,6 +1592,25 @@ fn format_bisection_result(
     let x = format_coordinate(x);
     let residual = format_result(residual).map_err(EquationError::Approximation)?;
     Ok(format!("x ≈ {x}\r\n残差 {residual_name} ≈ {residual}"))
+}
+
+fn function_average_rate(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::AverageRateArguments;
+    let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let [first_x, last_x] = function_endpoints(arguments, invalid)?;
+    let value_at = |x| evaluate_at_x(expression, x).map_err(EquationError::Approximation);
+    let first_y = value_at(first_x)?;
+    let last_y = value_at(last_x)?;
+    let slope = difference_quotient(first_x, last_x, first_y, last_y);
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    Ok(format!(
+        "平均变化率 ≈ {}\r\nx = {} → {}\r\nf(x) = {} → {}",
+        display(slope)?,
+        format_coordinate(first_x),
+        format_coordinate(last_x),
+        display(first_y)?,
+        display(last_y)?
+    ))
 }
 
 fn numeric_derivative(input: &str) -> Result<String, EquationError> {
@@ -3014,6 +3038,28 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn finds_the_secant_slope_in_either_endpoint_order() {
+        assert_eq!(
+            solve_equation("平均变化率 f(x)=x² @ 3..1").as_deref(),
+            Ok("平均变化率 ≈ 4\r\nx = 3 → 1\r\nf(x) = 9 → 1")
+        );
+        assert_eq!(
+            solve_equation("average-rate x @ -1e308..1e308").as_deref(),
+            Ok("平均变化率 ≈ 1\r\nx = -1e308 → 1e308\r\nf(x) = -1e308 → 1e308")
+        );
+        assert_eq!(
+            solve_equation("平均变化率 x @ 1..1"),
+            Err(EquationError::AverageRateArguments)
+        );
+        assert_eq!(
+            solve_equation("平均变化率 sqrt(x) @ -1..1"),
+            Err(EquationError::Approximation(
+                CalculationError::FunctionDomain
+            ))
         );
     }
 
