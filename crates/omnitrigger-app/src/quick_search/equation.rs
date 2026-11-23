@@ -55,6 +55,7 @@ pub(super) enum EquationError {
     FunctionComparisonPlotArguments,
     ParametricSampleArguments,
     ParametricPlotHasNoPoints,
+    PolarSampleArguments,
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
@@ -124,6 +125,9 @@ impl EquationError {
                 "按 x、y 的顺序填写两个带 t 的算式，再填两个不同的端点和可选的 2 至 129 个采样点"
             }
             Self::ParametricPlotHasNoPoints => "该区间没有横坐标和纵坐标均有限的采样点",
+            Self::PolarSampleArguments => {
+                "填写以 t 为弧度角的半径算式，再填两个不同的端点和可选的 2 至 129 个采样点"
+            }
             Self::BisectionArguments => {
                 "填写要求零点的算式或等式和两个不同的端点，例如 cos(x)=x @ 0 到 1"
             }
@@ -204,6 +208,9 @@ fn solve_equation_table(operation: &str, arguments: &str) -> Option<Result<Strin
         "参数采样" | "sample-parametric" => {
             parametric_samples(arguments).and_then(|samples| format_parametric_samples(&samples))
         }
+        "极坐标采样" | "sample-polar" => {
+            polar_samples(arguments).and_then(|samples| format_polar_samples(&samples))
+        }
         "积分采样" | "sample-integral" => integral_samples(arguments)
             .and_then(|samples| format_function_samples(&samples, "累计积分")),
         "导数采样" | "sample-derivative" => derivative_samples(arguments)
@@ -267,6 +274,9 @@ fn solve_equation_text(
             }
             "参数图" | "parametric-plot" => {
                 return format_parametric_samples(&parametric_samples(arguments)?);
+            }
+            "极坐标图" | "polar-plot" => {
+                return format_polar_samples(&polar_samples(arguments)?);
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
@@ -684,6 +694,7 @@ pub(super) fn equation_chart(input: &str) -> Option<Result<(String, ScatterPlot)
         "积分采样图" | "integral-plot" => Some(plot_sampled_integral(arguments)),
         "函数对照图" | "compare-function-plot" => Some(plot_function_comparison(arguments)),
         "参数图" | "parametric-plot" => Some(plot_parametric_samples(arguments)),
+        "极坐标图" | "polar-plot" => Some(plot_polar_samples(arguments)),
         _ => None,
     }
 }
@@ -792,16 +803,32 @@ fn plot_function_comparison(input: &str) -> Result<(String, ScatterPlot), Equati
 fn plot_parametric_samples(input: &str) -> Result<(String, ScatterPlot), EquationError> {
     let input = normalize_equation(input)?;
     let samples = parametric_samples(&input)?;
+    let points = samples.iter().filter_map(|sample| sample.x.zip(sample.y));
+    let plot = plot_sampled_coordinates(points, samples.len())?;
+    Ok((format_parametric_samples(&samples)?, plot))
+}
+
+fn plot_polar_samples(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let samples = polar_samples(&input)?;
     let points = samples
         .iter()
-        .filter_map(|sample| sample.x.zip(sample.y))
+        .filter_map(|sample| sample.radius_and_point.map(|[_, x, y]| (x, y)));
+    let plot = plot_sampled_coordinates(points, samples.len())?;
+    Ok((format_polar_samples(&samples)?, plot))
+}
+
+fn plot_sampled_coordinates(
+    points: impl Iterator<Item = (f64, f64)>,
+    requested: usize,
+) -> Result<ScatterPlot, EquationError> {
+    let points = points
         .map(|(x, y)| Ok((sample_rational(x)?, sample_rational(y)?)))
         .collect::<Result<Vec<_>, EquationError>>()?;
     if points.is_empty() {
         return Err(EquationError::ParametricPlotHasNoPoints);
     }
-    let plot = ScatterPlot::from_parametric_samples(&points, samples.len());
-    Ok((format_parametric_samples(&samples)?, plot))
+    Ok(ScatterPlot::from_parametric_samples(&points, requested))
 }
 
 fn sample_rational(value: f64) -> Result<BigRational, EquationError> {
@@ -1094,19 +1121,12 @@ fn parametric_samples(input: &str) -> Result<Vec<ParametricSample>, EquationErro
 }
 
 fn format_parametric_samples(samples: &[ParametricSample]) -> Result<String, EquationError> {
-    let display = |value: Option<f64>| {
-        value
-            .map(format_result)
-            .transpose()
-            .map(Option::unwrap_or_default)
-            .map_err(EquationError::Approximation)
-    };
     let mut csv = String::from("t,x,y");
     for sample in samples {
         let row = [
             format_coordinate(sample.t),
-            display(sample.x)?,
-            display(sample.y)?,
+            format_optional_sample_value(sample.x)?,
+            format_optional_sample_value(sample.y)?,
         ];
         append_bounded_csv_row(
             &mut csv,
@@ -1115,6 +1135,61 @@ fn format_parametric_samples(samples: &[ParametricSample]) -> Result<String, Equ
         )?;
     }
     Ok(csv)
+}
+
+struct PolarSample {
+    t: f64,
+    radius_and_point: Option<[f64; 3]>,
+}
+
+fn polar_samples(input: &str) -> Result<Vec<PolarSample>, EquationError> {
+    let invalid = EquationError::PolarSampleArguments;
+    let (radius, bounds) = input.split_once('@').ok_or(invalid)?;
+    if radius.trim().is_empty() {
+        return Err(invalid);
+    }
+    sampled_coordinates(bounds, invalid)?
+        .map(|t| {
+            let radius = sample_at_t(radius, t).map_err(EquationError::Approximation)?;
+            let radius_and_point = radius.map(|radius| {
+                let (sin, cos) = t.sin_cos();
+                [radius, radius * cos, radius * sin]
+            });
+            Ok(PolarSample {
+                t,
+                radius_and_point,
+            })
+        })
+        .collect()
+}
+
+fn format_polar_samples(samples: &[PolarSample]) -> Result<String, EquationError> {
+    let mut csv = String::from("t,r,x,y");
+    for sample in samples {
+        let [radius, x, y] = sample
+            .radius_and_point
+            .map_or([None; 3], |values| values.map(Some));
+        let row = [
+            format_coordinate(sample.t),
+            format_optional_sample_value(radius)?,
+            format_optional_sample_value(x)?,
+            format_optional_sample_value(y)?,
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            row.iter().map(String::as_str),
+            EquationError::PolarSampleArguments,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn format_optional_sample_value(value: Option<f64>) -> Result<String, EquationError> {
+    value
+        .map(format_result)
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(EquationError::Approximation)
 }
 
 fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
@@ -2883,6 +2958,23 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn samples_polar_curves_with_radian_angles_and_signed_radii() {
+        let command = "极坐标图 1+cos(t) @ 0..2*pi; 65";
+        let (csv, plot) = equation_chart(command).unwrap().unwrap();
+        assert_eq!(plot.point_count(), 65);
+        assert!(csv.starts_with("t,r,x,y\r\n0,2,2,0\r\n"));
+        assert_eq!(csv, solve_equation(command).unwrap());
+        let samples = solve_equation("极坐标采样 sqrt(t) @ -1..1; 3").unwrap();
+        assert!(samples.starts_with("t,r,x,y\r\n-1,\"\",\"\",\"\"\r\n0,0,0,0\r\n"));
+        let signed = solve_equation("sample-polar -2 @ 0..1; 2").unwrap();
+        assert!(signed.starts_with("t,r,x,y\r\n0,-2,-2,0\r\n"));
+        assert_eq!(
+            solve_equation("极坐标采样 @ 0..1"),
+            Err(EquationError::PolarSampleArguments)
         );
     }
 

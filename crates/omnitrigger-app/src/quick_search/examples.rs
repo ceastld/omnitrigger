@@ -306,6 +306,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "由半径算式绘制极坐标曲线",
+        query: "方程: 极坐标图 1+cos(t) @ 0..2*pi; 65",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看极角、半径和对应的平面坐标",
+        query: "方程: 极坐标采样 2*cos(3*t) @ 0..2*pi; 9",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用二分法求连续函数的一个近似零点",
         query: "方程: 二分求根 cos(x)-x @ 0 到 1",
     },
@@ -5591,6 +5601,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "函数对照图",
             "参数采样",
             "参数图",
+            "极坐标图",
+            "极坐标采样",
             "二分求根",
             "数值积分",
             "积分对照",
