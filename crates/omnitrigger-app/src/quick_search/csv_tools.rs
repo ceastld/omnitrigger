@@ -7,7 +7,7 @@ use std::{
 };
 
 use chrono::{
-    format::{parse, Parsed, StrftimeItems},
+    format::{parse, Item, Parsed, StrftimeItems},
     Datelike, NaiveDate,
 };
 use num_bigint::{BigInt, Sign};
@@ -165,6 +165,10 @@ pub(super) enum CsvError {
     InvalidNumber,
     NumericIssuesTooLarge,
     DateIssuesTooLarge,
+    DatePatternCheckArguments,
+    LengthCheckArguments,
+    HeaderCheckArguments,
+    HeaderCheckTooLarge,
     RegexCheckColumnsArguments,
     RegexCheckColumnsInputTooLarge,
     RegexIssuesTooLarge,
@@ -367,6 +371,10 @@ impl CsvError {
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::NumericIssuesTooLarge => "数值列检查结果超过 1 MiB，请缩小表格范围",
             Self::DateIssuesTooLarge => "日期列检查结果超过 1 MiB，请缩小表格范围",
+            Self::DatePatternCheckArguments => "填写列名或列号列表和日期格式",
+            Self::LengthCheckArguments => "填写列列表和 [长度单位,最小长度,最大长度]，最小长度不能大于最大长度",
+            Self::HeaderCheckArguments => "用非空的 JSON 字符串数组填写预期列名和顺序",
+            Self::HeaderCheckTooLarge => "表头检查结果超过 1 MiB，请缩小表格范围",
             Self::RegexCheckColumnsArguments => "填写列名或列号列表和正则表达式",
             Self::RegexCheckColumnsInputTooLarge => "所选列的文本合计超过 16 KiB，请缩小表格范围",
             Self::RegexIssuesTooLarge => "正则检查结果超过 1 MiB，请缩小表格范围",
@@ -421,6 +429,8 @@ enum TextComparison {
 enum ColumnValidation {
     Number,
     Date,
+    DatePattern(Vec<Item<'static>>),
+    LengthRange(TextLengthUnit, usize, usize),
     Pattern(Regex),
     NumericRange {
         lower: BigRational,
@@ -436,6 +446,7 @@ enum ColumnRuleInput {
     Simple(ColumnReference, String),
     Pattern(ColumnReference, String, String),
     Allowed(ColumnReference, String, Vec<String>),
+    Length(ColumnReference, String, (String, usize, usize)),
     Range(ColumnReference, String, String, String),
 }
 
@@ -446,6 +457,24 @@ enum ColumnRuleOutput {
 }
 
 impl ColumnValidation {
+    fn length_range((unit, lower, upper): (String, usize, usize)) -> Result<Self, CsvError> {
+        let unit = TextLengthUnit::parse(&unit).ok_or(CsvError::LengthCheckArguments)?;
+        if lower > upper {
+            return Err(CsvError::LengthCheckArguments);
+        }
+        Ok(Self::LengthRange(unit, lower, upper))
+    }
+
+    fn date_pattern(pattern: &str) -> Result<Self, CsvError> {
+        if pattern.is_empty() || pattern.contains('\0') {
+            return Err(CsvError::DateFormatColumnPattern);
+        }
+        StrftimeItems::new(pattern)
+            .parse_to_owned()
+            .map(Self::DatePattern)
+            .map_err(|_| CsvError::DateFormatColumnPattern)
+    }
+
     fn allowed_values(values: Vec<String>) -> Option<Self> {
         let count = values.len();
         let values: HashSet<_> = values.into_iter().collect();
@@ -462,6 +491,8 @@ impl ColumnValidation {
         match self {
             Self::Number => "数值",
             Self::Date => "日期",
+            Self::DatePattern(_) => "日期格式",
+            Self::LengthRange(..) => "长度范围",
             Self::Pattern(_) => "正则",
             Self::NumericRange { .. } => "数值范围",
             Self::AllowedValues(_) => "允许值",
@@ -473,6 +504,9 @@ impl ColumnValidation {
         match self {
             Self::Number => parse_fraction_literal(cell).is_ok(),
             Self::Date => parse_complete_date(cell).is_ok(),
+            Self::DatePattern(items) => parse_formatted_date(cell.trim(), items)
+                .is_ok_and(|date| (0..=9999).contains(&date.year())),
+            Self::LengthRange(unit, lower, upper) => (*lower..=*upper).contains(&unit.count(cell)),
             Self::Pattern(pattern) => pattern.is_match(cell),
             Self::AllowedValues(values) => values.contains(cell),
             Self::Json => serde_json::from_str::<&RawValue>(cell).is_ok(),
@@ -504,6 +538,7 @@ enum Operation {
     FillEmptyCells(Vec<ColumnReference>, FillDirection),
     InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
+    CheckHeader(Vec<String>),
     CheckColumns(Vec<ColumnReference>, ColumnValidation),
     CheckColumnRules(Vec<(ColumnReference, ColumnValidation)>, ColumnRuleOutput),
     RoundColumns {
@@ -982,6 +1017,39 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             };
             Operation::CheckColumns(columns, validation)
         }
+        "检查表头" | "check-header" => {
+            let invalid = CsvError::HeaderCheckArguments;
+            let (expected, data) = json_argument_and_data::<Vec<String>>(input, invalid)?;
+            if expected.is_empty() {
+                return Err(invalid);
+            }
+            input = data;
+            Operation::CheckHeader(expected)
+        }
+        "检查长度范围" | "check-length-range" => {
+            let invalid = CsvError::LengthCheckArguments;
+            let ((columns, bounds), data) = json_argument_and_data::<(
+                Vec<ColumnReference>,
+                (String, usize, usize),
+            )>(input, invalid)?;
+            if columns.is_empty() {
+                return Err(invalid);
+            }
+            let validation = ColumnValidation::length_range(bounds)?;
+            input = data;
+            Operation::CheckColumns(columns, validation)
+        }
+        "检查日期格式" | "check-date-format" => {
+            let invalid = CsvError::DatePatternCheckArguments;
+            let ((columns, pattern), data) =
+                json_argument_and_data::<(Vec<ColumnReference>, String)>(input, invalid)?;
+            if columns.is_empty() {
+                return Err(invalid);
+            }
+            let validation = ColumnValidation::date_pattern(&pattern)?;
+            input = data;
+            Operation::CheckColumns(columns, validation)
+        }
         "检查正则列" | "check-regex-columns" => {
             let ((columns, pattern), data) =
                 json_argument_and_data::<(Vec<ColumnReference>, String)>(
@@ -1045,6 +1113,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                         let pattern = compile_regex(&pattern).map_err(CsvError::Regex)?;
                         Ok((column, ColumnValidation::Pattern(pattern)))
                     }
+                    ColumnRuleInput::Pattern(column, kind, pattern)
+                        if kind == "日期格式" || kind.eq_ignore_ascii_case("date-format") =>
+                    {
+                        Ok((column, ColumnValidation::date_pattern(&pattern)?))
+                    }
                     ColumnRuleInput::Range(column, kind, lower, upper)
                         if kind == "数值范围" || kind.eq_ignore_ascii_case("numeric-range") =>
                     {
@@ -1059,6 +1132,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                             column,
                             ColumnValidation::allowed_values(values).ok_or(invalid)?,
                         ))
+                    }
+                    ColumnRuleInput::Length(column, kind, bounds)
+                        if kind == "长度范围" || kind.eq_ignore_ascii_case("length-range") =>
+                    {
+                        Ok((column, ColumnValidation::length_range(bounds)?))
                     }
                     _ => Err(invalid),
                 })
@@ -1990,6 +2068,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             interpolate_empty_csv_cells(&rows, column, &groups)
         }
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
+        Operation::CheckHeader(expected) => check_header(&rows, &expected),
         Operation::CheckColumns(columns, validation) => check_columns(&rows, &columns, &validation),
         Operation::CheckColumnRules(rules, output) => check_column_rules(&rows, &rules, output),
         Operation::RoundColumns {
@@ -3028,6 +3107,36 @@ fn round_csv_columns(
     Ok(output)
 }
 
+fn check_header(rows: &[Vec<String>], expected: &[String]) -> Result<String, CsvError> {
+    let actual = rows.first().ok_or(CsvError::MissingInput)?;
+    let mut output = String::from("列号,问题,预期列名,实际列名");
+    for column in 0..actual.len().max(expected.len()) {
+        let wanted = expected.get(column).map(String::as_str);
+        let found = actual.get(column).map(String::as_str);
+        if wanted == found {
+            continue;
+        }
+        let issue = match (wanted, found) {
+            (None, _) => "多余列",
+            (_, None) => "缺少列",
+            _ => "列名不同",
+        };
+        let number = (column + 1).to_string();
+        append_bounded_csv_row(
+            &mut output,
+            [
+                number.as_str(),
+                issue,
+                wanted.unwrap_or_default(),
+                found.unwrap_or_default(),
+            ]
+            .into_iter(),
+            CsvError::HeaderCheckTooLarge,
+        )?;
+    }
+    Ok(output)
+}
+
 fn check_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -3039,8 +3148,9 @@ fn check_columns(
         ColumnValidation::Number | ColumnValidation::NumericRange { .. } => {
             CsvError::NumericIssuesTooLarge
         }
-        ColumnValidation::Date => CsvError::DateIssuesTooLarge,
+        ColumnValidation::Date | ColumnValidation::DatePattern(_) => CsvError::DateIssuesTooLarge,
         ColumnValidation::Pattern(_) => CsvError::RegexIssuesTooLarge,
+        ColumnValidation::LengthRange(..) => CsvError::ValidationRulesTooLarge,
         ColumnValidation::AllowedValues(_) | ColumnValidation::Json => {
             CsvError::ValidationRulesTooLarge
         }
@@ -3372,6 +3482,12 @@ fn first_nonempty_csv_column(
     })
 }
 
+fn parse_formatted_date(text: &str, items: &[Item<'_>]) -> Result<NaiveDate, chrono::ParseError> {
+    let mut parsed = Parsed::new();
+    parse(&mut parsed, text, items.iter())?;
+    parsed.to_naive_date()
+}
+
 fn date_pattern_column(
     rows: &[Vec<String>],
     name: &str,
@@ -3413,10 +3529,8 @@ fn date_pattern_column(
             cause,
         };
         if parse_input {
-            let mut parsed = Parsed::new();
-            let date = parse(&mut parsed, text, items.iter())
-                .and_then(|()| parsed.to_naive_date())
-                .map_err(|_| data_error("日期不符合指定格式"))?;
+            let date =
+                parse_formatted_date(text, &items).map_err(|_| data_error("日期不符合指定格式"))?;
             if !(0..=9999).contains(&date.year()) {
                 return Err(data_error("年份须在 0000 至 9999 之间"));
             }
@@ -5226,6 +5340,69 @@ mod tests {
         assert_eq!(
             transform_csv("检查规则 [[1,\"JSON\"]] 数据\nfalse\n普通文本").as_deref(),
             Ok("数据行,列号,列名,规则号,规则,内容\r\n2,1,数据,1,JSON,普通文本"),
+        );
+    }
+
+    #[test]
+    fn checks_header_order_and_distinguishes_missing_from_empty_names() {
+        let cases = [
+            (
+                r#"["编号","金额",""] 金额,编号"#,
+                "1,列名不同,编号,金额\r\n2,列名不同,金额,编号\r\n3,缺少列,\"\",\"\"",
+            ),
+            (r#"["编号"] 编号,"需,确认""#, "2,多余列,\"\",\"需,确认\""),
+            (r#"["编号",""] 编号,"#, ""),
+        ];
+        for (input, issues) in cases {
+            let mut expected = String::from("列号,问题,预期列名,实际列名");
+            if !issues.is_empty() {
+                expected.push_str("\r\n");
+                expected.push_str(issues);
+            }
+            assert_eq!(
+                transform_csv(&format!("检查表头 {input}")).as_deref(),
+                Ok(expected.as_str()),
+            );
+        }
+        assert_eq!(
+            transform_csv("检查表头 [] 编号"),
+            Err(CsvError::HeaderCheckArguments),
+        );
+    }
+
+    #[test]
+    fn checks_inclusive_text_lengths_in_the_selected_unicode_unit() {
+        let table = "编号,备注\nA,👩‍💻\nB,e\u{301}\nC,北京\nD,";
+        assert_eq!(
+            transform_csv(&format!(r#"检查长度范围 [["备注"],["字素",1,1]] {table}"#)).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n3,2,备注,北京\r\n4,2,备注,\"\""),
+        );
+        assert_eq!(
+            transform_csv("检查规则 [[2,\"长度范围\",[\"UTF-8 字节\",0,5]]] 编号,备注\nA,北京\nB,")
+                .as_deref(),
+            Ok("数据行,列号,列名,规则号,规则,内容\r\n1,2,备注,1,长度范围,北京"),
+        );
+        assert_eq!(
+            transform_csv(r#"检查长度范围 [[1],["字素",3,1]] 备注"#),
+            Err(CsvError::LengthCheckArguments),
+        );
+    }
+
+    #[test]
+    fn checks_dates_by_the_given_format_and_preserves_invalid_cells() {
+        let query = "检查日期格式 [[\"日期\"],\"%d/%m/%Y\"] 编号,日期\nA,29/02/2024\nB,29/02/2023\nC,2024-02-29\nD,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n2,2,日期,29/02/2023\r\n3,2,日期,2024-02-29\r\n4,2,日期,\"\""),
+        );
+        assert_eq!(
+            transform_csv("check-rules [[1,\"date-format\",\"%Y-%j\"]] 日期\n2024-366\n2023-366")
+                .as_deref(),
+            Ok("数据行,列号,列名,规则号,规则,内容\r\n2,1,日期,1,日期格式,2023-366"),
+        );
+        assert_eq!(
+            transform_csv(r#"检查日期格式 [[1],"%Q"] 日期"#),
+            Err(CsvError::DateFormatColumnPattern),
         );
     }
 

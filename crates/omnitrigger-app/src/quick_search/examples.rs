@@ -3663,6 +3663,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按指定日期格式检查表格",
+        query: "CSV: 检查日期格式 [[\"日期\"],\"%d/%m/%Y\"] 编号,日期\nA,29/02/2024\nB,29/02/2023\nC,2024-02-29",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "定位文字长度超过限制的单元格",
+        query: "CSV: 检查长度范围 [[\"备注\"],[\"UTF-8 字节\",0,5]] 编号,备注\nA,茶\nB,北京\nC,",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "检查 CSV 表头的列名和顺序",
+        query: "CSV: 检查表头 [\"编号\",\"金额\",\"备注\"] 金额,编号\n29,001",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位不符合正则规则的单元格",
         query: "CSV: 检查正则列 [[\"编号\"],\"^[A-Z][0-9]{2}$\"] 编号,状态\nA01,通过\nB7,待复核\n,未知\nC23,完成",
     },
