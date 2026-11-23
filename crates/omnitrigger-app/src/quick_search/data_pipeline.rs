@@ -12,7 +12,7 @@ use super::{
     decibel::convert_decibels,
     duration::convert_duration,
     fraction::simplify_fraction,
-    json_tools::transform_json,
+    json_tools::{read_json_array, transform_json, JsonError},
     operators::json_argument_and_tail,
     path_tools::path_component,
     pitch::convert_pitch,
@@ -36,6 +36,7 @@ pub(super) enum DataPipelineError {
     Arguments,
     CsvColumnArguments,
     Csv(CsvError),
+    Json(JsonError),
     Step {
         index: usize,
         cause: &'static str,
@@ -53,6 +54,14 @@ pub(super) enum DataPipelineError {
         index: usize,
         cause: &'static str,
     },
+    JsonItemStep {
+        item: usize,
+        index: usize,
+        cause: &'static str,
+    },
+    JsonArrayTooLarge {
+        item: usize,
+    },
 }
 
 impl From<CsvError> for DataPipelineError {
@@ -68,6 +77,7 @@ pub(super) enum DataPipelineMode {
     Rows,
     RowsCsv,
     ColumnCsv,
+    JsonArray,
 }
 
 #[derive(Clone, Copy)]
@@ -75,6 +85,7 @@ enum PipelineLocation {
     Whole,
     Line(usize),
     CsvRow(usize),
+    JsonItem(usize),
 }
 
 pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
@@ -85,6 +96,7 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
         "逐行" | "rows" => (DataPipelineMode::Rows, arguments),
         "逐行csv" | "rows-csv" => (DataPipelineMode::RowsCsv, arguments),
         "csv列" | "csv-column" => (DataPipelineMode::ColumnCsv, arguments),
+        "json数组" | "json-array" => (DataPipelineMode::JsonArray, arguments),
         _ => (DataPipelineMode::LastResult, input),
     }
 }
@@ -122,7 +134,9 @@ pub(super) fn transform_data_pipeline(
     if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len()) || source.trim().is_empty() {
         return Err(DataPipelineError::Arguments);
     }
-    if matches!(mode, DataPipelineMode::Rows | DataPipelineMode::RowsCsv) {
+    if mode == DataPipelineMode::JsonArray {
+        run_pipeline_json_array(&steps, source.trim_start(), today, &mut remaining_work)
+    } else if matches!(mode, DataPipelineMode::Rows | DataPipelineMode::RowsCsv) {
         run_pipeline_rows(
             &steps,
             source,
@@ -140,6 +154,46 @@ pub(super) fn transform_data_pipeline(
             &mut remaining_work,
         )
     }
+}
+
+fn run_pipeline_json_array(
+    steps: &[String],
+    source: &str,
+    today: NaiveDate,
+    remaining_work: &mut usize,
+) -> Result<String, DataPipelineError> {
+    let values = read_json_array(source).map_err(DataPipelineError::Json)?;
+    let mut result = String::from("[");
+    for (index, value) in values.into_iter().enumerate() {
+        let item = index + 1;
+        let raw = value.get();
+        let input = if raw.starts_with('"') {
+            Cow::Owned(
+                serde_json::from_str::<String>(raw)
+                    .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?,
+            )
+        } else {
+            Cow::Borrowed(raw)
+        };
+        let text = run_pipeline_steps(
+            steps,
+            &input,
+            today,
+            false,
+            PipelineLocation::JsonItem(item),
+            remaining_work,
+        )?;
+        let encoded = serde_json::to_string(&text)
+            .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?;
+        let separator = if index == 0 { "" } else { "," };
+        if result.len() + separator.len() + encoded.len() + 1 > MAX_PIPELINE_OUTPUT_BYTES {
+            return Err(DataPipelineError::JsonArrayTooLarge { item });
+        }
+        result.push_str(separator);
+        result.push_str(&encoded);
+    }
+    result.push(']');
+    Ok(result)
 }
 
 fn run_pipeline_rows(
@@ -199,6 +253,9 @@ fn run_pipeline_steps(
             PipelineLocation::Whole => DataPipelineError::Step { index, cause },
             PipelineLocation::Line(line) => DataPipelineError::RowStep { line, index, cause },
             PipelineLocation::CsvRow(row) => DataPipelineError::CsvRowStep { row, index, cause },
+            PipelineLocation::JsonItem(item) => {
+                DataPipelineError::JsonItemStep { item, index, cause }
+            }
         };
         if step.contains(['\r', '\n', '\0']) {
             return Err(error(STEP_SYNTAX));
@@ -435,6 +492,41 @@ mod tests {
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn processes_json_array_members_in_order_using_the_original_numeric_text() {
+        for (input, expected) in [
+            (
+                r#"JSON数组 ["JSON: 取值 /金额","分数:"] [{"金额":0.50},{"金额":1.25}]"#,
+                r#"["1/2","5/4"]"#,
+            ),
+            (
+                r#"json-array ["文本: 大写"] ["a\nb","001",9007199254740993,1.20,null]"#,
+                r#"["A\nB","001","9007199254740993","1.20","NULL"]"#,
+            ),
+            (r#"JSON数组 ["文本: 大写"] []"#, "[]"),
+        ] {
+            assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            run_pipeline(r#"JSON数组 ["分数:"] {"金额":1}"#),
+            Err(DataPipelineError::Json(JsonError::ExpectedArray))
+        );
+        assert!(matches!(
+            run_pipeline(r#"JSON数组 ["JSON: 取值 /金额","分数:"] [{"金额":1},{"金额":null}]"#),
+            Err(DataPipelineError::JsonItemStep {
+                item: 2,
+                index: 2,
+                ..
+            })
+        ));
+        let value = "a".repeat(MAX_PIPELINE_OUTPUT_BYTES / 2);
+        let input = format!(r#"JSON数组 ["文本: 大写"] ["{value}","{value}"]"#);
+        assert_eq!(
+            run_pipeline(&input),
+            Err(DataPipelineError::JsonArrayTooLarge { item: 2 })
+        );
     }
 
     #[test]

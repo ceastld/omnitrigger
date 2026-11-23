@@ -558,8 +558,15 @@ impl ValueError {
                 "填写 [\"新列名\",源列,[\"步骤一\",\"步骤二\"]]，再粘贴含表头的 CSV"
             }
             Self::DataPipeline(DataPipelineError::Csv(error)) => error.message(),
+            Self::DataPipeline(DataPipelineError::Json(error)) => error.message(),
             Self::DataPipeline(DataPipelineError::CsvRowStep { row, index, cause }) => {
                 return format!("第 {row} 个数据行的第 {index} 步失败 · {cause}").into();
+            }
+            Self::DataPipeline(DataPipelineError::JsonItemStep { item, index, cause }) => {
+                return format!("第 {item} 个数组元素的第 {index} 步失败 · {cause}").into();
+            }
+            Self::DataPipeline(DataPipelineError::JsonArrayTooLarge { item }) => {
+                return format!("第 {item} 个数组元素使结果超过 1 MiB，请缩小数据范围").into();
             }
             Self::DataPipeline(DataPipelineError::RowStep { line, index, cause }) => {
                 return format!("第 {line} 行的第 {index} 步失败 · {cause}").into();

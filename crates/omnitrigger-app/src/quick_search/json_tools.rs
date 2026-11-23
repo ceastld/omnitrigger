@@ -1446,7 +1446,7 @@ fn select_pointer_keys<'a>(item: &'a RawValue, keys: &[String]) -> Result<&'a Ra
         .try_fold(item, |value, key| select_member(value, key))
 }
 
-fn read_json_array(source: &str) -> Result<Vec<&RawValue>, JsonError> {
+pub(super) fn read_json_array(source: &str) -> Result<Vec<&RawValue>, JsonError> {
     if !source.starts_with('[') {
         serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
         return Err(JsonError::ExpectedArray);
