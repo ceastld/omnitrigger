@@ -972,6 +972,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "精确换算不同进制的小数",
+        query: "进制: 小数 10.625 从 10 到 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把罗马数字转换为十进制整数",
         query: "进制: 罗马数字 CDXCIX",
     },
@@ -4369,6 +4374,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "字节倒序",
             "表格列号",
             "罗马数字",
+            "小数",
         ],
         Scope::Duration => &[
             "合计",

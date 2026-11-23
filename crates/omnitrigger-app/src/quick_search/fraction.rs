@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Write as _};
+use std::collections::HashMap;
 
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
@@ -14,7 +14,7 @@ const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
 pub(super) const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
 const MAX_EXACT_BITS: u64 = 8192;
 pub(super) const MAX_DECIMAL_PLACES: u32 = 100;
-const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
+pub(super) const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
 const MAX_TABLE_INPUTS: usize = 12;
 const MAX_SEQUENCE_VALUES: usize = 128;
 const MAX_APPROXIMATION_DENOMINATOR: u32 = 1_000_000;
@@ -828,9 +828,13 @@ pub(super) fn format_exact_percentage(value: BigRational) -> Result<String, Frac
 }
 
 pub(super) fn repeating_decimal(value: &BigRational) -> Result<String, FractionError> {
+    repeating_radix(value, 10)
+}
+
+pub(super) fn repeating_radix(value: &BigRational, base: u32) -> Result<String, FractionError> {
     let numerator = value.numer().magnitude();
     let denominator = value.denom().magnitude();
-    let mut text = (numerator / denominator).to_string();
+    let mut text = (numerator / denominator).to_str_radix(base);
     if value.numer().sign() == Sign::Minus {
         text.insert(0, '-');
     }
@@ -850,8 +854,8 @@ pub(super) fn repeating_decimal(value: &BigRational) -> Result<String, FractionE
         if text.len() - decimal_start >= MAX_REPEATING_DECIMAL_PLACES {
             return Err(FractionError::RepeatingDecimalLength);
         }
-        let scaled = remainder * 10_u8;
-        write!(text, "{}", &scaled / denominator).expect("可将一位数字写入字符串");
+        let scaled = remainder * base;
+        text.push_str(&(&scaled / denominator).to_str_radix(base));
         remainder = scaled % denominator;
     }
     Ok(text)

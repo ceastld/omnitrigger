@@ -1,9 +1,11 @@
 use std::num::IntErrorKind;
 
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint, Sign};
+use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::conversion::ConversionError;
+use super::fraction::{repeating_radix, MAX_REPEATING_DECIMAL_PLACES};
 
 const MAX_INTEGER_BITS: u64 = 8192;
 const MAX_SHEET_COLUMN: u32 = 16_384;
@@ -48,6 +50,8 @@ pub(super) enum RadixError {
     SheetColumnArguments,
     RomanArguments,
     RomanRange,
+    FractionalArguments,
+    FractionalLength,
 }
 
 impl RadixError {
@@ -83,6 +87,8 @@ impl RadixError {
             Self::SheetColumnArguments => "填写 A 至 XFD 的列字母，或 1 至 16384 的整数列号",
             Self::RomanArguments => "填写常用写法的罗马数字，例如 IV、CDXCIX 或 MMXXVI",
             Self::RomanRange => "填写 1 至 3999 的十进制整数，例如 2026",
+            Self::FractionalArguments => "填写小数、原进制和目标进制，例如 10.625 从 10 到 2",
+            Self::FractionalLength => "原小数或结果超过 512 位，请缩短输入或选择其他目标进制",
         }
     }
 }
@@ -203,18 +209,55 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "罗马数字" || operation.eq_ignore_ascii_case("roman") {
         return convert_roman(arguments);
     }
-    let tokens: Vec<_> = input.split_whitespace().take(6).collect();
-    let [integer, from, source, to, target] = tokens.as_slice() else {
-        return Err(RadixError::Incomplete);
+    let fractional = operation == "小数" || operation.eq_ignore_ascii_case("fractional");
+    let (expression, missing) = if fractional {
+        (arguments, RadixError::FractionalArguments)
+    } else {
+        (input.as_str(), RadixError::Incomplete)
+    };
+    let tokens: Vec<_> = expression.split_whitespace().take(6).collect();
+    let [number, from, source, to, target] = tokens.as_slice() else {
+        return Err(missing);
     };
     if !((*from == "从" || from.eq_ignore_ascii_case("from"))
         && (*to == "到" || to.eq_ignore_ascii_case("to")))
     {
-        return Err(RadixError::Incomplete);
+        return Err(missing);
     }
     let source = arbitrary_base(source).ok_or(RadixError::Base)?;
     let target = arbitrary_base(target).ok_or(RadixError::Base)?;
-    convert_radix_integer(integer, source, target)
+    if fractional {
+        convert_radix_fraction(number, source, target)
+    } else {
+        convert_radix_integer(number, source, target)
+    }
+}
+
+fn convert_radix_fraction(number: &str, source: u32, target: u32) -> Result<String, RadixError> {
+    let sign = if number.starts_with('-') {
+        Sign::Minus
+    } else {
+        Sign::Plus
+    };
+    let number = number.strip_prefix(['+', '-']).unwrap_or(number);
+    let (whole, fractional) = number
+        .split_once('.')
+        .ok_or(RadixError::FractionalArguments)?;
+    let whole = if whole.is_empty() {
+        BigUint::default()
+    } else {
+        bounded_magnitude(whole, source)?
+    };
+    let fractional = ungroup_digits(fractional).ok_or(RadixError::Digits)?;
+    if fractional.len() > MAX_REPEATING_DECIMAL_PLACES {
+        return Err(RadixError::FractionalLength);
+    }
+    let divisor = BigUint::from(source).pow(fractional.len() as u32);
+    let remainder =
+        BigUint::parse_bytes(fractional.as_bytes(), source).ok_or(RadixError::Digits)?;
+    let numerator = BigInt::from_biguint(sign, whole * &divisor + remainder);
+    let value = BigRational::new(numerator, divisor.into());
+    repeating_radix(&value, target).map_err(|_| RadixError::FractionalLength)
 }
 
 fn convert_roman(input: &str) -> Result<String, RadixError> {
@@ -672,6 +715,33 @@ mod tests {
                 convert_arbitrary_radix(query),
                 Err(RadixError::BitRangeArguments)
             );
+        }
+    }
+
+    #[test]
+    fn converts_finite_and_repeating_fractional_values_across_radices() {
+        for (query, expected) in [
+            ("小数 10.625 从 10 到 2", "1010.101"),
+            ("fractional -A.A from hex to decimal", "-10.625"),
+            ("小数 0.1 从 10 到 2", "0.0(0011)"),
+            ("小数 1.1 从 3 到 10", "1.(3)"),
+            ("小数 .01_1 从 2 到 10", "0.375"),
+            ("小数 0.z 从 36 到 36", "0.z"),
+            ("小数 -0.0 从 10 到 2", "0"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("小数 1 从 10 到 2", RadixError::FractionalArguments),
+            ("小数 0.2 从 2 到 10", RadixError::Digits),
+            ("小数 0..1 从 10 到 2", RadixError::Digits),
+            ("小数 0.00001 从 10 到 2", RadixError::FractionalLength),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
         }
     }
 
