@@ -3418,6 +3418,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "从同一基准目录生成多条相对路径",
+        query: r#"路径: 相对路径 ["C:\\工作\\资料","C:\\工作\\资料\\表.csv","C:\\工作\\发布\\报告.txt"]"#,
+    },
+    Example {
+        icon: Icon::Layers,
         title: "查找多条绝对路径共同的最长前缀",
         query: r#"路径: 共同路径 ["C:\\工作\\发布\\A.txt","C:\\工作\\草稿\\B.txt"]"#,
     },

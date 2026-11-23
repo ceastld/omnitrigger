@@ -378,6 +378,7 @@
 - 输入 `路径: 换扩展名 ["C:\\工作\\发布 包.tar.gz",".zip"]` 得到 `C:\工作\发布 包.tar.zip`。用空字符串可删除最后一个扩展名，结果是可复制的路径文本。 [Rust 路径扩展名替换](https://doc.rust-lang.org/std/path/struct.Path.html#method.with_extension)
 - 输入 `路径: 拼接 ["C:\\工作","报告 集","2026.txt"]` 得到 `C:\工作\报告 集\2026.txt`。数组首项为起始路径，后续各项为相对路径。 [Rust 路径拼接规则](https://doc.rust-lang.org/std/path/struct.PathBuf.html#method.push)
 - 输入 `路径: 相对路径 ["C:\\工作\\资料","C:\\工作\\发布\\2026.txt"]` 得到 `..\发布\2026.txt`。数组首项是基准目录，两项须为同一根下的绝对路径，支持普通盘符和 UNC 共享，路径中省略 `..`。搜索框按路径分段比较。 [Rust 路径分段规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.components)
+- 可在 `相对路径` 的数组中继续填写目标路径。同一基准目录下各目标的相对路径按输入顺序逐行输出。
 - 输入 `路径: 共同路径 ["C:\\工作\\发布\\A.txt","C:\\工作\\草稿\\B.txt"]` 得到 `C:\工作`。输入两条或更多同盘符或同共享根的绝对路径，结果按完整路径分段保留最长公共前缀。 [Rust 路径前缀规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.starts_with)
 - 输入 `路径: 规范化 "C:/工作//发布/./临时/../报告 集.txt"` 得到 `C:\工作\发布\报告 集.txt`。搜索框按分段整理分隔符、`.` 和 `..`，输入可用普通盘符或 UNC 共享根下的绝对路径。越过根目录会给出提示。 [Rust 路径分段规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.components)
 - 输入 `路径: 合法文件名 CON.报告?.txt` 得到 `_CON.报告_.txt`。此操作生成单个 Windows 文件名，用下划线替换保留字符，为设备保留名加下划线，并去掉末尾的空格与句点。最多支持 255 个 UTF-16 单元。 [Windows 文件命名规则](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions)

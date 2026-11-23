@@ -36,7 +36,7 @@ impl PathError {
             Self::JoinArguments => "用 JSON 字符串数组填写起始路径和至少一条相对路径",
             Self::RelativePartRequired => "起始路径后的每一条路径须为相对路径",
             Self::RelativeArguments => {
-                "用 JSON 数组填写普通盘符或共享目录下的两个绝对路径，路径里省略 .."
+                "用 JSON 数组填写基准目录和至少一条绝对目标路径，路径里省略 .."
             }
             Self::CommonPathArguments => {
                 "用 JSON 数组填写至少两个普通盘符或共享目录下的绝对路径，路径里省略 .."
@@ -197,16 +197,31 @@ fn join_paths(input: &str) -> Result<String, PathError> {
 }
 
 fn relative_path(input: &str) -> Result<String, PathError> {
-    let paths = serde_json::from_str::<[String; 2]>(input).map_err(|error| {
+    let paths = serde_json::from_str::<Vec<String>>(input).map_err(|error| {
         if error.is_eof() {
             PathError::Incomplete
         } else {
             PathError::RelativeArguments
         }
     })?;
-    let [Some(base), Some(target)] = paths.each_ref().map(String::as_str).map(absolute_path) else {
+    let [base, targets @ ..] = paths.as_slice() else {
         return Err(PathError::RelativeArguments);
     };
+    if targets.is_empty() {
+        return Err(PathError::RelativeArguments);
+    }
+    let base = absolute_path(base).ok_or(PathError::RelativeArguments)?;
+    let results = targets
+        .iter()
+        .map(|target| {
+            let target = absolute_path(target).ok_or(PathError::RelativeArguments)?;
+            relative_path_from(base, target)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(results.join("\n"))
+}
+
+fn relative_path_from(base: &Path, target: &Path) -> Result<String, PathError> {
     let mut base = base.components().peekable();
     let mut target = target.components().peekable();
     if base.next() != target.next() {
@@ -486,6 +501,24 @@ mod tests {
         ] {
             assert_eq!(path_component(input), Err(expected), "{input}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lists_relative_paths_for_multiple_targets_in_order() {
+        let query = r#"相对路径 ["C:\\工作\\资料","C:\\工作\\资料\\表.csv","C:\\工作\\发布\\报告.txt","C:\\工作\\资料"]"#;
+        assert_eq!(
+            path_component(query).as_deref(),
+            Ok("表.csv\n..\\发布\\报告.txt\n.")
+        );
+        assert_eq!(
+            path_component(r#"relative ["C:\\工作","C:\\工作\\报告.txt","D:\\工作\\报告.txt"]"#),
+            Err(PathError::DifferentRoot)
+        );
+        assert_eq!(
+            path_component(r#"relative ["C:\\工作","C:\\工作\\报告.txt","报告.txt"]"#),
+            Err(PathError::RelativeArguments)
+        );
     }
 
     #[test]
