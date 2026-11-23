@@ -11,12 +11,15 @@ use super::fraction::{
 use super::operators::{split_top_level_commas, NumberComparison};
 use super::plane::{parse_point, PointError};
 
+const MAX_ROOT_CANDIDATES: usize = 64;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
     Coefficients,
     ExpressionArguments,
     ProductArguments,
     ProductDegree,
+    VerifyRootsArguments,
     RootArguments,
     CurvePairArguments,
     ThreePointArguments,
@@ -38,6 +41,7 @@ impl EquationError {
             }
             Self::ProductArguments => "填写 x 的因式乘积，例如 (x - 1)(x - 2)",
             Self::ProductDegree => "展开结果的次数须不超过二次",
+            Self::VerifyRootsArguments => "填写等式或函数，用 @ 隔开 1 至 64 个候选值",
             Self::ExpressionArguments => {
                 "输入由常数、x 和 x² 项组成的式子，例如 x**2 - 3*x + 2 = 0"
             }
@@ -75,16 +79,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "因式分解" | "factor" => return factor_polynomial(arguments.trim_start()),
             "展开" | "expand" => return expand_polynomial(arguments.trim_start()),
             "求根" | "roots" => {
-                let coefficients = if arguments
-                    .split_once('=')
-                    .is_some_and(|(left, _)| !left.trim().eq_ignore_ascii_case("y"))
-                {
-                    expanded_equation_coefficients(arguments)?
-                } else {
-                    function_coefficients(arguments)?
-                };
-                return solve_equation_coefficients(coefficients);
+                return solve_equation_coefficients(equation_input_coefficients(arguments)?);
             }
+            "验根" | "verify-roots" => return verify_roots(arguments.trim_start()),
             "取系数" | "coefficients" => {
                 let [a, b, c] = expanded_equation_coefficients(arguments)?;
                 return format_quadratic_coefficients(a, b, c);
@@ -122,6 +119,41 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         coefficient_row(&input)?
     };
     solve_equation_coefficients(coefficients)
+}
+
+fn equation_input_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
+    if input
+        .split_once('=')
+        .is_some_and(|(left, _)| !left.trim().eq_ignore_ascii_case("y"))
+    {
+        expanded_equation_coefficients(input)
+    } else {
+        function_coefficients(input)
+    }
+}
+
+fn verify_roots(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::VerifyRootsArguments;
+    let (expression, candidates) = input.split_once('@').ok_or(invalid)?;
+    let candidates: Vec<_> = split_top_level_commas(candidates)
+        .take(MAX_ROOT_CANDIDATES + 1)
+        .collect();
+    if candidates.len() > MAX_ROOT_CANDIDATES {
+        return Err(invalid);
+    }
+    let [a, b, c] = equation_input_coefficients(expression)?;
+    let mut lines = vec!["x,代入值,是否为根".to_owned()];
+    for candidate in candidates {
+        let x = equation_value(candidate, invalid)?;
+        let value = polynomial_value(&a, &b, &c, &x)?;
+        let is_root = if value.numer().sign() == Sign::NoSign {
+            "是"
+        } else {
+            "否"
+        };
+        lines.push(format!("{x},{value},{is_root}"));
+    }
+    Ok(lines.join("\r\n"))
 }
 
 fn solve_equation_coefficients([a, b, c]: [BigRational; 3]) -> Result<String, EquationError> {
@@ -481,10 +513,8 @@ fn polynomial_interval_extrema(input: &str) -> Result<String, EquationError> {
     let values = points
         .into_iter()
         .map(|x| {
-            let y = (&a * &x + &b) * &x + &c;
-            for value in [&x, &y] {
-                ensure_exact_size(value).map_err(EquationError::Evaluation)?;
-            }
+            let y = polynomial_value(&a, &b, &c, &x)?;
+            ensure_exact_size(&x).map_err(EquationError::Evaluation)?;
             Ok((x, y))
         })
         .collect::<Result<Vec<_>, EquationError>>()?;
@@ -512,6 +542,17 @@ fn polynomial_interval_extrema(input: &str) -> Result<String, EquationError> {
         extrema("最小值", minimum),
         extrema("最大值", maximum)
     ))
+}
+
+fn polynomial_value(
+    a: &BigRational,
+    b: &BigRational,
+    c: &BigRational,
+    x: &BigRational,
+) -> Result<BigRational, EquationError> {
+    let y = (a * x + b) * x + c;
+    ensure_exact_size(&y).map_err(EquationError::Evaluation)?;
+    Ok(y)
 }
 
 fn polynomial_bounds(
@@ -597,10 +638,8 @@ fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
     let [[a, b, c], [other_a, other_b, other_c]] = polynomial_pair(input)?;
     let (diff_a, diff_b, diff_c) = (&a - other_a, &b - other_b, &c - other_c);
     let point = |x: &BigRational| {
-        let y = (&a * x + &b) * x + &c;
-        for value in [x, &y] {
-            ensure_exact_size(value).map_err(EquationError::Evaluation)?;
-        }
+        let y = polynomial_value(&a, &b, &c, x)?;
+        ensure_exact_size(x).map_err(EquationError::Evaluation)?;
         Ok(format!("({x}, {y})"))
     };
     if diff_a.numer().sign() == Sign::NoSign {
@@ -1225,6 +1264,22 @@ mod tests {
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn verifies_multiple_candidate_roots_with_exact_residuals() {
+        assert_eq!(
+            solve_equation("验根 (2x-1)(x-2) = 0 @ 1/2,1,2").as_deref(),
+            Ok("x,代入值,是否为根\r\n1/2,0,是\r\n1,-1,否\r\n2,0,是")
+        );
+        assert_eq!(
+            solve_equation("verify-roots y = x - 1/3 @ 1/3,0.33").as_deref(),
+            Ok("x,代入值,是否为根\r\n1/3,0,是\r\n33/100,-1/300,否")
+        );
+        assert_eq!(
+            solve_equation("验根 x = 1 @"),
+            Err(EquationError::VerifyRootsArguments)
+        );
     }
 
     #[test]
