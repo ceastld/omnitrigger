@@ -29,6 +29,9 @@ pub(super) enum ConversionError {
     InvalidTransferDuration,
     InvalidPace,
     InvalidPixelDensity,
+    ScaleArguments,
+    InvalidScaleRatio,
+    InvalidScaleLength,
     InvalidFuelEconomy,
     InvalidUnitPrice,
     InvalidCircuit,
@@ -66,6 +69,9 @@ impl ConversionError {
             }
             Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
             Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
+            Self::ScaleArguments => "输入比例和距离，例如 1:50000 3.2 cm to km",
+            Self::InvalidScaleRatio => "比例须由两个正数组成，例如 1:50000",
+            Self::InvalidScaleLength => "使用长度单位和非负距离，求比例时两段距离须大于零",
             Self::InvalidFuelEconomy => "输入正数及油耗单位，可用 L/100 km、km/L、mpg-us 或 mpg-uk",
             Self::InvalidUnitPrice => "输入价格、正的数量和目标单位，例如 36 元 / 750 g to kg",
             Self::InvalidCircuit => {
@@ -1556,6 +1562,78 @@ fn format_degrees_minutes_seconds(amount: f64, source: &Unit) -> Result<String, 
     ))
 }
 
+pub(super) fn convert_map_scale(query: &str) -> Result<String, ConversionError> {
+    let normalized = normalize(query);
+    let input = normalized.trim();
+    let (first, rest) = input
+        .split_once(char::is_whitespace)
+        .ok_or(ConversionError::ScaleArguments)?;
+    let command = first.to_ascii_lowercase();
+    let command = command.as_str();
+    if matches!(command, "求" | "ratio") {
+        let (map, ground) = rest
+            .split_once('=')
+            .ok_or(ConversionError::ScaleArguments)?;
+        let (map, map_unit) = parse_scale_length(map)?;
+        let (ground, ground_unit) = parse_scale_length(ground)?;
+        if map == 0. || ground == 0. {
+            return Err(ConversionError::InvalidScaleLength);
+        }
+        let scale = (ground / map) * (ground_unit.scale / map_unit.scale);
+        let scale =
+            format_result(checked_scale_factor(scale)?).map_err(|_| ConversionError::OutOfRange)?;
+        return Ok(format!("1:{scale}"));
+    }
+
+    let (ratio, operands) = if matches!(command, "图上" | "map" | "实际" | "ground") {
+        rest.trim_start()
+            .split_once(char::is_whitespace)
+            .ok_or(ConversionError::ScaleArguments)?
+    } else {
+        (first, rest)
+    };
+    let ground_to_map = matches!(command, "图上" | "map");
+    let (map, ground) = ratio
+        .split_once(':')
+        .ok_or(ConversionError::InvalidScaleRatio)?;
+    let positive = |text| {
+        evaluate(text)
+            .ok()
+            .filter(|&value| value > 0.)
+            .ok_or(ConversionError::InvalidScaleRatio)
+    };
+    let (map, ground) = (positive(map)?, positive(ground)?);
+    let factor = checked_scale_factor(if ground_to_map {
+        map / ground
+    } else {
+        ground / map
+    })?;
+    let (source, target) =
+        split_conversion(operands.trim()).ok_or(ConversionError::ScaleArguments)?;
+    let (amount, source) = parse_scale_length(source)?;
+    let target = Unit::parse(target.trim())?;
+    if target.dimension != Dimension::Length {
+        return Err(ConversionError::InvalidScaleLength);
+    }
+    format_conversion(amount * factor, &source, &target)
+}
+
+fn parse_scale_length(input: &str) -> Result<(f64, Unit), ConversionError> {
+    let (amount, unit) = parse_quantity(input.trim())?;
+    if unit.dimension != Dimension::Length || amount < 0. {
+        return Err(ConversionError::InvalidScaleLength);
+    }
+    Ok((amount, unit))
+}
+
+fn checked_scale_factor(factor: f64) -> Result<f64, ConversionError> {
+    if factor.is_finite() && factor > 0. {
+        Ok(factor)
+    } else {
+        Err(ConversionError::OutOfRange)
+    }
+}
+
 fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String, ConversionError> {
     if source.dimension != target.dimension {
         return Err(ConversionError::DifferentDimensions);
@@ -1584,6 +1662,30 @@ fn format_with_unit(value: impl std::fmt::Display, target: &Unit) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_between_diagram_and_ground_lengths_and_derives_the_scale() {
+        for (query, expected) in [
+            ("1:50000 3.2 cm to km", "1.6 km"),
+            ("图上 1：50000 1.6 km 转 cm", "3.2 cm"),
+            ("实际 1:24000 1 in to ft", "2000 ft"),
+            ("求 3.2 cm = 1.6 km", "1:50000"),
+            ("ratio 4 m = 2 m", "1:0.5"),
+            ("2:3 0 cm to mm", "0 mm"),
+        ] {
+            assert_eq!(convert_map_scale(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("1:0 2 cm to m", ConversionError::InvalidScaleRatio),
+            ("1:2 1 kg to g", ConversionError::InvalidScaleLength),
+            ("1:2 1 cm to kg", ConversionError::InvalidScaleLength),
+            ("1:2 -1 cm to m", ConversionError::InvalidScaleLength),
+            ("求 0 mm = 10 m", ConversionError::InvalidScaleLength),
+            ("1:2 2 m", ConversionError::ScaleArguments),
+        ] {
+            assert_eq!(convert_map_scale(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn converts_chinese_and_square_imperial_area_units() {

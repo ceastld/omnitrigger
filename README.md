@@ -695,6 +695,7 @@
 - 输入 `单价: 36 元 / 750 g to kg` 得到 `48 元 / kg`，也可以指定分量，例如 `单价: 37.5 元 / 750 g to 500 g` 得到 `25 元 / 500 g`。支持长度、重量、时间、面积、体积、数据量和能量单位，结果沿用输入的货币符号或代码。
 - 输入 `人民币: 1409.50` 得到 `人民币壹仟肆佰零玖元伍角整`。支持 0 至 999,999,999,999.99 元、小数点后最多两位，以及用逗号分隔的千位。 [《支付结算办法》附一](https://policy.mofcom.gov.cn/claw/clawContent.shtml?id=38763)
 - 输入 `像素密度: 3840×2160 @ 27 in` 得到 `163.18 PPI · 59.77 × 33.62 cm`。尺寸指屏幕对角线，按正方形像素算出屏幕宽和高。也可使用 `按 27英寸` 或输入厘米尺寸。
+- 输入 `比例尺: 1:50000 3.2 cm to km`，可把图上的长度换成实际距离 `1.6 km`。用 `比例尺: 图上 1:50000 1.6 km to cm` 可反向换算。已知两段距离时，输入 `比例尺: 求 3.2 cm = 1.6 km` 得到 `1:50000`。 [美国地质调查局的比例尺说明](https://www.usgs.gov/educational-resources/finding-your-way-map-and-compass)
 - 输入 `纸张: B5` 得到 `176 × 250 mm`，输入 `纸张: A4 @ 300 dpi` 得到 `2480 × 3508 px`。用 `纸张: A4 to A5` 可算出能放入目标纸张的等比缩放比例 `70.47%`，结果向下保留两位小数。纸型默认纵向，可加 `横向`。 [ISO 216 尺寸表](https://preview.sist.si/sist-preview/36631/c0883203ea25445c9992bb09343620c5/ISO-216-2007.pdf) [Letter 与 Legal 尺寸](https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/doxyhtml/print__media_8hpp_source.html#l00084)
 - 输入 `网段: 192.0.2.137/26` 可查看网段、掩码、地址范围和地址数。也可用点分十进制掩码或输入 IPv6 前缀，例如 `网段: 2001:db8::/64 包含 2001:db8::1`。 [IPv4 前缀](https://www.rfc-editor.org/rfc/rfc4632.html#section-3.1) [IPv6 前缀](https://www.rfc-editor.org/rfc/rfc4291.html#section-2.3)
 - 输入 `网段: 覆盖 192.0.2.1 至 192.0.2.6` 得到包含整个区间的最小网段 `192.0.2.0/29`。用 `分解` 可生成与区间精确对应的 CIDR 网段，每行一个。两个地址均计入区间，支持 IPv4 和 IPv6。 [地址区间分解](https://docs.python.org/3/library/ipaddress.html#ipaddress.summarize_address_range)

@@ -88,7 +88,8 @@ use complex::{calculate_complex, ComplexError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
     calculate_unit_price, conversion_target_input, convert, convert_batch, convert_batch_csv,
-    convert_exact_data, convert_period, estimate_transfer, suggested_targets, ConversionError,
+    convert_exact_data, convert_map_scale, convert_period, estimate_transfer, suggested_targets,
+    ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
 use data_pipeline::{transform_data_pipeline, DataPipelineError};
@@ -891,6 +892,9 @@ impl Results {
                 }
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
+                }
+                Scope::MapScale => {
+                    Self::text_value(convert_map_scale(term).map_err(ValueError::Conversion))
                 }
                 Scope::PixelDensity => {
                     Self::text_value(calculate_pixel_density(term).map_err(ValueError::Conversion))

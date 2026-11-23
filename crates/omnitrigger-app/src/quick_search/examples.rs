@@ -1289,6 +1289,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按地图比例尺将图上长度换成实际距离",
+        query: "比例尺: 1:50000 3.2 cm to km",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "用图上和实际距离反求地图比例",
+        query: "比例尺: 求 3.2 cm = 1.6 km",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "查询标准纸张尺寸",
         query: "纸张: B5",
     },
@@ -4588,6 +4598,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Circuit
         | Scope::Period
         | Scope::AspectRatio
+        | Scope::MapScale
         | Scope::PixelDensity
         | Scope::Paper
         | Scope::Rectangle
@@ -4712,6 +4723,7 @@ mod tests {
             Scope::Circuit,
             Scope::Period,
             Scope::AspectRatio,
+            Scope::MapScale,
             Scope::PixelDensity,
             Scope::Paper,
             Scope::Rectangle,
