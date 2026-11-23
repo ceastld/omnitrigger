@@ -4569,6 +4569,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看选定 CSV 数值列两两之间的精确相关系数",
+        query: "CSV: 相关矩阵 [\"x\",\"y\",\"z\",\"固定\"] x,y,z,固定\n-1,2,1,5\n0,0,-2,5\n1,-2,1,5\n8,,9,6",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按总体方差统计 CSV 数值列",
         query: "CSV: 列总体 \"数值\" 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",
     },

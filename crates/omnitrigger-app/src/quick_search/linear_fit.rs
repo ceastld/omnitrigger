@@ -692,7 +692,7 @@ pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String,
 }
 
 pub(super) fn calculate_correlation(points: &str) -> Result<String, LinearFitError> {
-    format_correlation(paired_sums(points.trim(), false)?.centered_products()?)
+    paired_sums(points.trim(), false)?.correlation()
 }
 
 pub(super) fn calculate_rank_correlation(points: &str) -> Result<String, LinearFitError> {
@@ -702,7 +702,7 @@ pub(super) fn calculate_rank_correlation(points: &str) -> Result<String, LinearF
         .into_iter()
         .zip(doubled_midranks(&y))
         .map(Ok);
-    format_correlation(summarize_pairs(ranks, false)?.centered_products()?)
+    summarize_pairs(ranks, false)?.correlation()
 }
 
 pub(super) fn calculate_kendall_correlation(points: &str) -> Result<String, LinearFitError> {
@@ -769,6 +769,10 @@ pub(super) struct PairedSums {
 }
 
 impl PairedSums {
+    pub(super) fn correlation(&self) -> Result<String, LinearFitError> {
+        format_correlation(self.centered_products()?)
+    }
+
     pub(super) fn count(&self) -> &BigInt {
         &self.count
     }
