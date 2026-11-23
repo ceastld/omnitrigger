@@ -189,6 +189,7 @@ pub(super) enum CsvError {
     SignificantColumnsTooLarge,
     StatisticsColumn,
     ColumnBinsArguments,
+    StatisticsOutputTooLarge,
     AggregateColumn,
     GroupingColumns,
     GroupFitColumns,
@@ -409,6 +410,7 @@ impl CsvError {
             Self::SignificantColumnsTooLarge => "有效数字列结果超过 1 MiB，请缩小表格范围",
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
             Self::ColumnBinsArguments => "填写列名或列号和边界，例如 [\"金额\",\"0,1/2,2\"]",
+            Self::StatisticsOutputTooLarge => "统计结果超过 1 MiB，请缩小表格范围",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
             Self::GroupFitColumns => "填写分组列和两列不同的坐标，例如 [[\"区域\"],[\"x\",\"y\"]]",
@@ -743,6 +745,7 @@ enum Operation {
         sample: bool,
     },
     ColumnBins(ColumnReference, Vec<BigRational>),
+    NumericProfile(Vec<ColumnReference>),
     SortByColumns {
         columns: Vec<ColumnReference>,
         descending: bool,
@@ -2051,6 +2054,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ColumnBins(column, edges)
         }
+        "数值列摘要" | "numeric-profile" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::NumericProfile(columns)
+        }
         "透视合计" | "pivot-sum" | "透视计数" | "pivot-count" => {
             let (column_count, invalid) =
                 if matches!(operation.as_str(), "透视计数" | "pivot-count") {
@@ -2521,6 +2530,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             report_binned_unweighted(numeric_column_values(&rows, column)?, &edges)
                 .map_err(csv_column_statistics_error)
         }
+        Operation::NumericProfile(columns) => numeric_column_profile(&rows, &columns),
         Operation::SortByColumns {
             columns,
             descending,
@@ -5220,6 +5230,97 @@ fn numeric_column_values_at(
         .collect()
 }
 
+fn numeric_column_profile(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let mut output = String::new();
+    let limit = CsvError::Statistics(StatisticsError::TooManyValues);
+    let headings = [
+        "列号",
+        "列名",
+        "数值数",
+        "空白数",
+        "非数值数",
+        "最小值",
+        "最大值",
+        "平均值",
+        "中位数",
+    ];
+    append_bounded_csv_row(
+        &mut output,
+        headings.into_iter(),
+        CsvError::StatisticsOutputTooLarge,
+    )?;
+    for column in columns {
+        let mut numbers = Vec::new();
+        let mut totals = RunningTotals::default();
+        let mut blanks = 0usize;
+        let mut other = 0usize;
+        for (index, row) in records.iter().enumerate() {
+            let cell = row[column].trim();
+            if cell.is_empty() {
+                blanks += 1;
+                continue;
+            }
+            match parse_fraction_literal(cell) {
+                Ok(number) => {
+                    if numbers.len() == MAX_VALUES {
+                        return Err(limit);
+                    }
+                    totals.push(number.clone()).map_err(CsvError::Statistics)?;
+                    numbers.push(number);
+                }
+                Err(error @ (FractionError::OutOfRange | FractionError::TooLong)) => {
+                    return Err(CsvError::DataRowValue {
+                        row: index + 1,
+                        cause: error.message(),
+                    });
+                }
+                Err(_) => other += 1,
+            }
+        }
+        numbers.sort_unstable();
+        let [min, max, average, median] = if let Some(min) = numbers.first() {
+            let max = numbers.last().expect("至少有一个数值");
+            let average = totals.format(true).map_err(CsvError::Statistics)?;
+            let median = median_sorted_values(&numbers)
+                .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
+            [
+                min.to_string(),
+                max.to_string(),
+                average,
+                median.to_string(),
+            ]
+        } else {
+            Default::default()
+        };
+        let ordinal = (column + 1).to_string();
+        let numeric_count = numbers.len().to_string();
+        let blanks = blanks.to_string();
+        let other = other.to_string();
+        let values = [
+            ordinal.as_str(),
+            header[column].as_str(),
+            numeric_count.as_str(),
+            blanks.as_str(),
+            other.as_str(),
+            min.as_str(),
+            max.as_str(),
+            average.as_str(),
+            median.as_str(),
+        ];
+        append_bounded_csv_row(
+            &mut output,
+            values.into_iter(),
+            CsvError::StatisticsOutputTooLarge,
+        )?;
+    }
+    Ok(output)
+}
+
 fn csv_column_statistics_error(error: StatisticsError) -> CsvError {
     match error {
         StatisticsError::Incomplete => CsvError::EmptyStatisticsColumn,
@@ -7513,6 +7614,28 @@ mod tests {
             transform_csv("离群列 [\"离群\",1] 金额\n1\n待定"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn profiles_selected_csv_columns_without_confusing_missing_and_text_values() {
+        let data = "编号,金额,空列,系数\r\n001,1/2,,1.50\r\n002,待定, ,6/4\r\n003,2,,";
+        assert_eq!(
+            transform_csv(&format!(r#"数值列摘要 [4,"金额",3] {data}"#)).as_deref(),
+            Ok("列号,列名,数值数,空白数,非数值数,最小值,最大值,平均值,中位数\r\n4,系数,2,1,0,3/2,3/2,3/2,3/2\r\n2,金额,2,0,1,1/2,2,5/4,5/4\r\n3,空列,0,3,0,\"\",\"\",\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("numeric-profile [1] 金额").as_deref(),
+            Ok("列号,列名,数值数,空白数,非数值数,最小值,最大值,平均值,中位数\r\n1,金额,0,0,0,\"\",\"\",\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("数值列摘要 [1,\"金额\"] 金额\n2"),
+            Err(CsvError::NamedColumnArguments)
+        );
+        let many = format!("numeric-profile [1] 金额\n{}", "1\n".repeat(MAX_VALUES + 1));
+        assert_eq!(
+            transform_csv(&many),
+            Err(CsvError::Statistics(StatisticsError::TooManyValues))
+        );
     }
 
     #[test]

@@ -4564,6 +4564,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "同时查看多列的数值缺失情况和精确摘要",
+        query: "CSV: 数值列摘要 [\"金额\",\"系数\"] 编号,金额,系数\n001,1/2,1.50\n002,待定,6/4\n003,2,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按总体方差统计 CSV 数值列",
         query: "CSV: 列总体 \"数值\" 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",
     },
