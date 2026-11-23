@@ -10,12 +10,13 @@ use super::{
     path_tools::path_component,
     scope::{scoped_query, Scope},
     text_tools::transform_text,
+    toml_tools::transform_toml,
     url_encoding::convert_url_component,
 };
 
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
-const STEP_SYNTAX: &str = "每一步填写带前缀的文本、CSV、JSON、URL、路径或日期命令";
+const STEP_SYNTAX: &str = "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径或日期命令";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -63,6 +64,7 @@ pub(super) fn transform_data_pipeline(
             Scope::TextTools => transform_text(&query).map_err(|cause| cause.message()),
             Scope::Csv => transform_csv(&query).map_err(|cause| cause.message()),
             Scope::Json => transform_json(&query).map_err(|cause| cause.message()),
+            Scope::Toml => transform_toml(&query).map_err(|cause| cause.message()),
             Scope::UrlEncoding => convert_url_component(&query).map_err(|cause| cause.message()),
             Scope::Path => path_component(&query).map_err(|cause| cause.message()),
             Scope::Date => calculate_date(&query, today).map_err(|cause| cause.message()),
@@ -161,6 +163,14 @@ mod tests {
                 index: 2,
                 cause: "步骤CSV超过 1 MiB，请缩小数据范围",
             })
+        );
+    }
+
+    #[test]
+    fn uses_toml_conversion_before_selecting_a_json_value() {
+        assert_eq!(
+            run_pipeline(r#"["TOML: 转JSON","JSON: 取值 /port"] port = 8000"#).as_deref(),
+            Ok("8000"),
         );
     }
 

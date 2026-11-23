@@ -404,6 +404,8 @@
 - 输入 `路径: 合法文件名 CON.报告?.txt` 得到 `_CON.报告_.txt`。此操作生成单个 Windows 文件名，用下划线替换保留字符，为设备保留名加下划线，并去掉末尾的空格与句点。最多支持 255 个 UTF-16 单元。 [Windows 文件命名规则](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions)
 - 输入 `路径: 转文件网址 C:\docs\report 2026.txt` 得到 `file:///C:/docs/report%202026.txt`。用 `路径: 从文件网址` 可转换回绝对路径。两种操作只转换文本，可处理盘符路径和 UNC 路径。 [Rust 文件网址转换规则](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `JSON: 格式化 {"名称":"北京","值":1}` 可添加两格缩进，输入 `JSON: 压缩` 加上 JSON 文本可移除结构空白。两种操作均检查语法，并保留原有键顺序、数字和字符串拼写。搜索框可输入最多 4096 个字符。
+- 用 `TOML: 校验` 粘贴配置，可查看顶层键数量，语法有误时显示行和列。用 `TOML: 转JSON` 可把配置转成 JSON，日期和时间输出为字符串，大整数保留数值。遇到 `inf` 或 `nan` 会提示转换错误。 [TOML 1.1 规范](https://toml.io/en/v1.1.0)
+- `处理: ["TOML: 转JSON","JSON: 取值 /port"] port = 8000` 可从 TOML 配置取出顶层端口值 `8000`。
 - 用 `JSON: 去注释` 加上带注释的 JSON，可移除 `//` 行注释和 `/* … */` 块注释，再输出两格缩进的有效 JSON。网址和其他字符串内的同样符号会保留。 [JSONC 注释语法](https://jsonc.org/#syntax)
 - 输入 `JSON: 键排序 {"z":1.20,"a":{"y":2,"b":3}}` 得到 `{"a":{"b":3,"y":2},"z":1.20}`。数组内的对象也会逐一排序，数字沿用原始写法。
 - 输入 `JSON: 取值 /商品/0/价格 {"商品":[{"价格":9007199254740993}]}` 可提取原文中的 `9007199254740993`。路径中的 `~1` 表示键名内的斜杠，`~0` 表示波浪号。带空白的路径可用 JSON 双引号包住。参见 [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901.html#section-4)。

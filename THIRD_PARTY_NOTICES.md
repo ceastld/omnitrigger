@@ -11,6 +11,7 @@
 | GPUI | Windows 桌面界面 | Apache-2.0 |
 | windows | Windows API 绑定 | MIT OR Apache-2.0 |
 | serde / serde_json | 本地配置序列化、JSON 文本处理 | MIT OR Apache-2.0 |
+| toml | 快速搜索的 TOML 校验与 JSON 转换，复用锁定的 1.1.8+spec-1.1.0 | MIT OR Apache-2.0 |
 | getrandom | 桌面桥接随机令牌与脚本工程稳定标识，复用锁定的 0.3.4 | MIT OR Apache-2.0 |
 | unicode-segmentation | 文本编辑的字素边界 | MIT OR Apache-2.0 |
 | unicode-normalization | 快速搜索的 Unicode 规范化，固定 0.1.26，包含上游 Unicode 数据许可 | (MIT OR Apache-2.0) AND Unicode-3.0 |

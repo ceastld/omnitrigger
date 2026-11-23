@@ -43,6 +43,7 @@ mod statistics;
 mod text_tools;
 mod timecode;
 mod timestamp;
+mod toml_tools;
 mod triangle;
 mod triggers;
 mod url_encoding;
@@ -124,6 +125,7 @@ use statistics::{calculate_statistics, StatisticsError};
 use text_tools::{count_text, transform_text, TextError};
 use timecode::{convert_timecode, TimecodeError};
 use timestamp::{convert_timestamp, is_offset_timestamp, TimestampError};
+use toml_tools::{transform_toml, TomlError};
 use triangle::{calculate_triangle, TriangleError};
 use triggers::{matching_triggers, SearchTrigger};
 use unicode_segmentation::UnicodeSegmentation;
@@ -407,6 +409,7 @@ enum ValueError {
     Color(ColorError),
     Text(TextError),
     Json(JsonError),
+    Toml(TomlError),
     Csv(CsvError),
     DataPipeline(DataPipelineError),
     Fraction(FractionError),
@@ -533,6 +536,10 @@ impl ValueError {
                 return format!("第 {row} 个数据行 · {cause}").into();
             }
             Self::Json(error) => error.message(),
+            Self::Toml(TomlError::Invalid { line, column }) => {
+                return format!("TOML 语法有误 · 第 {line} 行第 {column} 列").into();
+            }
+            Self::Toml(error) => error.message(),
             Self::Csv(error) => error.message(),
             Self::Fraction(error) => error.message(),
             Self::Equation(error) => error.message(),
@@ -613,6 +620,7 @@ impl ValueError {
                 | Self::Complex(ComplexError::Incomplete)
                 | Self::Path(PathError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
+                | Self::Toml(TomlError::Incomplete)
                 | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
                 | Self::DataPipeline(DataPipelineError::Arguments)
         )
@@ -948,6 +956,7 @@ impl Results {
                     Self::text_value(transform_text(term).map_err(ValueError::Text))
                 }
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
+                Scope::Toml => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
                 Scope::Csv => Self::text_value(transform_csv(term).map_err(ValueError::Csv)),
                 Scope::DataPipeline => Self::text_value(
                     transform_data_pipeline(term, chrono::Local::now().date_naive())

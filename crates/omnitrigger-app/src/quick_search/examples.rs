@@ -26,7 +26,7 @@ impl Example {
         }
         if !matches!(
             scope,
-            Scope::Json | Scope::Csv | Scope::TextTools | Scope::UrlEncoding
+            Scope::Json | Scope::Toml | Scope::Csv | Scope::TextTools | Scope::UrlEncoding
         ) {
             return None;
         }
@@ -2685,6 +2685,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "校验 TOML 配置并统计顶层键",
+        query: "TOML: 校验 name = '茶'\nport = 8000",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将 TOML 配置转为可复制的 JSON",
+        query: "TOML: 转JSON date = 2024-02-29\nnumber = 9_007_199_254_740_993",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "压缩 JSON",
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },
@@ -4514,6 +4524,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "变化率"
             ) => {}
         Scope::Json
+        | Scope::Toml
         | Scope::Csv
         | Scope::TextTools
         | Scope::UrlEncoding
