@@ -50,7 +50,7 @@ use super::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
     radix::{convert_radix_fraction, convert_radix_integer},
-    scatter_plot::ScatterPlot,
+    scatter_plot::{SampledSeries, ScatterPlot},
     statistics::{
         median_sorted_values, plot_box_unweighted, report_box_unweighted, summarize_unweighted,
         RunningTotals, StatisticsError, MAX_VALUES,
@@ -1135,7 +1135,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
-        "曲线差值" | "curve-difference" => return compare_coordinate_curves(input),
+        "曲线差值" | "curve-difference" | "曲线对比图" | "curve-comparison-plot" => {
+            return compare_coordinate_curves(input)?.to_csv()
+        }
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -5643,7 +5645,52 @@ fn collect_coordinate_samples(
     Ok(samples)
 }
 
-fn compare_coordinate_curves(input: &str) -> Result<String, CsvError> {
+struct CoordinateCurveComparison {
+    headers: [String; 4],
+    samples: Vec<(BigRational, [BigRational; 2])>,
+}
+
+impl CoordinateCurveComparison {
+    fn to_csv(&self) -> Result<String, CsvError> {
+        let mut csv = String::new();
+        let limit = CsvError::ColumnComparisonTooLarge;
+        append_bounded_csv_row(&mut csv, self.headers.iter().map(String::as_str), limit)?;
+        for (x, [left_y, right_y]) in &self.samples {
+            let difference = left_y - right_y;
+            ensure_exact_size(&difference).map_err(|_| CsvError::ComputedNumberRange)?;
+            let row = [
+                x.to_string(),
+                left_y.to_string(),
+                right_y.to_string(),
+                difference.to_string(),
+            ];
+            append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), limit)?;
+        }
+        Ok(csv)
+    }
+
+    fn into_chart(self) -> Result<(String, ScatterPlot), CsvError> {
+        let csv = self.to_csv()?;
+        let [x_name, left_name, right_name, _] = self.headers;
+        let series = [left_name, right_name]
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| SampledSeries {
+                label,
+                points: self
+                    .samples
+                    .iter()
+                    .map(|(x, y)| (x.clone(), y[index].clone()))
+                    .collect(),
+            })
+            .collect();
+        let plot =
+            ScatterPlot::from_connected_series(series).with_axis_names([x_name, "数值".to_owned()]);
+        Ok((csv, plot))
+    }
+}
+
+fn compare_coordinate_curves(input: &str) -> Result<CoordinateCurveComparison, CsvError> {
     let invalid = CsvError::CoordinateDifferenceArguments;
     let ((columns, name), data) =
         json_argument_and_data::<([ColumnReference; 3], String)>(input, invalid)?;
@@ -5678,27 +5725,21 @@ fn compare_coordinate_curves(input: &str) -> Result<String, CsvError> {
     coordinates.sort_unstable();
     coordinates.dedup();
 
-    let mut csv = String::new();
-    let limit = CsvError::ColumnComparisonTooLarge;
-    let headers = columns
-        .iter()
-        .map(|&index| header[index].as_str())
-        .chain(std::iter::once(name.as_str()));
-    append_bounded_csv_row(&mut csv, headers, limit)?;
-    for x in coordinates {
-        let left_y = interpolate_coordinate_value(&left, x)?;
-        let right_y = interpolate_coordinate_value(&right, x)?;
-        let difference = &left_y - &right_y;
-        ensure_exact_size(&difference).map_err(|_| CsvError::ComputedNumberRange)?;
-        let row = [
-            x.to_string(),
-            left_y.to_string(),
-            right_y.to_string(),
-            difference.to_string(),
-        ];
-        append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), limit)?;
-    }
-    Ok(csv)
+    let headers = [
+        header[x].clone(),
+        header[left_y].clone(),
+        header[right_y].clone(),
+        name,
+    ];
+    let samples = coordinates
+        .into_iter()
+        .map(|x| {
+            let left_y = interpolate_coordinate_value(&left, x)?;
+            let right_y = interpolate_coordinate_value(&right, x)?;
+            Ok((x.clone(), [left_y, right_y]))
+        })
+        .collect::<Result<Vec<_>, CsvError>>()?;
+    Ok(CoordinateCurveComparison { headers, samples })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -5784,6 +5825,11 @@ pub(super) fn coordinate_line_chart(
     query: &str,
 ) -> Option<Result<(String, ScatterPlot), CsvError>> {
     let (operation, input) = split_argument(query)?;
+    if operation == "曲线对比图" || operation.eq_ignore_ascii_case("curve-comparison-plot") {
+        return Some(
+            compare_coordinate_curves(input).and_then(CoordinateCurveComparison::into_chart),
+        );
+    }
     let table = coordinate_line_table(operation, input)?;
     Some(table.and_then(|table| {
         let csv = table.to_csv()?;
@@ -7470,6 +7516,20 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn plots_distinct_connected_curves_with_the_exact_difference_table() {
+        let query = "[[1,2,3],\"差值\"] 时间,实测,基准\n5,,10\n0,0,\n2,4,\n1,,3\n4,4,\n3,,6";
+        let (csv, plot) = coordinate_line_chart(&format!("曲线对比图 {query}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plot.point_count(), 8);
+        assert!(plot.has_curve());
+        assert_eq!(
+            transform_csv(&format!("curve-comparison-plot {query}")),
+            Ok(csv)
+        );
     }
 
     #[test]

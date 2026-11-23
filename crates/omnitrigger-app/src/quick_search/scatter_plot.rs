@@ -124,6 +124,22 @@ impl ScatterPlot {
         x_bounds: [&BigRational; 2],
         requested: usize,
     ) -> Self {
+        Self::prepare_series(
+            series,
+            ScatterKind::SampledFunction { requested },
+            Some(x_bounds),
+        )
+    }
+
+    pub(super) fn from_connected_series(series: Vec<SampledSeries>) -> Self {
+        Self::prepare_series(series, ScatterKind::ConnectedObservations, None)
+    }
+
+    fn prepare_series(
+        series: Vec<SampledSeries>,
+        kind: ScatterKind,
+        x_bounds: Option<[&BigRational; 2]>,
+    ) -> Self {
         let mut points = Vec::new();
         let mut labels = Vec::with_capacity(series.len());
         for SampledSeries {
@@ -134,7 +150,7 @@ impl ScatterPlot {
             labels.push((label, series_points.len()));
             points.extend(series_points);
         }
-        let mut plot = Self::from_sampled_function(&points, x_bounds, requested);
+        let mut plot = Self::prepare(&points, &[], kind, x_bounds);
         plot.sample_series = labels;
         plot
     }
@@ -233,6 +249,8 @@ impl ScatterPlot {
 
     pub(super) fn has_curve(&self) -> bool {
         !self.curve.is_empty()
+            || (self.kind == ScatterKind::ConnectedObservations
+                && self.sample_series.iter().any(|(_, count)| *count > 1))
     }
 
     pub(super) fn with_range_labels(mut self, x: [String; 2], y: [String; 2]) -> Self {
@@ -311,11 +329,24 @@ impl ScatterPlot {
             .copied()
             .zip(colors.chain(std::iter::repeat(rgb(theme::ACCENT))))
             .collect();
-        let curve = self.curve.clone();
+        let mut curves = Vec::new();
+        if !self.curve.is_empty() {
+            curves.push((self.curve.clone(), rgb(theme::ACCENT_2)));
+        }
+        if self.kind == ScatterKind::ConnectedObservations {
+            let mut remaining = self.locations.as_slice();
+            for (index, (_, count)) in self.sample_series.iter().enumerate() {
+                let (series, rest) = remaining.split_at(*count);
+                remaining = rest;
+                if series.len() > 1 {
+                    let color = rgb(SAMPLE_SERIES_COLORS[index % SAMPLE_SERIES_COLORS.len()]);
+                    curves.push((series.to_vec(), color));
+                }
+            }
+        }
         let grid = rgb(theme::BORDER_MID);
         let [zero_x, zero_y] = self.zero_axes;
         let axis = rgb(theme::BORDER_HI);
-        let line = rgb(theme::ACCENT_2);
         let square = matches!(self.kind, ScatterKind::Parametric { .. });
         let marker = px(if square { 2. } else { 3. });
         let plot = canvas(
@@ -360,12 +391,15 @@ impl ScatterPlot {
                         axis,
                     ));
                 }
-                if let Some((first, rest)) = curve.split_first() {
+                for (curve, line) in &curves {
+                    let Some((first, rest)) = curve.split_first() else {
+                        continue;
+                    };
                     let start = place(first);
                     if rest.is_empty() {
                         window.paint_quad(fill(
                             Bounds::new(start - point(px(5.), px(1.)), size(px(10.), px(2.))),
-                            line,
+                            *line,
                         ));
                     } else {
                         let mut path = PathBuilder::stroke(px(2.));
@@ -374,7 +408,7 @@ impl ScatterPlot {
                             path.line_to(place(point));
                         }
                         if let Ok(path) = path.build() {
-                            window.paint_path(path, line);
+                            window.paint_path(path, *line);
                         }
                     }
                 }
