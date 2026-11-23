@@ -31,7 +31,8 @@ use super::{
     duration::{elapsed_clock_interval, format_clock_duration},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, format_significant_digits,
-        parse_fraction_literal, rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
+        interpolate_fraction, parse_fraction_literal, rounded_decimal, FractionError,
+        MAX_DECIMAL_PLACES,
     },
     json_tools::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens, JsonCellContent,
@@ -96,6 +97,7 @@ pub(super) enum CsvError {
     DuplicateComparisonKey,
     ColumnComparisonTooLarge,
     FillTooLarge,
+    InterpolationColumns,
     ConstantColumnArguments,
     RowNumberArguments,
     RowNumberOverflow,
@@ -213,6 +215,7 @@ impl CsvError {
             Self::DuplicateComparisonKey => "对比列需要每张表中的键组合各出现一次",
             Self::ColumnComparisonTooLarge => "表格对比结果超过 1 MiB，请缩小表格范围",
             Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
+            Self::InterpolationColumns => "填写数值列和分组列，例如 [\"金额\",[\"地区\"]]",
             Self::ConstantColumnArguments => {
                 "用 JSON 数组填写新列名和固定文本，例如 [\"来源\",\"人工复核\"]"
             }
@@ -379,6 +382,7 @@ enum Operation {
     DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
     FillEmptyCells(Vec<ColumnReference>, FillDirection),
+    InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
     CheckNumericColumns(Vec<ColumnReference>),
     RoundColumns {
@@ -763,6 +767,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 FillDirection::Down
             };
             Operation::FillEmptyCells(columns, direction)
+        }
+        "插值填充" | "fill-interpolate" => {
+            let ((column, groups), data) = json_argument_and_data::<(
+                ColumnReference,
+                Vec<ColumnReference>,
+            )>(input, CsvError::InterpolationColumns)?;
+            input = data;
+            Operation::InterpolateEmptyCells(column, groups)
         }
         "空值统计" | "count-empty" => {
             let (columns, data) =
@@ -1588,6 +1600,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
         Operation::FillEmptyCells(columns, direction) => {
             fill_empty_csv_cells(&rows, &columns, direction)
+        }
+        Operation::InterpolateEmptyCells(column, groups) => {
+            interpolate_empty_csv_cells(&rows, column, &groups)
         }
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
         Operation::CheckNumericColumns(columns) => check_numeric_columns(&rows, &columns),
@@ -2674,6 +2689,72 @@ fn fill_empty_csv_cells(
     Ok(output)
 }
 
+fn interpolate_empty_csv_cells(
+    rows: &[Vec<String>],
+    source: ColumnReference,
+    groups: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, groups, CsvError::InterpolationColumns)?;
+    let mut values = Vec::with_capacity(records.len());
+    for (index, row) in records.iter().enumerate() {
+        let field = &row[source];
+        let value = (!field.is_empty())
+            .then(|| parse_fraction_literal(field))
+            .transpose()
+            .map_err(|error| CsvError::DataRowValue {
+                row: index + 1,
+                cause: error.message(),
+            })?;
+        values.push(value);
+    }
+    let mut fills = vec![None; records.len()];
+    let mut fill_bytes = 0usize;
+    for positions in grouped_row_positions(records, &groups) {
+        let mut previous: Option<(usize, &BigRational)> = None;
+        for (position, &row) in positions.iter().enumerate() {
+            let Some(end) = values[row].as_ref() else {
+                continue;
+            };
+            if let Some((start_position, start)) = previous {
+                let span = position - start_position;
+                for (offset, &row) in positions[start_position + 1..position].iter().enumerate() {
+                    let progress = BigRational::new((offset + 1).into(), span.into());
+                    let fill = interpolate_fraction(start, end, &progress)
+                        .map_err(|error| CsvError::DataRowValue {
+                            row: row + 1,
+                            cause: error.message(),
+                        })?
+                        .to_string();
+                    fill_bytes = fill_bytes.saturating_add(fill.len());
+                    if fill_bytes > MAX_EXPANDED_CSV_BYTES {
+                        return Err(CsvError::FillTooLarge);
+                    }
+                    fills[row] = Some(fill);
+                }
+            }
+            previous = Some((position, end));
+        }
+    }
+
+    let too_large = CsvError::FillTooLarge;
+    let mut output = String::new();
+    append_bounded_csv_row(&mut output, header.iter().map(String::as_str), too_large)?;
+    for (row, fill) in records.iter().zip(&fills) {
+        let fields = row.iter().enumerate().map(|(column, field)| {
+            if column == source {
+                fill.as_deref().unwrap_or(field)
+            } else {
+                field.as_str()
+            }
+        });
+        append_bounded_csv_row(&mut output, fields, too_large)?;
+    }
+    Ok(output)
+}
+
 fn add_constant_column(rows: &[Vec<String>], name: &str, value: &str) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -3252,15 +3333,8 @@ fn shifted_csv_column(
     let source = source.resolve(header)?;
     validate_column_width(&[source], header.len())?;
     let groups = resolve_distinct_columns(header, groups, CsvError::ShiftedColumnArguments)?;
-    let mut positions_by_group = HashMap::<_, Vec<usize>>::new();
-    for (index, record) in records.iter().enumerate() {
-        positions_by_group
-            .entry(column_key(record, &groups))
-            .or_default()
-            .push(index);
-    }
     let mut shifted = vec![""; records.len()];
-    for positions in positions_by_group.values() {
+    for positions in grouped_row_positions(records, &groups) {
         for (position, &record_index) in positions.iter().enumerate() {
             let target = if following {
                 position.checked_add(distance)
@@ -3713,6 +3787,21 @@ fn numeric_column_key(row: &[String], columns: &[usize]) -> Result<Vec<BigRation
 
 fn column_key<'a>(row: &'a [String], columns: &[usize]) -> Vec<&'a str> {
     columns.iter().map(|&index| row[index].as_str()).collect()
+}
+
+fn grouped_row_positions(records: &[Vec<String>], columns: &[usize]) -> Vec<Vec<usize>> {
+    let mut group_positions = HashMap::new();
+    let mut groups = Vec::<Vec<usize>>::new();
+    for (index, record) in records.iter().enumerate() {
+        let group = *group_positions
+            .entry(column_key(record, columns))
+            .or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+        groups[group].push(index);
+    }
+    groups
 }
 
 fn pivot_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
@@ -4843,6 +4932,25 @@ mod tests {
             transform_csv(&format!("fill-down 1 地区,编号\n{large},001{many_blanks}")),
             Err(CsvError::FillTooLarge)
         );
+    }
+
+    #[test]
+    fn fills_bounded_gaps_between_exact_csv_values_in_each_group() {
+        assert_eq!(
+            transform_csv(
+                "插值填充 [\"量\",[\"组\"]] 组,量\nA,1/3\nB,\nA,\nB,1.0\nA,\nB,\nA,4/3\nB,3\nA,"
+            )
+            .as_deref(),
+            Ok("组,量\r\nA,1/3\r\nB,\"\"\r\nA,2/3\r\nB,1.0\r\nA,1\r\nB,2\r\nA,4/3\r\nB,3\r\nA,\"\"")
+        );
+        assert_eq!(
+            transform_csv("fill-interpolate [1,[]] 值\n2.50\n\"\"\n2.5").as_deref(),
+            Ok("值\r\n2.50\r\n5/2\r\n2.5")
+        );
+        assert!(matches!(
+            transform_csv("插值填充 [2,[1]] 组,值\nA,1\nB,待定\nA,3"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]

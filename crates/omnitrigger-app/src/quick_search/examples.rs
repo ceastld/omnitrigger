@@ -2973,6 +2973,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按组用精确线性插值填充 CSV 空值",
+        query: "CSV: 插值填充 [\"金额\",[\"地区\"]] 地区,金额\n北,1/3\n南,8\n北,\n北,\n北,4/3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计 CSV 各列的空单元格",
         query: "CSV: 空值统计 [\"备注\",1] 编号,备注\n001,\n,\" \"\n002,茶",
     },

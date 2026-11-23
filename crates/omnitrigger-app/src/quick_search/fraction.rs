@@ -978,7 +978,7 @@ fn fraction_progress(
     Ok(progress)
 }
 
-fn interpolate_fraction(
+pub(super) fn interpolate_fraction(
     start: &BigRational,
     end: &BigRational,
     progress: &BigRational,
