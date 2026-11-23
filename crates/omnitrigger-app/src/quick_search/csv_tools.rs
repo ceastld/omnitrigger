@@ -168,6 +168,7 @@ pub(super) enum CsvError {
     RegexCheckColumnsArguments,
     RegexCheckColumnsInputTooLarge,
     RegexIssuesTooLarge,
+    NumericRangeCheckArguments,
     DecimalColumnsArguments,
     DecimalColumnsTooLarge,
     SignificantColumnsArguments,
@@ -366,6 +367,7 @@ impl CsvError {
             Self::RegexCheckColumnsArguments => "填写列名或列号列表和正则表达式",
             Self::RegexCheckColumnsInputTooLarge => "所选列的文本合计超过 16 KiB，请缩小表格范围",
             Self::RegexIssuesTooLarge => "正则检查结果超过 1 MiB，请缩小表格范围",
+            Self::NumericRangeCheckArguments => "填写列列表和两个数值字符串，下界须不大于上界",
             Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
             Self::DecimalColumnsTooLarge => "小数列结果超过 1 MiB，请缩小表格范围",
             Self::SignificantColumnsArguments => "填写不同的列和 1 至 100 位有效数字，例如 [[\"金额\",3],3]",
@@ -414,6 +416,10 @@ enum ColumnValidation {
     Number,
     Date,
     Pattern(Regex),
+    NumericRange {
+        lower: BigRational,
+        upper: BigRational,
+    },
 }
 
 enum Operation {
@@ -922,6 +928,21 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let pattern = compile_regex(&pattern).map_err(CsvError::Regex)?;
             input = data;
             Operation::CheckColumns(columns, ColumnValidation::Pattern(pattern))
+        }
+        "检查数值范围" | "check-numeric-range" => {
+            let ((columns, [lower, upper]), data) =
+                json_argument_and_data::<(Vec<ColumnReference>, [String; 2])>(
+                    input,
+                    CsvError::NumericRangeCheckArguments,
+                )?;
+            let invalid = CsvError::NumericRangeCheckArguments;
+            let lower = parse_fraction_literal(&lower).map_err(|_| invalid)?;
+            let upper = parse_fraction_literal(&upper).map_err(|_| invalid)?;
+            if columns.is_empty() || lower > upper {
+                return Err(invalid);
+            }
+            input = data;
+            Operation::CheckColumns(columns, ColumnValidation::NumericRange { lower, upper })
         }
         "小数列" | "decimal-columns" | "有效数字列" | "significant-columns" => {
             let significant = matches!(operation.as_str(), "有效数字列" | "significant-columns");
@@ -2896,7 +2917,9 @@ fn check_columns(
         return Err(CsvError::RegexCheckColumnsInputTooLarge);
     }
     let too_large = match validation {
-        ColumnValidation::Number => CsvError::NumericIssuesTooLarge,
+        ColumnValidation::Number | ColumnValidation::NumericRange { .. } => {
+            CsvError::NumericIssuesTooLarge
+        }
         ColumnValidation::Date => CsvError::DateIssuesTooLarge,
         ColumnValidation::Pattern(_) => CsvError::RegexIssuesTooLarge,
     };
@@ -2909,6 +2932,8 @@ fn check_columns(
                 ColumnValidation::Number => parse_fraction_literal(cell).is_ok(),
                 ColumnValidation::Date => parse_complete_date(cell).is_ok(),
                 ColumnValidation::Pattern(pattern) => pattern.is_match(cell),
+                ColumnValidation::NumericRange { lower, upper } => parse_fraction_literal(cell)
+                    .is_ok_and(|value| lower <= &value && &value <= upper),
             };
             if valid {
                 continue;
@@ -4981,6 +5006,19 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn reports_values_outside_an_exact_inclusive_csv_range() {
+        let query = "检查数值范围 [[\"比率\"],[\"1/4\",\"3/4\"]] 编号,比率\nA,1/4\nB,0.750\nC,0.751\nD,未填\nE,0.24";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n3,2,比率,0.751\r\n4,2,比率,未填\r\n5,2,比率,0.24"),
+        );
+        assert_eq!(
+            transform_csv(r#"check-numeric-range [[1],["1","0"]] 数值"#),
+            Err(CsvError::NumericRangeCheckArguments),
+        );
     }
 
     #[test]

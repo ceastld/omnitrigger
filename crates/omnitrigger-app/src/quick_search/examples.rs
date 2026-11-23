@@ -3668,6 +3668,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位超出数值范围的单元格",
+        query: "CSV: 检查数值范围 [[\"比率\"],[\"1/4\",\"3/4\"]] 编号,比率\nA,1/4\nB,0.750\nC,0.751\nD,未填",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把选中的 CSV 数值列统一成固定小数位",
         query: "CSV: 小数列 [[\"金额\",3],2] 编号,金额,比率\n001,2.675,1/8\n002,,-0.005",
     },
