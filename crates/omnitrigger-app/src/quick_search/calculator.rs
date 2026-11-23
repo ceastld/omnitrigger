@@ -104,18 +104,18 @@ pub(super) fn sample_at_coordinates(
     x: f64,
     y: Option<f64>,
 ) -> Result<Option<f64>, CalculationError> {
-    sample_with_variables(
+    optional_sample(evaluate_with_variables(
         query,
         Variables {
             x: Some(x),
             y,
             ..Variables::default()
         },
-    )
+    ))
 }
 
-pub(super) fn sample_at_t(query: &str, t: f64) -> Result<Option<f64>, CalculationError> {
-    sample_with_variables(
+pub(super) fn evaluate_at_t(query: &str, t: f64) -> Result<f64, CalculationError> {
+    evaluate_with_variables(
         query,
         Variables {
             t: Some(t),
@@ -124,11 +124,12 @@ pub(super) fn sample_at_t(query: &str, t: f64) -> Result<Option<f64>, Calculatio
     )
 }
 
-fn sample_with_variables(
-    query: &str,
-    variables: Variables,
-) -> Result<Option<f64>, CalculationError> {
-    match evaluate_with_variables(query, variables) {
+pub(super) fn sample_at_t(query: &str, t: f64) -> Result<Option<f64>, CalculationError> {
+    optional_sample(evaluate_at_t(query, t))
+}
+
+fn optional_sample(value: Result<f64, CalculationError>) -> Result<Option<f64>, CalculationError> {
+    match value {
         Ok(value) => Ok(Some(value)),
         Err(
             CalculationError::DivisionByZero

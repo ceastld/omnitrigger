@@ -316,6 +316,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "估算极坐标半径在角度区间内扫过的面积",
+        query: "方程: 极坐标面积 1+cos(t) @ 0..2*pi; 64",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用二分法求连续函数的一个近似零点",
         query: "方程: 二分求根 cos(x)-x @ 0 到 1",
     },
@@ -5603,6 +5608,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "参数图",
             "极坐标图",
             "极坐标采样",
+            "极坐标面积",
             "二分求根",
             "数值积分",
             "积分对照",

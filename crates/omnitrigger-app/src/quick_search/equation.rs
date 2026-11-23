@@ -4,8 +4,8 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{
-    evaluate, evaluate_at_x, format_result, format_round_trip as format_coordinate, normalize,
-    sample_at_t, sample_at_x, CalculationError, QUERY_LIMIT,
+    evaluate, evaluate_at_t, evaluate_at_x, format_result, format_round_trip as format_coordinate,
+    normalize, sample_at_t, sample_at_x, CalculationError, QUERY_LIMIT,
 };
 use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{
@@ -56,6 +56,7 @@ pub(super) enum EquationError {
     ParametricSampleArguments,
     ParametricPlotHasNoPoints,
     PolarSampleArguments,
+    NumericPolarAreaArguments,
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
@@ -127,6 +128,9 @@ impl EquationError {
             Self::ParametricPlotHasNoPoints => "该区间没有横坐标和纵坐标均有限的采样点",
             Self::PolarSampleArguments => {
                 "填写以 t 为弧度角的半径算式，再填两个不同的端点和可选的 2 至 129 个采样点"
+            }
+            Self::NumericPolarAreaArguments => {
+                "填写以 t 为弧度角的半径算式，再填不同的端点和可选的 2 至 128 的偶数子区间数"
             }
             Self::BisectionArguments => {
                 "填写要求零点的算式或等式和两个不同的端点，例如 cos(x)=x @ 0 到 1"
@@ -283,6 +287,7 @@ fn solve_equation_text(
             "积分对照" | "compare-integrals" => return compare_numeric_integrals(arguments),
             "数值面积" | "numeric-area" => return numeric_function_area(arguments),
             "数值弧长" | "numeric-arc-length" => return numeric_function_arc_length(arguments),
+            "极坐标面积" | "polar-area" => return numeric_polar_area(arguments),
             "积分采样图" | "integral-plot" => {
                 return format_function_samples(&integral_samples(arguments)?, "累计积分");
             }
@@ -1144,10 +1149,7 @@ struct PolarSample {
 
 fn polar_samples(input: &str) -> Result<Vec<PolarSample>, EquationError> {
     let invalid = EquationError::PolarSampleArguments;
-    let (radius, bounds) = input.split_once('@').ok_or(invalid)?;
-    if radius.trim().is_empty() {
-        return Err(invalid);
-    }
+    let (radius, bounds) = split_polar_arguments(input, invalid)?;
     sampled_coordinates(bounds, invalid)?
         .map(|t| {
             let radius = sample_at_t(radius, t).map_err(EquationError::Approximation)?;
@@ -1161,6 +1163,18 @@ fn polar_samples(input: &str) -> Result<Vec<PolarSample>, EquationError> {
             })
         })
         .collect()
+}
+
+fn split_polar_arguments(
+    input: &str,
+    invalid: EquationError,
+) -> Result<(&str, &str), EquationError> {
+    let (radius, bounds) = input.split_once('@').ok_or(invalid)?;
+    let radius = radius.trim();
+    if radius.is_empty() {
+        return Err(invalid);
+    }
+    Ok((radius, bounds))
 }
 
 fn format_polar_samples(samples: &[PolarSample]) -> Result<String, EquationError> {
@@ -1716,6 +1730,22 @@ fn numeric_function_arc_length(input: &str) -> Result<String, EquationError> {
         estimate_derivative(expression, x, derivative_step(x)).map(|slope| slope.hypot(1.0))
     })?;
     display_integral("弧长", value, intervals)
+}
+
+fn numeric_polar_area(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericPolarAreaArguments;
+    let (radius, bounds) = split_polar_arguments(input, invalid)?;
+    let ([left, right], intervals) = numeric_integral_range(bounds, invalid)?;
+    let value = integrate_samples([left.min(right), left.max(right)], intervals, |t| {
+        let radius = evaluate_at_t(radius, t).map_err(EquationError::Approximation)?;
+        let sector = (radius * 0.5) * radius;
+        if sector.is_finite() {
+            Ok(sector)
+        } else {
+            Err(EquationError::Approximation(CalculationError::OutOfRange))
+        }
+    })?;
+    display_integral("极坐标面积", value, intervals)
 }
 
 fn numeric_integral_range(
@@ -2958,6 +2988,28 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn integrates_the_area_swept_by_polar_radii_with_unordered_endpoints() {
+        assert_eq!(
+            solve_equation("极坐标面积 1 @ 2*pi..0; 8").as_deref(),
+            Ok("极坐标面积 ≈ 3.14159265358979\r\n复合辛普森法 · 8 个子区间")
+        );
+        assert_eq!(
+            solve_equation("polar-area -2 @ 0..pi; 8").as_deref(),
+            Ok("极坐标面积 ≈ 6.28318530717959\r\n复合辛普森法 · 8 个子区间")
+        );
+        assert_eq!(
+            solve_equation("极坐标面积 1/t @ -1..1; 4"),
+            Err(EquationError::Approximation(
+                CalculationError::DivisionByZero
+            ))
+        );
+        assert_eq!(
+            solve_equation("极坐标面积 1 @ 0..pi; 3"),
+            Err(EquationError::NumericPolarAreaArguments)
         );
     }
 
