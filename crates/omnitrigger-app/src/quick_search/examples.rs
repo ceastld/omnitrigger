@@ -531,6 +531,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 分箱 0,1/2,2 @ -1,0,0.50,1,2",
     },
     Example {
+        icon: Icon::Layers,
+        title: "在搜索框对比各区间的观测次数",
+        query: "统计: 分箱图 0,1/2,2 @ -1,0,0.50,1,2",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "计算恰好成功指定次数的二项概率",
         query: "统计: 二项概率 4,2,50%",
@@ -5443,6 +5448,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "期望频数",
                     "箱线摘要",
                     "箱线图",
+                    "分箱图",
                     "截尾平均",
                     "缩尾平均",
                     "基尼系数",

@@ -3,6 +3,7 @@ use std::{borrow::Borrow, collections::BTreeMap};
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
+use super::bin_plot::BinPlot;
 use super::box_plot::BoxPlot;
 use super::calculator::normalize;
 use super::fraction::{
@@ -178,14 +179,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             StatisticsOperation::Frequencies(FrequencyReport::Mode),
             values.trim(),
         ),
-        "分箱" | "histogram" => {
-            let (edges, input) = values
-                .split_once('@')
-                .ok_or(StatisticsError::InvalidBinEdges)?;
-            (
-                StatisticsOperation::Bins(parse_bin_edges(edges)?),
-                input.trim(),
-            )
+        "分箱" | "histogram" | "分箱图" | "bin-plot" => {
+            let (edges, input) = bin_arguments(values)?;
+            (StatisticsOperation::Bins(edges), input)
         }
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "调和平均" | "harmonic-mean" => (StatisticsOperation::HarmonicMean, values.trim()),
@@ -681,23 +677,56 @@ pub(super) fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, Statistic
     Ok(edges)
 }
 
+fn bin_arguments(input: &str) -> Result<(Vec<BigRational>, &str), StatisticsError> {
+    let (edges, data) = input
+        .split_once('@')
+        .ok_or(StatisticsError::InvalidBinEdges)?;
+    Ok((parse_bin_edges(edges)?, data.trim()))
+}
+
+pub(super) fn bin_plot_arguments(input: &str) -> Option<&str> {
+    let (operation, values) = operation_and_arguments(input.trim());
+    (operation == "分箱图" || operation.eq_ignore_ascii_case("bin-plot")).then_some(values.trim())
+}
+
+pub(super) fn calculate_bin_plot(input: &str) -> Result<(String, BinPlot), StatisticsError> {
+    let input = normalize(input);
+    let (edges, data) = bin_arguments(&input)?;
+    let (values, count) = read_observations(data)?;
+    let bins = count_bins(values, &edges);
+    let labels = bin_labels(&edges);
+    let csv = bin_csv(&labels, &bins, count);
+    Ok((csv, BinPlot::new(labels, bins, count)))
+}
+
 fn report_binned_frequencies(
     values: Vec<(BigRational, u64)>,
     count: u64,
     edges: &[BigRational],
 ) -> String {
+    bin_csv(&bin_labels(edges), &count_bins(values, edges), count)
+}
+
+fn count_bins(values: Vec<(BigRational, u64)>, edges: &[BigRational]) -> Vec<u64> {
     let mut bins = vec![0; edges.len() + 1];
     for (value, occurrences) in values {
         let index = edges.partition_point(|edge| edge <= &value);
         // 各组频数的总和已在调用前检查。
         bins[index] += occurrences;
     }
-    let edges: Vec<_> = std::iter::once("-∞".to_owned())
+    bins
+}
+
+fn bin_labels(edges: &[BigRational]) -> Vec<String> {
+    std::iter::once("-∞".to_owned())
         .chain(edges.iter().map(ToString::to_string))
         .chain(std::iter::once("+∞".to_owned()))
-        .collect();
+        .collect()
+}
+
+fn bin_csv(edges: &[String], bins: &[u64], count: u64) -> String {
     std::iter::once("下界,上界,次数,频率".to_owned())
-        .chain(edges.windows(2).zip(bins).map(|(edge, occurrences)| {
+        .chain(edges.windows(2).zip(bins).map(|(edge, &occurrences)| {
             let share = BigRational::new(occurrences.into(), count.into());
             format!("{},{},{occurrences},{share}", edge[0], edge[1])
         }))

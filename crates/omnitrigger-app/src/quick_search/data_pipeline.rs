@@ -4,6 +4,7 @@ use chrono::{DateTime, FixedOffset};
 use serde_json::value::RawValue;
 
 use super::{
+    bin_plot::BinPlot,
     box_plot::BoxPlot,
     calendar::calculate_date,
     conversion::{calculate_circuit, convert_wave},
@@ -25,7 +26,10 @@ use super::{
     scatter_plot::ScatterPlot,
     scope::{scoped_query, Scope},
     solid::calculate_solid,
-    statistics::{box_plot_arguments, calculate_box_plot, calculate_statistics},
+    statistics::{
+        bin_plot_arguments, box_plot_arguments, calculate_bin_plot, calculate_box_plot,
+        calculate_statistics,
+    },
     tempo::calculate_tempo,
     text_tools::transform_text,
     timestamp::convert_timestamp,
@@ -138,6 +142,7 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
 pub(super) enum PipelineChart {
     Scatter(ScatterPlot),
     BoxPlot(BoxPlot),
+    Bins(BinPlot),
 }
 
 enum PipelineView<'a> {
@@ -485,11 +490,19 @@ fn prepare_pipeline_chart(
                 .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
                 .map_err(|error| error.message())
         }),
-        Scope::Statistics => box_plot_arguments(query).map(|input| {
-            calculate_box_plot(input)
-                .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
-                .map_err(|error| error.message())
-        }),
+        Scope::Statistics => box_plot_arguments(query)
+            .map(|input| {
+                calculate_box_plot(input)
+                    .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
+                    .map_err(|error| error.message())
+            })
+            .or_else(|| {
+                bin_plot_arguments(query).map(|input| {
+                    calculate_bin_plot(input)
+                        .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
+                        .map_err(|error| error.message())
+                })
+            }),
         _ => None,
     }
 }

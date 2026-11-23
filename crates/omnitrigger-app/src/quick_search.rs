@@ -2,6 +2,7 @@ mod actions;
 mod applications;
 mod aspect_ratio;
 mod batch;
+mod bin_plot;
 mod box_plot;
 mod calculator;
 mod calendar;
@@ -210,7 +211,10 @@ struct ResultValue {
 
 impl ResultValue {
     fn is_chart(&self) -> bool {
-        matches!(&self.kind, ValueKind::Scatter(_) | ValueKind::BoxPlot(_))
+        matches!(
+            &self.kind,
+            ValueKind::Scatter(_) | ValueKind::BoxPlot(_) | ValueKind::BinPlot(_)
+        )
     }
 
     fn continuation_hint(&self) -> Option<&'static str> {
@@ -241,6 +245,7 @@ enum ValueKind {
     ColorContrast([u32; 2]),
     Scatter(scatter_plot::ScatterPlot),
     BoxPlot(box_plot::BoxPlot),
+    BinPlot(bin_plot::BinPlot),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1051,6 +1056,7 @@ impl Results {
                             kind: match chart {
                                 Some(PipelineChart::Scatter(plot)) => ValueKind::Scatter(plot),
                                 Some(PipelineChart::BoxPlot(plot)) => ValueKind::BoxPlot(plot),
+                                Some(PipelineChart::Bins(plot)) => ValueKind::BinPlot(plot),
                                 None => ValueKind::Text,
                             },
                         }),
@@ -1089,6 +1095,15 @@ impl Results {
                                 .map(|(text, plot)| ResultValue {
                                     text,
                                     kind: ValueKind::BoxPlot(plot),
+                                })
+                                .map_err(ValueError::Statistics),
+                        )
+                    } else if let Some(values) = statistics::bin_plot_arguments(term) {
+                        Self::Value(
+                            statistics::calculate_bin_plot(values)
+                                .map(|(text, plot)| ResultValue {
+                                    text,
+                                    kind: ValueKind::BinPlot(plot),
                                 })
                                 .map_err(ValueError::Statistics),
                         )
@@ -2776,6 +2791,16 @@ impl QuickSearch {
                 "F2 查看摘要",
                 cx,
             ),
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::BinPlot(plot),
+                ..
+            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+                plot.legend(),
+                plot.render(),
+                "复制 CSV  Enter",
+                "F2 查看数据",
+                cx,
+            ),
             Results::Value(Ok(output)) => {
                 let result = &output.text;
                 let line_limit = self.value_line_limit();
@@ -3932,6 +3957,20 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn binned_chart_preserves_weighted_counts_and_the_exact_csv() {
+        let arguments = "0,1 @ 频数 -1@1,0@18446744073709551614";
+        let plot = for_query(&format!("统计: 分箱图 {arguments}"), &[]);
+        assert!(matches!(
+            &plot,
+            Results::Value(Ok(ResultValue { kind: ValueKind::BinPlot(plot), .. }))
+                if plot.bin_count() == 3
+        ));
+        let csv = calculate_statistics(&format!("分箱 {arguments}")).unwrap();
+        assert_eq!(plot.refillable_text(), Some(csv.as_str()));
+        assert!(plot.value_preview_expandable());
     }
 
     #[test]
