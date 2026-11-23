@@ -235,6 +235,8 @@ pub(super) enum CsvError {
     SecantColumnArguments,
     SecantPointCount,
     SecantDuplicateX,
+    CoordinateWindowMeanArguments,
+    CoordinateWindowMeanPointCount,
     CoordinateInterpolationArguments,
     CoordinateInterpolationPointCount,
     CoordinateDuplicateX,
@@ -525,6 +527,10 @@ impl CsvError {
             }
             Self::SecantPointCount => "差商列需要 2 至 64 行同时含 x 和 y 的数据",
             Self::SecantDuplicateX => "差商列的横坐标须互不相同",
+            Self::CoordinateWindowMeanArguments => {
+                "填写新列名、两个坐标列和正的窗口长度，例如 [\"窗均值\",[\"时间\",\"高度\"],\"3/2\"]"
+            }
+            Self::CoordinateWindowMeanPointCount => "时间窗平均列需要 2 至 64 个完整样点",
             Self::CoordinateInterpolationArguments => {
                 "填写两个坐标列和 1 至 64 个数值横坐标，例如 [[\"时间\",\"高度\"],[\"1/2\",2]]"
             }
@@ -1135,6 +1141,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         "差商列" | "secant-column" => {
             return append_sampled_coordinate_column(input, CoordinateColumn::Secant)
+        }
+        "时间窗平均列" | "time-window-mean-column" => {
+            return append_coordinate_window_mean(input)
         }
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
@@ -5931,27 +5940,88 @@ fn append_sampled_coordinate_column(
     };
     let ((name, coordinates), data) =
         json_argument_and_data::<(String, [ColumnReference; 2])>(input, invalid)?;
+    append_coordinate_column(
+        data,
+        &name,
+        &coordinates,
+        invalid,
+        point_count_error,
+        |samples, values| match operation {
+            CoordinateColumn::CumulativeIntegral => {
+                integrate_trapezoid_samples(samples, false, |sample, total| {
+                    values[sample.row_index] = total.to_string();
+                })?;
+                Ok(())
+            }
+            CoordinateColumn::Secant => fill_secant_slopes(samples, values),
+        },
+    )
+}
+
+fn append_coordinate_window_mean(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateWindowMeanArguments;
+    let ((name, coordinates, width), data) =
+        json_argument_and_data::<(String, [ColumnReference; 2], Box<RawValue>)>(input, invalid)?;
+    let width = coordinate_argument(&width, invalid)?;
+    if width <= BigRational::default() {
+        return Err(invalid);
+    }
+    append_coordinate_column(
+        data,
+        &name,
+        &coordinates,
+        invalid,
+        CsvError::CoordinateWindowMeanPointCount,
+        |samples, values| fill_coordinate_window_means(samples, values, &width),
+    )
+}
+
+fn append_coordinate_column(
+    data: &str,
+    name: &str,
+    coordinates: &[ColumnReference; 2],
+    invalid: CsvError,
+    point_count_error: CsvError,
+    fill: impl FnOnce(&mut [CoordinateSample], &mut [String]) -> Result<(), CsvError>,
+) -> Result<String, CsvError> {
     if name.trim().is_empty() || name.contains('\0') {
         return Err(invalid);
     }
     let data = data.strip_prefix('\u{feff}').unwrap_or(data);
     let rows = read_rows(data, ',')?;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_distinct_columns(header, &coordinates, invalid)?;
+    let columns = resolve_distinct_columns(header, coordinates, invalid)?;
     let mut samples = collect_coordinate_samples(records, &columns, point_count_error)?;
     let mut values = vec![String::new(); records.len()];
-    match operation {
-        CoordinateColumn::CumulativeIntegral => {
-            integrate_trapezoid_samples(&mut samples, false, |sample, total| {
-                values[sample.row_index] = total.to_string();
-            })?;
-        }
-        CoordinateColumn::Secant => fill_secant_slopes(&mut samples, &mut values)?,
-    }
+    fill(&mut samples, &mut values)?;
     let mut values = values.into_iter();
-    write_appended_column(header, records, &name, |_| {
+    write_appended_column(header, records, name, |_| {
         Ok(values.next().expect("每行均有一个追加单元格"))
     })
+}
+
+fn fill_coordinate_window_means(
+    samples: &mut [CoordinateSample],
+    cells: &mut [String],
+    width: &BigRational,
+) -> Result<(), CsvError> {
+    sort_distinct_coordinates(samples)?;
+    let mut areas = Vec::with_capacity(samples.len());
+    integrate_trapezoid_samples(samples, false, |_, total| areas.push(total.clone()))?;
+    let first_x = &samples[0].point.0;
+    let two = BigInt::from(2u8);
+    for (index, sample) in samples.iter().enumerate().skip(1) {
+        let x = &sample.point.0;
+        let start = (x - width).max(first_x.clone());
+        let preceding = samples[..index].partition_point(|sample| sample.point.0 <= start) - 1;
+        let (preceding_x, preceding_y) = &samples[preceding].point;
+        let start_y = interpolate_coordinate_value(samples, &start)?;
+        let partial_area = (&start - preceding_x) * (preceding_y + start_y) / &two;
+        let mean = (&areas[index] - &areas[preceding] - partial_area) / (x - start);
+        ensure_exact_size(&mean).map_err(|_| CsvError::ComputedNumberRange)?;
+        cells[sample.row_index] = mean.to_string();
+    }
+    Ok(())
 }
 
 fn fill_secant_slopes(
@@ -7820,6 +7890,31 @@ mod tests {
         assert_eq!(
             transform_csv("差商列 [\"斜率\",[1,2]] x,y\n1/2,2\n0.50,"),
             Err(CsvError::SecantPointCount)
+        );
+    }
+
+    #[test]
+    fn averages_exact_trailing_windows_at_irregular_samples_in_original_row_order() {
+        let data = "编号,x,y\n003,3,4\n000,0,0\n002,2,\n001,1,2";
+        assert_eq!(
+            transform_csv(&format!(
+                "时间窗平均列 [\"窗均值\",[\"x\",\"y\"],\"3/2\"] {data}"
+            ))
+            .as_deref(),
+            Ok("编号,x,y,窗均值\r\n003,3,4,13/4\r\n000,0,0,\"\"\r\n002,2,\"\",\"\"\r\n001,1,2,1")
+        );
+        assert_eq!(
+            transform_csv("time-window-mean-column [\"均值\",[1,2],2] x,y\n0,0\n1,2\n3,4")
+                .as_deref(),
+            Ok("x,y,均值\r\n0,0,\"\"\r\n1,2,1\r\n3,4,3")
+        );
+        assert_eq!(
+            transform_csv(&format!("时间窗平均列 [\"均值\",[2,3],0] {data}")),
+            Err(CsvError::CoordinateWindowMeanArguments)
+        );
+        assert_eq!(
+            transform_csv("时间窗平均列 [\"均值\",[1,2],1] x,y\n1/2,1\n0.5,2"),
+            Err(CsvError::CoordinateDuplicateX)
         );
     }
 
