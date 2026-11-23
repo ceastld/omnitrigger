@@ -4,7 +4,7 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{
-    evaluate, evaluate_at_x, format_result, normalize, CalculationError, QUERY_LIMIT,
+    evaluate, format_result, normalize, sample_at_x, CalculationError, QUERY_LIMIT,
 };
 use super::fraction::{
     calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
@@ -677,15 +677,7 @@ fn function_samples_for_inputs(input: &str) -> Result<Vec<(f64, Option<f64>)>, E
 }
 
 fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
-    match evaluate_at_x(expression, x) {
-        Ok(value) => Ok(Some(value)),
-        Err(
-            CalculationError::DivisionByZero
-            | CalculationError::FunctionDomain
-            | CalculationError::OutOfRange,
-        ) => Ok(None),
-        Err(error) => Err(EquationError::Approximation(error)),
-    }
+    sample_at_x(expression, x).map_err(EquationError::Approximation)
 }
 
 fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, EquationError> {

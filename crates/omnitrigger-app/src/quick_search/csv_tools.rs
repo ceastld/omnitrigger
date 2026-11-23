@@ -27,7 +27,7 @@ use super::statistics::{
 use super::{
     bin_plot::BinPlot,
     box_plot::BoxPlot,
-    calculator::normalize,
+    calculator::{evaluate, format_result, normalize, sample_at_x, QUERY_LIMIT},
     calendar::{
         parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
         workday_exceptions_from_dates, SpreadsheetDateSystem,
@@ -69,6 +69,7 @@ const MAX_EXPANDED_CSV_BYTES: usize = 1024 * 1024;
 const MAX_STACK_TABLES: usize = 16;
 const MAX_VALUE_MAPPINGS: usize = 32;
 const MAX_FORMULA_RECORDS: usize = 32;
+const MAX_FUNCTION_RECORDS: usize = 128;
 const MAX_ADDED_CELLS: usize = 16_384;
 const MAX_CELL_PADDING_WIDTH: usize = 4096;
 const MAX_REGEX_COLUMN_INPUT_BYTES: usize = 16 * 1024;
@@ -165,6 +166,8 @@ pub(super) enum CsvError {
     FormulaColumnArguments,
     FormulaColumnLimit,
     FormulaEvaluation(FractionError),
+    FunctionColumnArguments,
+    FunctionColumnLimit,
     ComputedDivisionByZero,
     ComputedNumberRange,
     InvalidColumnValue,
@@ -392,6 +395,10 @@ impl CsvError {
             }
             Self::FormulaColumnLimit => "公式列每次最多处理 32 条数据",
             Self::FormulaEvaluation(error) => error.message(),
+            Self::FunctionColumnArguments => {
+                "填写新列名、来源列和含 x 的算式，例如 [\"余弦\",2,\"cosd(x)\"]"
+            }
+            Self::FunctionColumnLimit => "函数列每次最多处理 128 条数据",
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
             Self::InvalidColumnValue => "输入列号或带双引号的列名，再输入带双引号的值",
@@ -685,6 +692,7 @@ enum Operation {
         right: Option<ColumnReference>,
         arithmetic: ColumnArithmetic,
     },
+    FunctionColumn(String, ColumnReference, String),
     ConvertDataColumn(String, ColumnReference, String),
     RadixColumn {
         name: String,
@@ -1960,6 +1968,22 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 arithmetic: ColumnArithmetic::Formula(normalize(&expression)),
             }
         }
+        "函数列" | "function-column" => {
+            let ((name, source, expression), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(
+                    input,
+                    CsvError::FunctionColumnArguments,
+                )?;
+            if name.trim().is_empty()
+                || name.contains('\0')
+                || expression.trim().is_empty()
+                || expression.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT
+            {
+                return Err(CsvError::FunctionColumnArguments);
+            }
+            input = data;
+            Operation::FunctionColumn(name, source, expression)
+        }
         "按列去重" | "deduplicate-columns" | "数值去重" | "deduplicate-numeric" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
@@ -2414,6 +2438,18 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             right,
             arithmetic,
         } => compute_column(rows, name, left, right, arithmetic),
+        Operation::FunctionColumn(name, source, expression) => {
+            if rows.len().saturating_sub(1) > MAX_FUNCTION_RECORDS {
+                return Err(CsvError::FunctionColumnLimit);
+            }
+            append_from_one_column(&rows, &name, source, |value| {
+                let x = evaluate(value).map_err(|_| CsvError::InvalidNumber.message())?;
+                sample_at_x(&expression, x)
+                    .and_then(|y| y.map(format_result).transpose())
+                    .map(Option::unwrap_or_default)
+                    .map_err(|error| error.message())
+            })
+        }
         Operation::ConvertDataColumn(name, source, target) => {
             convert_data_column(&rows, &name, source, &target)
         }
@@ -9471,6 +9507,33 @@ null"#
         assert_eq!(
             transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
             Err(CsvError::NumericComparisonColumnArguments)
+        );
+    }
+
+    #[test]
+    fn appends_calculator_function_values_with_blank_cells_and_row_errors() {
+        assert_eq!(
+            transform_csv(
+                "函数列 [\"根号\",\"数值\",\"sqrt(x)\"] 编号,数值\n001,4\n002,-1\n003,\n004,1/4"
+            )
+            .as_deref(),
+            Ok("编号,数值,根号\r\n001,4,2\r\n002,-1,\"\"\r\n003,\"\",\"\"\r\n004,1/4,0.5")
+        );
+        assert_eq!(
+            transform_csv("function-column [\"余弦\",1,\"cosd(x)\"] 角度\n0\n文字"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: CsvError::InvalidNumber.message()
+            })
+        );
+        assert!(matches!(
+            transform_csv("函数列 [\"函数值\",1,\"f(x)\"] 角度\n0"),
+            Err(CsvError::DataRowValue { row: 1, .. })
+        ));
+        let over_limit = format!("函数列 [\"结果\",1,\"x\"] 数值{}", "\n1".repeat(129));
+        assert_eq!(
+            transform_csv(&over_limit),
+            Err(CsvError::FunctionColumnLimit)
         );
     }
 

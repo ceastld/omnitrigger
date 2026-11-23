@@ -63,8 +63,16 @@ pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
     evaluate_with_coordinate(query, None)
 }
 
-pub(super) fn evaluate_at_x(query: &str, x: f64) -> Result<f64, CalculationError> {
-    evaluate_with_coordinate(query, Some(x))
+pub(super) fn sample_at_x(query: &str, x: f64) -> Result<Option<f64>, CalculationError> {
+    match evaluate_with_coordinate(query, Some(x)) {
+        Ok(value) => Ok(Some(value)),
+        Err(
+            CalculationError::DivisionByZero
+            | CalculationError::FunctionDomain
+            | CalculationError::OutOfRange,
+        ) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn evaluate_with_coordinate(query: &str, coordinate: Option<f64>) -> Result<f64, CalculationError> {

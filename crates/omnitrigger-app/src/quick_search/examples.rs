@@ -4178,6 +4178,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "将一列数据代入计算器函数并追加近似值",
+        query: "CSV: 函数列 [\"余弦\",\"角度\",\"cosd(x)\"]\n角度,编号\n0,001\n90,002\n,003\n180,004",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按精确数值比较两列并标记是否达标",
         query: "CSV: 数值比较列 [\"达标\",\"实测\",2,\">=\"] 实测,门槛\n1.50,3/2\n1,2\n,0",
     },
