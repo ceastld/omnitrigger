@@ -1072,6 +1072,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "先转置矩阵，再求行列式",
+        query: r#"处理: ["矩阵: 转置","矩阵: 行列式"] 1,2; 3,4"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "对数据插值并取出结果列",
+        query: r#"处理: ["拟合: 插值 1/2,2 @","CSV: 选列名 [\"插值\"]"] 0,1; 1,2; 2,5"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把节拍时长换成时分秒格式",
         query: r#"处理: ["节拍: 时长","时长:"] 120 BPM @ 3/2"#,
     },

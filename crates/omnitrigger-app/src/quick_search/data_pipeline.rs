@@ -15,6 +15,8 @@ use super::{
     equation::{solve_equation, solve_linear_system},
     fraction::simplify_fraction,
     json_tools::{read_json_array, read_unique_object_entries, transform_json, JsonError},
+    linear_fit::calculate_linear_fit,
+    matrix::calculate_matrix,
     operators::json_argument_and_tail,
     path_tools::path_component,
     pitch::convert_pitch,
@@ -357,6 +359,7 @@ fn run_pipeline_steps(
                     | Scope::Circuit
                     | Scope::Equation
                     | Scope::LinearSystem
+                    | Scope::LinearFit
                     | Scope::Fraction
                     | Scope::Statistics
             )
@@ -389,6 +392,8 @@ fn run_pipeline_steps(
             Scope::Circuit => calculate_circuit(&query).map_err(|cause| cause.message()),
             Scope::Equation => solve_equation(&query).map_err(|cause| cause.message()),
             Scope::LinearSystem => solve_linear_system(&query).map_err(|cause| cause.message()),
+            Scope::Matrix => calculate_matrix(&query).map_err(|cause| cause.message()),
+            Scope::LinearFit => calculate_linear_fit(&query).map_err(|cause| cause.message()),
             Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
             Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
@@ -420,6 +425,23 @@ mod tests {
     fn run_pipeline(input: &str) -> Result<String, DataPipelineError> {
         let now = DateTime::parse_from_rfc3339("2024-02-18T23:30:00-08:00").unwrap();
         transform_data_pipeline(input, now)
+    }
+
+    #[test]
+    fn passes_exact_matrices_and_interpolation_rows_between_tools() {
+        assert_eq!(
+            run_pipeline(r#"["矩阵: 转置","矩阵: 行列式"] 1,2; 3,4"#).as_deref(),
+            Ok("-2"),
+        );
+        assert_eq!(
+            run_pipeline(r#"["拟合: 插值 1/2,2 @","CSV: 选列名 [\"插值\"]"] 0,1; 1,2; 2,5"#)
+                .as_deref(),
+            Ok("插值\r\n5/4\r\n5"),
+        );
+        assert_eq!(
+            run_pipeline(r#"["拟合:"] 0,1; 1,3; 2,5"#).as_deref(),
+            Ok("斜率 2 · 截距 1\nR² 1"),
+        );
     }
 
     #[test]
