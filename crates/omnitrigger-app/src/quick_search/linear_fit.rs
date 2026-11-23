@@ -10,6 +10,7 @@ use super::fraction::{
 };
 use super::matrix::{least_squares_with_weights, MatrixError};
 use super::operators::split_top_level_commas;
+use super::scatter_plot::ScatterPlot;
 use super::statistics::median_sorted_values;
 
 const MAX_POINTS: usize = 64;
@@ -71,6 +72,9 @@ enum FitOutput {
 pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError> {
     let normalized = normalize(input);
     let input = normalized.trim();
+    if let Some(points) = scatter_arguments(input) {
+        return calculate_scatter(points).map(|(csv, _)| csv);
+    }
     let (points, output) = match input.split_once(char::is_whitespace) {
         Some((operation, rest))
             if operation == "过原点" || operation.eq_ignore_ascii_case("through-origin") =>
@@ -190,6 +194,20 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         .r_squared()?
         .map_or_else(|| "未定义".to_owned(), |value| value.to_string());
     Ok(format!("斜率 {slope} · 截距 {intercept}\nR² {r_squared}"))
+}
+
+pub(super) fn scatter_arguments(input: &str) -> Option<&str> {
+    let (operation, points) = input.trim().split_once(char::is_whitespace)?;
+    (operation == "散点图" || operation.eq_ignore_ascii_case("scatter")).then_some(points.trim())
+}
+
+pub(super) fn calculate_scatter(input: &str) -> Result<(String, ScatterPlot), LinearFitError> {
+    let input = normalize(input);
+    let points = parse_paired_points(input.trim())?.collect::<Result<Vec<_>, _>>()?;
+    let mut rows = vec!["x,y".to_owned()];
+    rows.extend(points.iter().map(|(x, y)| format!("{x},{y}")));
+    let plot = ScatterPlot::from_points(&points);
+    Ok((rows.join("\r\n"), plot))
 }
 
 fn fit_through_origin(points: &str) -> Result<String, LinearFitError> {

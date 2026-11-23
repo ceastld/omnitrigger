@@ -38,6 +38,7 @@ mod ratio_allocation;
 mod recent;
 mod rectangle;
 mod renminbi;
+mod scatter_plot;
 mod scientific;
 mod scope;
 mod settings_sections;
@@ -233,6 +234,7 @@ enum ValueKind {
     Conversion(Option<String>),
     Color(u32),
     ColorContrast([u32; 2]),
+    Scatter(scatter_plot::ScatterPlot),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1050,7 +1052,18 @@ impl Results {
                     Self::text_value(solve_linear_system(term).map_err(ValueError::Equation))
                 }
                 Scope::LinearFit => {
-                    Self::text_value(calculate_linear_fit(term).map_err(ValueError::LinearFit))
+                    if let Some(points) = linear_fit::scatter_arguments(term) {
+                        Self::Value(
+                            linear_fit::calculate_scatter(points)
+                                .map(|(text, plot)| ResultValue {
+                                    text,
+                                    kind: ValueKind::Scatter(plot),
+                                })
+                                .map_err(ValueError::LinearFit),
+                        )
+                    } else {
+                        Self::text_value(calculate_linear_fit(term).map_err(ValueError::LinearFit))
+                    }
                 }
                 Scope::Statistics => {
                     Self::text_value(calculate_statistics(term).map_err(ValueError::Statistics))
@@ -1314,7 +1327,8 @@ impl Results {
     fn value_preview_expandable(&self) -> bool {
         matches!(
             self,
-            Self::Value(Ok(value)) if value_preview::lines(&value.text).nth(MAX_VALUE_LINES).is_some()
+            Self::Value(Ok(value)) if !matches!(&value.kind, ValueKind::Scatter(_))
+                && value_preview::lines(&value.text).nth(MAX_VALUE_LINES).is_some()
         )
     }
 
@@ -1324,6 +1338,9 @@ impl Results {
                 132. + items.len().min(DESTINATION_PAGE_SIZE) as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => {
+                if matches!(&value.kind, ValueKind::Scatter(_)) {
+                    return 158. + scatter_plot::PREVIEW_HEIGHT + 28.;
+                }
                 let hints = usize::from(value.continuation_hint().is_some())
                     + usize::from(self.value_preview_expandable());
                 158. + value_extra_height(&value.text, value_line_limit) + hints as f32 * 24.
@@ -2668,6 +2685,25 @@ impl QuickSearch {
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         match &self.results {
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Scatter(plot),
+                ..
+            })) => div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    row.justify_between()
+                        .child(format!("{} 个数据点", plot.point_count()))
+                        .child(
+                            button("copy-scatter", "复制 CSV  Enter", Tone::Primary, true)
+                                .flex_none()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.confirm(window, cx)),
+                                ),
+                        ),
+                )
+                .child(plot.render()),
             Results::Value(Ok(output)) => {
                 let result = &output.text;
                 let line_limit = self.value_line_limit();
@@ -3822,6 +3858,24 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn scatter_preview_preserves_exact_csv_for_copy_and_refill() {
+        let query = "拟合: 散点图 100000000000000000000,1/2; 100000000000000000001,1/2";
+        let results = for_query(query, &[]);
+        assert!(!results.value_preview_expandable());
+        let expected = "x,y\r\n100000000000000000000,1/2\r\n100000000000000000001,1/2";
+        assert_eq!(results.refillable_text(), Some(expected));
+        let Results::Value(Ok(ResultValue {
+            kind: ValueKind::Scatter(plot),
+            text,
+        })) = results
+        else {
+            panic!("散点图没有返回图形预览");
+        };
+        assert_eq!(plot.point_count(), 2);
+        assert_eq!(text, expected);
     }
 
     #[test]
