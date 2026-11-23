@@ -930,6 +930,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "复数: 极坐标 3+4i",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按模和辐角计算复数的直角式",
+        query: "复数: 由极坐标 2 @ 30°",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用同一个分数乘矩阵中的每个元素",
         query: "矩阵: 数乘 -3/2 @ 1/3,2; -1,0",

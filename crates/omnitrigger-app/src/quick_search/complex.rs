@@ -4,8 +4,8 @@ use num_rational::BigRational;
 use super::{
     calculator::{format_result, normalize},
     fraction::{
-        calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root,
-        FractionError,
+        calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
+        format_square_root, FractionError,
     },
     operators::{split_top_level_commas, visit_additive_terms},
 };
@@ -18,6 +18,9 @@ pub(super) enum ComplexError {
     Operation,
     Components,
     Exponent,
+    PolarArguments,
+    NegativeModulus,
+    PolarApproximationRange,
     ZeroDivisor,
     Evaluation(FractionError),
 }
@@ -26,9 +29,14 @@ impl ComplexError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "填写复数，两组复数用 @ 隔开",
-            Self::Operation => "可用加法、减法、乘法、除法、模、共轭、乘方、平方根和极坐标",
+            Self::Operation => {
+                "可用加法、减法、乘法、除法、模、共轭、乘方、平方根、极坐标和由极坐标"
+            }
             Self::Components => "填写 a,b 或 a+bi 形式的复数，例如 3,4 或 3+4i",
             Self::Exponent => "在 @ 后填写 −1024 至 1024 的整数指数",
+            Self::PolarArguments => "填写模、@ 和以度为单位的辐角，例如 2 @ 30°",
+            Self::NegativeModulus => "复数的模须大于或等于零",
+            Self::PolarApproximationRange => "直角坐标超出可显示的近似范围",
             Self::ZeroDivisor => "复数的除数不能为零",
             Self::Evaluation(error) => error.message(),
         }
@@ -57,6 +65,7 @@ pub(super) fn calculate_complex(query: &str) -> Result<String, ComplexError> {
             return complex_modulus(&components(input)?);
         }
         "极坐标" | "polar" => return complex_polar(components(input)?),
+        "由极坐标" | "from-polar" => return complex_from_polar(input),
         "共轭" | "conjugate" => {
             let [real, imaginary] = components(input)?;
             return format_complex([real, -imaginary]);
@@ -165,8 +174,8 @@ fn complex_polar(value: [BigRational; 2]) -> Result<String, ComplexError> {
         (angle * direction).to_string()
     } else {
         let scale = real_size.max(imaginary_size);
-        let x = relative_coordinate(real, &scale);
-        let y = relative_coordinate(imaginary, &scale);
+        let x = rational_float(&(real / &scale));
+        let y = rational_float(&(imaginary / &scale));
         let degrees = format_result(y.atan2(x).to_degrees())
             .map_err(|_| ComplexError::Evaluation(FractionError::ExactRange))?;
         format!("≈ {degrees}")
@@ -174,20 +183,22 @@ fn complex_polar(value: [BigRational; 2]) -> Result<String, ComplexError> {
     Ok(format!("模 {modulus} · 辐角 {angle}°"))
 }
 
-fn relative_coordinate(value: &BigRational, scale: &BigRational) -> f64 {
-    // 先在有理数内归一化，再分别取分子和分母的高位进入浮点计算。
-    let ratio = value / scale;
+fn rational_float(value: &BigRational) -> f64 {
+    // 分别取分子和分母的高位，保留相除后的数量级。
     let leading_bits = |value: &BigUint| {
         let shift = value.bits().saturating_sub(53);
         let bits = u64::try_from(value >> shift as usize).expect("尾数至多为 53 位");
         (bits as f64, shift as i32)
     };
-    let (numerator, numerator_shift) = leading_bits(ratio.numer().magnitude());
-    let (denominator, denominator_shift) = leading_bits(ratio.denom().magnitude());
+    let (numerator, numerator_shift) = leading_bits(value.numer().magnitude());
+    let (denominator, denominator_shift) = leading_bits(value.denom().magnitude());
     let exponent = numerator_shift - denominator_shift;
     let mantissa = numerator / denominator;
     let magnitude = if exponent < f64::MIN_EXP - 1 {
         (mantissa * 2f64.powi(exponent - (f64::MIN_EXP - 1))) * f64::MIN_POSITIVE
+    } else if exponent >= f64::MAX_EXP {
+        let limit = f64::MAX_EXP - 1;
+        (mantissa * 2f64.powi(exponent - limit)) * 2f64.powi(limit)
     } else {
         mantissa * 2f64.powi(exponent)
     };
@@ -196,6 +207,115 @@ fn relative_coordinate(value: &BigRational, scale: &BigRational) -> f64 {
     } else {
         magnitude
     }
+}
+
+fn complex_from_polar(input: &str) -> Result<String, ComplexError> {
+    let (modulus, angle) = input.split_once('@').ok_or(ComplexError::PolarArguments)?;
+    let angle = angle.trim();
+    let angle = angle.strip_suffix(['°', '度']).unwrap_or(angle).trim();
+    if modulus.trim().is_empty() || angle.is_empty() {
+        return Err(ComplexError::PolarArguments);
+    }
+    let modulus = calculate_fraction(modulus).map_err(ComplexError::Evaluation)?;
+    if modulus.numer().sign() == Sign::Minus {
+        return Err(ComplexError::NegativeModulus);
+    }
+    let angle = calculate_fraction(angle).map_err(ComplexError::Evaluation)?;
+    if modulus.numer().sign() == Sign::NoSign {
+        return Ok("0".to_owned());
+    }
+    let turn = angle.denom() * 360_u16;
+    let mut reduced = angle.numer() % &turn;
+    if reduced.sign() == Sign::Minus {
+        reduced += turn;
+    }
+    let angle = BigRational::new(reduced, angle.denom().clone());
+    if let Some([real, imaginary]) = special_polar_angles(&angle) {
+        return render_exact_polar_components(modulus, real, imaginary);
+    }
+
+    // 在有理数内移到最近的坐标轴，再对小角度取正弦和余弦。
+    let quarter = BigInt::from(90_u8);
+    let quadrant = ((&angle + BigInt::from(45_u8)) / &quarter).to_integer();
+    let offset = angle - &quarter * &quadrant;
+    let (sine, cosine) = rational_float(&offset).to_radians().sin_cos();
+    let [real_factor, imaginary_factor] = match u8::try_from(quadrant) {
+        Ok(1) => [-sine, cosine],
+        Ok(2) => [-cosine, -sine],
+        Ok(3) => [sine, -cosine],
+        _ => [cosine, sine],
+    };
+    let approximate = |factor| {
+        let multiplier = BigRational::from_float(factor).expect("三角函数值有限");
+        rational_float(&(&modulus * multiplier))
+    };
+    let (real, imaginary) = (approximate(real_factor), approximate(imaginary_factor));
+    if real == 0.0 && imaginary == 0.0 {
+        return Err(ComplexError::PolarApproximationRange);
+    }
+    let display = |value| format_result(value).map_err(|_| ComplexError::PolarApproximationRange);
+    let imaginary_term = match display(imaginary.abs())?.as_str() {
+        "0" => String::new(),
+        "1" => "i".to_owned(),
+        coefficient => format!("{coefficient}i"),
+    };
+    Ok(format!(
+        "≈ {}",
+        format_complex_parts(display(real)?, imaginary_term, imaginary < 0.0)
+    ))
+}
+
+fn special_polar_angles(angle: &BigRational) -> Option<[i8; 2]> {
+    if !angle.is_integer() {
+        return None;
+    }
+    let degrees = u16::try_from(angle.numer()).ok()?;
+    let mut squares = match degrees % 90 {
+        0 => [4, 0],
+        30 => [3, 1],
+        45 => [2, 2],
+        60 => [1, 3],
+        _ => return None,
+    };
+    if !(degrees / 90).is_multiple_of(2) {
+        squares.swap(0, 1);
+    }
+    if (90..270).contains(&degrees) {
+        squares[0] = -squares[0];
+    }
+    if degrees > 180 {
+        squares[1] = -squares[1];
+    }
+    Some(squares)
+}
+
+fn render_exact_polar_components(
+    modulus: BigRational,
+    real_square: i8,
+    imaginary_square: i8,
+) -> Result<String, ComplexError> {
+    let half = &modulus / BigInt::from(2_u8);
+    if real_square.unsigned_abs() != 4 && imaginary_square.unsigned_abs() != 4 {
+        ensure_exact_size(&half).map_err(ComplexError::Evaluation)?;
+    }
+    let real = match real_square.unsigned_abs() {
+        0 => "0".to_owned(),
+        1 => half.to_string(),
+        4 => modulus.to_string(),
+        other => format_exact_multiple(&half, &format!("√{other}")),
+    };
+    let real = if real_square < 0 {
+        format!("-{real}")
+    } else {
+        real
+    };
+    let imaginary = match imaginary_square.unsigned_abs() {
+        0 => String::new(),
+        1 => imaginary_term(&half),
+        4 => imaginary_term(&modulus),
+        other => format_exact_multiple(&half, &format!("√{other}i")),
+    };
+    Ok(format_complex_parts(real, imaginary, imaginary_square < 0))
 }
 
 fn square_roots(value: [BigRational; 2]) -> Result<String, ComplexError> {
@@ -357,6 +477,32 @@ mod tests {
         ] {
             assert_eq!(calculate_complex(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn converts_polar_inputs_to_exact_or_annotated_cartesian_coordinates() {
+        for (query, expected) in [
+            ("由极坐标 2 @ 30°", "√3 + i"),
+            ("由极坐标 2 @ 120度", "-1 + √3i"),
+            ("由极坐标 1/2 @ -450", "-(1/2)i"),
+            ("from-polar 2 @ 315", "√2 - √2i"),
+            ("由极坐标 2 @ 60+90", "-√3 + i"),
+            ("由极坐标 1 @ 210", "-√3/2 - (1/2)i"),
+            ("由极坐标 0 @ -37", "0"),
+            ("由极坐标 5 @ 10", "≈ 4.92403876506104 + 0.868240888334652i"),
+        ] {
+            assert_eq!(calculate_complex(query).as_deref(), Ok(expected), "{query}");
+        }
+        let near_axis = calculate_complex("由极坐标 1 @ 90+(1/10^20)").unwrap();
+        assert!(near_axis.starts_with("≈ -1.74532925") && near_axis.ends_with("e-22 + i"));
+        assert_eq!(
+            calculate_complex("由极坐标 -1 @ 45"),
+            Err(ComplexError::NegativeModulus)
+        );
+        assert_eq!(
+            calculate_complex("由极坐标 1 @"),
+            Err(ComplexError::PolarArguments)
+        );
     }
 
     #[test]
