@@ -692,6 +692,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从圆外一点引出两条切线并求出切点",
+        query: "圆: 切点 0,0 @ 1; 2,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "判断分数坐标的点位于圆内、圆周上还是圆外",
         query: "圆: 包含 3/5,4/5 @ 0,0 @ 1",
     },

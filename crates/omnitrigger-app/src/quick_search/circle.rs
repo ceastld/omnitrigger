@@ -18,6 +18,7 @@ pub(super) enum CircleError {
     PointArguments,
     TwoCircleArguments,
     LineCircleArguments,
+    TangentPointArguments,
     CoincidentLinePoints,
     PointCircleArguments,
     CollinearPoints,
@@ -36,6 +37,7 @@ impl CircleError {
             Self::LineCircleArguments => {
                 "依次填写圆心与半径、直线上的两个点，例如 0,0 @ 1; -1,0; 1,0"
             }
+            Self::TangentPointArguments => "填写圆心与半径，再填引出切线的点，例如 0,0 @ 1; 2,0",
             Self::CoincidentLinePoints => "用于确定直线的两个点须互不重合",
             Self::PointCircleArguments => "填写待测点、圆心和半径，例如 包含 3/5,4/5 @ 0,0 @ 1",
             Self::CollinearPoints => "三个点须互不重合且不在同一直线上",
@@ -66,6 +68,9 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
     }
     if operation == "直线交点" || operation.eq_ignore_ascii_case("line-intersections") {
         return line_circle_intersections(arguments);
+    }
+    if operation == "切点" || operation.eq_ignore_ascii_case("tangent-points") {
+        return circle_tangent_points(arguments);
     }
     if operation == "包含" || operation.eq_ignore_ascii_case("contains") {
         return circle_contains(arguments);
@@ -256,6 +261,7 @@ fn circle_intersections(input: &str) -> Result<String, CircleError> {
             dx.numer().sign() == Sign::Minus,
         ],
         offset_sign == Sign::NoSign,
+        "交点",
     )
 }
 
@@ -300,6 +306,46 @@ fn line_circle_intersections(input: &str) -> Result<String, CircleError> {
             dy.numer().sign() == Sign::Minus,
         ],
         offset_sign == Sign::NoSign,
+        "交点",
+    )
+}
+
+fn circle_tangent_points(input: &str) -> Result<String, CircleError> {
+    let invalid = CircleError::TangentPointArguments;
+    let (circle, point) = input.split_once(';').ok_or(invalid)?;
+    let circle = circle_center_and_radius(circle).map_err(|error| match error {
+        CircleError::TwoCircleArguments => invalid,
+        error => error,
+    })?;
+    let [px, py] = circle_point(point)?;
+    let [cx, cy] = circle.center;
+    let (dx, dy) = (&px - &cx, &py - &cy);
+    let dx_squared = &dx * &dx;
+    let dy_squared = &dy * &dy;
+    let distance_squared = &dx_squared + &dy_squared;
+    let radius_squared = &circle.radius * &circle.radius;
+    for value in [&distance_squared, &radius_squared] {
+        ensure_exact_size(value).map_err(CircleError::Evaluation)?;
+    }
+    match distance_squared.cmp(&radius_squared) {
+        Ordering::Less => return Ok("无切点".to_owned()),
+        Ordering::Equal => return Ok(format!("切点 ({px}, {py})")),
+        Ordering::Greater => {}
+    }
+    // 切点半径垂直于切线，切点在圆心与给定点连线上的投影比例为 r²/d²。
+    let fraction = radius_squared / distance_squared;
+    let center = [cx + &fraction * &dx, cy + &fraction * &dy];
+    let one = BigRational::from_integer(1.into());
+    let offset_squared = &fraction * (one - &fraction);
+    render_symmetric_intersections(
+        center,
+        [dy_squared * &offset_squared, dx_squared * offset_squared],
+        [
+            dy.numer().sign() == Sign::Plus,
+            dx.numer().sign() == Sign::Minus,
+        ],
+        false,
+        "切点",
     )
 }
 
@@ -308,11 +354,12 @@ fn render_symmetric_intersections(
     [shift_x_squared, shift_y_squared]: Point2,
     [subtract_x, subtract_y]: [bool; 2],
     tangent: bool,
+    label: &str,
 ) -> Result<String, CircleError> {
     let render_point = |opposite| {
         let x = intersection_axis(&middle_x, &shift_x_squared, subtract_x ^ opposite)?;
         let y = intersection_axis(&middle_y, &shift_y_squared, subtract_y ^ opposite)?;
-        Ok::<_, CircleError>(format!("交点 ({x}, {y})"))
+        Ok::<_, CircleError>(format!("{label} ({x}, {y})"))
     };
     let first = render_point(false)?;
     if tangent {
@@ -436,6 +483,21 @@ mod tests {
             calculate_circle("包含 1,1 @ 0,0 @ 0"),
             Err(CircleError::NonPositiveRadius)
         );
+    }
+
+    #[test]
+    fn finds_exact_tangent_points_from_exterior_boundary_and_interior_points() {
+        for (query, expected) in [
+            (
+                "切点 0,0 @ 1; 2,0",
+                "切点 (1/2, √(3/4))\n切点 (1/2, -√(3/4))",
+            ),
+            ("tangent-points 0,0 @ 1; 3/5,4/5", "切点 (3/5, 4/5)"),
+            ("切点 0,0 @ 1; 1/2,0", "无切点"),
+            ("切点 0,0 @ 1; 0,0", "无切点"),
+        ] {
+            assert_eq!(calculate_circle(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]
