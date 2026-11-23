@@ -3049,6 +3049,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按箱线图内围栏标记 CSV 数值离群值",
+        query: "CSV: 离群列 [\"离群\",\"金额\"] 编号,金额\n001,100\n002,1\n003,2\n004,3\n005,4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 中混用的容量单位换算为同一单位",
         query: "CSV: 数据换算列 [\"容量(KiB)\",\"容量\",\"KiB\"]\n文件,容量\n甲,9007199254740993 B\n乙,1/3 KiB\n丙,",
     },

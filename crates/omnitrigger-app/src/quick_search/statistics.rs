@@ -944,22 +944,46 @@ fn report_quantiles(
     if let QuantileReport::Single(probability) = &report {
         return quantile(probability).map(|value| value.to_string());
     }
-    let lower = quantile(&BigRational::new(1.into(), 4.into()))?;
+    let (lower, upper) = quartile_bounds(&values, count)?;
     let middle = quantile(&BigRational::new(1.into(), 2.into()))?;
-    let upper = quantile(&BigRational::new(3.into(), 4.into()))?;
-    let spread = bounded(&upper - &lower)?;
     let quartiles = format!("Q1 {lower} · 中位数 {middle} · Q3 {upper}");
     if matches!(report, QuantileReport::BoxSummary) {
-        let offset = bounded(spread * BigRational::new(3.into(), 2.into()))?;
-        let lower_fence = bounded(lower - &offset)?;
-        let upper_fence = bounded(upper + offset)?;
+        let (lower_fence, upper_fence) = inner_fences(&lower, &upper)?;
         Ok(format!(
             "{quartiles}\n{}",
             report_box_summary(&values, &lower_fence, &upper_fence)
         ))
     } else {
+        let spread = bounded(&upper - &lower)?;
         Ok(format!("{quartiles}\n四分位距 {spread}"))
     }
+}
+
+pub(super) fn unweighted_box_fences(
+    values: Vec<BigRational>,
+) -> Result<(BigRational, BigRational), StatisticsError> {
+    let mut observations = unweighted_observations(values)?;
+    observations.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let (lower, upper) = quartile_bounds(&observations, observations.len() as u64)?;
+    inner_fences(&lower, &upper)
+}
+
+fn quartile_bounds(
+    values: &[(BigRational, u64)],
+    count: u64,
+) -> Result<(BigRational, BigRational), StatisticsError> {
+    let lower = interpolate_quantile(values, count, &BigRational::new(1.into(), 4.into()))?;
+    let upper = interpolate_quantile(values, count, &BigRational::new(3.into(), 4.into()))?;
+    Ok((lower, upper))
+}
+
+fn inner_fences(
+    lower: &BigRational,
+    upper: &BigRational,
+) -> Result<(BigRational, BigRational), StatisticsError> {
+    let spread = bounded(upper - lower)?;
+    let offset = bounded(spread * BigRational::new(3.into(), 2.into()))?;
+    Ok((bounded(lower - &offset)?, bounded(upper + offset)?))
 }
 
 fn report_box_summary(

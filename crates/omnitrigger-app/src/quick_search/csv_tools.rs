@@ -20,7 +20,7 @@ use serde::{
 };
 use serde_json::value::RawValue;
 
-use super::statistics::{parse_bin_edges, report_binned_unweighted};
+use super::statistics::{parse_bin_edges, report_binned_unweighted, unweighted_box_fences};
 use super::{
     calculator::normalize,
     calendar::{
@@ -106,6 +106,7 @@ pub(super) enum CsvError {
     DataConversionColumnArguments,
     RadixColumnArguments,
     NumericComparisonColumnArguments,
+    OutlierColumnArguments,
     DateDifferenceColumnArguments,
     ClockDifferenceColumnArguments,
     DateOffsetColumnArguments,
@@ -238,6 +239,7 @@ impl CsvError {
             Self::NumericComparisonColumnArguments => {
                 "填写新列名、左列、右列和比较符，例如 [\"达标\",\"实测\",\"门槛\",\">=\"]"
             }
+            Self::OutlierColumnArguments => "填写新列名和数值列，例如 [\"离群\",\"金额\"]",
             Self::DateDifferenceColumnArguments => {
                 "填写新列名、开始日期列和结束日期列，例如 [\"天数\",\"开始\",\"结束\"]"
             }
@@ -425,6 +427,7 @@ enum Operation {
     ConvertDataColumn(String, ColumnReference, String),
     RadixColumn(String, ColumnReference, u32, u32),
     NumericComparisonColumn(String, ColumnReference, ColumnReference, NumberComparison),
+    OutlierColumn(String, ColumnReference),
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
     ClockDifferenceColumn(String, ColumnReference, ColumnReference),
     DateOffsetColumn {
@@ -1095,6 +1098,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 parse_input: matches!(kind, "日期解析列" | "date-parse-column"),
             }
         }
+        "离群列" | "outlier-column" => {
+            let ((name, source), data) = json_argument_and_data::<(String, ColumnReference)>(
+                input,
+                CsvError::OutlierColumnArguments,
+            )?;
+            input = data;
+            Operation::OutlierColumn(name, source)
+        }
         "数值比较列" | "numeric-comparison-column" => {
             let ((name, left, right, operator), data) =
                 json_argument_and_data::<(String, ColumnReference, ColumnReference, String)>(
@@ -1603,6 +1614,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::ConvertDataColumn(name, source, target) => {
             convert_data_column(&rows, &name, source, &target)
         }
+        Operation::OutlierColumn(name, source) => flag_outlier_column(&rows, &name, source),
         Operation::NumericComparisonColumn(name, left, right, comparison) => {
             append_from_two_columns(
                 &rows,
@@ -3036,6 +3048,46 @@ fn running_column(
                 Ok(mean.to_string())
             }
         }
+    })
+}
+
+fn flag_outlier_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::OutlierColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let mut samples = Vec::new();
+    let mut values = Vec::with_capacity(records.len());
+    for (index, row) in records.iter().enumerate() {
+        let cell = row[source].trim();
+        if cell.is_empty() {
+            values.push(None);
+            continue;
+        }
+        let value = parse_fraction_literal(cell).map_err(|error| CsvError::DataRowValue {
+            row: index + 1,
+            cause: error.message(),
+        })?;
+        samples.push(value.clone());
+        values.push(Some(value));
+    }
+    if samples.is_empty() {
+        return write_appended_column(header, records, name, |_| Ok(""));
+    }
+    let (lower, upper) = unweighted_box_fences(samples).map_err(CsvError::Statistics)?;
+    let mut values = values.into_iter();
+    write_appended_column(header, records, name, |_| {
+        Ok(match values.next().flatten() {
+            None => "",
+            Some(value) if value < lower || value > upper => "true",
+            Some(_) => "false",
+        })
     })
 }
 
@@ -5632,6 +5684,27 @@ mod tests {
         );
         assert_eq!(transform_csv("排序 1 a,b").as_deref(), Ok("a,b"));
         assert_eq!(transform_csv("降序 3 a,b"), Err(CsvError::ColumnOutOfRange));
+    }
+
+    #[test]
+    fn flags_csv_outliers_using_exact_fences_and_preserves_row_order() {
+        assert_eq!(
+            transform_csv("离群列 [\"离群\",\"金额\"] 编号,金额\n001,100\n002,1\n003,2\n004,3\n005,4\n006,")
+                .as_deref(),
+            Ok("编号,金额,离群\r\n001,100,true\r\n002,1,false\r\n003,2,false\r\n004,3,false\r\n005,4,false\r\n006,\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("outlier-column [\"离群\",1] 金额\n1\n2\n3\n4\n7").as_deref(),
+            Ok("金额,离群\r\n1,false\r\n2,false\r\n3,false\r\n4,false\r\n7,false")
+        );
+        assert_eq!(
+            transform_csv("离群列 [\"离群\",1] 金额").as_deref(),
+            Ok("金额,离群")
+        );
+        assert!(matches!(
+            transform_csv("离群列 [\"离群\",1] 金额\n1\n待定"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
