@@ -4818,6 +4818,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在共同横坐标区间对齐两条曲线并计算差值",
+        query: "CSV: 曲线差值 [[\"时间\",\"实测\",\"基准\"],\"差值\"] 时间,实测,基准\n5,,10\n0,0,\n2,4,\n1,,3\n4,4,\n3,,6",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按横坐标绘制 CSV 的累计梯形积分",
         query: "CSV: 梯形累计图 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0",
     },
@@ -5735,6 +5740,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "线性插值",
             "等距插值",
             "水平交点",
+            "曲线差值",
             "梯形累计图",
             "曲线图",
             "残差图",

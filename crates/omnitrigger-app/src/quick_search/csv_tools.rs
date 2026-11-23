@@ -241,6 +241,9 @@ pub(super) enum CsvError {
     CoordinateResampleArguments,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
+    CoordinateDifferenceArguments,
+    CoordinateDifferencePointCount,
+    CoordinateDifferenceNoOverlap,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -532,6 +535,11 @@ impl CsvError {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
             Self::CoordinateCrossingPointCount => "水平交点需要 2 至 64 行同时含 x 和 y 的数据",
+            Self::CoordinateDifferenceArguments => {
+                "填写横坐标列、两条曲线的值列及新的差值列名，例如 [[\"时间\",\"实测\",\"基准\"],\"差值\"]"
+            }
+            Self::CoordinateDifferencePointCount => "每条曲线都需要 2 至 64 个完整样点",
+            Self::CoordinateDifferenceNoOverlap => "两条曲线的横坐标范围没有交集",
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -1122,6 +1130,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
+        "曲线差值" | "curve-difference" => return compare_coordinate_curves(input),
         operation if is_cumulative_trapezoid_plot(operation) => {
             return cumulative_trapezoid_coordinates(input)?.to_csv();
         }
@@ -5389,20 +5398,18 @@ struct CoordinateSample {
     point: Point,
 }
 
-impl CsvCoordinates {
-    fn sort_distinct(&mut self) -> Result<(), CsvError> {
-        self.samples
-            .sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
-        if self
-            .samples
-            .windows(2)
-            .any(|pair| pair[0].point.0 == pair[1].point.0)
-        {
-            return Err(CsvError::CoordinateDuplicateX);
-        }
-        Ok(())
+fn sort_distinct_coordinates(samples: &mut [CoordinateSample]) -> Result<(), CsvError> {
+    samples.sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
+    if samples
+        .windows(2)
+        .any(|pair| pair[0].point.0 == pair[1].point.0)
+    {
+        return Err(CsvError::CoordinateDuplicateX);
     }
+    Ok(())
+}
 
+impl CsvCoordinates {
     fn to_csv(&self) -> Result<String, CsvError> {
         let mut output = String::new();
         let limit = CsvError::ScatterTooLarge;
@@ -5455,7 +5462,7 @@ fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
         invalid,
         CsvError::CoordinateInterpolationPointCount,
     )?;
-    table.sort_distinct()?;
+    sort_distinct_coordinates(&mut table.samples)?;
     let samples = coordinates
         .iter()
         .enumerate()
@@ -5485,7 +5492,7 @@ fn resample_coordinate_table(input: &str) -> Result<String, CsvError> {
         invalid,
         CsvError::CoordinateInterpolationPointCount,
     )?;
-    table.sort_distinct()?;
+    sort_distinct_coordinates(&mut table.samples)?;
     let first = &table.samples[0].point.0;
     let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
     let intervals = BigInt::from(count - 1);
@@ -5543,7 +5550,7 @@ fn coordinate_horizontal_crossings(input: &str) -> Result<String, CsvError> {
         invalid,
         CsvError::CoordinateCrossingPointCount,
     )?;
-    table.sort_distinct()?;
+    sort_distinct_coordinates(&mut table.samples)?;
 
     let samples = &table.samples;
     let mut csv = String::from("起始横坐标,结束横坐标,类型");
@@ -5634,6 +5641,64 @@ fn collect_coordinate_samples(
     Ok(samples)
 }
 
+fn compare_coordinate_curves(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateDifferenceArguments;
+    let ((columns, name), data) =
+        json_argument_and_data::<([ColumnReference; 3], String)>(input, invalid)?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    let rows = read_rows(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, &columns, invalid)?;
+    let [x, left_y, right_y] = [columns[0], columns[1], columns[2]];
+    if name.trim().is_empty()
+        || name.contains('\0')
+        || columns.iter().any(|&index| header[index] == name)
+    {
+        return Err(invalid);
+    }
+    let point_count_error = CsvError::CoordinateDifferencePointCount;
+    let mut left = collect_coordinate_samples(records, &[x, left_y], point_count_error)?;
+    let mut right = collect_coordinate_samples(records, &[x, right_y], point_count_error)?;
+    sort_distinct_coordinates(&mut left)?;
+    sort_distinct_coordinates(&mut right)?;
+    let start = (&left[0].point.0).max(&right[0].point.0);
+    let end = (&left.last().expect("至少有两个完整坐标").point.0)
+        .min(&right.last().expect("至少有两个完整坐标").point.0);
+    if start > end {
+        return Err(CsvError::CoordinateDifferenceNoOverlap);
+    }
+    let mut coordinates: Vec<_> = left
+        .iter()
+        .chain(&right)
+        .map(|sample| &sample.point.0)
+        .filter(|&x| x >= start && x <= end)
+        .collect();
+    coordinates.sort_unstable();
+    coordinates.dedup();
+
+    let mut csv = String::new();
+    let limit = CsvError::ColumnComparisonTooLarge;
+    let headers = columns
+        .iter()
+        .map(|&index| header[index].as_str())
+        .chain(std::iter::once(name.as_str()));
+    append_bounded_csv_row(&mut csv, headers, limit)?;
+    for x in coordinates {
+        let left_y = interpolate_coordinate_value(&left, x)?;
+        let right_y = interpolate_coordinate_value(&right, x)?;
+        let difference = &left_y - &right_y;
+        ensure_exact_size(&difference).map_err(|_| CsvError::ComputedNumberRange)?;
+        let row = [
+            x.to_string(),
+            left_y.to_string(),
+            right_y.to_string(),
+            difference.to_string(),
+        ];
+        append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), limit)?;
+    }
+    Ok(csv)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TrapezoidMeasure {
     Integral,
@@ -5675,7 +5740,7 @@ fn read_trapezoid_samples(input: &str) -> Result<CsvCoordinates, CsvError> {
         return Err(CsvError::TrapezoidIntervalOrder);
     }
     let mut table = read_coordinate_table(data, &columns, invalid, point_count_error)?;
-    table.sort_distinct()?;
+    sort_distinct_coordinates(&mut table.samples)?;
     let first = &table.samples[0].point.0;
     let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
     if left < *first || right > *last {
@@ -7397,6 +7462,35 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn aligns_independently_sampled_curves_at_all_knots_in_their_shared_range() {
+        let data = "时间,实测,基准\n5,,10\n0,0,\n2,4,\n1,,3\n4,4,\n3,,6";
+        assert_eq!(
+            transform_csv(&format!(
+                "曲线差值 [[\"时间\",\"实测\",\"基准\"],\"差值\"] {data}"
+            ))
+            .as_deref(),
+            Ok("时间,实测,基准,差值\r\n1,2,3,-1\r\n2,4,9/2,-1/2\r\n3,4,6,-2\r\n4,4,8,-4")
+        );
+        assert_eq!(
+            transform_csv("curve-difference [[1,2,3],\"差值\"] x,a,b\n0,0,\n1,2,3\n2,,4")
+                .as_deref(),
+            Ok("x,a,b,差值\r\n1,2,3,-1")
+        );
+        assert_eq!(
+            transform_csv("曲线差值 [[1,2,3],\"差值\"] x,a,b\n0,0,\n1,2,\n2,,3\n3,,4"),
+            Err(CsvError::CoordinateDifferenceNoOverlap)
+        );
+        assert_eq!(
+            transform_csv("曲线差值 [[1,2,3],\"差值\"] x,a,b\n1/2,0,0\n0.5,2,\n2,,3"),
+            Err(CsvError::CoordinateDuplicateX)
+        );
+        assert_eq!(
+            transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
+            Err(CsvError::CoordinateDifferenceArguments)
+        );
     }
 
     #[test]
