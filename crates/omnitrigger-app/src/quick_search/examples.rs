@@ -3678,6 +3678,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留通过所有规则的行",
+        query: "CSV: 规则保留行 [[\"日期\",\"日期\"],[\"编号\",\"正则\",\"^A[0-9]+$\"]] 日期,编号\n2024-02-29,A01\n2023-02-29,B02",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "保留有规则失败的行",
+        query: "CSV: 规则问题行 [[\"日期\",\"日期\"],[\"编号\",\"正则\",\"^A[0-9]+$\"]] 日期,编号\n2024-02-29,A01\n2023-02-29,B02",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位列表之外的单元格值",
         query: "CSV: 检查允许值 [[\"状态\"],[\"待办\",\"完成\",\"\"]] 编号,状态\nA,待办\nB,待确认\nC,\nD,完成",
     },

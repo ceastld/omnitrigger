@@ -439,6 +439,12 @@ enum ColumnRuleInput {
     Range(ColumnReference, String, String, String),
 }
 
+enum ColumnRuleOutput {
+    Issues,
+    ValidRows,
+    InvalidRows,
+}
+
 impl ColumnValidation {
     fn allowed_values(values: Vec<String>) -> Option<Self> {
         let count = values.len();
@@ -499,7 +505,7 @@ enum Operation {
     InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
     CheckColumns(Vec<ColumnReference>, ColumnValidation),
-    CheckColumnRules(Vec<(ColumnReference, ColumnValidation)>),
+    CheckColumnRules(Vec<(ColumnReference, ColumnValidation)>, ColumnRuleOutput),
     RoundColumns {
         columns: Vec<ColumnReference>,
         digits: u32,
@@ -1014,7 +1020,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CheckColumns(columns, validation)
         }
-        "检查规则" | "check-rules" => {
+        "检查规则" | "check-rules" | "规则保留行" | "keep-valid-rows" | "规则问题行"
+        | "keep-invalid-rows" => {
             let invalid = CsvError::ValidationRulesArguments;
             let (rules, data) = json_argument_and_data::<Vec<ColumnRuleInput>>(input, invalid)?;
             if !(1..=64).contains(&rules.len()) {
@@ -1057,7 +1064,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             input = data;
-            Operation::CheckColumnRules(rules)
+            let output = match operation.as_str() {
+                "规则保留行" | "keep-valid-rows" => ColumnRuleOutput::ValidRows,
+                "规则问题行" | "keep-invalid-rows" => ColumnRuleOutput::InvalidRows,
+                _ => ColumnRuleOutput::Issues,
+            };
+            Operation::CheckColumnRules(rules, output)
         }
         "小数列" | "decimal-columns" | "有效数字列" | "significant-columns" => {
             let significant = matches!(operation.as_str(), "有效数字列" | "significant-columns");
@@ -1979,7 +1991,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
         Operation::CheckColumns(columns, validation) => check_columns(&rows, &columns, &validation),
-        Operation::CheckColumnRules(rules) => check_column_rules(&rows, &rules),
+        Operation::CheckColumnRules(rules, output) => check_column_rules(&rows, &rules, output),
         Operation::RoundColumns {
             columns,
             digits,
@@ -3043,6 +3055,7 @@ fn check_columns(
 fn check_column_rules(
     rows: &[Vec<String>],
     rules: &[(ColumnReference, ColumnValidation)],
+    output: ColumnRuleOutput,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let rules = rules
@@ -3053,22 +3066,38 @@ fn check_column_rules(
             Ok((column, validation))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    report_invalid_cells(
-        header,
-        records,
-        &rules,
-        true,
-        CsvError::ValidationRulesTooLarge,
-    )
+    if matches!(output, ColumnRuleOutput::Issues) {
+        return report_invalid_cells(
+            header,
+            records,
+            &rules,
+            true,
+            CsvError::ValidationRulesTooLarge,
+        );
+    }
+    validate_regex_inputs(records, &rules)?;
+    let keep_valid = matches!(output, ColumnRuleOutput::ValidRows);
+    let matches = records.iter().filter(|row| {
+        rules
+            .iter()
+            .all(|&(column, rule)| rule.accepts(&row[column]))
+            == keep_valid
+    });
+    let mut csv = String::new();
+    for row in std::iter::once(header).chain(matches) {
+        append_bounded_csv_row(
+            &mut csv,
+            row.iter().map(String::as_str),
+            CsvError::ValidationRulesTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
-fn report_invalid_cells(
-    header: &[String],
+fn validate_regex_inputs(
     records: &[Vec<String>],
     rules: &[(usize, &ColumnValidation)],
-    include_rules: bool,
-    too_large: CsvError,
-) -> Result<String, CsvError> {
+) -> Result<(), CsvError> {
     let regex_columns: Vec<_> = rules
         .iter()
         .filter_map(|&(column, rule)| {
@@ -3088,6 +3117,17 @@ fn report_invalid_cells(
     {
         return Err(CsvError::RegexCheckColumnsInputTooLarge);
     }
+    Ok(())
+}
+
+fn report_invalid_cells(
+    header: &[String],
+    records: &[Vec<String>],
+    rules: &[(usize, &ColumnValidation)],
+    include_rules: bool,
+    too_large: CsvError,
+) -> Result<String, CsvError> {
+    validate_regex_inputs(records, rules)?;
     let mut output = String::from(if include_rules {
         "数据行,列号,列名,规则号,规则,内容"
     } else {
@@ -5203,6 +5243,23 @@ mod tests {
         assert_eq!(
             transform_csv(r#"检查允许值 [[1],["完成","完成"]] 状态"#),
             Err(CsvError::AllowedValuesCheckArguments),
+        );
+    }
+
+    #[test]
+    fn keeps_each_csv_record_according_to_all_its_column_rules() {
+        let input = "[[\"编号\",\"正则\",\"^[AB]$\"],[2,\"日期\"]] 编号,日期,备注\nA,2024-02-29,\"有效,原文\"\nB,2023-02-29,日期错误\nX,2024-01-01,编号错误";
+        assert_eq!(
+            transform_csv(&format!("规则保留行 {input}")).as_deref(),
+            Ok("编号,日期,备注\r\nA,2024-02-29,\"有效,原文\""),
+        );
+        assert_eq!(
+            transform_csv(&format!("keep-invalid-rows {input}")).as_deref(),
+            Ok("编号,日期,备注\r\nB,2023-02-29,日期错误\r\nX,2024-01-01,编号错误"),
+        );
+        assert_eq!(
+            transform_csv("规则问题行 [[1,\"日期\"]] 日期\n2024-02-29").as_deref(),
+            Ok("日期"),
         );
     }
 
