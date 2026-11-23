@@ -901,6 +901,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "复数: 乘方 1,1 @ 5",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "求一对互为相反数的精确复数平方根",
+        query: "复数: 平方根 3,4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用同一个分数乘矩阵中的每个元素",
         query: "矩阵: 数乘 -3/2 @ 1/3,2; -1,0",

@@ -1,9 +1,12 @@
-use num_bigint::Sign;
+use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::{
     calculator::normalize,
-    fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError},
+    fraction::{
+        calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root,
+        FractionError,
+    },
     operators::split_top_level_commas,
 };
 
@@ -23,7 +26,7 @@ impl ComplexError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "填写实部和虚部，两组复数用 @ 隔开",
-            Self::Operation => "可用加法、减法、乘法、除法、模、共轭和乘方",
+            Self::Operation => "可用加法、减法、乘法、除法、模、共轭、乘方和平方根",
             Self::Components => "每个复数按实部、虚部填写，两个部分用逗号隔开",
             Self::Exponent => "在 @ 后填写 −1024 至 1024 的整数指数",
             Self::ZeroDivisor => "复数的除数不能为零",
@@ -51,8 +54,7 @@ pub(super) fn calculate_complex(query: &str) -> Result<String, ComplexError> {
         "乘法" | "multiply" => BinaryOperation::Multiply,
         "除法" | "divide" => BinaryOperation::Divide,
         "模" | "modulus" | "abs" => {
-            let [real, imaginary] = components(input)?;
-            let squared = &real * &real + &imaginary * &imaginary;
+            let squared = squared_modulus(&components(input)?);
             ensure_exact_size(&squared).map_err(ComplexError::Evaluation)?;
             return Ok(format_square_root(&squared));
         }
@@ -60,6 +62,7 @@ pub(super) fn calculate_complex(query: &str) -> Result<String, ComplexError> {
             let [real, imaginary] = components(input)?;
             return format_complex([real, -imaginary]);
         }
+        "平方根" | "sqrt" | "square-roots" => return square_roots(components(input)?),
         "乘方" | "pow" | "power" => {
             let (base, exponent) = input.split_once('@').ok_or(ComplexError::Incomplete)?;
             let exponent = exponent
@@ -92,9 +95,10 @@ fn multiply([a, b]: &[BigRational; 2], [c, d]: &[BigRational; 2]) -> [BigRationa
 
 fn divide(
     [a, b]: &[BigRational; 2],
-    [c, d]: &[BigRational; 2],
+    right: &[BigRational; 2],
 ) -> Result<[BigRational; 2], ComplexError> {
-    let denominator = c * c + d * d;
+    let [c, d] = right;
+    let denominator = squared_modulus(right);
     if denominator.numer().sign() == Sign::NoSign {
         return Err(ComplexError::ZeroDivisor);
     }
@@ -127,6 +131,54 @@ fn integer_power(base: [BigRational; 2], exponent: i32) -> Result<[BigRational; 
     Ok(result)
 }
 
+fn squared_modulus([real, imaginary]: &[BigRational; 2]) -> BigRational {
+    real * real + imaginary * imaginary
+}
+
+fn square_roots(value: [BigRational; 2]) -> Result<String, ComplexError> {
+    let modulus_squared = squared_modulus(&value);
+    let [real, imaginary] = value;
+    ensure_exact_size(&modulus_squared).map_err(ComplexError::Evaluation)?;
+    if modulus_squared.numer().sign() == Sign::NoSign {
+        return Ok("0".to_owned());
+    }
+    // 平方后比较实部与模，可得 u² = (|z| + a)/2，v² = (|z| - a)/2。
+    let (root_real, root_imaginary) = if let Some(modulus) = exact_abs_square_root(&modulus_squared)
+    {
+        let two = BigInt::from(2u8);
+        let [real_squared, imaginary_squared] =
+            bounded_components([(&modulus + &real) / &two, (modulus - real) / two])?;
+        let real = format_square_root(&real_squared);
+        let imaginary = exact_abs_square_root(&imaginary_squared).map_or_else(
+            || format!("{}i", format_square_root(&imaginary_squared)),
+            |root| imaginary_term(&root),
+        );
+        (real, imaginary)
+    } else {
+        let magnitude = format_square_root(&modulus_squared);
+        let (absolute, [add, subtract]) = if real.numer().sign() == Sign::Minus {
+            (-real, ['-', '+'])
+        } else {
+            (real, ['+', '-'])
+        };
+        (
+            format!("√(({magnitude} {add} {absolute})/2)"),
+            format!("√(({magnitude} {subtract} {absolute})/2)i"),
+        )
+    };
+    let root = format_complex_parts(
+        root_real,
+        root_imaginary,
+        imaginary.numer().sign() == Sign::Minus,
+    );
+    // ± 同时作用于实部与虚部，保留两个互为相反数的根。
+    Ok(if root.contains(' ') {
+        format!("±({root})")
+    } else {
+        format!("±{root}")
+    })
+}
+
 fn components(input: &str) -> Result<[BigRational; 2], ComplexError> {
     let mut terms = split_top_level_commas(input);
     let (Some(real), Some(imaginary), None) = (terms.next(), terms.next(), terms.next()) else {
@@ -147,28 +199,37 @@ fn bounded_components(values: [BigRational; 2]) -> Result<[BigRational; 2], Comp
 
 fn format_complex(values: [BigRational; 2]) -> Result<String, ComplexError> {
     let [real, imaginary] = bounded_components(values)?;
-    let sign = imaginary.numer().sign();
-    if sign == Sign::NoSign {
-        return Ok(real.to_string());
-    }
-    let absolute = if sign == Sign::Minus {
-        -imaginary
-    } else {
-        imaginary
-    };
-    let imaginary = if absolute.numer() == absolute.denom() {
+    let negative = imaginary.numer().sign() == Sign::Minus;
+    let absolute = if negative { -imaginary } else { imaginary };
+    Ok(format_complex_parts(
+        real.to_string(),
+        imaginary_term(&absolute),
+        negative,
+    ))
+}
+
+fn imaginary_term(absolute: &BigRational) -> String {
+    if absolute.numer().sign() == Sign::NoSign {
+        String::new()
+    } else if absolute.numer() == absolute.denom() {
         "i".to_owned()
     } else if absolute.is_integer() {
         format!("{absolute}i")
     } else {
         format!("({absolute})i")
-    };
-    Ok(match (real.numer().sign(), sign) {
-        (Sign::NoSign, Sign::Minus) => format!("-{imaginary}"),
-        (Sign::NoSign, _) => imaginary,
-        (_, Sign::Minus) => format!("{real} - {imaginary}"),
-        _ => format!("{real} + {imaginary}"),
-    })
+    }
+}
+
+fn format_complex_parts(real: String, imaginary: String, negative: bool) -> String {
+    if imaginary.is_empty() {
+        return real;
+    }
+    match (real == "0", negative) {
+        (true, true) => format!("-{imaginary}"),
+        (true, false) => imaginary,
+        (false, true) => format!("{real} - {imaginary}"),
+        (false, false) => format!("{real} + {imaginary}"),
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +260,23 @@ mod tests {
             ("未知 1,2", ComplexError::Operation),
         ] {
             assert_eq!(calculate_complex(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn computes_both_complex_square_roots_in_exact_form() {
+        for (query, expected) in [
+            ("平方根 3,4", "±(2 + i)"),
+            ("平方根 3,-4", "±(2 - i)"),
+            ("sqrt 5/36,1/3", "±(1/2 + (1/3)i)"),
+            ("平方根 -4,0", "±2i"),
+            ("平方根 4,0", "±2"),
+            ("平方根 0,0", "0"),
+            ("平方根 0,1", "±(√(1/2) + √(1/2)i)"),
+            ("平方根 1,1", "±(√((√2 + 1)/2) + √((√2 - 1)/2)i)"),
+            ("平方根 -1,-1", "±(√((√2 - 1)/2) - √((√2 + 1)/2)i)"),
+        ] {
+            assert_eq!(calculate_complex(query).as_deref(), Ok(expected), "{query}");
         }
     }
 
