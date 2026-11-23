@@ -5655,6 +5655,27 @@ mod tests {
     }
 
     #[test]
+    fn completes_trigger_sort_order_after_existing_export_and_filters() {
+        let Results::FilterOptions(options) = for_query("触发器: 排序=", &[]) else {
+            panic!("缺少排序选项");
+        };
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].label, Some("名称"));
+        assert_eq!(options[1].label, Some("动作"));
+        let query = r#"全局触发器： 输出=JSON 名称正则="^Open Ａ" SORT＝ｎ"#;
+        let result = for_query(query, &[]);
+        let filled = result.suggested_input(0).unwrap();
+        assert_eq!(
+            filled,
+            r#"全局触发器： 输出=JSON 名称正则="^Open Ａ" SORT＝name"#
+        );
+        assert!(matches!(
+            for_query(filled, &[]),
+            Results::Value(Ok(value)) if value.text == "[]"
+        ));
+    }
+
+    #[test]
     fn trigger_search_keeps_matches_for_later_pages() {
         let bindings = crate::settings::defaults();
         let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();

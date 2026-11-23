@@ -54,7 +54,7 @@ pub(super) enum TriggerSearchError {
     JsonExport,
     InvalidExport,
     TitleRegex,
-    SortOrder,
+    SortOrder { start: usize },
     RepeatedSortOrder,
 }
 
@@ -72,7 +72,7 @@ impl TriggerSearchError {
             Self::JsonExport => "生成触发器 JSON 失败",
             Self::InvalidExport => "触发器导出格式可用 CSV 或 JSON",
             Self::TitleRegex => "填写一个有效的名称正则表达式，含空格时用双引号包住",
-            Self::SortOrder => "触发器排序可用 名称 或 动作",
+            Self::SortOrder { .. } => "触发器排序可用 名称 或 动作",
             Self::RepeatedSortOrder => "触发器排序条件填写一次",
         }
     }
@@ -136,6 +136,29 @@ enum TriggerOrder {
 }
 
 impl TriggerOrder {
+    const ALL: [Self; 2] = [Self::Name, Self::Action];
+
+    fn names(self) -> [&'static str; 2] {
+        match self {
+            Self::Name => ["名称", "name"],
+            Self::Action => ["动作", "action"],
+        }
+    }
+
+    fn suggestions(query_prefix: &str, value_prefix: &str) -> Vec<InputSuggestion> {
+        let prefix = search_key(value_prefix);
+        Self::ALL
+            .into_iter()
+            .filter_map(|order| {
+                let name = order
+                    .names()
+                    .into_iter()
+                    .find(|name| name.starts_with(&prefix))?;
+                option_suggestion(query_prefix, name)
+            })
+            .collect()
+    }
+
     fn sort(self, matches: Vec<&SearchTrigger>) -> Vec<&SearchTrigger> {
         let mut entries: Vec<_> = matches
             .into_iter()
@@ -224,11 +247,15 @@ fn parse_trigger_query(
                     return Err(TriggerSearchError::RepeatedSortOrder);
                 }
                 let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-                order = Some(match search_key(value).as_str() {
-                    "名称" | "name" => TriggerOrder::Name,
-                    "动作" | "action" => TriggerOrder::Action,
-                    _ => return Err(TriggerSearchError::SortOrder),
-                });
+                let value = search_key(value);
+                order = Some(
+                    TriggerOrder::ALL
+                        .into_iter()
+                        .find(|order| order.names().contains(&value.as_str()))
+                        .ok_or(TriggerSearchError::SortOrder {
+                            start: query_len - input.len(),
+                        })?,
+                );
                 query = rest.trim_start();
                 continue;
             }
@@ -303,16 +330,25 @@ pub(super) fn search_triggers(
     };
     let query = match parse_trigger_query(query, inherited) {
         Ok(parsed) => parsed,
-        Err(error @ TriggerSearchError::InvalidValue { facet, start }) => {
-            let (prefix, value) = full_query.split_at(full_query.len() - query.len() + start);
-            let suggestions = filter_suggestions(facet, prefix, value);
+        Err(error) => {
+            let parts = |start| full_query.split_at(full_query.len() - query.len() + start);
+            let suggestions = match error {
+                TriggerSearchError::InvalidValue { facet, start } => {
+                    let (prefix, value) = parts(start);
+                    filter_suggestions(facet, prefix, value)
+                }
+                TriggerSearchError::SortOrder { start } => {
+                    let (prefix, value) = parts(start);
+                    TriggerOrder::suggestions(prefix, value)
+                }
+                _ => Vec::new(),
+            };
             return if suggestions.is_empty() {
                 Results::Value(Err(ValueError::TriggerSearch(error)))
             } else {
                 Results::FilterOptions(suggestions)
             };
         }
-        Err(error) => return Results::Value(Err(ValueError::TriggerSearch(error))),
     };
     let mut matches = matching_triggers(
         triggers,
