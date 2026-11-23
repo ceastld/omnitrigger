@@ -1569,6 +1569,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "节拍: 速度 1.5秒 @ 3",
     },
     Example {
+        icon: Icon::Clock,
+        title: "按时长和速度计算拍数",
+        query: "节拍: 拍数 90秒 @ 120 BPM",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按整数半音移动音高",
         query: "音高: 转调 Bb3 @ 2",
@@ -4709,7 +4714,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
         ],
         Scope::Pitch => &["MIDI", "转调", "音程"],
         Scope::Decibel => &["功率比", "幅度比", "转功率比", "转幅度比", "叠加"],
-        Scope::Tempo => &["时长", "速度"],
+        Scope::Tempo => &["时长", "速度", "拍数"],
         Scope::Solid => &[
             "圆柱",
             "圆锥",
