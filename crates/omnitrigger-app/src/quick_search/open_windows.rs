@@ -9,7 +9,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use super::{
-    csv_tools::csv_cell,
+    csv_tools::{append_bounded_csv_row, csv_cell},
     examples::search_key,
     operators::json_value_and_tail,
     text_tools::{compare_natural, compile_regex},
@@ -20,7 +20,7 @@ const MAX_WINDOW_EXPORT_BYTES: usize = 1024 * 1024;
 
 enum WindowExport {
     Json,
-    Csv,
+    Csv { include_state: bool },
     ProcessCounts,
 }
 
@@ -28,6 +28,8 @@ enum WindowExport {
 struct WindowSummary<'a> {
     title: &'a str,
     process: Option<&'a str>,
+    #[serde(skip_serializing)]
+    minimized: bool,
 }
 
 #[derive(Debug)]
@@ -200,7 +202,18 @@ impl OpenWindowsIndex {
         let (format, rest) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
         let (export, filter) = match search_key(format).as_str() {
             "输出=json" | "output=json" => (Some(WindowExport::Json), rest.trim_start()),
-            "输出=csv" | "output=csv" => (Some(WindowExport::Csv), rest.trim_start()),
+            "输出=csv" | "output=csv" => (
+                Some(WindowExport::Csv {
+                    include_state: false,
+                }),
+                rest.trim_start(),
+            ),
+            "输出=状态csv" | "output=state-csv" => (
+                Some(WindowExport::Csv {
+                    include_state: true,
+                }),
+                rest.trim_start(),
+            ),
             "输出=进程统计" | "output=process-counts" => {
                 (Some(WindowExport::ProcessCounts), rest.trim_start())
             }
@@ -257,6 +270,7 @@ impl OpenWindowsIndex {
             let windows = matches.into_iter().map(|(_, window)| WindowSummary {
                 title: &window.window.title,
                 process: window.window.process.as_deref(),
+                minimized: window.window.minimized,
             });
             return export_windows(export, windows);
         }
@@ -280,17 +294,21 @@ fn export_windows<'a>(
             Ok(_) => too_large(),
             Err(error) => Results::OpenWindowsUnavailable(format!("生成窗口列表失败：{error}")),
         },
-        WindowExport::Csv => {
-            let mut csv = String::from("标题,程序文件名");
+        WindowExport::Csv { include_state } => {
+            let mut csv = String::from(if include_state {
+                "标题,程序文件名,状态"
+            } else {
+                "标题,程序文件名"
+            });
+            let width = 2 + usize::from(include_state);
             for window in windows {
-                write!(
-                    csv,
-                    "\r\n{},{}",
-                    csv_cell(window.title),
-                    csv_cell(window.process.unwrap_or_default())
-                )
-                .expect("写入 String 不会出错");
-                if csv.len() > MAX_WINDOW_EXPORT_BYTES {
+                let state = if window.minimized {
+                    "已最小化"
+                } else {
+                    "未最小化"
+                };
+                let fields = [window.title, window.process.unwrap_or_default(), state];
+                if append_bounded_csv_row(&mut csv, fields[..width].iter().copied(), ()).is_err() {
                     return too_large();
                 }
             }
@@ -465,18 +483,22 @@ mod tests {
             WindowSummary {
                 title: "甲",
                 process: Some("Notepad.exe"),
+                minimized: false,
             },
             WindowSummary {
                 title: "乙",
                 process: Some("notepad.exe"),
+                minimized: true,
             },
             WindowSummary {
                 title: "丙",
                 process: None,
+                minimized: false,
             },
             WindowSummary {
                 title: "丁",
                 process: Some("code.exe"),
+                minimized: false,
             },
         ];
         assert!(matches!(
@@ -495,14 +517,16 @@ mod tests {
             WindowSummary {
                 title: "预算,\"复核\"",
                 process: Some("Example Tool.exe"),
+                minimized: true,
             },
             WindowSummary {
                 title: "资料",
                 process: None,
+                minimized: false,
             },
         ];
         assert!(matches!(
-            export_windows(WindowExport::Csv, windows.into_iter()),
+            export_windows(WindowExport::Csv { include_state: false }, windows.into_iter()),
             Results::Value(Ok(result)) if result.text == "标题,程序文件名\r\n\"预算,\"\"复核\"\"\",Example Tool.exe\r\n资料,\"\""
         ));
         let index = OpenWindowsIndex::Ready(Vec::new());
@@ -510,6 +534,41 @@ mod tests {
             index.results("输出＝ＣＳＶ　进程=notepad.exe 报告"),
             Results::Value(Ok(result)) if result.text == "标题,程序文件名"
         ));
+    }
+
+    #[test]
+    fn exports_window_state_as_an_explicit_extra_csv_column() {
+        let windows = [
+            WindowSummary {
+                title: "报告,\"复核\"",
+                process: Some("notes.exe"),
+                minimized: true,
+            },
+            WindowSummary {
+                title: "资料",
+                process: None,
+                minimized: false,
+            },
+        ];
+        assert!(matches!(
+            export_windows(WindowExport::Csv { include_state: true }, windows.into_iter()),
+            Results::Value(Ok(value))
+                if value.text == "标题,程序文件名,状态\r\n\"报告,\"\"复核\"\"\",notes.exe,已最小化\r\n资料,\"\",未最小化"
+        ));
+        assert!(matches!(
+            OpenWindowsIndex::Ready(Vec::new()).results("output=state-csv 排序=进程 状态=已最小化"),
+            Results::Value(Ok(value)) if value.text == "标题,程序文件名,状态"
+        ));
+        let json = serde_json::to_value(WindowSummary {
+            title: "报告",
+            process: Some("notes.exe"),
+            minimized: true,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"title":"报告","process":"notes.exe"})
+        );
     }
 
     #[test]

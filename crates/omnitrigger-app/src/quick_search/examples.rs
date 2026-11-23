@@ -945,6 +945,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Grid,
+        title: "在导出的 CSV 中查看窗口最小化状态",
+        query: "窗口: 输出=状态CSV 排序=进程",
+    },
+    Example {
+        icon: Icon::Grid,
         title: "按程序统计匹配窗口的数量",
         query: "窗口: 输出=进程统计",
     },
