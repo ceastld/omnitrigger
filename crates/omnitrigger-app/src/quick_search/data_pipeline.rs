@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use chrono::NaiveDate;
+use serde_json::value::RawValue;
 
 use super::{
     calendar::calculate_date,
@@ -12,7 +13,7 @@ use super::{
     decibel::convert_decibels,
     duration::convert_duration,
     fraction::simplify_fraction,
-    json_tools::{read_json_array, transform_json, JsonError},
+    json_tools::{read_json_array, read_unique_object_entries, transform_json, JsonError},
     operators::json_argument_and_tail,
     path_tools::path_component,
     pitch::convert_pitch,
@@ -62,6 +63,14 @@ pub(super) enum DataPipelineError {
     JsonArrayTooLarge {
         item: usize,
     },
+    JsonFieldStep {
+        field: usize,
+        index: usize,
+        cause: &'static str,
+    },
+    JsonObjectTooLarge {
+        field: usize,
+    },
 }
 
 impl From<CsvError> for DataPipelineError {
@@ -78,6 +87,7 @@ pub(super) enum DataPipelineMode {
     RowsCsv,
     ColumnCsv,
     JsonArray,
+    JsonObject,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +96,7 @@ enum PipelineLocation {
     Line(usize),
     CsvRow(usize),
     JsonItem(usize),
+    JsonField(usize),
 }
 
 pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
@@ -97,6 +108,7 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
         "逐行csv" | "rows-csv" => (DataPipelineMode::RowsCsv, arguments),
         "csv列" | "csv-column" => (DataPipelineMode::ColumnCsv, arguments),
         "json数组" | "json-array" => (DataPipelineMode::JsonArray, arguments),
+        "json对象" | "json-object" => (DataPipelineMode::JsonObject, arguments),
         _ => (DataPipelineMode::LastResult, input),
     }
 }
@@ -134,37 +146,56 @@ pub(super) fn transform_data_pipeline(
     if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len()) || source.trim().is_empty() {
         return Err(DataPipelineError::Arguments);
     }
-    if mode == DataPipelineMode::JsonArray {
-        run_pipeline_json_array(&steps, source.trim_start(), today, &mut remaining_work)
-    } else if matches!(mode, DataPipelineMode::Rows | DataPipelineMode::RowsCsv) {
-        run_pipeline_rows(
+    match mode {
+        DataPipelineMode::JsonArray => {
+            let values = read_json_array(source.trim_start()).map_err(DataPipelineError::Json)?;
+            run_pipeline_json(
+                values.into_iter().map(|value| (None, value)),
+                false,
+                &steps,
+                today,
+                &mut remaining_work,
+            )
+        }
+        DataPipelineMode::JsonObject => {
+            let entries =
+                read_unique_object_entries(source.trim_start()).map_err(DataPipelineError::Json)?;
+            run_pipeline_json(
+                entries.into_iter().map(|(key, value)| (Some(key), value)),
+                true,
+                &steps,
+                today,
+                &mut remaining_work,
+            )
+        }
+        DataPipelineMode::Rows | DataPipelineMode::RowsCsv => run_pipeline_rows(
             &steps,
             source,
             today,
             mode == DataPipelineMode::RowsCsv,
             &mut remaining_work,
-        )
-    } else {
-        run_pipeline_steps(
+        ),
+        _ => run_pipeline_steps(
             &steps,
             source,
             today,
             mode == DataPipelineMode::StepsCsv,
             PipelineLocation::Whole,
             &mut remaining_work,
-        )
+        ),
     }
 }
 
-fn run_pipeline_json_array(
+fn run_pipeline_json<'a>(
+    values: impl IntoIterator<Item = (Option<String>, &'a RawValue)>,
+    object: bool,
     steps: &[String],
-    source: &str,
     today: NaiveDate,
     remaining_work: &mut usize,
 ) -> Result<String, DataPipelineError> {
-    let values = read_json_array(source).map_err(DataPipelineError::Json)?;
-    let mut result = String::from("[");
-    for (index, value) in values.into_iter().enumerate() {
+    let (open, close) = if object { ("{", '}') } else { ("[", ']') };
+    let mut result = String::from(open);
+    for (index, (key, value)) in values.into_iter().enumerate() {
         let item = index + 1;
         let raw = value.get();
         let input = if raw.starts_with('"') {
@@ -175,24 +206,37 @@ fn run_pipeline_json_array(
         } else {
             Cow::Borrowed(raw)
         };
-        let text = run_pipeline_steps(
-            steps,
-            &input,
-            today,
-            false,
-            PipelineLocation::JsonItem(item),
-            remaining_work,
-        )?;
+        let location = if object {
+            PipelineLocation::JsonField(item)
+        } else {
+            PipelineLocation::JsonItem(item)
+        };
+        let text = run_pipeline_steps(steps, &input, today, false, location, remaining_work)?;
         let encoded = serde_json::to_string(&text)
             .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?;
+        let key = key
+            .map(|key| serde_json::to_string(&key))
+            .transpose()
+            .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?;
         let separator = if index == 0 { "" } else { "," };
-        if result.len() + separator.len() + encoded.len() + 1 > MAX_PIPELINE_OUTPUT_BYTES {
-            return Err(DataPipelineError::JsonArrayTooLarge { item });
+        let key_bytes = key.as_ref().map_or(0, |key| key.len() + 1);
+        if result.len() + separator.len() + key_bytes + encoded.len() + 1
+            > MAX_PIPELINE_OUTPUT_BYTES
+        {
+            return Err(if object {
+                DataPipelineError::JsonObjectTooLarge { field: item }
+            } else {
+                DataPipelineError::JsonArrayTooLarge { item }
+            });
         }
         result.push_str(separator);
+        if let Some(key) = key {
+            result.push_str(&key);
+            result.push(':');
+        }
         result.push_str(&encoded);
     }
-    result.push(']');
+    result.push(close);
     Ok(result)
 }
 
@@ -256,6 +300,11 @@ fn run_pipeline_steps(
             PipelineLocation::JsonItem(item) => {
                 DataPipelineError::JsonItemStep { item, index, cause }
             }
+            PipelineLocation::JsonField(field) => DataPipelineError::JsonFieldStep {
+                field,
+                index,
+                cause,
+            },
         };
         if step.contains(['\r', '\n', '\0']) {
             return Err(error(STEP_SYNTAX));
@@ -526,6 +575,45 @@ mod tests {
         assert_eq!(
             run_pipeline(&input),
             Err(DataPipelineError::JsonArrayTooLarge { item: 2 })
+        );
+    }
+
+    #[test]
+    fn maps_object_values_in_field_order_and_reports_field_failures() {
+        for (input, expected) in [
+            (
+                r#"JSON对象 ["分数:"] {"乙":1.25,"甲":0.50}"#,
+                r#"{"乙":"5/4","甲":"1/2"}"#,
+            ),
+            (
+                r#"JSON-OBJECT ["文本: 大写"] {"a\"b":"x\ny","big":9007199254740993}"#,
+                r#"{"a\"b":"X\nY","big":"9007199254740993"}"#,
+            ),
+            (r#"JSON对象 ["分数:"] {}"#, "{}"),
+        ] {
+            assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            run_pipeline(r#"JSON对象 ["分数:"] [1]"#),
+            Err(DataPipelineError::Json(JsonError::ExpectedObject))
+        );
+        assert_eq!(
+            run_pipeline(r#"JSON对象 ["分数:"] {"x":1,"\u0078":2}"#),
+            Err(DataPipelineError::Json(JsonError::DuplicateKey))
+        );
+        assert!(matches!(
+            run_pipeline(r#"JSON对象 ["分数:"] {"甲":1,"乙":null}"#),
+            Err(DataPipelineError::JsonFieldStep {
+                field: 2,
+                index: 1,
+                ..
+            })
+        ));
+        let value = "x".repeat(MAX_PIPELINE_OUTPUT_BYTES / 2);
+        let input = format!(r#"JSON对象 ["文本: 大写"] {{"a":"{value}","b":"{value}"}}"#);
+        assert_eq!(
+            run_pipeline(&input),
+            Err(DataPipelineError::JsonObjectTooLarge { field: 2 })
         );
     }
 

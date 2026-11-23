@@ -1525,7 +1525,9 @@ fn merge_json_objects(source: &str) -> Result<String, JsonError> {
     write_object_entries(ordered.into_iter().map(|(key, (_, value))| (key, value)))
 }
 
-fn read_unique_object_entries(source: &str) -> Result<Vec<(String, &RawValue)>, JsonError> {
+pub(super) fn read_unique_object_entries(
+    source: &str,
+) -> Result<Vec<(String, &RawValue)>, JsonError> {
     let entries = read_object_entries(source)?;
     let mut seen = HashSet::with_capacity(entries.len());
     if entries.iter().any(|(key, _)| !seen.insert(key)) {

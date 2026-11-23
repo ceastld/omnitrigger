@@ -894,6 +894,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"处理: JSON数组 ["JSON: 取值 /金额","分数:"] [{"金额":0.50},{"金额":1.25}]"#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "逐个处理 JSON 对象的字段值",
+        query: r#"处理: JSON对象 ["分数:"] {"乙":1.25,"甲":0.50}"#,
+    },
+    Example {
         icon: Icon::Browser,
         title: "解码网址查询参数并取出第一个值",
         query: r#"处理: ["URL: 参数JSON","JSON: 取值 /0/1"] https://example.invalid/?q=%E8%8C%B6+1"#,
@@ -5004,13 +5009,20 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Wave if "波速".starts_with(term) => {}
         Scope::DataPipeline
-            if ["步骤csv", "逐行", "逐行csv", "csv列", "json数组"]
-                .into_iter()
-                .any(|operation| {
-                    operation
-                        .get(..term.len())
-                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(term))
-                }) => {}
+            if [
+                "步骤csv",
+                "逐行",
+                "逐行csv",
+                "csv列",
+                "json数组",
+                "json对象",
+            ]
+            .into_iter()
+            .any(|operation| {
+                operation
+                    .get(..term.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(term))
+            }) => {}
         Scope::Date
         | Scope::Duration
         | Scope::BatchConversion

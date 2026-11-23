@@ -570,6 +570,16 @@ impl ValueError {
             Self::DataPipeline(DataPipelineError::JsonArrayTooLarge { item }) => {
                 return format!("第 {item} 个数组元素使结果超过 1 MiB，请缩小数据范围").into();
             }
+            Self::DataPipeline(DataPipelineError::JsonFieldStep {
+                field,
+                index,
+                cause,
+            }) => {
+                return format!("第 {field} 个对象字段的第 {index} 步失败 · {cause}").into();
+            }
+            Self::DataPipeline(DataPipelineError::JsonObjectTooLarge { field }) => {
+                return format!("第 {field} 个对象字段使结果超过 1 MiB，请缩小数据范围").into();
+            }
             Self::DataPipeline(DataPipelineError::RowStep { line, index, cause }) => {
                 return format!("第 {line} 行的第 {index} 步失败 · {cause}").into();
             }
