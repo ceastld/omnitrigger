@@ -55,7 +55,7 @@ impl TimestampError {
             Self::ZoneCandidateArguments => {
                 "填写当地日期、时间和地区时区，例如 2026-11-01 01:30 America/New_York"
             }
-            Self::CivilDayArguments => "填写完整日期和明确时区，例如 2026-03-08 America/New_York",
+            Self::CivilDayArguments => "填写完整日期或顺序正确的日期范围，以及明确时区",
             Self::OffsetChangesArguments => "填写四位年份和明确时区，例如 2026 America/New_York",
             Self::DailyClockArguments => "填写当地起始时刻、明确时区和 1 至 128 天，例如 2026-03-07 02:30 America/New_York @ 3",
             Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
@@ -370,15 +370,20 @@ fn named_time_source(input: &str) -> Option<(&str, &str)> {
 
 fn civil_day_intervals(input: &str) -> Result<String, TimestampError> {
     let invalid = TimestampError::CivilDayArguments;
-    let (day, zone) = input
+    let (dates, zone) = input
         .trim()
         .rsplit_once(char::is_whitespace)
         .ok_or(invalid)?;
-    let day = parse_complete_date(day).map_err(|_| invalid)?;
+    let (start, end) = dates.split_once(['到', '至']).unwrap_or((dates, dates));
+    let start = parse_complete_date(start).map_err(|_| invalid)?;
+    let end = parse_complete_date(end).map_err(|_| invalid)?;
+    if start > end {
+        return Err(invalid);
+    }
     let zone = explicit_timezone(zone, invalid)?;
-    let next_day = day.succ_opt().ok_or(TimestampError::OutOfRange)?;
+    let next_day = end.succ_opt().ok_or(TimestampError::OutOfRange)?;
     let seconds = |date: NaiveDate| date.and_time(NaiveTime::MIN).and_utc().timestamp();
-    let day_start = seconds(day);
+    let day_start = seconds(start);
     let day_end = seconds(next_day);
     let first = Timestamp::new(day_start - i64::from(Offset::MAX.seconds()), 0)
         .map_err(|_| TimestampError::OutOfRange)?;
@@ -1030,6 +1035,7 @@ mod tests {
     fn partitions_a_local_date_into_all_of_its_utc_intervals() {
         for (query, expected) in [
             ("2026-03-08 America/New_York", "\r\n2026-03-08T05:00:00Z,2026-03-09T04:00:00Z,23:00:00"),
+            ("2026-03-07 到 2026-03-09 America/New_York", "\r\n2026-03-07T05:00:00Z,2026-03-10T04:00:00Z,71:00:00"),
             ("2026-11-01 America/New_York", "\r\n2026-11-01T04:00:00Z,2026-11-02T05:00:00Z,25:00:00"),
             ("2024-02-29 UTC+8", "\r\n2024-02-28T16:00:00Z,2024-02-29T16:00:00Z,24:00:00"),
             ("1987-10-25 America/St_Johns", "\r\n1987-10-25T02:30:00Z,1987-10-25T02:31:00Z,00:01:00\r\n1987-10-25T03:30:00Z,1987-10-26T03:30:00Z,24:00:00"),
@@ -1043,6 +1049,10 @@ mod tests {
         }
         assert_eq!(
             convert_timestamp("日区间 2023-02-29 UTC", DateTime::UNIX_EPOCH),
+            Err(TimestampError::CivilDayArguments),
+        );
+        assert_eq!(
+            convert_timestamp("日区间 2026-03-09 至 2026-03-07 UTC", DateTime::UNIX_EPOCH),
             Err(TimestampError::CivilDayArguments),
         );
     }

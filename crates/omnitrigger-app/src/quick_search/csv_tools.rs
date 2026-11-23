@@ -726,6 +726,7 @@ enum Operation {
         numeric: bool,
     },
     SortWithOrders(Vec<(ColumnReference, FieldSortOrder)>),
+    SortByTimestamps(Vec<ColumnReference>, bool),
 }
 
 #[derive(Deserialize)]
@@ -2044,6 +2045,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::SortWithOrders(rules)
         }
+        "时间戳排序" | "sort-timestamps" | "时间戳降序" | "sort-timestamps-desc" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            let descending = matches!(operation.as_str(), "时间戳降序" | "sort-timestamps-desc");
+            Operation::SortByTimestamps(columns, descending)
+        }
         "排序" | "sort-columns" | "降序" | "sort-columns-desc" | "数值排序" | "sort-numeric"
         | "数值降序" | "sort-numeric-desc" => {
             let (columns, data) =
@@ -2478,6 +2486,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             numeric,
         } => sort_by_columns(&rows, &columns, descending, numeric),
         Operation::SortWithOrders(rules) => sort_with_orders(&rows, rules),
+        Operation::SortByTimestamps(columns, descending) => {
+            sort_by_timestamps(&rows, &columns, descending)
+        }
     }
 }
 
@@ -4783,6 +4794,42 @@ fn sort_by_columns(
     Ok(write_rows(std::iter::once(header).chain(ordered), ','))
 }
 
+fn sort_by_timestamps(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    descending: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let mut records = records
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let times = columns
+                .iter()
+                .map(|&column| {
+                    absolute_timestamp(&row[column]).map_err(|error| CsvError::DataRowValue {
+                        row: index + 1,
+                        cause: error.message(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((times, row))
+        })
+        .collect::<Result<Vec<_>, CsvError>>()?;
+    records.sort_by(|(left, _), (right, _)| {
+        if descending {
+            right.cmp(left)
+        } else {
+            left.cmp(right)
+        }
+    });
+    Ok(write_rows(
+        std::iter::once(header).chain(records.into_iter().map(|(_, row)| row)),
+        ',',
+    ))
+}
+
 fn sort_with_orders(
     rows: &[Vec<String>],
     rules: Vec<(ColumnReference, FieldSortOrder)>,
@@ -5465,6 +5512,23 @@ mod tests {
             transform_csv(r#"检查时间范围 [[1],["1ns","0"]] 时间"#),
             Err(CsvError::TimestampRangeCheckArguments),
         );
+    }
+
+    #[test]
+    fn sorts_csv_timestamps_on_the_utc_timeline_and_keeps_equal_keys_in_input_order() {
+        let table = "编号,时间\nA,1970-01-01T08:00:00+08:00\nB,1ns\nC,0\nD,-0.000001ms";
+        assert_eq!(
+            transform_csv(&format!(r#"时间戳排序 ["时间"] {table}"#)).as_deref(),
+            Ok("编号,时间\r\nD,-0.000001ms\r\nA,1970-01-01T08:00:00+08:00\r\nC,0\r\nB,1ns"),
+        );
+        assert_eq!(
+            transform_csv(&format!("sort-timestamps-desc 2 {table}")).as_deref(),
+            Ok("编号,时间\r\nB,1ns\r\nA,1970-01-01T08:00:00+08:00\r\nC,0\r\nD,-0.000001ms"),
+        );
+        assert!(matches!(
+            transform_csv("时间戳排序 2 编号,时间\nA,0\nB,2026-11-01 01:30 America/New_York"),
+            Err(CsvError::DataRowValue { row: 2, .. }),
+        ));
     }
 
     #[test]

@@ -1948,6 +1948,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "把连续的当地日期映射到 UTC 区间",
+        query: "时间戳: 日区间 2026-03-07 到 2026-03-09 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查看某年时区偏移变更",
         query: "时间戳: 偏移变更 2026 America/New_York",
     },
@@ -4276,6 +4281,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按指定列数值升序排列 CSV 行",
         query: "CSV: 数值排序 2 编号,金额\n001,12.50\n002,-2.75\n003,3/2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按 UTC 时刻排列 CSV 数据行",
+        query: "CSV: 时间戳排序 [\"时间\"] 编号,时间\nA,1970-01-01T08:00:00+08:00\nB,1ns\nC,0\nD,-0.000001ms",
     },
     Example {
         icon: Icon::Terminal,
