@@ -61,8 +61,8 @@ impl WindowSelection {
                 ("未最小化", "not-minimized", "列出普通和最大化的窗口"),
             ],
             Self::Order => [
-                ("标题", "title", "按标题排列，编号按数值比较"),
-                ("进程", "process", "先按程序文件名排列，再按标题排列"),
+                ("标题", "title", "编号按数值排序"),
+                ("进程", "process", "同程序按标题排序"),
             ],
         };
         let prefix = search_key(value_prefix);
