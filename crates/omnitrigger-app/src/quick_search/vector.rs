@@ -1,3 +1,4 @@
+use num_bigint::Sign;
 use num_rational::BigRational;
 
 use super::calculator::normalize;
@@ -77,6 +78,10 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
             | "cross"
             | "距离"
             | "distance"
+            | "曼哈顿距离"
+            | "manhattan-distance"
+            | "切比雪夫距离"
+            | "chebyshev-distance"
             | "投影"
             | "project"
             | "分解"
@@ -110,6 +115,26 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
                 &differences,
                 &differences,
             )?))
+        }
+        "曼哈顿距离" | "manhattan-distance" | "切比雪夫距离" | "chebyshev-distance" => {
+            let mut differences = vector_difference(&left, &right)?.into_iter().map(|value| {
+                if value.numer().sign() == Sign::Minus {
+                    -value
+                } else {
+                    value
+                }
+            });
+            let distance = if matches!(operation.as_str(), "切比雪夫距离" | "chebyshev-distance")
+            {
+                differences.max().unwrap_or_default()
+            } else {
+                differences.try_fold(BigRational::default(), |total, value| {
+                    let total = total + value;
+                    ensure_exact_size(&total).map_err(VectorError::Evaluation)?;
+                    Ok(total)
+                })?
+            };
+            Ok(distance.to_string())
         }
         _ => Ok(dot_product(&left, &right)?.to_string()),
     }
@@ -399,6 +424,22 @@ mod tests {
             calculate_vector("线段距离 3,4 @ 0,0; 2,0,1"),
             Err(VectorError::Dimensions)
         );
+    }
+
+    #[test]
+    fn computes_exact_manhattan_and_chebyshev_distances() {
+        for (query, expected) in [
+            ("曼哈顿距离 1/2,-2,3; -1,-1/4,3", "13/4"),
+            ("切比雪夫距离 1/2,-2,3; -1,-1/4,3", "7/4"),
+            ("MANHATTAN-DISTANCE -1,-1/4,3; 1/2,-2,3", "13/4"),
+            ("chebyshev-distance -1/2; 1/3", "5/6"),
+            ("切比雪夫距离 1/2,3; 0.50,3", "0"),
+        ] {
+            assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["曼哈顿距离 1,2; 1", "切比雪夫距离 1; 1,2"] {
+            assert_eq!(calculate_vector(query), Err(VectorError::Dimensions));
+        }
     }
 
     #[test]

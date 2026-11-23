@@ -477,6 +477,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算对应坐标绝对差的和",
+        query: "向量: 曼哈顿距离 1/2,-2,3; -1,-1/4,3",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算对应坐标最大的绝对差",
+        query: "向量: 切比雪夫距离 1/2,-2,3; -1,-1/4,3",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算点到线段的距离和最近点",
         query: "向量: 线段距离 3,4 @ 0,0; 2,0",
     },
