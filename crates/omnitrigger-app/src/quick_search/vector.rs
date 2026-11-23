@@ -65,9 +65,11 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
             return Ok(format_square_root(&dot_product(&values, &values)?));
         }
         "单位向量" | "unit-vector" => return unit_vector(&components(input)?),
-        "线段距离" | "segment-distance" => return distance_to_line(input, true),
-        "直线距离" | "line-distance" => return distance_to_line(input, false),
-        "平面距离" | "plane-distance" => return distance_to_plane(input),
+        "线段距离" | "segment-distance" => return project_onto_line(input, true)?.distance(),
+        "直线距离" | "line-distance" => return project_onto_line(input, false)?.distance(),
+        "平面距离" | "plane-distance" => return project_onto_plane(input)?.distance(),
+        "直线对称" | "line-reflection" => return project_onto_line(input, false)?.reflection(),
+        "平面对称" | "plane-reflection" => return project_onto_plane(input)?.reflection(),
         _ => {}
     }
     if !matches!(
@@ -234,7 +236,40 @@ fn vector_cosine(left: &[BigRational], right: &[BigRational]) -> Result<String, 
     Ok(format_signed_square_root(&squared, dot.numer().sign()))
 }
 
-fn distance_to_line(input: &str, restrict_to_segment: bool) -> Result<String, VectorError> {
+struct PointProjection {
+    point: Vec<BigRational>,
+    closest: Vec<BigRational>,
+}
+
+impl PointProjection {
+    fn distance(&self) -> Result<String, VectorError> {
+        let difference = vector_difference(&self.point, &self.closest)?;
+        let distance = format_square_root(&dot_product(&difference, &difference)?);
+        Ok(format!(
+            "距离 {distance}\n最近点 {}",
+            format_vector(&self.closest)
+        ))
+    }
+
+    fn reflection(&self) -> Result<String, VectorError> {
+        let coordinates = self
+            .closest
+            .iter()
+            .zip(&self.point)
+            .map(|(foot, point)| {
+                let value = foot + (foot - point);
+                ensure_exact_size(&value).map_err(VectorError::Evaluation)?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format_vector(&coordinates))
+    }
+}
+
+fn project_onto_line(
+    input: &str,
+    restrict_to_segment: bool,
+) -> Result<PointProjection, VectorError> {
     let (point, line) = input.split_once('@').ok_or(VectorError::LineArguments)?;
     let (start, end) = line.split_once(';').ok_or(VectorError::LineArguments)?;
     let (point, start, end) = (components(point)?, components(start)?, components(end)?);
@@ -267,15 +302,10 @@ fn distance_to_line(input: &str, restrict_to_segment: bool) -> Result<String, Ve
             })
             .collect::<Result<Vec<_>, _>>()?
     };
-    let difference = vector_difference(&point, &closest)?;
-    let distance = format_square_root(&dot_product(&difference, &difference)?);
-    Ok(format!(
-        "距离 {distance}\n最近点 {}",
-        format_vector(&closest)
-    ))
+    Ok(PointProjection { point, closest })
 }
 
-fn distance_to_plane(input: &str) -> Result<String, VectorError> {
+fn project_onto_plane(input: &str) -> Result<PointProjection, VectorError> {
     let (point, plane) = input.split_once('@').ok_or(VectorError::PlaneArguments)?;
     let points: Vec<_> = plane.split(';').take(4).collect();
     let [origin, next, last] = points.as_slice() else {
@@ -298,11 +328,7 @@ fn distance_to_plane(input: &str) -> Result<String, VectorError> {
         _ => error,
     })?;
     let closest = vector_difference(&point, &perpendicular)?;
-    let distance = format_square_root(&dot_product(&perpendicular, &perpendicular)?);
-    Ok(format!(
-        "距离 {distance}\n最近点 {}",
-        format_vector(&closest)
-    ))
+    Ok(PointProjection { point, closest })
 }
 
 fn cross_product(
@@ -356,6 +382,32 @@ mod tests {
             calculate_vector("单位向量 0,0"),
             Err(VectorError::ZeroUnitVector)
         );
+    }
+
+    #[test]
+    fn reflects_points_across_a_line_or_plane_with_exact_coordinates() {
+        for (query, expected) in [
+            ("直线对称 3,4 @ 0,0; 2,0", "3, -4"),
+            ("line-reflection 1/2,0 @ 0,0; 1,1", "0, 1/2"),
+            ("直线对称 2,1,2 @ 0,1,0; 0,1,1", "-2, 1, 2"),
+            ("平面对称 3,4,5 @ 0,0,0; 1,0,0; 0,1,0", "3, 4, -5"),
+            (
+                "plane-reflection 1,1,1 @ 1,0,0; 0,1,0; 0,0,1",
+                "-1/3, -1/3, -1/3",
+            ),
+            ("平面对称 1/2,-2,0 @ 0,0,0; 1,0,0; 0,1,0", "1/2, -2, 0"),
+        ] {
+            assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("直线对称 0,0 @ 1,1; 1,1", VectorError::CoincidentLinePoints),
+            (
+                "平面对称 1,2,3 @ 0,0,0; 1,0,0; 2,0,0",
+                VectorError::CollinearPlanePoints,
+            ),
+        ] {
+            assert_eq!(calculate_vector(query), Err(error), "{query}");
+        }
     }
 
     #[test]
