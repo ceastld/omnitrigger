@@ -12,16 +12,16 @@ use super::operators::split_top_level_commas;
 pub(super) enum SolidError {
     Arguments,
     NonPositiveDimension,
+    InvalidInnerRadius,
     Evaluation(FractionError),
 }
 
 impl SolidError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Arguments => {
-                "填写圆柱或圆锥 半径,高、圆台 半径,半径,高、球 半径、立方体 边长或长方体 长,宽,高"
-            }
+            Self::Arguments => "填入形状和尺寸，例如 圆柱 3,5。按 F1 查看各形状的参数",
             Self::NonPositiveDimension => "每项尺寸须大于零",
+            Self::InvalidInnerRadius => "内半径须小于外半径",
             Self::Evaluation(error) => error.message(),
         }
     }
@@ -46,6 +46,19 @@ pub(super) fn calculate_solid(query: &str) -> Result<String, SolidError> {
             ("圆锥" | "cone", [radius, height]) => return cone(radius, height),
             ("圆台" | "圆锥台" | "frustum", [first, second, height]) => {
                 return conical_frustum(first, second, height);
+            }
+            ("圆管" | "tube" | "hollow-cylinder", [outer, inner, height]) => {
+                let outer = positive_dimension(outer)?;
+                let inner = positive_dimension(inner)?;
+                let height = positive_dimension(height)?;
+                if inner >= outer {
+                    return Err(SolidError::InvalidInnerRadius);
+                }
+                let radii_sum = &outer + &inner;
+                let annulus = (&outer - &inner) * &radii_sum;
+                let surface = (&radii_sum * &height + &annulus) * BigInt::from(2);
+                let volume = annulus * height;
+                (surface, volume, true)
             }
             ("球" | "球体" | "sphere", [radius]) => {
                 let radius = positive_dimension(radius)?;
@@ -146,6 +159,8 @@ mod tests {
             ("FRUSTUM 5,2,4", "表面积 64π · 体积 52π"),
             ("圆台 2,1,1", "表面积 π(5 + √18) · 体积 7π/3"),
             ("圆台 2,2,3", "表面积 20π · 体积 12π"),
+            ("圆管 3,2,5", "表面积 60π · 体积 25π"),
+            ("HOLLOW-CYLINDER 3/2,1/2,1/2", "表面积 6π · 体积 π"),
             ("ＣＹＬＩＮＤＥＲ １／２，３", "表面积 7π/2 · 体积 3π/4"),
             ("球 1/2", "表面积 π · 体积 π/6"),
             ("sphere 3", "表面积 36π · 体积 36π"),
@@ -171,6 +186,9 @@ mod tests {
             calculate_solid("圆台 2,-1,4"),
             Err(SolidError::NonPositiveDimension)
         );
+        for query in ["圆管 2,2,3", "圆管 2,3,3"] {
+            assert_eq!(calculate_solid(query), Err(SolidError::InvalidInnerRadius));
+        }
         assert_eq!(calculate_solid("长方体 1,2"), Err(SolidError::Arguments));
         assert_eq!(calculate_solid("圆柱 1,2,3"), Err(SolidError::Arguments));
     }
