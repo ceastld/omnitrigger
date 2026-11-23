@@ -4399,6 +4399,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按组求拟合直线的斜率、截距和 R²",
+        query: "CSV: 分组拟合 [[\"地区\"],[\"x\",\"y\"]] 地区,x,y\n北,0,1/2\n南,2,1\n北,1,3/2\n南,2,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留每组金额最高的两条完整记录",
         query: "CSV: 组内最高 [[\"地区\"],\"金额\",2] 地区,金额,编号\n北,1/2,001\n南,3,002\n北,2e0,003\n北,0.50,004",
     },

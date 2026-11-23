@@ -154,15 +154,14 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         _ => (input, FitOutput::Summary),
     };
     let sums = paired_sums(points, matches!(output, FitOutput::Residuals))?;
-    let products = sums.centered_products()?;
-    if products.square_x.numer().sign() == Sign::NoSign {
-        return Err(LinearFitError::ConstantX);
-    }
-    let slope = &products.cross / &products.square_x;
-    let intercept = (sums.y - &slope * sums.x) / &sums.count;
-    check_size([&slope, &intercept])?;
+    let fit = sums.fit_line()?;
+    let FittedLine {
+        slope,
+        intercept,
+        products,
+    } = &fit;
     let predict_y = |x: &BigRational| {
-        let y = &slope * x + &intercept;
+        let y = slope * x + intercept;
         check_size([&y])?;
         Ok::<_, LinearFitError>(y)
     };
@@ -170,7 +169,7 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         FitOutput::Summary => {}
         FitOutput::Errors => {
             // 中心化平方和与乘积和已乘以样本数量。
-            let residual_sum = (&products.square_y - &products.cross * &slope) / &sums.count;
+            let residual_sum = (&products.square_y - &products.cross * slope) / &sums.count;
             return format_fit_errors(residual_sum, sums.count);
         }
         FitOutput::Predictions(xs) => {
@@ -187,11 +186,9 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             return Ok(rows.join("\r\n"));
         }
     }
-    let r_squared = if products.square_y.numer().sign() == Sign::NoSign {
-        "未定义".to_owned()
-    } else {
-        products.squared_correlation()?.to_string()
-    };
+    let r_squared = fit
+        .r_squared()?
+        .map_or_else(|| "未定义".to_owned(), |value| value.to_string());
     Ok(format!("斜率 {slope} · 截距 {intercept}\nR² {r_squared}"))
 }
 
@@ -643,7 +640,8 @@ fn format_correlation(products: CenteredProducts) -> Result<String, LinearFitErr
     ))
 }
 
-struct PairedSums {
+#[derive(Default)]
+pub(super) struct PairedSums {
     count: BigInt,
     x: BigRational,
     y: BigRational,
@@ -654,6 +652,39 @@ struct PairedSums {
 }
 
 impl PairedSums {
+    pub(super) fn count(&self) -> &BigInt {
+        &self.count
+    }
+
+    pub(super) fn record(
+        &mut self,
+        x: &BigRational,
+        y: &BigRational,
+    ) -> Result<(), LinearFitError> {
+        self.count += 1u8;
+        self.xx += x * x;
+        self.xy += x * y;
+        self.yy += y * y;
+        self.x += x;
+        self.y += y;
+        check_size([&self.x, &self.y, &self.xx, &self.xy, &self.yy])
+    }
+
+    pub(super) fn fit_line(&self) -> Result<FittedLine, LinearFitError> {
+        let products = self.centered_products()?;
+        if products.square_x.numer().sign() == Sign::NoSign {
+            return Err(LinearFitError::ConstantX);
+        }
+        let slope = &products.cross / &products.square_x;
+        let intercept = (&self.y - &slope * &self.x) / &self.count;
+        check_size([&slope, &intercept])?;
+        Ok(FittedLine {
+            slope,
+            intercept,
+            products,
+        })
+    }
+
     fn centered_products(&self) -> Result<CenteredProducts, LinearFitError> {
         // 每项乘以样本数，保留精确的中心化平方和与乘积和。
         let products = CenteredProducts {
@@ -667,6 +698,21 @@ impl PairedSums {
 
     fn centered_cross_product(&self) -> BigRational {
         &self.xy * &self.count - &self.x * &self.y
+    }
+}
+
+pub(super) struct FittedLine {
+    pub(super) slope: BigRational,
+    pub(super) intercept: BigRational,
+    products: CenteredProducts,
+}
+
+impl FittedLine {
+    pub(super) fn r_squared(&self) -> Result<Option<BigRational>, LinearFitError> {
+        if self.products.square_y.numer().sign() == Sign::NoSign {
+            return Ok(None);
+        }
+        self.products.squared_correlation().map(Some)
     }
 }
 
@@ -731,32 +777,15 @@ fn summarize_pairs(
     pairs: impl Iterator<Item = Result<Point, LinearFitError>>,
     retain_points: bool,
 ) -> Result<PairedSums, LinearFitError> {
-    let [mut sx, mut sy, mut sxx, mut sxy, mut syy]: [BigRational; 5] = Default::default();
-    let mut observations = Vec::new();
-    let mut count = 0usize;
+    let mut sums = PairedSums::default();
     for pair in pairs {
         let (x, y) = pair?;
-        count += 1;
-        sxx += &x * &x;
-        sxy += &x * &y;
-        syy += &y * &y;
-        sx += &x;
-        sy += &y;
-        check_size([&sx, &sy, &sxx, &sxy, &syy])?;
+        sums.record(&x, &y)?;
         if retain_points {
-            observations.push((x, y));
+            sums.points.push((x, y));
         }
     }
-
-    Ok(PairedSums {
-        count: BigInt::from(count),
-        x: sx,
-        y: sy,
-        xx: sxx,
-        xy: sxy,
-        yy: syy,
-        points: observations,
-    })
+    Ok(sums)
 }
 
 fn evaluate(input: &str) -> Result<BigRational, LinearFitError> {

@@ -41,6 +41,7 @@ use super::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
         json_wildcard_values, JsonCellContent, JsonError,
     },
+    linear_fit::{LinearFitError, PairedSums},
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
@@ -188,6 +189,9 @@ pub(super) enum CsvError {
     ColumnBinsArguments,
     AggregateColumn,
     GroupingColumns,
+    GroupFitColumns,
+    GroupFitTooLarge,
+    LinearFit(LinearFitError),
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -401,6 +405,9 @@ impl CsvError {
             Self::ColumnBinsArguments => "填写列名或列号和边界，例如 [\"金额\",\"0,1/2,2\"]",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
+            Self::GroupFitColumns => "填写分组列和两列不同的坐标，例如 [[\"区域\"],[\"x\",\"y\"]]",
+            Self::GroupFitTooLarge => "分组拟合结果超过 1 MiB，请缩小表格范围",
+            Self::LinearFit(error) => error.message(),
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -706,6 +713,10 @@ enum Operation {
     GroupMedian {
         columns: Vec<ColumnReference>,
         amount: ColumnReference,
+    },
+    GroupFit {
+        columns: Vec<ColumnReference>,
+        coordinates: [ColumnReference; 2],
     },
     SelectGroupExtrema {
         columns: Vec<ColumnReference>,
@@ -1980,6 +1991,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::GroupMedian { columns, amount }
         }
+        "分组拟合" | "group-fit" => {
+            let ((columns, coordinates), data) = json_argument_and_data::<(
+                Vec<ColumnReference>,
+                [ColumnReference; 2],
+            )>(input, CsvError::GroupFitColumns)?;
+            if columns.is_empty() {
+                return Err(CsvError::GroupingColumns);
+            }
+            input = data;
+            Operation::GroupFit {
+                columns,
+                coordinates,
+            }
+        }
         label @ ("组内最高" | "group-top" | "组内最低" | "group-bottom") => {
             let ((columns, amount, limit), data) =
                 json_argument_and_data::<(Vec<ColumnReference>, ColumnReference, usize)>(
@@ -2464,6 +2489,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             aggregation,
         } => aggregate_by_columns(&rows, &columns, amount, aggregation),
         Operation::GroupMedian { columns, amount } => median_by_columns(&rows, &columns, amount),
+        Operation::GroupFit {
+            columns,
+            coordinates,
+        } => fit_by_columns(&rows, &columns, &coordinates),
         Operation::SelectGroupExtrema {
             columns,
             amount,
@@ -4566,6 +4595,70 @@ fn median_by_columns(
     Ok(grouped_csv(header, &columns, medians, "中位数"))
 }
 
+fn fit_by_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    coordinates: &[ColumnReference; 2],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
+    let coordinates = resolve_distinct_columns(header, coordinates, CsvError::GroupFitColumns)?;
+    let mut groups = HashMap::new();
+    for (position, row) in records.iter().enumerate() {
+        let (_, sums) = groups
+            .entry(column_key(row, &columns))
+            .or_insert_with(|| (position, PairedSums::default()));
+        let x = row[coordinates[0]].trim();
+        let y = row[coordinates[1]].trim();
+        if x.is_empty() || y.is_empty() {
+            continue;
+        }
+        let at_row = |cause| CsvError::DataRowValue {
+            row: position + 1,
+            cause,
+        };
+        let x = parse_fraction_literal(x).map_err(|error| at_row(error.message()))?;
+        let y = parse_fraction_literal(y).map_err(|error| at_row(error.message()))?;
+        sums.record(&x, &y)
+            .map_err(|error| at_row(error.message()))?;
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_unstable_by_key(|(_, (position, _))| *position);
+    let mut output = String::new();
+    let limit = CsvError::GroupFitTooLarge;
+    let labels = ["观测数", "斜率", "截距", "R²"];
+    append_bounded_csv_row(
+        &mut output,
+        columns
+            .iter()
+            .map(|&index| header[index].as_str())
+            .chain(labels),
+        limit,
+    )?;
+    for (key, (_, sums)) in groups {
+        let [slope, intercept, r_squared] = match sums.fit_line() {
+            Ok(fit) => [
+                fit.slope.to_string(),
+                fit.intercept.to_string(),
+                fit.r_squared()
+                    .map_err(CsvError::LinearFit)?
+                    .map_or_else(String::new, |value| value.to_string()),
+            ],
+            Err(LinearFitError::ConstantX) => Default::default(),
+            Err(error) => return Err(CsvError::LinearFit(error)),
+        };
+        let count = sums.count().to_string();
+        let values = [
+            count.as_str(),
+            slope.as_str(),
+            intercept.as_str(),
+            r_squared.as_str(),
+        ];
+        append_bounded_csv_row(&mut output, key.into_iter().chain(values), limit)?;
+    }
+    Ok(output)
+}
+
 fn select_group_extrema(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -5382,6 +5475,27 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn fits_csv_groups_in_first_seen_order_and_keeps_unfittable_groups() {
+        let data = "地区,x,y\r\n\"北,区\",0,1/2\r\n南,2,1\r\n东,,3\r\n\"北,区\",1,3/2\r\n南,2,3\r\n西,0,4\r\n西,1,4";
+        assert_eq!(
+            transform_csv(&format!("分组拟合 [[\"地区\"],[2,\"y\"]] {data}")).as_deref(),
+            Ok("地区,观测数,斜率,截距,R²\r\n\"北,区\",2,1,1/2,1\r\n南,2,\"\",\"\",\"\"\r\n东,0,\"\",\"\",\"\"\r\n西,2,0,4,\"\"")
+        );
+        assert_eq!(
+            transform_csv("group-fit [[1],[2,3]] 地区,x,y").as_deref(),
+            Ok("地区,观测数,斜率,截距,R²")
+        );
+        assert_eq!(
+            transform_csv("分组拟合 [[1],[2,\"x\"]] 地区,x,y"),
+            Err(CsvError::GroupFitColumns)
+        );
+        assert!(matches!(
+            transform_csv("分组拟合 [[1],[2,3]] 地区,x,y\n北,1,3\n南,2,待定"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
