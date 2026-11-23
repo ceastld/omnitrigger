@@ -160,6 +160,7 @@ const PAGES: [(Page, &str); 9] = [
 #[derive(PartialEq, Eq)]
 enum Results {
     Value(Result<ResultValue, ValueError>),
+    RefilledInput,
     Destinations(Vec<Destination>),
     ApplicationsLoading,
     ApplicationsUnavailable(String),
@@ -1398,7 +1399,8 @@ impl QuickSearch {
             if !query.trim().is_empty() {
                 this.index.recent.last_input.borrow_mut().clone_from(&query);
             }
-            if this.index.wheel_slots.is_none()
+            if !this.has_refilled_input(&query)
+                && this.index.wheel_slots.is_none()
                 && matches!(scoped_query(query.trim()), Some((Scope::WheelSlots, term)) if !term.is_empty())
             {
                 this.index.wheel_slots = Some(this.workspace.upgrade().map_or_else(Vec::new, |workspace| {
@@ -1482,14 +1484,13 @@ impl QuickSearch {
         if self.bookmark_name_edit.is_some() {
             return;
         }
-        if self
-            .result_refill
-            .as_ref()
-            .is_some_and(|refill| refill.inserted != query)
-        {
+        let refilled = self.has_refilled_input(query);
+        let next = if refilled {
+            Results::RefilledInput
+        } else {
             self.result_refill = None;
-        }
-        let next = self.index.results(query);
+            self.index.results(query)
+        };
         if !Self::shows_help(query, &next) {
             self.input_before_help = None;
         }
@@ -1522,7 +1523,7 @@ impl QuickSearch {
                 window.resize(size(px(WIDTH), px(next_height)));
             }
         }
-        let query = query.trim();
+        let query = if refilled { "" } else { query.trim() };
         let local_files_query = match scoped_query(query) {
             Some((Scope::LocalFiles, term))
                 if !matches!(self.results, Results::Value(Err(ValueError::InputTooLong))) =>
@@ -1838,6 +1839,12 @@ impl QuickSearch {
                 .update(cx, |input, cx| input.set_text(inserted, cx));
             window.focus(&self.input.focus_handle(cx));
         }
+    }
+
+    fn has_refilled_input(&self, query: &str) -> bool {
+        self.result_refill
+            .as_ref()
+            .is_some_and(|refill| refill.inserted == query)
     }
 
     fn fill_query(
@@ -2188,7 +2195,7 @@ impl QuickSearch {
                     self.toggle_bookmark_browser(window, cx);
                 }
             }
-            "f5" => {
+            "f5" if !matches!(self.results, Results::RefilledInput) => {
                 let query = self.input.read(cx).text();
                 match scoped_query(query.trim()) {
                     Some((Scope::LocalFiles | Scope::OpenWindows | Scope::Applications, _))
@@ -2266,6 +2273,7 @@ impl QuickSearch {
                     | Results::FileOptions(items)
                     | Results::Bookmarks(items) => items.len(),
                     Results::Value(_)
+                    | Results::RefilledInput
                     | Results::ApplicationsLoading
                     | Results::ApplicationsUnavailable(_)
                     | Results::OpenWindowsLoading
@@ -2684,6 +2692,9 @@ impl QuickSearch {
                     theme::DANGER_TEXT
                 }))
                 .child(error.message()),
+            Results::RefilledInput => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("可在结果前添加下一条命令"),
             Results::Help(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("未找到用法示例"),
@@ -3914,6 +3925,7 @@ mod tests {
     ) {
         let original = "文本: 大写 hello\nworld";
         let result = "HELLO\nWORLD";
+        let application_refresh = search.application_refresh;
         let key = |is_held| KeyDownEvent {
             keystroke: gpui::Keystroke::parse("f3").unwrap(),
             is_held,
@@ -3925,6 +3937,8 @@ mod tests {
         search.key_down(&key(false), window, cx);
         assert_eq!(search.input.read(cx).text(), result);
         search.refresh_results(result, window, cx);
+        assert!(matches!(search.results, Results::RefilledInput));
+        assert!(search.application_refresh == application_refresh);
         search.key_down(&key(true), window, cx);
         assert_eq!(search.input.read(cx).text(), result);
         search.key_down(&key(false), window, cx);
