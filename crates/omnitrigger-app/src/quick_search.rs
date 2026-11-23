@@ -1543,6 +1543,15 @@ struct ResultRefill {
     inserted: String,
 }
 
+enum ResultSaveState {
+    Ready,
+    InProgress,
+    Finished {
+        query: String,
+        result: Result<(), String>,
+    },
+}
+
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
@@ -1557,6 +1566,7 @@ pub(super) struct QuickSearch {
     input_before_calculation_history: Option<String>,
     input_before_bookmarks: Option<String>,
     result_refill: Option<ResultRefill>,
+    result_save: ResultSaveState,
     previous_input: String,
     bookmark_limit_reached: bool,
     bookmark_save_error: Option<String>,
@@ -1622,6 +1632,9 @@ impl QuickSearch {
                 return;
             }
             let query = input.read(cx).text();
+            if matches!(&this.result_save, ResultSaveState::Finished { query: saved, .. } if saved != &query) {
+                this.result_save = ResultSaveState::Ready;
+            }
             this.bookmark_limit_reached = false;
             this.bookmark_save_error = None;
             if !query.trim().is_empty() {
@@ -1647,7 +1660,7 @@ impl QuickSearch {
                 this.was_active = true;
                 window.focus(&this.input.focus_handle(cx));
                 cx.notify();
-            } else if this.was_active {
+            } else if this.was_active && !matches!(this.result_save, ResultSaveState::InProgress) {
                 window.remove_window();
             }
         });
@@ -1667,6 +1680,7 @@ impl QuickSearch {
             input_before_calculation_history: None,
             input_before_bookmarks: None,
             result_refill: None,
+            result_save: ResultSaveState::Ready,
             previous_input,
             bookmark_limit_reached: false,
             bookmark_save_error: None,
@@ -2023,6 +2037,66 @@ impl QuickSearch {
         }
     }
 
+    fn save_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.result_save, ResultSaveState::InProgress) {
+            return;
+        }
+        let Results::Value(Ok(result)) = &self.results else {
+            return;
+        };
+        let name = match &result.kind {
+            ValueKind::Table(_)
+            | ValueKind::Scatter(_)
+            | ValueKind::BinPlot(_)
+            | ValueKind::CorrelationPlot(_) => "搜索结果.csv",
+            _ => "搜索结果.txt",
+        };
+        let original_query = self.input.read(cx).text();
+        let text = result.text.clone();
+        self.result_save = ResultSaveState::InProgress;
+        let receiver = cx.prompt_for_new_path(Path::new(""), Some(name));
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = async {
+                let path = receiver
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                let Some(path) = path else {
+                    return Ok(false);
+                };
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::settings::atomic_write_labeled(&path, text.as_bytes(), "搜索结果")
+                    })
+                    .await?;
+                Ok::<_, String>(true)
+            }
+            .await;
+            let _ = cx.update(|_, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.result_save = if this.input.read(cx).text() == original_query {
+                        match saved {
+                            Ok(true) => ResultSaveState::Finished {
+                                query: original_query,
+                                result: Ok(()),
+                            },
+                            Ok(false) => ResultSaveState::Ready,
+                            Err(error) => ResultSaveState::Finished {
+                                query: original_query,
+                                result: Err(error),
+                            },
+                        }
+                    } else {
+                        ResultSaveState::Ready
+                    };
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
     fn remember_selected_example(&self) {
         let Results::Help(items) = &self.results else {
             return;
@@ -2353,6 +2427,15 @@ impl QuickSearch {
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "r" {
                 if !event.is_held {
                     self.toggle_calculation_history(window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1
+                && keystroke.modifiers.control
+                && keystroke.key == "s"
+                && matches!(&self.results, Results::Value(Ok(_)))
+            {
+                if !event.is_held {
+                    self.save_result(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
@@ -3447,6 +3530,28 @@ impl Render for QuickSearch {
                                 })),
                         )
                     })
+                    .when(matches!(&self.results, Results::Value(Ok(_))), |header| {
+                        let (label, hint, enabled) = match &self.result_save {
+                            ResultSaveState::Ready => ("保存 Ctrl+S", "选择结果文件".into(), true),
+                            ResultSaveState::InProgress => {
+                                ("正在保存", "正在选择位置或写入文件".into(), false)
+                            }
+                            ResultSaveState::Finished { result: Ok(()), .. } => {
+                                ("已保存", "Ctrl+S 再次保存".into(), true)
+                            }
+                            ResultSaveState::Finished {
+                                result: Err(error), ..
+                            } => ("保存失败", error.clone().into(), true),
+                        };
+                        header.child(
+                            button(label, label, Tone::Ghost, enabled)
+                                .h(px(24.))
+                                .tooltip(theme::text_tooltip(hint))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.save_result(window, cx);
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .id("close-quick-search")
@@ -4116,6 +4221,31 @@ mod tests {
             transform_csv("列箱线摘要 2 编号,金额\nA,\nB,待定"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn saves_original_csv_bytes_and_replaces_an_existing_result_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("结果.csv");
+        std::fs::write(&target, "旧结果").unwrap();
+        let csv = "编号,备注\r\n001,\"茶,咖啡\"\r\n";
+        let result = for_query(&format!("CSV: 表格预览 {csv}"), &[]);
+        crate::settings::atomic_write_labeled(
+            &target,
+            result.refillable_text().unwrap().as_bytes(),
+            "搜索结果",
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), csv.as_bytes());
+        let blocked = directory.path().join("不可替换");
+        std::fs::create_dir(&blocked).unwrap();
+        let existing = blocked.join("已存在.txt");
+        std::fs::write(&existing, "原始数据").unwrap();
+        let error =
+            crate::settings::atomic_write_labeled(&blocked, b"new", "搜索结果").unwrap_err();
+        assert!(error.contains("保存搜索结果失败"));
+        assert_eq!(std::fs::read_to_string(existing).unwrap(), "原始数据");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]

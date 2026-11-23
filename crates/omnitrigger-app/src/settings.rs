@@ -1503,7 +1503,16 @@ pub(crate) fn backup_legacy(
 
 /// 在同目录写完整临时文件后替换；失败不会删除现有配置。
 pub(crate) fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), String> {
-    write_and_commit(destination, contents, |temporary, target| {
+    atomic_write_labeled(destination, contents, "配置")
+}
+
+/// 在同目录写完整临时文件后替换，并在错误中指出写入的内容。
+pub(crate) fn atomic_write_labeled(
+    destination: &Path,
+    contents: &[u8],
+    label: &str,
+) -> Result<(), String> {
+    write_and_commit(destination, contents, label, |temporary, target| {
         std::fs::rename(temporary, target)
     })
 }
@@ -1513,6 +1522,7 @@ pub(crate) fn atomic_create(destination: &Path, contents: &[u8]) -> Result<(), S
     write_and_commit(
         destination,
         contents,
+        "配置",
         |temporary, target| match move_new_file(temporary, target) {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
             other => other,
@@ -1522,7 +1532,7 @@ pub(crate) fn atomic_create(destination: &Path, contents: &[u8]) -> Result<(), S
 
 /// 发布完整文件。目标已存在时返回错误，供只能授予一次的更新退出授权使用。
 pub(crate) fn atomic_create_new(destination: &Path, contents: &[u8]) -> Result<(), String> {
-    write_and_commit(destination, contents, move_new_file)
+    write_and_commit(destination, contents, "配置", move_new_file)
 }
 
 fn move_new_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
@@ -1548,6 +1558,7 @@ fn move_new_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
 fn write_and_commit(
     destination: &Path,
     contents: &[u8],
+    label: &str,
     commit: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -1555,10 +1566,10 @@ fn write_and_commit(
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|error| format!("创建配置目录失败：{error}"))?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("创建{label}目录失败：{error}"))?;
     let mut temporary_name = destination
         .file_name()
-        .ok_or("配置路径不可用")?
+        .ok_or_else(|| format!("{label}路径不可用"))?
         .to_os_string();
     temporary_name.push(format!(
         ".{}.{}.tmp",
@@ -1570,12 +1581,12 @@ fn write_and_commit(
         .write(true)
         .create_new(true)
         .open(&temporary)
-        .map_err(|error| format!("创建临时配置失败：{error}"))?;
+        .map_err(|error| format!("创建临时{label}失败：{error}"))?;
     let result = file.write_all(contents).and_then(|_| file.sync_all());
     drop(file);
     let result = result.and_then(|_| commit(&temporary, destination));
     let _ = std::fs::remove_file(&temporary);
-    result.map_err(|error| format!("保存配置失败，原文件已保留：{error}"))
+    result.map_err(|error| format!("保存{label}失败，原文件已保留：{error}"))
 }
 
 #[cfg(test)]
