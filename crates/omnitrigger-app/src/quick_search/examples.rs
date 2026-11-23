@@ -1488,6 +1488,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "生成连续几个月的月初日期",
+        query: "日期: 月初序列 2024-11,3",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "生成连续几个月的月末日期",
+        query: "日期: 月末序列 2024-01,3",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "生成连续几个季度的季初日期",
+        query: "日期: 季初序列 2024-11-20,3",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "生成连续几个季度的季末日期",
+        query: "日期: 季末序列 2024-11-20,3",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按周输出日期区间天数和工作日 CSV",
         query: "日期: 按周拆分CSV 2026-12-30 至 2027-01-05",
     },
@@ -4316,6 +4336,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Circle
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
+            if ["月初序列", "月末序列", "季初序列", "季末序列"]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
+        Scope::Date
         | Scope::Duration
         | Scope::BatchConversion
         | Scope::BatchCalculation
@@ -4412,6 +4436,7 @@ mod tests {
         for (scope, prefix, with_argument) in [
             (Scope::Csv, "排序", "排序 1 编号"),
             (Scope::Json, "改键", "改键 ["),
+            (Scope::Date, "月末", "月末序列 2024-01,3"),
             (Scope::Statistics, "箱线", "箱线摘要 1,2,3"),
             (Scope::TextTools, "取列", "取列 \"x\""),
         ] {

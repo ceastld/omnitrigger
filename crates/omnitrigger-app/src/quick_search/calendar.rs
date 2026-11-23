@@ -35,6 +35,7 @@ pub(super) enum DateError {
     MissingWorkdayOrdinal,
     InvalidOperation,
     InvalidDateList,
+    DateSeriesArguments,
     InvalidDateRanges,
     RangeSplitArguments,
     InvalidDateInterval,
@@ -71,6 +72,7 @@ impl DateError {
             Self::MissingWorkdayOrdinal => "该月的工作日不足指定序号",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
+            Self::DateSeriesArguments => "用逗号填写起始日期和 1 至 366 个日期，例如 2024-01,3",
             Self::InvalidDateRanges => {
                 "填写 2 至 32 个日期区间。每段用“至”连接日期，用分号或换行分隔各段"
             }
@@ -1010,6 +1012,47 @@ fn month_calendar(input: &str, today: NaiveDate) -> Result<String, DateError> {
     Ok(grid)
 }
 
+fn date_boundary_series(
+    input: &str,
+    today: NaiveDate,
+    months: u32,
+    last_day: bool,
+) -> Result<String, DateError> {
+    let (start, count) = input
+        .split_once(',')
+        .ok_or(DateError::DateSeriesArguments)?;
+    let count = count
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|count| (1..=MAX_LISTED_DATES as u32).contains(count))
+        .ok_or(DateError::DateSeriesArguments)?;
+    let start = start.trim();
+    let date = match calendar_month_start(start, today) {
+        Ok(date) => date,
+        Err(DateError::InvalidMonthCalendar) => {
+            let (date, rest) = date_operand(start, today)?;
+            if !rest.trim().is_empty() {
+                return Err(DateError::DateSeriesArguments);
+            }
+            date
+        }
+        Err(error) => return Err(error),
+    };
+    let first = relative_period_start(date, 0, months)?;
+    let mut dates = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let start = in_range(first.checked_add_months(Months::new(index * months)))?;
+        let date = if last_day {
+            month_end(start, months)?
+        } else {
+            start
+        };
+        dates.push(date.to_string());
+    }
+    Ok(dates.join("\n"))
+}
+
 fn workday_by_ordinal(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let (query, exceptions) = split_workday_exceptions(input.trim());
     let (month, ordinal) = query
@@ -1283,6 +1326,14 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     }
     match operation.to_ascii_lowercase().as_str() {
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
+        "月初序列" | "month-start-series" => {
+            return date_boundary_series(rest, today, 1, false)
+        }
+        "月末序列" | "month-end-series" => return date_boundary_series(rest, today, 1, true),
+        "季初序列" | "quarter-start-series" => {
+            return date_boundary_series(rest, today, 3, false)
+        }
+        "季末序列" | "quarter-end-series" => return date_boundary_series(rest, today, 3, true),
         "工作日序号" | "nth-workday" => return workday_by_ordinal(rest, today),
         "合并区间" | "merge-ranges" => {
             return combine_date_ranges(rest, today, DateRangeOperation::Merge);
@@ -1525,6 +1576,37 @@ mod tests {
             calculate_date("days-csv 9999-12-31 至 9999-12-31", today).as_deref(),
             Ok("日期,星期,工作日\r\n9999-12-31,星期五,1")
         );
+    }
+
+    #[test]
+    fn lists_month_and_quarter_boundaries_including_the_starting_period() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        for (query, expected) in [
+            ("月末序列 2024-01,3", "2024-01-31\n2024-02-29\n2024-03-31"),
+            ("month-start-series 本月,2", "2026-11-01\n2026-12-01"),
+            ("季初序列 今天,2", "2026-10-01\n2027-01-01"),
+            (
+                "quarter-end-series 2024-11-20,3",
+                "2024-12-31\n2025-03-31\n2025-06-30",
+            ),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("月末序列 9999-12,2", today),
+            Err(DateError::OutOfRange)
+        );
+        for query in ["月末序列 今天,0", "季末序列 今天,367", "月初序列"] {
+            assert_eq!(
+                calculate_date(query, today),
+                Err(DateError::DateSeriesArguments),
+                "{query}"
+            );
+        }
     }
 
     #[test]
