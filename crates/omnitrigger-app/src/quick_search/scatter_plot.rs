@@ -11,6 +11,7 @@ pub(super) const PREVIEW_HEIGHT: f32 = 134.;
 const AXIS_WIDTH: f32 = 81.;
 const MAX_AXIS_LABEL_WIDTH: f32 = 167.;
 const AXIS_GAP: f32 = 8.;
+const SQUARE_AXIS_LABEL_OVERHANG: f32 = 112.;
 pub(super) const POSITION_STEPS: u16 = 4096;
 const PLOT_PADDING: f32 = 9.;
 const SAMPLE_SERIES_COLORS: [u32; 4] = [
@@ -388,7 +389,11 @@ impl ScatterPlot {
         .size_full();
 
         let vertical = div()
-            .min_w(px(AXIS_WIDTH))
+            .min_w(px(if square {
+                SQUARE_AXIS_LABEL_OVERHANG
+            } else {
+                AXIS_WIDTH
+            }))
             .max_w(px(MAX_AXIS_LABEL_WIDTH))
             .h(px(PREVIEW_HEIGHT))
             .flex_none()
@@ -409,6 +414,11 @@ impl ScatterPlot {
                 .child(axis_label(self.y[0].clone()))
         };
         let horizontal = div()
+            .when(square, |labels| {
+                labels
+                    .w(px(PREVIEW_HEIGHT + 2. * SQUARE_AXIS_LABEL_OVERHANG))
+                    .ml(px(-SQUARE_AXIS_LABEL_OVERHANG))
+            })
             .px(px(PLOT_PADDING))
             .h(px(19.))
             .flex()
@@ -436,22 +446,27 @@ impl ScatterPlot {
                         .child(axis_label(self.x[1].clone())),
                 )
         };
-        let axes = div().flex().gap(px(AXIS_GAP)).child(vertical).child(
-            div()
-                .when(square, |body| body.w(px(PREVIEW_HEIGHT)).flex_none())
-                .when(!square, |body| body.flex_1().min_w_0())
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .h(px(PREVIEW_HEIGHT))
-                        .min_w_0()
-                        .rounded(px(5.))
-                        .bg(rgb(theme::ROW))
-                        .child(plot),
-                )
-                .child(horizontal),
-        );
+        let axes = div()
+            .when(square, |axes| axes.pr(px(SQUARE_AXIS_LABEL_OVERHANG)))
+            .flex()
+            .gap(px(AXIS_GAP))
+            .child(vertical)
+            .child(
+                div()
+                    .when(square, |body| body.w(px(PREVIEW_HEIGHT)).flex_none())
+                    .when(!square, |body| body.flex_1().min_w_0())
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(PREVIEW_HEIGHT))
+                            .min_w_0()
+                            .rounded(px(5.))
+                            .bg(rgb(theme::ROW))
+                            .child(plot),
+                    )
+                    .child(horizontal),
+            );
         if square {
             div().w_full().flex().justify_center().child(axes)
         } else {
