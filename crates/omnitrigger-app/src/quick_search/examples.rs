@@ -745,6 +745,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量计算: 分数对照 1/3 + 1/6\n2**80",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "跨工具清理文本、转换 CSV 并取出 JSON 字段",
+        query: "处理: [\"文本: 去空行\",\"CSV: 数值对象 [2]\",\"JSON: 取值 /1/金额\"] 编号,金额\n001,1.50\n\n002,2e0",
+    },
+    Example {
         icon: Icon::Grid,
         title: "切换已打开的窗口",
         query: "窗口:",
@@ -3926,6 +3931,18 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
             .map(|example| (search_key(example.title), search_key(example.query)))
             .collect()
     });
+    if let Some(prefix) = query
+        .strip_suffix(':')
+        .and_then(tool_example_keyword)
+        .filter(|prefix| prefix.ends_with(':'))
+    {
+        let prefix = search_key(prefix);
+        return search_text
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, command))| command.starts_with(&prefix).then_some(index))
+            .collect();
+    }
     let mut matches: Vec<_> = search_text
         .iter()
         .enumerate()

@@ -10,6 +10,7 @@ mod color;
 mod complex;
 mod conversion;
 mod csv_tools;
+mod data_pipeline;
 mod duration;
 mod equation;
 mod examples;
@@ -89,6 +90,7 @@ use conversion::{
     convert_exact_data, convert_period, estimate_transfer, suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
+use data_pipeline::{transform_data_pipeline, DataPipelineError};
 use duration::{convert_duration, is_clock_duration, DurationError};
 use equation::{solve_equation, solve_linear_system, EquationError};
 use examples::{
@@ -405,6 +407,7 @@ enum ValueError {
     Text(TextError),
     Json(JsonError),
     Csv(CsvError),
+    DataPipeline(DataPipelineError),
     Fraction(FractionError),
     Equation(EquationError),
     Percentage(PercentageError),
@@ -517,8 +520,12 @@ impl ValueError {
             }
             Self::Json(JsonError::PipelineStep { index, cause })
             | Self::Csv(CsvError::PipelineStep { index, cause })
-            | Self::Text(TextError::PipelineStep { index, cause }) => {
+            | Self::Text(TextError::PipelineStep { index, cause })
+            | Self::DataPipeline(DataPipelineError::Step { index, cause }) => {
                 return format!("第 {index} 步失败 · {cause}").into();
+            }
+            Self::DataPipeline(DataPipelineError::Arguments) => {
+                "填写 1 至 8 条单行命令，再粘贴要处理的数据"
             }
             Self::Text(error) => error.message(),
             Self::Csv(CsvError::DataRowValue { row, cause }) => {
@@ -606,6 +613,7 @@ impl ValueError {
                 | Self::Path(PathError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
                 | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
+                | Self::DataPipeline(DataPipelineError::Arguments)
         )
     }
 }
@@ -932,6 +940,9 @@ impl Results {
                 }
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 Scope::Csv => Self::text_value(transform_csv(term).map_err(ValueError::Csv)),
+                Scope::DataPipeline => Self::text_value(
+                    transform_data_pipeline(term).map_err(ValueError::DataPipeline),
+                ),
                 Scope::Fraction => Self::Value(
                     simplify_fraction(term)
                         .map(|text| ResultValue {
@@ -3695,16 +3706,22 @@ mod tests {
             ("contrast", "对比度:"),
             ("URL", "URL:"),
             ("ＪＳＯＮ", "JSON:"),
+            ("? JSON:", "JSON:"),
+            ("CSV", "CSV:"),
             ("ｔｅｘｔ　ｔｏｏｌｓ", "文本:"),
             ("文本工具", "文本:"),
+            ("处理", "处理:"),
         ] {
             let Results::Help(items) = for_query(query, &[]) else {
                 panic!("未显示对应工具的示例：{query}");
             };
             assert!(!items.is_empty(), "{query}");
-            assert!(items
-                .iter()
-                .all(|&index| EXAMPLES[index].query.starts_with(prefix)));
+            assert!(
+                items
+                    .iter()
+                    .all(|&index| EXAMPLES[index].query.starts_with(prefix)),
+                "{query}"
+            );
         }
         let mut bindings = crate::settings::defaults();
         bindings[0].message = "分数".into();
