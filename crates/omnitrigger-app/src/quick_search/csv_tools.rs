@@ -231,6 +231,10 @@ pub(super) enum CsvError {
     SecantColumnArguments,
     SecantPointCount,
     SecantDuplicateX,
+    CoordinateInterpolationArguments,
+    CoordinateInterpolationPointCount,
+    CoordinateInterpolationDuplicateX,
+    CoordinateInterpolationRange,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -504,6 +508,12 @@ impl CsvError {
             }
             Self::SecantPointCount => "差商列需要 2 至 64 行同时含 x 和 y 的数据",
             Self::SecantDuplicateX => "差商列的横坐标须互不相同",
+            Self::CoordinateInterpolationArguments => {
+                "填写两个坐标列和 1 至 64 个数值横坐标，例如 [[\"时间\",\"高度\"],[\"1/2\",2]]"
+            }
+            Self::CoordinateInterpolationPointCount => "线性插值需要 2 至 64 行同时含 x 和 y 的数据",
+            Self::CoordinateInterpolationDuplicateX => "线性插值的完整样点横坐标须互不相同",
+            Self::CoordinateInterpolationRange => "查询横坐标须在完整样点的范围内",
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -1091,6 +1101,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "差商列" | "secant-column" => {
             return append_sampled_coordinate_column(input, CoordinateColumn::Secant)
         }
+        "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
         operation if is_cumulative_trapezoid_plot(operation) => {
             return cumulative_trapezoid_coordinates(input)?.to_csv();
         }
@@ -5377,16 +5388,83 @@ fn parse_coordinate_table(
 ) -> Result<CsvCoordinates, CsvError> {
     let invalid = CsvError::ScatterColumns;
     let (columns, data) = json_argument_and_data::<[ColumnReference; 2]>(input, invalid)?;
+    read_coordinate_table(data, &columns, invalid, point_count_error)
+}
+
+fn read_coordinate_table(
+    data: &str,
+    columns: &[ColumnReference; 2],
+    invalid: CsvError,
+    point_count_error: CsvError,
+) -> Result<CsvCoordinates, CsvError> {
     let data = data.strip_prefix('\u{feff}').unwrap_or(data);
     if data.is_empty() {
         return Err(CsvError::MissingInput);
     }
     let rows = read_rows(data, ',')?;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_distinct_columns(header, &columns, invalid)?;
+    let columns = resolve_distinct_columns(header, columns, invalid)?;
     let headers = [header[columns[0]].clone(), header[columns[1]].clone()];
     let samples = collect_coordinate_samples(records, &columns, point_count_error)?;
     Ok(CsvCoordinates { headers, samples })
+}
+
+fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateInterpolationArguments;
+    let ((columns, coordinates), data) =
+        json_argument_and_data::<([ColumnReference; 2], Vec<Box<RawValue>>)>(input, invalid)?;
+    if coordinates.is_empty() || coordinates.len() > MAX_POINTS {
+        return Err(invalid);
+    }
+    let mut table = read_coordinate_table(
+        data,
+        &columns,
+        invalid,
+        CsvError::CoordinateInterpolationPointCount,
+    )?;
+    table
+        .samples
+        .sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
+    if table
+        .samples
+        .windows(2)
+        .any(|pair| pair[0].point.0 == pair[1].point.0)
+    {
+        return Err(CsvError::CoordinateInterpolationDuplicateX);
+    }
+    let samples = coordinates
+        .iter()
+        .enumerate()
+        .map(|(row_index, raw)| {
+            let text = raw.get();
+            let text = if text.starts_with('"') {
+                Cow::Owned(serde_json::from_str::<String>(text).map_err(|_| invalid)?)
+            } else {
+                Cow::Borrowed(text)
+            };
+            let x = parse_fraction_literal(&text).map_err(|_| invalid)?;
+            let y = match table
+                .samples
+                .binary_search_by(|sample| sample.point.0.cmp(&x))
+            {
+                Ok(index) => table.samples[index].point.1.clone(),
+                Err(right) if right > 0 && right < table.samples.len() => {
+                    let (left_x, left_y) = &table.samples[right - 1].point;
+                    let (right_x, right_y) = &table.samples[right].point;
+                    let progress = (&x - left_x) / (right_x - left_x);
+                    interpolate_fraction(left_y, right_y, &progress)
+                        .map_err(|_| CsvError::ComputedNumberRange)?
+                }
+                Err(_) => return Err(CsvError::CoordinateInterpolationRange),
+            };
+            Ok(CoordinateSample {
+                row_index,
+                point: (x, y),
+            })
+        })
+        .collect::<Result<Vec<_>, CsvError>>()?;
+    table.samples = samples;
+    table.to_csv()
 }
 
 fn collect_coordinate_samples(
@@ -7185,6 +7263,27 @@ mod tests {
         assert_eq!(
             transform_csv("梯形平均 [1,2] x,y\n1/2,2\n0.50,3"),
             Err(CsvError::TrapezoidDuplicateX)
+        );
+    }
+
+    #[test]
+    fn interpolates_exact_values_at_requested_coordinates_in_input_order() {
+        let data = "x,y\n3,3\n1,2\n2,\n0,0";
+        assert_eq!(
+            transform_csv(&format!("线性插值 [[\"x\",\"y\"],[\"1/2\",2,0,3]] {data}")).as_deref(),
+            Ok("x,y\r\n1/2,1\r\n2,5/2\r\n0,0\r\n3,3")
+        );
+        assert_eq!(
+            transform_csv(&format!("linear-interpolate [[1,2],[4]] {data}")),
+            Err(CsvError::CoordinateInterpolationRange)
+        );
+        assert_eq!(
+            transform_csv("线性插值 [[1,2],[0.5]] x,y\n1/2,1\n0.50,2"),
+            Err(CsvError::CoordinateInterpolationDuplicateX)
+        );
+        assert_eq!(
+            transform_csv(&format!("线性插值 [[1,2],[true]] {data}")),
+            Err(CsvError::CoordinateInterpolationArguments)
         );
     }
 
