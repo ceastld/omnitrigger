@@ -142,6 +142,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "写出无穷多解方程组的通解",
+        query: "联立: 通解 1,2,3; 2,4,6",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用最小二乘法拟合直线",
         query: "拟合: 0,1; 1,3; 2,5",
     },
@@ -964,6 +969,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把上一步结果填进命令中指定的位置",
         query: r#"处理: ["文本: 去空行",{"模板":"电路: 分压 {结果} @ 1 kΩ,2 kΩ"}] 12 V"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "串接方程系数和求根",
+        query: r#"处理: ["方程: 由根","方程:"] 1/2,3/2,-2"#,
     },
     Example {
         icon: Icon::Terminal,

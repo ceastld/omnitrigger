@@ -12,6 +12,7 @@ use super::{
     },
     decibel::convert_decibels,
     duration::convert_duration,
+    equation::{solve_equation, solve_linear_system},
     fraction::simplify_fraction,
     json_tools::{read_json_array, read_unique_object_entries, transform_json, JsonError},
     operators::json_argument_and_tail,
@@ -31,7 +32,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、时长、进制、音高、节拍、分贝、立体、波长、电路、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、时长、进制、音高、节拍、分贝、立体、波长、电路、方程、联立、分数或统计命令";
 const STEP_RESULT_SLOT: &str = "{结果}";
 const STEP_TEMPLATE_SYNTAX: &str = "模板的工具前缀之后须正好有一个 {结果}";
 
@@ -354,6 +355,8 @@ fn run_pipeline_steps(
                     | Scope::Pitch
                     | Scope::Wave
                     | Scope::Circuit
+                    | Scope::Equation
+                    | Scope::LinearSystem
                     | Scope::Fraction
                     | Scope::Statistics
             )
@@ -384,6 +387,8 @@ fn run_pipeline_steps(
             Scope::Solid => calculate_solid(&query).map_err(|cause| cause.message()),
             Scope::Wave => convert_wave(&query).map_err(|cause| cause.message()),
             Scope::Circuit => calculate_circuit(&query).map_err(|cause| cause.message()),
+            Scope::Equation => solve_equation(&query).map_err(|cause| cause.message()),
+            Scope::LinearSystem => solve_linear_system(&query).map_err(|cause| cause.message()),
             Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
             Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
@@ -415,6 +420,18 @@ mod tests {
     fn run_pipeline(input: &str) -> Result<String, DataPipelineError> {
         let now = DateTime::parse_from_rfc3339("2024-02-18T23:30:00-08:00").unwrap();
         transform_data_pipeline(input, now)
+    }
+
+    #[test]
+    fn passes_exact_equation_coefficients_and_system_inputs_between_steps() {
+        assert_eq!(
+            run_pipeline(r#"["方程: 由根","方程:"] 1/2,3/2,-2"#).as_deref(),
+            Ok("x₁ = 1/2 · x₂ = 3/2"),
+        );
+        assert_eq!(
+            run_pipeline(r#"["联立:"] 2,1,5; 1,-1,1"#).as_deref(),
+            Ok("x = 2 · y = 1"),
+        );
     }
 
     #[test]

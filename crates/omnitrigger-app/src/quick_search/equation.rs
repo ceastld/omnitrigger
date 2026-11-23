@@ -5,7 +5,8 @@ use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::fraction::{
-    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root, FractionError,
+    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
+    format_square_root, FractionError,
 };
 use super::operators::{split_top_level_commas, NumberComparison};
 use super::plane::{parse_point, PointError};
@@ -448,6 +449,11 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
         return Err(EquationError::Evaluation(FractionError::TooLong));
     }
     let input = normalize(query);
+    let (parametric, input) = input
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .filter(|(operation, _)| *operation == "通解" || operation.eq_ignore_ascii_case("general"))
+        .map_or((false, input.as_ref()), |(_, rows)| (true, rows));
     let (first, second) = input
         .split_once([';', '\n'])
         .ok_or(EquationError::SystemRows)?;
@@ -470,12 +476,27 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
             .into_iter()
             .any(|(x, y, rhs)| is_zero(x) && is_zero(y) && !is_zero(rhs));
         let inconsistent = inconsistent_row || !is_zero(&numer_x) || !is_zero(&numer_y);
-        return Ok(if inconsistent {
-            "无解"
-        } else {
-            "无穷多解"
+        if inconsistent {
+            return Ok("无解".to_owned());
         }
-        .to_owned());
+        if !parametric {
+            return Ok("无穷多解".to_owned());
+        }
+        let (a, b, c) = if is_zero(&a) && is_zero(&b) {
+            (d, e, f)
+        } else {
+            (a, b, c)
+        };
+        if is_zero(&a) && is_zero(&b) {
+            return Ok("x = s · y = t（s、t 为任意实数）".to_owned());
+        }
+        if is_zero(&a) {
+            let y = c / b;
+            ensure_exact_size(&y).map_err(EquationError::Evaluation)?;
+            return Ok(format!("x = t · y = {y}（t 为任意实数）"));
+        }
+        let expression = parameter_expression(c / &a, -b / a)?;
+        return Ok(format!("x = {expression} · y = t（t 为任意实数）"));
     }
     for value in [&det, &numer_x, &numer_y] {
         ensure_exact_size(value).map_err(EquationError::Evaluation)?;
@@ -488,9 +509,56 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
     Ok(format!("x = {x} · y = {y}"))
 }
 
+fn parameter_expression(
+    constant: BigRational,
+    slope: BigRational,
+) -> Result<String, EquationError> {
+    for value in [&constant, &slope] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    if slope.numer().sign() == Sign::NoSign {
+        return Ok(constant.to_string());
+    }
+    let negative = slope.numer().sign() == Sign::Minus;
+    let magnitude = if negative { -slope } else { slope };
+    let term = format_exact_multiple(&magnitude, "t");
+    Ok(if constant.numer().sign() == Sign::NoSign {
+        if negative {
+            format!("-{term}")
+        } else {
+            term
+        }
+    } else {
+        let sign = if negative { '-' } else { '+' };
+        format!("{constant} {sign} {term}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn describes_free_parameters_only_when_the_two_equations_are_consistent() {
+        for (input, expected) in [
+            ("通解 1,2,3; 2,4,6", "x = 3 - 2t · y = t（t 为任意实数）"),
+            ("general 0,0,0; 2,1,0", "x = -t/2 · y = t（t 为任意实数）"),
+            ("通解 0,2,4; 0,1,2", "x = t · y = 2（t 为任意实数）"),
+            ("通解 0,0,0; 0,0,0", "x = s · y = t（s、t 为任意实数）"),
+            ("通解 0,0,1; 1,2,3", "无解"),
+            ("通解 2,1,5; 1,-1,1", "x = 2 · y = 1"),
+        ] {
+            assert_eq!(
+                solve_linear_system(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            solve_linear_system("1,2,3; 2,4,6").as_deref(),
+            Ok("无穷多解")
+        );
+    }
 
     #[test]
     fn recovers_quadratic_coefficients_from_a_fractional_vertex_and_curvature() {
