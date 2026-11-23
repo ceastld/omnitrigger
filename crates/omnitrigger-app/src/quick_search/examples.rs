@@ -687,6 +687,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求直线与圆的交点，并保留分数和根式",
+        query: "圆: 直线交点 0,0 @ 1; -1,1/2; 1,1/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "判断分数坐标的点位于圆内、圆周上还是圆外",
         query: "圆: 包含 3/5,4/5 @ 0,0 @ 1",
     },

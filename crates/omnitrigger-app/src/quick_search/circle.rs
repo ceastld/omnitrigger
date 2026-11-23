@@ -17,6 +17,8 @@ pub(super) enum CircleError {
     AngleOutOfRange,
     PointArguments,
     TwoCircleArguments,
+    LineCircleArguments,
+    CoincidentLinePoints,
     PointCircleArguments,
     CollinearPoints,
     CoincidentDiameterPoints,
@@ -31,6 +33,10 @@ impl CircleError {
             Self::AngleOutOfRange => "圆心角须在 0 至 360 度之间",
             Self::PointArguments => "填写二维坐标，用逗号分隔每点的两个坐标，用分号分隔各点",
             Self::TwoCircleArguments => "分别填写两个圆心和半径，例如 0,0 @ 1; 2,0 @ 1",
+            Self::LineCircleArguments => {
+                "依次填写圆心与半径、直线上的两个点，例如 0,0 @ 1; -1,0; 1,0"
+            }
+            Self::CoincidentLinePoints => "用于确定直线的两个点须互不重合",
             Self::PointCircleArguments => "填写待测点、圆心和半径，例如 包含 3/5,4/5 @ 0,0 @ 1",
             Self::CollinearPoints => "三个点须互不重合且不在同一直线上",
             Self::CoincidentDiameterPoints => "直径的两个端点须互不重合",
@@ -57,6 +63,9 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
     }
     if operation == "两圆交点" || operation.eq_ignore_ascii_case("intersections") {
         return circle_intersections(arguments);
+    }
+    if operation == "直线交点" || operation.eq_ignore_ascii_case("line-intersections") {
+        return line_circle_intersections(arguments);
     }
     if operation == "包含" || operation.eq_ignore_ascii_case("contains") {
         return circle_contains(arguments);
@@ -239,15 +248,74 @@ fn circle_intersections(input: &str) -> Result<String, CircleError> {
     let middle_y = y1 + projection * &dy;
     let shift_x_squared = dy_squared * &offset_squared;
     let shift_y_squared = dx_squared * offset_squared;
-    let subtract_x = dy.numer().sign() == Sign::Plus;
-    let subtract_y = dx.numer().sign() == Sign::Minus;
+    render_symmetric_intersections(
+        [middle_x, middle_y],
+        [shift_x_squared, shift_y_squared],
+        [
+            dy.numer().sign() == Sign::Plus,
+            dx.numer().sign() == Sign::Minus,
+        ],
+        offset_sign == Sign::NoSign,
+    )
+}
+
+fn line_circle_intersections(input: &str) -> Result<String, CircleError> {
+    let invalid = CircleError::LineCircleArguments;
+    let mut parts = input.split(';');
+    let (Some(circle), Some(first), Some(second), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(invalid);
+    };
+    let circle = circle_center_and_radius(circle).map_err(|error| match error {
+        CircleError::TwoCircleArguments => invalid,
+        error => error,
+    })?;
+    let [x1, y1] = circle_point(first)?;
+    let [x2, y2] = circle_point(second)?;
+    let (dx, dy) = (x2 - &x1, y2 - &y1);
+    let dx_squared = &dx * &dx;
+    let dy_squared = &dy * &dy;
+    let length_squared = &dx_squared + &dy_squared;
+    if length_squared.numer().sign() == Sign::NoSign {
+        return Err(CircleError::CoincidentLinePoints);
+    }
+    ensure_exact_size(&length_squared).map_err(CircleError::Evaluation)?;
+    let projection =
+        ((&circle.center[0] - &x1) * &dx + (&circle.center[1] - &y1) * &dy) / &length_squared;
+    let center = [x1 + &projection * &dx, y1 + projection * &dy];
+    let remainder =
+        &circle.radius * &circle.radius - squared_point_distance(&center, &circle.center);
+    ensure_exact_size(&remainder).map_err(CircleError::Evaluation)?;
+    let offset_sign = remainder.numer().sign();
+    if offset_sign == Sign::Minus {
+        return Ok("无交点".to_owned());
+    }
+    let offset_squared = remainder / length_squared;
+    render_symmetric_intersections(
+        center,
+        [dx_squared * &offset_squared, dy_squared * offset_squared],
+        [
+            dx.numer().sign() == Sign::Minus,
+            dy.numer().sign() == Sign::Minus,
+        ],
+        offset_sign == Sign::NoSign,
+    )
+}
+
+fn render_symmetric_intersections(
+    [middle_x, middle_y]: Point2,
+    [shift_x_squared, shift_y_squared]: Point2,
+    [subtract_x, subtract_y]: [bool; 2],
+    tangent: bool,
+) -> Result<String, CircleError> {
     let render_point = |opposite| {
         let x = intersection_axis(&middle_x, &shift_x_squared, subtract_x ^ opposite)?;
         let y = intersection_axis(&middle_y, &shift_y_squared, subtract_y ^ opposite)?;
         Ok::<_, CircleError>(format!("交点 ({x}, {y})"))
     };
     let first = render_point(false)?;
-    if offset_sign == Sign::NoSign {
+    if tangent {
         return Ok(first);
     }
     Ok(format!("{first}\n{}", render_point(true)?))
@@ -367,6 +435,28 @@ mod tests {
         assert_eq!(
             calculate_circle("包含 1,1 @ 0,0 @ 0"),
             Err(CircleError::NonPositiveRadius)
+        );
+    }
+
+    #[test]
+    fn intersects_a_circle_and_an_infinite_line_with_exact_coordinates() {
+        for (query, expected) in [
+            (
+                "直线交点 0,0 @ 1; -1,1/2; 1,1/2",
+                "交点 (√(3/4), 1/2)\n交点 (-√(3/4), 1/2)",
+            ),
+            (
+                "line-intersections 0,0 @ 1; 3/5,10; 3/5,11",
+                "交点 (3/5, 4/5)\n交点 (3/5, -4/5)",
+            ),
+            ("直线交点 0,0 @ 1; -1,1; 1,1", "交点 (0, 1)"),
+            ("直线交点 0,0 @ 1; -1,2; 1,2", "无交点"),
+        ] {
+            assert_eq!(calculate_circle(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_circle("直线交点 0,0 @ 1; 2,2; 2,2"),
+            Err(CircleError::CoincidentLinePoints)
         );
     }
 
