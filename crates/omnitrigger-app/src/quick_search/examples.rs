@@ -954,6 +954,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "窗口: 排除进程=notepad.exe 报告",
     },
     Example {
+        icon: Icon::Search,
+        title: "同时查找多个指定程序的窗口",
+        query: r#"窗口: 任一进程=["code.exe","notepad.exe"] 报告"#,
+    },
+    Example {
+        icon: Icon::Search,
+        title: "一次排除多个程序的窗口",
+        query: r#"窗口: 排除进程列表=["code.exe","notepad.exe"]"#,
+    },
+    Example {
         icon: Icon::Grid,
         title: "查找当前已最小化的窗口",
         query: "窗口: 状态=已最小化",

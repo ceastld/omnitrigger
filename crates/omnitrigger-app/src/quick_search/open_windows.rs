@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, collections::HashMap, fmt::Write as _};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+};
 
 use omnitrigger_windows::{list_open_windows, OpenWindow};
 use regex::Regex;
@@ -7,6 +11,7 @@ use serde::Serialize;
 use super::{
     csv_tools::csv_cell,
     examples::search_key,
+    operators::json_value_and_tail,
     text_tools::{compare_natural, compile_regex},
     title_rank, Destination, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
 };
@@ -28,6 +33,7 @@ struct WindowSummary<'a> {
 #[derive(Debug)]
 enum WindowQueryError {
     Filters,
+    ProcessList,
     TitleRegex,
     Order,
     Selection { kind: WindowSelection, start: usize },
@@ -36,7 +42,10 @@ enum WindowQueryError {
 impl WindowQueryError {
     fn message(&self) -> &'static str {
         match self {
-            Self::Filters => "状态可用 已最小化 或 未最小化。进程和排除进程各填一个程序文件名，文件名含空格时加双引号。",
+            Self::Filters => {
+                "状态可用 已最小化 或 未最小化。每类进程条件填写一次，单个文件名含空格时加双引号。"
+            }
+            Self::ProcessList => "填写包含程序文件名的非空 JSON 数组，同一个名称只填一次。",
             Self::TitleRegex => "填写一个有效的标题正则表达式，含空格时用双引号包住。",
             Self::Order => "排序可用 标题 或 进程，每次查询可指定一种排序。",
             Self::Selection { kind, .. } => match kind {
@@ -112,8 +121,8 @@ impl WindowOrder {
 }
 
 struct WindowFilter {
-    process: Option<String>,
-    excluded_process: Option<String>,
+    process: Option<HashSet<String>>,
+    excluded_process: Option<HashSet<String>>,
     minimized: Option<bool>,
     title_regex: Option<Regex>,
     order: Option<WindowOrder>,
@@ -122,8 +131,13 @@ struct WindowFilter {
 
 impl WindowFilter {
     fn matches_process(&self, process: &str) -> bool {
-        self.process.as_deref().is_none_or(|name| process == name)
-            && self.excluded_process.as_deref() != Some(process)
+        self.process
+            .as_ref()
+            .is_none_or(|names| names.contains(process))
+            && !self
+                .excluded_process
+                .as_ref()
+                .is_some_and(|names| names.contains(process))
     }
 
     fn matches_state(&self, minimized: bool) -> bool {
@@ -310,7 +324,7 @@ fn export_windows<'a>(
 }
 
 fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
-    use WindowQueryError::{Filters, Order, TitleRegex};
+    use WindowQueryError::{Filters, Order, ProcessList, TitleRegex};
 
     let query_length = query.len();
     let mut process = None;
@@ -319,9 +333,11 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
     let mut title_regex = None;
     let mut order = None;
     while let Some((name, input)) = query.split_once(['=', '＝']) {
-        let slot = match search_key(name).as_str() {
-            "进程" | "process" => &mut process,
-            "排除进程" | "exclude-process" => &mut excluded_process,
+        let (slot, list) = match search_key(name).as_str() {
+            "进程" | "process" => (&mut process, false),
+            "排除进程" | "exclude-process" => (&mut excluded_process, false),
+            "任一进程" | "any-process" => (&mut process, true),
+            "排除进程列表" | "exclude-process-list" => (&mut excluded_process, true),
             "状态" | "state" => {
                 if minimized.is_some() {
                     return Err(Filters);
@@ -375,13 +391,15 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
         if slot.is_some() {
             return Err(Filters);
         }
-        let (filename, rest) =
-            filter_value(input, |character| matches!(character, '"' | '＂')).ok_or(Filters)?;
-        let filename = search_key(filename);
-        if filename.trim().is_empty() || filename.contains(['/', '\\', ':', '"']) {
-            return Err(Filters);
-        }
-        *slot = Some(filename);
+        let (names, rest) = if list {
+            process_list(input).ok_or(ProcessList)?
+        } else {
+            let (filename, rest) =
+                filter_value(input, |character| matches!(character, '"' | '＂')).ok_or(Filters)?;
+            let filename = process_name(filename).ok_or(Filters)?;
+            (HashSet::from([filename]), rest)
+        };
+        *slot = Some(names);
         query = rest;
     }
     Ok(WindowFilter {
@@ -392,6 +410,25 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
         order,
         terms: search_key(query),
     })
+}
+
+fn process_name(name: &str) -> Option<String> {
+    let name = search_key(name);
+    (!name.trim().is_empty() && !name.contains(['/', '\\', ':', '"', '\0'])).then_some(name)
+}
+
+fn process_list(input: &str) -> Option<(HashSet<String>, &str)> {
+    let (names, rest) = json_value_and_tail::<Vec<String>>(input)?;
+    if names.is_empty() || (!rest.is_empty() && !rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    let mut keys = HashSet::with_capacity(names.len());
+    for name in names {
+        if !keys.insert(process_name(&name)?) {
+            return None;
+        }
+    }
+    Some((keys, rest.trim_start()))
 }
 
 fn filter_value(input: &str, quote: impl Fn(char) -> bool) -> Option<(&str, &str)> {
@@ -515,7 +552,11 @@ mod tests {
             ("预算 notes", None, "预算 notes"),
         ] {
             let filter = window_query(query).unwrap();
-            assert_eq!(filter.process.as_deref(), process, "{query}");
+            assert_eq!(
+                filter.process,
+                process.map(|name| HashSet::from([name.to_owned()])),
+                "{query}"
+            );
             assert_eq!(filter.terms, terms, "{query}");
         }
         for invalid in [
@@ -563,6 +604,42 @@ mod tests {
                 Results::OpenWindowsUnavailable(_)
             ));
         }
+    }
+
+    #[test]
+    fn accepts_process_lists_with_exact_names_and_combines_include_exclude_and_state() {
+        let filter = window_query(
+            r#"任一进程＝["Notes.exe","Example Tool.exe"] 排除进程列表=["Ｎｏｔｅｓ．ｅｘｅ","other.exe"] 状态=已最小化　报表"#,
+        )
+        .unwrap();
+        assert_eq!(filter.terms, "报表");
+        assert!(filter.matches_state(true));
+        assert!(filter.matches_process("example tool.exe"));
+        assert!(!filter.matches_process("notes.exe"));
+        assert!(!filter.matches_process("my-example tool.exe"));
+        assert!(!filter.matches_process(""));
+
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        assert!(matches!(
+            index.results(r#"输出=CSV exclude-process-list=["a.exe","b.exe"]"#),
+            Results::Value(Ok(value)) if value.text == "标题,程序文件名"
+        ));
+        for query in [
+            "任一进程=[]",
+            r#"任一进程=["A.exe","ａ．ｅｘｅ"]"#,
+            r#"任一进程=["C:\\a.exe"]"#,
+            r#"任一进程=["a.exe"]标题"#,
+            r#"排除进程列表=[1]"#,
+        ] {
+            assert!(
+                matches!(
+                    index.results(query),
+                    Results::OpenWindowsUnavailable(message) if message.contains("JSON 数组")
+                ),
+                "{query}"
+            );
+        }
+        assert!(window_query(r#"进程=a.exe 任一进程=["b.exe"]"#).is_err());
     }
 
     #[test]
