@@ -369,6 +369,7 @@ enum Operation {
     CheckNumericColumns(Vec<ColumnReference>),
     DecimalColumns(Vec<ColumnReference>, u32),
     DropEmptyRecords,
+    DropEmptyColumns,
     SelectRows {
         ranges: String,
         keep_selected: bool,
@@ -695,6 +696,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         "去重" | "deduplicate" => Operation::DeduplicateRows,
         "去空行" | "drop-empty-rows" => Operation::DropEmptyRecords,
+        "去空列" | "drop-empty-columns" => Operation::DropEmptyColumns,
         operation @ ("取行" | "pick-rows" | "删行" | "drop-rows") => {
             let (ranges, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
             input = data;
@@ -1522,6 +1524,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             format_decimal_columns(&rows, &columns, places)
         }
         Operation::DropEmptyRecords => drop_empty_csv_records(&rows),
+        Operation::DropEmptyColumns => drop_empty_csv_columns(&rows),
         Operation::SelectRows {
             ranges,
             keep_selected,
@@ -2294,6 +2297,17 @@ fn drop_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<Str
         .filter(|column| !removed.contains(column))
         .collect();
     select_columns(rows, &kept)
+}
+
+fn drop_empty_csv_columns(rows: &[Vec<String>]) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns: Vec<_> = (0..header.len())
+        .filter(|&column| records.is_empty() || records.iter().any(|row| !row[column].is_empty()))
+        .collect();
+    if columns.is_empty() {
+        return Err(CsvError::NoColumnsRemain);
+    }
+    select_columns(rows, &columns)
 }
 
 fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
@@ -4747,6 +4761,28 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn drops_only_columns_with_no_nonempty_data_cells() {
+        for (query, expected) in [
+            (
+                "去空列 编号,备注,状态\n001,,0\n002,\"\",茶",
+                "编号,状态\r\n001,0\r\n002,茶",
+            ),
+            ("drop-empty-columns 空格,空\n ,\n,", "空格\r\n \r\n\"\""),
+            ("去空列 编号,备注", "编号,备注"),
+        ] {
+            assert_eq!(transform_csv(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_csv("去空列 编号,备注\n,"),
+            Err(CsvError::NoColumnsRemain)
+        );
+        assert_eq!(
+            transform_csv("去空列 编号,备注\n001"),
+            Err(CsvError::DifferentColumnCount)
+        );
     }
 
     #[test]

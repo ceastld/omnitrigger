@@ -2952,6 +2952,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "移除所有数据单元格都为空的 CSV 列",
+        query: "CSV: 去空列 编号,空备注,状态\n001,,0\n002,,完成",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "为 CSV 每行追加固定文本列",
         query: "CSV: 常量列 [\"来源\",\"人工,复核\"] 编号,商品\n001,茶\n002,梨",
     },
