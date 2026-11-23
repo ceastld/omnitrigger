@@ -35,7 +35,9 @@ impl Example {
                 | Scope::Path
                 | Scope::Uuid
                 | Scope::Ulid
-        ) && !replaceable_tool_operations(scope).contains(&operation)
+        ) && !replaceable_tool_operations(scope)
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(operation))
         {
             return None;
         }
@@ -4493,6 +4495,10 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "排序",
             "降序",
         ],
+        Scope::Pitch => &["MIDI", "转调", "音程"],
+        Scope::Decibel => &["功率比", "幅度比", "转功率比", "转幅度比"],
+        Scope::Tempo => &["时长", "速度"],
+        Scope::Solid => &["圆柱", "球", "立方体", "长方体"],
         _ => &[],
     }
 }
@@ -4503,11 +4509,19 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         return None;
     }
     match scope {
-        Scope::Date | Scope::Radix | Scope::Duration
+        Scope::Date
+        | Scope::Radix
+        | Scope::Duration
+        | Scope::Pitch
+        | Scope::Decibel
+        | Scope::Tempo
+        | Scope::Solid
             if !term.is_empty()
-                && replaceable_tool_operations(scope)
-                    .iter()
-                    .any(|operation| operation.starts_with(term)) => {}
+                && replaceable_tool_operations(scope).iter().any(|operation| {
+                    operation
+                        .get(..term.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(term))
+                }) => {}
         Scope::Intervals
             if ["交集", "合并", "差集", "对称差", "长度", "包含"]
                 .into_iter()
@@ -4784,22 +4798,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if ["重心", "包含", "周长", "边界框", "凸性"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
-        Scope::Tempo
-            if ["时长", "速度"]
-                .iter()
-                .any(|operation| operation.starts_with(term)) => {}
-        Scope::Solid
-            if ["圆柱", "球", "立方体", "长方体"]
-                .into_iter()
-                .any(|operation| operation.starts_with(term)) => {}
-        Scope::Decibel
-            if ["功率比", "幅度比", "转功率比", "转幅度比"]
-                .into_iter()
-                .any(|operation| operation.starts_with(term)) => {}
-        Scope::Pitch
-            if "转调".starts_with(term)
-                || "音程".starts_with(term)
-                || "midi".starts_with(&term.to_ascii_lowercase()) => {}
         _ => return None,
     }
     let prefix = term.to_ascii_lowercase();

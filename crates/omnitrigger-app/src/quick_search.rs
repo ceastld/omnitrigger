@@ -3838,6 +3838,10 @@ mod tests {
             ),
             ("文本: 大写 👩‍💻 x", "文本: 大写 ", "👩‍💻 x"),
             ("URL: 解码 %2B", "URL: 解码 ", "%2B"),
+            ("音高: MIDI 69", "音高: MIDI ", "69"),
+            ("分贝: 转幅度比 20 dB", "分贝: 转幅度比 ", "20 dB"),
+            ("节拍: 时长 120 BPM @ 3/2", "节拍: 时长 ", "120 BPM @ 3/2"),
+            ("立体: 圆柱 3,5", "立体: 圆柱 ", "3,5"),
             (
                 "日期: 星期统计 2024-02-29 至 2024-03-09",
                 "日期: 星期统计 ",
@@ -3874,6 +3878,8 @@ mod tests {
             "日期: 2024-01-01 + 1d",
             "进制: ff 从 16 到 10",
             "时长: 23:45 到 01:15",
+            "音高: 442 Hz",
+            "节拍: 120 BPM",
             "JSON: 取值",
             "CSV: 转置  ",
             "UUID: v4",
@@ -4294,6 +4300,31 @@ mod tests {
                                 ("日期: 星期统计", "2024-01-01 至 2024-01-07", "日期: 星期统计 2024-01-01 至 2024-01-07"),
                                 ("时长: 分摊", "03:00:00 @ 1:2", "时长: 分摊 03:00:00 @ 1:2"),
                                 ("进制: 罗马数字", "3999", "进制: 罗马数字 3999"),
+                            ] {
+                                search.fill_query(prefix, window, cx);
+                                search.refresh_results(prefix, window, cx);
+                                search.key_down(
+                                    &KeyDownEvent {
+                                        keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
+                                        is_held: false,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                search.input.update(cx, |input, cx| {
+                                    input.replace_text_in_range(None, replacement, window, cx);
+                                });
+                                assert_eq!(search.input.read(cx).text(), expected);
+                            }
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            for (prefix, replacement, expected) in [
+                                ("音高: midi", "81", "音高: MIDI 81"),
+                                ("分贝: 功率比", "10000", "分贝: 功率比 10000"),
+                                ("节拍: 速度", "1秒 @ 2", "节拍: 速度 1秒 @ 2"),
+                                ("立体: 圆柱", "1/2,3", "立体: 圆柱 1/2,3"),
                             ] {
                                 search.fill_query(prefix, window, cx);
                                 search.refresh_results(prefix, window, cx);
