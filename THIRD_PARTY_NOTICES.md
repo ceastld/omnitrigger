@@ -37,6 +37,8 @@
 
 UUIDv5 通过 `uuid` 的传递依赖 `sha1_smol` 1.0.1 计算，发行包保留该依赖的 BSD-3-Clause 许可。
 
+OKLCH 换算使用 Björn Ottosson 发布的 Oklab 数值矩阵。作者将参考实现置于公有领域，并提供 MIT 许可。 [Oklab 转换参考](https://bottosson.github.io/posts/oklab/#converting-from-linear-srgb-to-oklab) · [作者的许可说明](https://bottosson.github.io/misc/License.txt)
+
 浏览器动作通过 `omnitrigger-browser` 的 Rust 客户端直接复用本机持久连接，依赖固定于公开仓库修订 `a5adc50022120cc4e6b0596bb56e14ed0ec2d02e`，不随应用分发独立浏览器程序。该客户端与其传递依赖的许可由同一发行收集脚本保留；浏览器扩展和可选连接器的独立发行包另行保留其许可通知。
 
 `OR` 表示可按上游条款选择其中一种许可。完整依赖图还包含传递依赖，不能仅凭此表打包可执行文件。

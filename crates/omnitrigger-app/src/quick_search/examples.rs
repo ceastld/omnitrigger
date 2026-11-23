@@ -2170,6 +2170,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "在 OKLCH 和 sRGB 颜色之间换算",
+        query: "颜色: oklch(70% 25% 180 / 50%)",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算两个颜色的对比度",
         query: "对比度: #fff vs #000",
     },

@@ -3,6 +3,29 @@ use std::f64::consts::TAU;
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 
+// Oklab 的线性 sRGB 转换矩阵由 Björn Ottosson 发布。
+const LINEAR_SRGB_TO_LMS: [[f64; 3]; 3] = [
+    [0.4122214708, 0.5363325363, 0.0514459929],
+    [0.2119034982, 0.6806995451, 0.1073969566],
+    [0.0883024619, 0.2817188376, 0.6299787005],
+];
+const LMS_ROOT_TO_OKLAB: [[f64; 3]; 3] = [
+    [0.2104542553, 0.7936177850, -0.0040720468],
+    [1.9779984951, -2.4285922050, 0.4505937099],
+    [0.0259040371, 0.7827717662, -0.8086757660],
+];
+const OKLAB_TO_LMS_ROOT: [[f64; 3]; 3] = [
+    [1., 0.3963377774, 0.2158037573],
+    [1., -0.1055613458, -0.0638541728],
+    [1., -0.0894841775, -1.2914855480],
+];
+const LMS_TO_LINEAR_SRGB: [[f64; 3]; 3] = [
+    [4.0767416621, -3.3077115913, 0.2309699292],
+    [-1.2684380046, 2.6097574011, -0.3413193965],
+    [-0.0041960863, -0.7034186147, 1.7076147010],
+];
+const LINEAR_GAMUT_TOLERANCE: f64 = 0.00001;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Color {
     pub(super) swatch: u32,
@@ -21,6 +44,7 @@ pub(super) enum ColorError {
     IncompleteContrast,
     Invalid,
     InvalidFormat,
+    OutsideSrgbGamut,
     InvalidMix,
     InvalidPalette,
     MixColorSpace,
@@ -31,10 +55,11 @@ pub(super) enum ColorError {
 impl ColorError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Incomplete => "输入 HEX、RGB、HSL、HWB 或 CSS 颜色名",
+            Self::Incomplete => "输入 HEX、RGB、HSL、HWB、OKLCH 或 CSS 颜色名",
             Self::IncompleteContrast => "输入两个颜色，例如 对比度: #fff vs #000",
             Self::Invalid => "检查颜色名、HEX 位数或颜色通道范围",
-            Self::InvalidFormat => "目标颜色格式可用 HEX、RGB、HSL 或 HWB",
+            Self::InvalidFormat => "目标颜色格式可用 HEX、RGB、HSL、HWB 或 OKLCH",
+            Self::OutsideSrgbGamut => "这个 OKLCH 颜色超出 sRGB 色域",
             Self::InvalidMix => "输入两个颜色，权重范围为 0% 到 100%，总权重需大于 0%",
             Self::InvalidPalette => {
                 "填写起始颜色、结束颜色和 2 至 32 个色值，例如 #000 到 #fff @ 5"
@@ -51,6 +76,7 @@ enum ColorFormat {
     Rgb,
     Hsl,
     Hwb,
+    Oklch,
 }
 
 #[derive(Clone, Copy)]
@@ -69,12 +95,7 @@ impl ColorMixSpace {
                 let linear = (srgb_channel_to_linear(left) * first
                     + srgb_channel_to_linear(right) * second)
                     / total;
-                let encoded = if linear <= 0.0031308 {
-                    linear * 12.92
-                } else {
-                    1.055 * linear.powf(1. / 2.4) - 0.055
-                };
-                (encoded * 255.).round() as u8
+                linear_to_srgb_channel(linear)
             }
         }
     }
@@ -221,11 +242,12 @@ impl Channels {
             "rgb" | "rgba" => ColorFormat::Rgb,
             "hsl" | "hsla" => ColorFormat::Hsl,
             "hwb" => ColorFormat::Hwb,
+            "oklch" => ColorFormat::Oklch,
             _ => return Err(ColorError::Invalid),
         };
         let terms = terms.strip_suffix(')').ok_or(ColorError::Incomplete)?;
         let (values, alpha) = if terms.contains(',') {
-            if matches!(format, ColorFormat::Hwb) {
+            if matches!(format, ColorFormat::Hwb | ColorFormat::Oklch) {
                 return Err(ColorError::Invalid);
             }
             let mut parts: Vec<_> = terms.split(',').collect();
@@ -243,6 +265,7 @@ impl Channels {
         let rgb = match format {
             ColorFormat::Hsl => rgb_from_hsl(first, second, third)?,
             ColorFormat::Hwb => rgb_from_hwb(first, second, third)?,
+            ColorFormat::Oklch => rgb_from_oklch(first, second, third)?,
             ColorFormat::Rgb => [
                 component(first, 255.)?,
                 component(second, 255.)?,
@@ -329,6 +352,55 @@ fn hue_channels(sector: f64, chroma: f64) -> [f64; 3] {
         3 => [0., middle, chroma],
         4 => [middle, 0., chroma],
         _ => [chroma, 0., middle],
+    }
+}
+
+fn apply_color_matrix(matrix: [[f64; 3]; 3], components: [f64; 3]) -> [f64; 3] {
+    matrix.map(|row| {
+        row.into_iter()
+            .zip(components)
+            .map(|(weight, value)| weight * value)
+            .sum()
+    })
+}
+
+fn rgb_from_oklch(lightness: &str, chroma: &str, hue: &str) -> Result<[u8; 3], ColorError> {
+    let lightness = if let Some(percent) = lightness.strip_suffix('%') {
+        bounded_number(percent, 100.)? / 100.
+    } else {
+        bounded_number(lightness, 1.)?
+    };
+    let chroma = if let Some(percent) = chroma.strip_suffix('%') {
+        bounded_number(percent, f64::MAX)? * 0.004
+    } else {
+        bounded_number(chroma, f64::MAX)?
+    };
+    let angle = hue_sector(hue)? / 6. * TAU;
+    let (sin, cos) = angle.sin_cos();
+    let lms = apply_color_matrix(OKLAB_TO_LMS_ROOT, [lightness, chroma * cos, chroma * sin])
+        .map(|channel| channel.powi(3));
+    let rgb = apply_color_matrix(LMS_TO_LINEAR_SRGB, lms);
+    // 容差覆盖 OKLCH 输出小数舍入引起的边界误差。
+    let gamut = -LINEAR_GAMUT_TOLERANCE..=1. + LINEAR_GAMUT_TOLERANCE;
+    if rgb.iter().any(|channel| !gamut.contains(channel)) {
+        return Err(ColorError::OutsideSrgbGamut);
+    }
+    Ok(rgb.map(|channel| linear_to_srgb_channel(channel.clamp(0., 1.))))
+}
+
+fn format_oklch(rgb: [u8; 3], alpha: Option<u8>) -> String {
+    let lms = apply_color_matrix(LINEAR_SRGB_TO_LMS, rgb.map(srgb_channel_to_linear));
+    let [lightness, a, b] = apply_color_matrix(LMS_ROOT_TO_OKLAB, lms.map(f64::cbrt));
+    let chroma = a.hypot(b);
+    let (chroma, hue) = if chroma <= 0.000004 {
+        (0., 0.)
+    } else {
+        (chroma, b.atan2(a).to_degrees().rem_euclid(360.))
+    };
+    let base = format!("oklch({lightness:.6} {chroma:.6} {hue:.4}");
+    match alpha {
+        Some(alpha) => format!("{base} / {})", css_number(f64::from(alpha) / 255.)),
+        None => format!("{base})"),
     }
 }
 
@@ -490,6 +562,7 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
             "rgb" | "rgba" => ColorFormat::Rgb,
             "hsl" | "hsla" => ColorFormat::Hsl,
             "hwb" => ColorFormat::Hwb,
+            "oklch" => ColorFormat::Oklch,
             "" => return Err(ColorError::Incomplete),
             _ => return Err(ColorError::InvalidFormat),
         };
@@ -536,6 +609,7 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
         }
         ColorFormat::Hsl => format_hsl(channels.rgb, channels.alpha),
         ColorFormat::Hwb => format_hwb(channels.rgb, channels.alpha),
+        ColorFormat::Oklch => format_oklch(channels.rgb, channels.alpha),
     };
     Ok(Color {
         swatch: channels.swatch(),
@@ -550,6 +624,15 @@ fn srgb_channel_to_linear(value: u8) -> f64 {
     } else {
         ((channel + 0.055) / 1.055).powf(2.4)
     }
+}
+
+fn linear_to_srgb_channel(linear: f64) -> u8 {
+    let encoded = if linear <= 0.0031308 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1. / 2.4) - 0.055
+    };
+    (encoded * 255.).round() as u8
 }
 
 fn relative_luminance(rgb: [u8; 3]) -> f64 {
@@ -826,6 +909,47 @@ mod tests {
         }
         assert_eq!(convert_color("#abc to"), Err(ColorError::Incomplete));
         assert_eq!(convert_color("#abc to xyz"), Err(ColorError::InvalidFormat));
+    }
+
+    #[test]
+    fn converts_srgb_and_oklch_while_retaining_alpha_and_rejecting_outside_gamut() {
+        assert_eq!(
+            convert_color("oklch(70% 25% 180 / 50%)").unwrap().output,
+            "#4BB3A180",
+        );
+        assert_eq!(convert_color("oklch(0.5 0 0)").unwrap().output, "#636363");
+        assert_eq!(
+            convert_color("#f00 to oklch").unwrap().output,
+            "oklch(0.627955 0.257683 29.2339)",
+        );
+        for hex in [
+            "#f00",
+            "#0f0",
+            "#00f",
+            "#fff",
+            "#000",
+            "#abcdef80",
+            "#80c0ff7f",
+        ] {
+            let oklch = convert_color(&format!("{hex} to oklch")).unwrap();
+            assert_eq!(
+                convert_color(&oklch.output).unwrap().swatch,
+                oklch.swatch,
+                "{hex}"
+            );
+        }
+        assert_eq!(
+            convert_color("oklch(0.7 0.4 180)"),
+            Err(ColorError::OutsideSrgbGamut),
+        );
+        assert_eq!(
+            convert_color("oklch(0.7, 0.1, 180)"),
+            Err(ColorError::Invalid)
+        );
+        assert_eq!(
+            convert_color("oklch(0.7 -0.1 180)"),
+            Err(ColorError::Invalid)
+        );
     }
 
     #[test]
