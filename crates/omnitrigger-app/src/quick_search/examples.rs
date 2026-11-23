@@ -24,6 +24,7 @@ impl Example {
             let (_, data) = json_argument_and_tail::<Vec<String>>(arguments)?;
             return (!data.is_empty()).then_some(self.query.len() - data.len());
         }
+        let (operation, arguments) = input.trim_start().split_once(char::is_whitespace)?;
         if !matches!(
             scope,
             Scope::Json
@@ -34,10 +35,10 @@ impl Example {
                 | Scope::Path
                 | Scope::Uuid
                 | Scope::Ulid
-        ) {
+        ) && !replaceable_tool_operations(scope).contains(&operation)
+        {
             return None;
         }
-        let (_, arguments) = input.trim_start().split_once(char::is_whitespace)?;
         let arguments = arguments.trim_start();
         (!arguments.is_empty()).then_some(self.query.len() - arguments.len())
     }
@@ -4317,12 +4318,78 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
         .collect()
 }
 
+fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
+    match scope {
+        Scope::Date => &[
+            "列出",
+            "格式化",
+            "解析",
+            "月历",
+            "工作日序号",
+            "工作日位置",
+            "工作日序列",
+            "合并区间",
+            "区间交集",
+            "扣除区间",
+            "按月拆分",
+            "按月拆分CSV",
+            "按周拆分CSV",
+            "按季度拆分CSV",
+            "按半年拆分CSV",
+            "按年拆分CSV",
+            "逐日CSV",
+            "星期统计",
+        ],
+        Scope::Radix => &[
+            "字节序",
+            "读字节序",
+            "补码",
+            "读补码",
+            "位统计",
+            "取位",
+            "写位",
+            "循环左移",
+            "循环右移",
+            "位倒序",
+            "字节倒序",
+            "表格列号",
+            "罗马数字",
+        ],
+        Scope::Duration => &[
+            "合计",
+            "平均",
+            "频数平均",
+            "频数中位数",
+            "扣除休息",
+            "重叠",
+            "比率",
+            "缩放",
+            "分摊",
+            "舍入",
+            "向下取整",
+            "向上取整",
+            "中位数",
+            "最短",
+            "最长",
+            "极差",
+            "排序",
+            "降序",
+        ],
+        _ => &[],
+    }
+}
+
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     // 示例补全只匹配操作名。已有参数的输入直接交给对应工具。
     if term.contains(char::is_whitespace) {
         return None;
     }
     match scope {
+        Scope::Date | Scope::Radix | Scope::Duration
+            if !term.is_empty()
+                && replaceable_tool_operations(scope)
+                    .iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Intervals
             if ["交集", "合并", "差集", "对称差", "长度", "包含"]
                 .into_iter()
@@ -4386,30 +4453,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term))) => {}
-        Scope::Date
-            if !term.is_empty()
-                && [
-                    "列出",
-                    "格式化",
-                    "解析",
-                    "月历",
-                    "工作日序号",
-                    "工作日位置",
-                    "工作日序列",
-                    "合并区间",
-                    "区间交集",
-                    "扣除区间",
-                    "按月拆分",
-                    "按月拆分CSV",
-                    "按周拆分CSV",
-                    "按季度拆分CSV",
-                    "按半年拆分CSV",
-                    "按年拆分CSV",
-                    "逐日CSV",
-                    "星期统计",
-                ]
-                .into_iter()
-                .any(|operation| operation.starts_with(term)) => {}
         Scope::Color
             if !term.is_empty()
                 && ["色阶", "线性色阶"]
@@ -4442,25 +4485,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["预测", "残差", "误差", "过原点"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
-        Scope::Radix
-            if !term.is_empty()
-                && [
-                    "字节序",
-                    "读字节序",
-                    "补码",
-                    "读补码",
-                    "位统计",
-                    "取位",
-                    "写位",
-                    "循环左移",
-                    "循环右移",
-                    "位倒序",
-                    "字节倒序",
-                    "表格列号",
-                    "罗马数字",
-                ]
-                .iter()
-                .any(|operation| operation.starts_with(term)) => {}
         Scope::Triangle
             if !term.is_empty()
                 && ["斜边", "直角边"]
@@ -4477,30 +4501,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     && ["最小二乘", "1范数", "无穷范数", "条件数", "正定性"]
                         .iter()
                         .any(|op| op.starts_with(term))) => {}
-        Scope::Duration
-            if !term.is_empty()
-                && [
-                    "合计",
-                    "平均",
-                    "频数平均",
-                    "频数中位数",
-                    "扣除休息",
-                    "重叠",
-                    "比率",
-                    "缩放",
-                    "分摊",
-                    "舍入",
-                    "向下取整",
-                    "向上取整",
-                    "中位数",
-                    "最短",
-                    "最长",
-                    "极差",
-                    "排序",
-                    "降序",
-                ]
-                .into_iter()
-                .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
             if !term.is_empty()
                 && [

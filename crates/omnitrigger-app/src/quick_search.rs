@@ -3817,6 +3817,13 @@ mod tests {
             ("文本: 大写 👩‍💻 x", "文本: 大写 ", "👩‍💻 x"),
             ("URL: 解码 %2B", "URL: 解码 ", "%2B"),
             (
+                "日期: 星期统计 2024-02-29 至 2024-03-09",
+                "日期: 星期统计 ",
+                "2024-02-29 至 2024-03-09",
+            ),
+            ("时长: 分摊 01:30:00 @ 1:2", "时长: 分摊 ", "01:30:00 @ 1:2"),
+            ("进制: 罗马数字 CDXCIX", "进制: 罗马数字 ", "CDXCIX"),
+            (
                 "路径: 文件名 C:\\工作\\报告.txt",
                 "路径: 文件名 ",
                 "C:\\工作\\报告.txt",
@@ -3843,6 +3850,8 @@ mod tests {
         for query in [
             "2**10",
             "日期: 2024-01-01 + 1d",
+            "进制: ff 从 16 到 10",
+            "时长: 23:45 到 01:15",
             "JSON: 取值",
             "CSV: 转置  ",
             "UUID: v4",
@@ -4239,6 +4248,30 @@ mod tests {
                                 ("路径: 主名", "C:\\工作\\茶.txt", "路径: 主名 C:\\工作\\茶.txt"),
                                 ("UUID: v5", "URL https://example.invalid/a", "UUID: v5 URL https://example.invalid/a"),
                                 ("ULID: 格式", "01ARZ3NDEKTSV4RRFFQ69G5FAW", "ULID: 格式 01ARZ3NDEKTSV4RRFFQ69G5FAW"),
+                            ] {
+                                search.fill_query(prefix, window, cx);
+                                search.refresh_results(prefix, window, cx);
+                                search.key_down(
+                                    &KeyDownEvent {
+                                        keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
+                                        is_held: false,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                search.input.update(cx, |input, cx| {
+                                    input.replace_text_in_range(None, replacement, window, cx);
+                                });
+                                assert_eq!(search.input.read(cx).text(), expected);
+                            }
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            for (prefix, replacement, expected) in [
+                                ("日期: 星期统计", "2024-01-01 至 2024-01-07", "日期: 星期统计 2024-01-01 至 2024-01-07"),
+                                ("时长: 分摊", "03:00:00 @ 1:2", "时长: 分摊 03:00:00 @ 1:2"),
+                                ("进制: 罗马数字", "3999", "进制: 罗马数字 3999"),
                             ] {
                                 search.fill_query(prefix, window, cx);
                                 search.refresh_results(prefix, window, cx);
