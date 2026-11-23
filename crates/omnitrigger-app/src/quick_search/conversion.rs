@@ -38,6 +38,7 @@ pub(super) enum ConversionError {
     InvalidResistanceOperands,
     InvalidResistanceList,
     InvalidVoltageDivider,
+    InvalidCurrentDivider,
     InvalidEnergyUse,
     InvalidBatteryEnergy,
     InvalidPeriod,
@@ -86,6 +87,7 @@ impl ConversionError {
             Self::InvalidResistanceOperands => "求电阻时，电压和电流均须大于零",
             Self::InvalidResistanceList => "输入 2 至 32 个正电阻值，各项用逗号隔开",
             Self::InvalidVoltageDivider => "输入电压和两个正电阻，例如 分压 12 V @ 1 kΩ,2 kΩ",
+            Self::InvalidCurrentDivider => "输入总电流和两个正电阻，例如 分流 6 mA @ 1 kΩ,2 kΩ",
             Self::InvalidEnergyUse => "填写非负功率和用时，例如 耗电 1.5 kW @ 2h",
             Self::InvalidBatteryEnergy => "填写容量和标称电压，例如 电池能量 2500 mAh @ 3.7 V",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
@@ -1016,7 +1018,8 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
         match operation.to_ascii_lowercase().as_str() {
             "串联" | "series" => return equivalent_resistance(values, false),
             "并联" | "parallel" => return equivalent_resistance(values, true),
-            "分压" | "voltage-divider" => return calculate_voltage_divider(values),
+            "分压" | "voltage-divider" => return calculate_divider(values, Divider::Voltage),
+            "分流" | "current-divider" => return calculate_divider(values, Divider::Current),
             "耗电" | "energy-use" => return calculate_energy_use(values),
             "电池能量" | "battery-energy" => return calculate_battery_energy(values),
             _ => {}
@@ -1058,42 +1061,52 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
     ))
 }
 
-fn calculate_voltage_divider(input: &str) -> Result<String, ConversionError> {
-    let (voltage, resistors) = input
-        .split_once('@')
-        .ok_or(ConversionError::InvalidVoltageDivider)?;
+#[derive(Clone, Copy)]
+enum Divider {
+    Voltage,
+    Current,
+}
+
+fn calculate_divider(input: &str, divider: Divider) -> Result<String, ConversionError> {
+    let invalid = match divider {
+        Divider::Voltage => ConversionError::InvalidVoltageDivider,
+        Divider::Current => ConversionError::InvalidCurrentDivider,
+    };
+    let (source, resistors) = input.split_once('@').ok_or(invalid)?;
     let resistors: Vec<_> = split_top_level_commas(resistors).take(3).collect();
-    let [upper, lower] = resistors.as_slice() else {
-        return Err(ConversionError::InvalidVoltageDivider);
+    let [first, second] = resistors.as_slice() else {
+        return Err(invalid);
     };
     let parse = |value| {
         CircuitInput::parse(value).map_err(|error| match error {
             ConversionError::OutOfRange => error,
-            _ => ConversionError::InvalidVoltageDivider,
+            _ => invalid,
         })
     };
-    let (
-        CircuitInput::Voltage(voltage),
-        CircuitInput::Resistance(upper),
-        CircuitInput::Resistance(lower),
-    ) = (parse(voltage)?, parse(upper)?, parse(lower)?)
+    let (source, CircuitInput::Resistance(first), CircuitInput::Resistance(second)) =
+        (parse(source)?, parse(first)?, parse(second)?)
     else {
-        return Err(ConversionError::InvalidVoltageDivider);
+        return Err(invalid);
     };
-    let scale = upper.max(lower);
-    let lower_share = lower / scale;
-    let total = upper / scale + lower_share;
-    let fraction = lower_share / total;
-    let output = if voltage == 0.0 || fraction.is_normal() {
-        voltage * fraction
+    let (magnitude, unit, share, other) = match (divider, source) {
+        (Divider::Voltage, CircuitInput::Voltage(voltage)) => (voltage, "V", second, first),
+        (Divider::Current, CircuitInput::Current(current)) => (current, "A", first, second),
+        _ => return Err(invalid),
+    };
+    let scale = share.max(other);
+    let scaled_share = share / scale;
+    let total = scaled_share + other / scale;
+    let fraction = scaled_share / total;
+    let output = if magnitude == 0.0 || fraction.is_normal() {
+        magnitude * fraction
     } else {
-        // 电阻比太小时，用对数保留乘以输入电压后仍可表示的结果。
-        (voltage.ln() + lower.ln() - scale.ln() - total.ln()).exp()
+        // 电阻比太小时，用对数保留乘以输入量后仍可表示的结果。
+        (magnitude.ln() + share.ln() - scale.ln() - total.ln()).exp()
     };
-    if voltage > 0.0 && output == 0.0 {
+    if magnitude > 0.0 && output == 0.0 {
         return Err(ConversionError::OutOfRange);
     }
-    format_circuit_value(output, "V")
+    format_circuit_value(output, unit)
 }
 
 fn calculate_battery_energy(input: &str) -> Result<String, ConversionError> {
@@ -2679,6 +2692,28 @@ mod tests {
             assert_eq!(
                 calculate_circuit(query),
                 Err(ConversionError::InvalidVoltageDivider)
+            );
+        }
+    }
+
+    #[test]
+    fn calculates_the_second_branch_current_in_a_parallel_divider() {
+        for (query, expected) in [
+            ("分流 6 mA @ 1 kΩ,2 kΩ", "2 mA"),
+            ("CURRENT-DIVIDER (2*3)mA @ 2000 Ω,1 kΩ", "4 mA"),
+            ("分流 0 A @ 2 Ω,3 Ω", "0 A"),
+        ] {
+            assert_eq!(calculate_circuit(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "分流 6 V @ 1 kΩ,2 kΩ",
+            "分流 6 mA @ 1 kΩ",
+            "分流 6 mA @ 1 kΩ,0 Ω",
+        ] {
+            assert_eq!(
+                calculate_circuit(query),
+                Err(ConversionError::InvalidCurrentDivider),
+                "{query}"
             );
         }
     }
