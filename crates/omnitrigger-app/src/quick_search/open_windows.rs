@@ -11,7 +11,7 @@ use serde::Serialize;
 use super::{
     csv_tools::{append_bounded_csv_row, csv_cell},
     examples::search_key,
-    operators::json_value_and_tail,
+    operators::{json_value_and_tail, query_option_value},
     text_tools::{compare_natural, compile_regex},
     title_rank, Destination, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
 };
@@ -380,7 +380,7 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
                     return Err(TitleRegex);
                 }
                 let (pattern, rest) =
-                    filter_value(input, |character| character == '"').ok_or(TitleRegex)?;
+                    query_option_value(input, |character| character == '"').ok_or(TitleRegex)?;
                 title_regex = Some(compile_regex(pattern).map_err(|_| TitleRegex)?);
                 query = rest;
                 continue;
@@ -413,7 +413,8 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
             process_list(input).ok_or(ProcessList)?
         } else {
             let (filename, rest) =
-                filter_value(input, |character| matches!(character, '"' | '＂')).ok_or(Filters)?;
+                query_option_value(input, |character| matches!(character, '"' | '＂'))
+                    .ok_or(Filters)?;
             let filename = process_name(filename).ok_or(Filters)?;
             (HashSet::from([filename]), rest)
         };
@@ -447,18 +448,6 @@ fn process_list(input: &str) -> Option<(HashSet<String>, &str)> {
         }
     }
     Some((keys, rest.trim_start()))
-}
-
-fn filter_value(input: &str, quote: impl Fn(char) -> bool) -> Option<(&str, &str)> {
-    if let Some(quoted) = input.strip_prefix(&quote) {
-        let (value, rest) = quoted.split_once(quote)?;
-        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-            return None;
-        }
-        return Some((value, rest.trim_start()));
-    }
-    let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-    Some((value, rest.trim_start()))
 }
 
 fn window_rank(title: &str, process: &str, query: &str, terms: &[&str]) -> Option<(u8, bool)> {

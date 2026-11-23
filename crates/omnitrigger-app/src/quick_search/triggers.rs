@@ -1,3 +1,5 @@
+use regex::Regex;
+
 use crate::{
     assets::Icon,
     binding_context_label, browse_row, caps_for,
@@ -6,7 +8,8 @@ use crate::{
 };
 
 use super::{
-    csv_tools::append_bounded_csv_row, examples::search_key, Destination, Results, ValueError,
+    csv_tools::append_bounded_csv_row, examples::search_key, operators::query_option_value,
+    text_tools::compile_regex, Destination, Results, ValueError,
 };
 
 const TRIGGER_CSV_HEADER: &str = "名称,组合与条件,输入,动作,范围,启用状态";
@@ -16,6 +19,7 @@ pub(super) enum TriggerSearchError {
     InvalidValue(Facet),
     RepeatedFacet,
     CsvTooLarge,
+    TitleRegex,
 }
 
 impl TriggerSearchError {
@@ -27,6 +31,7 @@ impl TriggerSearchError {
             Self::InvalidValue(Facet::Action) => "动作填写触发器页的分类名称，例如 快速搜索",
             Self::RepeatedFacet => "每类筛选条件填写一次",
             Self::CsvTooLarge => "触发器 CSV 超过 1 MiB，请缩小筛选范围",
+            Self::TitleRegex => "填写一个有效的名称正则表达式，含空格时用双引号包住",
         }
     }
 }
@@ -75,11 +80,18 @@ impl SearchTrigger {
     }
 }
 
-fn trigger_search_filters(
+struct TriggerQuery<'a> {
+    filter: Filter,
+    term: &'a str,
+    title_regex: Option<Regex>,
+}
+
+fn parse_trigger_query(
     mut query: &str,
     inherited: Option<FacetValue>,
-) -> Result<(Filter, &str), TriggerSearchError> {
+) -> Result<TriggerQuery<'_>, TriggerSearchError> {
     let mut filter = Filter::default();
+    let mut title_regex = None;
     if let Some(value) = inherited {
         filter.set(value.facet(), Some(value));
     }
@@ -89,6 +101,17 @@ fn trigger_search_filters(
             "范围" | "scope" => Facet::Scope,
             "输入" | "input" => Facet::Input,
             "动作" | "action" => Facet::Action,
+            "名称正则" | "标题正则" | "name-regex" => {
+                if title_regex.is_some() {
+                    return Err(TriggerSearchError::TitleRegex);
+                }
+                let (pattern, rest) = query_option_value(input, |character| character == '"')
+                    .ok_or(TriggerSearchError::TitleRegex)?;
+                title_regex =
+                    Some(compile_regex(pattern).map_err(|_| TriggerSearchError::TitleRegex)?);
+                query = rest;
+                continue;
+            }
             _ => break,
         };
         if filter.get(facet).is_some() {
@@ -117,7 +140,11 @@ fn trigger_search_filters(
         filter.set(facet, Some(value));
         query = rest.trim_start();
     }
-    Ok((filter, query))
+    Ok(TriggerQuery {
+        filter,
+        term: query,
+        title_regex,
+    })
 }
 
 pub(super) fn search_triggers(
@@ -128,11 +155,16 @@ pub(super) fn search_triggers(
     let (format, rest) = term.split_once(char::is_whitespace).unwrap_or((term, ""));
     let export = matches!(search_key(format).as_str(), "输出=csv" | "output=csv");
     let query = if export { rest.trim_start() } else { term };
-    let (filter, query) = match trigger_search_filters(query, inherited) {
+    let query = match parse_trigger_query(query, inherited) {
         Ok(parsed) => parsed,
         Err(error) => return Results::Value(Err(ValueError::TriggerSearch(error))),
     };
-    let matches = matching_triggers(triggers, query, &filter);
+    let matches = matching_triggers(
+        triggers,
+        query.term,
+        &query.filter,
+        query.title_regex.as_ref(),
+    );
     if export {
         return Results::text_value(export_triggers(matches).map_err(ValueError::TriggerSearch));
     }
@@ -168,6 +200,7 @@ pub(super) fn matching_triggers<'a>(
     triggers: &'a [SearchTrigger],
     query: &str,
     filter: &Filter,
+    title_regex: Option<&Regex>,
 ) -> Vec<&'a SearchTrigger> {
     let query = trigger_browse::normalize_query(query);
     let unfiltered = filter.is_empty();
@@ -175,6 +208,7 @@ pub(super) fn matching_triggers<'a>(
         .iter()
         .enumerate()
         .filter(|(_, entry)| unfiltered || filter.accepts(&entry.row, None))
+        .filter(|(_, entry)| title_regex.is_none_or(|pattern| pattern.is_match(&entry.title)))
         .filter(|(_, entry)| trigger_browse::matches_query(&entry.row, &query))
         .map(|(index, entry)| {
             let rank = super::title_rank(&entry.title_key, &query);
@@ -199,15 +233,35 @@ mod tests {
 
     #[test]
     fn parses_all_trigger_facets_and_keeps_the_chord_as_search_text() {
-        let (filter, query) = trigger_search_filters(
+        let parsed = parse_trigger_query(
             "状态＝已启用 SCOPE=GLOBAL 输入=键盘 动作=快速搜索 Space + S",
             None,
         )
         .unwrap();
+        let filter = parsed.filter;
         assert_eq!(filter.status, Some(StatusKind::Enabled));
         assert_eq!(filter.scope, Some(ScopeKind::Global));
         assert_eq!(filter.input, Some(InputKind::Keyboard));
         assert_eq!(filter.action, Some(ActionKind::Search));
-        assert_eq!(query, "Space + S");
+        assert_eq!(parsed.term, "Space + S");
+    }
+
+    #[test]
+    fn preserves_the_original_trigger_name_pattern_and_combines_it_with_filters() {
+        let parsed =
+            parse_trigger_query(r#"名称正则＝"^Open Ａ\d+$" 状态=已启用 Caps + Space"#, None)
+                .unwrap();
+        assert_eq!(parsed.filter.status, Some(StatusKind::Enabled));
+        assert_eq!(parsed.term, "Caps + Space");
+        let pattern = parsed.title_regex.unwrap();
+        assert!(pattern.is_match("Open Ａ12"));
+        assert!(!pattern.is_match("open Ａ12"));
+        assert!(!pattern.is_match("Open A12"));
+        for query in ["名称正则=", "名称正则=[", "名称正则=a 名称正则=b"] {
+            assert!(matches!(
+                parse_trigger_query(query, None),
+                Err(TriggerSearchError::TitleRegex)
+            ));
+        }
     }
 }

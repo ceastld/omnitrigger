@@ -1128,7 +1128,7 @@ impl Results {
             .map(|(_, page)| Destination::Page(page))
             .collect();
         destinations.extend(
-            matching_triggers(triggers, &query, &Default::default())
+            matching_triggers(triggers, &query, &Default::default(), None)
                 .into_iter()
                 .map(|trigger| Destination::Trigger(trigger.id())),
         );

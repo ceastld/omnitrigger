@@ -23,6 +23,21 @@ pub(super) fn json_value_and_tail<T: serde::de::DeserializeOwned>(
     Some((value, &input[values.byte_offset()..]))
 }
 
+pub(super) fn query_option_value(
+    input: &str,
+    quote: impl Fn(char) -> bool,
+) -> Option<(&str, &str)> {
+    if let Some(quoted) = input.strip_prefix(&quote) {
+        let (value, rest) = quoted.split_once(quote)?;
+        if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        return Some((value, rest.trim_start()));
+    }
+    let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    Some((value, rest.trim_start()))
+}
+
 #[derive(Clone, Copy, serde::Deserialize)]
 pub(super) enum FieldSortOrder {
     #[serde(rename = "文本升序", alias = "text-asc")]
