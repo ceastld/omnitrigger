@@ -607,6 +607,10 @@ enum Operation {
     },
     DropEmptyRecords,
     DropEmptyColumns,
+    FilterMissingRows {
+        columns: Vec<ColumnReference>,
+        missing: bool,
+    },
     SelectRows {
         ranges: String,
         keep_selected: bool,
@@ -988,6 +992,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "去重" | "deduplicate" => Operation::DeduplicateRows,
         "去空行" | "drop-empty-rows" => Operation::DropEmptyRecords,
         "去空列" | "drop-empty-columns" => Operation::DropEmptyColumns,
+        "完整行" | "complete-rows" | "缺失行" | "incomplete-rows" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::FilterMissingRows {
+                columns,
+                missing: matches!(operation.as_str(), "缺失行" | "incomplete-rows"),
+            }
+        }
         operation @ ("取行" | "pick-rows" | "删行" | "drop-rows") => {
             let (ranges, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
             input = data;
@@ -2272,6 +2285,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         } => round_csv_columns(&rows, &columns, digits, significant),
         Operation::DropEmptyRecords => drop_empty_csv_records(&rows),
         Operation::DropEmptyColumns => drop_empty_csv_columns(&rows),
+        Operation::FilterMissingRows { columns, missing } => {
+            filter_missing_rows(&rows, &columns, missing)
+        }
         Operation::SelectRows {
             ranges,
             keep_selected,
@@ -3114,6 +3130,19 @@ fn drop_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<Str
         .filter(|column| !removed.contains(column))
         .collect();
     select_columns(rows, &kept)
+}
+
+fn filter_missing_rows(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    missing: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let selected = records
+        .iter()
+        .filter(|row| columns.iter().any(|&column| row[column].trim().is_empty()) == missing);
+    Ok(write_rows(std::iter::once(header).chain(selected), ','))
 }
 
 fn drop_empty_csv_columns(rows: &[Vec<String>]) -> Result<String, CsvError> {
@@ -6215,6 +6244,19 @@ mod tests {
         assert_eq!(
             transform_csv("group-frequency [1] 编号").as_deref(),
             Ok("编号,次数,频率")
+        );
+    }
+
+    #[test]
+    fn filters_complete_and_missing_csv_rows_without_changing_record_contents() {
+        let data = "编号,金额,日期,备注\n001,0,2024-02-29,\"示例\n第二行\"\n002,1/2, ,乙\n003,,2026-11-23,丙\n004,1/3,2026-11-23,";
+        assert_eq!(
+            transform_csv(&format!(r#"完整行 ["金额",3] {data}"#)).as_deref(),
+            Ok("编号,金额,日期,备注\r\n001,0,2024-02-29,\"示例\n第二行\"\r\n004,1/3,2026-11-23,\"\"")
+        );
+        assert_eq!(
+            transform_csv(&format!(r#"缺失行 [2,"日期"] {data}"#)).as_deref(),
+            Ok("编号,金额,日期,备注\r\n002,1/2, ,乙\r\n003,\"\",2026-11-23,丙")
         );
     }
 

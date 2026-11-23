@@ -4038,6 +4038,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "筛出金额和日期均已填写的记录",
+        query: "CSV: 完整行 [\"金额\",\"日期\"] 编号,金额,日期\n001,0,2024-02-29\n002,1/2, \n003,,2026-11-23",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "找出指定列仍有空白的记录",
+        query: "CSV: 缺失行 [\"金额\",\"日期\"] 编号,金额,日期\n001,0,2024-02-29\n002,1/2, \n003,,2026-11-23",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "为 CSV 每行追加固定文本列",
         query: "CSV: 常量列 [\"来源\",\"人工,复核\"] 编号,商品\n001,茶\n002,梨",
     },
