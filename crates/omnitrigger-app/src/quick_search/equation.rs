@@ -15,7 +15,7 @@ use super::plane::{parse_point, PointError};
 pub(super) enum EquationError {
     Coefficients,
     RootArguments,
-    IntersectionArguments,
+    CurvePairArguments,
     ThreePointArguments,
     VertexFormArguments,
     TangentArguments,
@@ -35,9 +35,7 @@ impl EquationError {
             }
             Self::InequalityArguments => "先填写 >、>=、< 或 <=，再填写 a, b, c",
             Self::RootArguments => "填写两个有理数根，可再填非零的二次项系数",
-            Self::IntersectionArguments => {
-                "分别填写两条曲线的 a, b, c 三个系数，两组用分号或换行隔开"
-            }
+            Self::CurvePairArguments => "分别填写两条曲线的 a, b, c 三个系数，两组用分号或换行隔开",
             Self::ThreePointArguments => {
                 "填写三个横坐标互不相同的点，每个点写 x, y，各点用分号或换行隔开"
             }
@@ -65,6 +63,12 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
             "由根" | "from-roots" => return quadratic_from_roots(arguments.trim_start()),
             "交点" | "intersections" => return polynomial_intersections(arguments.trim_start()),
+            "围成面积" | "enclosed-area" => {
+                return polynomial_enclosed_area(arguments.trim_start())
+            }
+            "标准式" | "standard-form" => {
+                return polynomial_standard_form(arguments.trim_start())
+            }
             "过三点" | "through-points" => {
                 return quadratic_through_points(arguments.trim_start())
             }
@@ -309,19 +313,53 @@ fn format_quadratic_coefficients(
     Ok(format!("{a},{b},{c}"))
 }
 
-fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
+fn polynomial_pair(input: &str) -> Result<[[BigRational; 3]; 2], EquationError> {
     let (first, second) = input
         .split_once([';', '；', '\n'])
-        .ok_or(EquationError::IntersectionArguments)?;
+        .ok_or(EquationError::CurvePairArguments)?;
     let parse = |coefficients| match coefficient_row(coefficients) {
         Err(
             EquationError::Coefficients
             | EquationError::Evaluation(FractionError::Invalid | FractionError::Incomplete),
-        ) => Err(EquationError::IntersectionArguments),
+        ) => Err(EquationError::CurvePairArguments),
         result => result,
     };
-    let [a, b, c] = parse(first)?;
-    let [other_a, other_b, other_c] = parse(second)?;
+    Ok([parse(first)?, parse(second)?])
+}
+
+fn polynomial_enclosed_area(input: &str) -> Result<String, EquationError> {
+    let [[a, b, c], [other_a, other_b, other_c]] = polynomial_pair(input)?;
+    let (diff_a, diff_b, diff_c) = (a - other_a, b - other_b, c - other_c);
+    if diff_a.numer().sign() == Sign::NoSign {
+        return Ok("没有有界区域".to_owned());
+    }
+    let (_, squared) = quadratic_center(&diff_a, diff_b, diff_c);
+    if squared.numer().sign() != Sign::Plus {
+        return Ok("没有有界区域".to_owned());
+    }
+    ensure_exact_size(&squared).map_err(EquationError::Evaluation)?;
+    let magnitude = if diff_a.numer().sign() == Sign::Minus {
+        -diff_a
+    } else {
+        diff_a
+    };
+    // 在两个交点之间积分 |a|(r² - (x-h)²)，得到 (4/3)|a|r³。
+    let factor = BigRational::new(4.into(), 3.into()) * magnitude * &squared;
+    if let Some(radius) = exact_abs_square_root(&squared) {
+        let area = factor * radius;
+        ensure_exact_size(&area).map_err(EquationError::Evaluation)?;
+        Ok(area.to_string())
+    } else {
+        ensure_exact_size(&factor).map_err(EquationError::Evaluation)?;
+        Ok(format_exact_multiple(
+            &factor,
+            &format_square_root(&squared),
+        ))
+    }
+}
+
+fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
+    let [[a, b, c], [other_a, other_b, other_c]] = polynomial_pair(input)?;
     let (diff_a, diff_b, diff_c) = (&a - other_a, &b - other_b, &c - other_c);
     let point = |x: &BigRational| {
         let y = (&a * x + &b) * x + &c;
@@ -362,6 +400,36 @@ fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
     }
     let [left_y, right_y] = ys;
     Ok(format!("({left_x}, {left_y})\n({right_x}, {right_y})"))
+}
+
+fn polynomial_standard_form(input: &str) -> Result<String, EquationError> {
+    let coefficients = coefficient_row(input)?;
+    let mut expression = String::new();
+    for (coefficient, variable) in coefficients.into_iter().zip(["x²", "x", ""]) {
+        let sign = coefficient.numer().sign();
+        if sign == Sign::NoSign {
+            continue;
+        }
+        let negative = sign == Sign::Minus;
+        if expression.is_empty() {
+            if negative {
+                expression.push('-');
+            }
+        } else {
+            expression.push_str(if negative { " - " } else { " + " });
+        }
+        let magnitude = if negative { -coefficient } else { coefficient };
+        let term = if variable.is_empty() {
+            magnitude.to_string()
+        } else {
+            format_exact_multiple(&magnitude, variable)
+        };
+        expression.push_str(&term);
+    }
+    if expression.is_empty() {
+        expression.push('0');
+    }
+    Ok(format!("y = {expression}"))
 }
 
 fn describe_quadratic(input: &str, complete_square: bool) -> Result<String, EquationError> {
@@ -749,6 +817,31 @@ mod tests {
     }
 
     #[test]
+    fn writes_polynomial_terms_with_canonical_signs_and_fractional_coefficients() {
+        for (input, expected) in [
+            ("标准式 -2,4,-3/2", "y = -2x² + 4x - 3/2"),
+            ("standard-form 1/2,-1,3/4", "y = x²/2 - x + 3/4"),
+            ("标准式 0,-1,0", "y = -x"),
+            ("标准式 0,0,-1/2", "y = -1/2"),
+            ("标准式 0,0,0", "y = 0"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn integrates_the_finite_area_enclosed_by_two_polynomials() {
+        for (input, expected) in [
+            ("围成面积 1,0,0 ; 0,0,1", "4/3"),
+            ("enclosed-area 0,0,2 ; 1,0,0", "8√2/3"),
+            ("围成面积 1,0,0 ; 0,0,0", "没有有界区域"),
+            ("围成面积 0,2,1 ; 0,-1,2", "没有有界区域"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+    }
+
+    #[test]
     fn intersects_quadratic_and_linear_graphs_with_exact_coordinates() {
         for (input, expected) in [
             ("交点 1,0,0 ; 0,-1,2", "(-2, 4)\n(1, 1)"),
@@ -762,7 +855,7 @@ mod tests {
         }
         assert_eq!(
             solve_equation("交点 1,0,0 ; 0,1"),
-            Err(EquationError::IntersectionArguments)
+            Err(EquationError::CurvePairArguments)
         );
     }
 
