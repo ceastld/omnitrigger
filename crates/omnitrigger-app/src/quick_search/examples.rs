@@ -1346,6 +1346,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "音高: 442 Hz",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按整数半音移动音高",
+        query: "音高: 转调 Bb3 @ 2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算两个音高之间的半音和音分",
+        query: "音高: 音程 C4 @ G4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用图上和实际距离反求地图比例",
         query: "比例尺: 求 3.2 cm = 1.6 km",
@@ -4689,7 +4699,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if ["重心", "包含", "周长", "边界框", "凸性"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
-        Scope::Pitch if "midi".starts_with(&term.to_ascii_lowercase()) => {}
+        Scope::Pitch
+            if "转调".starts_with(term)
+                || "音程".starts_with(term)
+                || "midi".starts_with(&term.to_ascii_lowercase()) => {}
         _ => return None,
     }
     let prefix = term.to_ascii_lowercase();

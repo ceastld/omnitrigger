@@ -12,6 +12,8 @@ pub(super) enum PitchError {
     InvalidNote,
     MidiRange,
     FrequencyRange,
+    TransposeArguments,
+    IntervalArguments,
 }
 
 impl PitchError {
@@ -20,6 +22,8 @@ impl PitchError {
             Self::InvalidNote => "填写音名、MIDI 编号或频率，例如 A4、MIDI 69 或 442 Hz",
             Self::MidiRange => "音高须在 MIDI 0 至 127 的范围内",
             Self::FrequencyRange => "填写正频率，最接近的音高须在 MIDI 0 至 127 内",
+            Self::TransposeArguments => "用 @ 分隔音高和半音数，例如 Bb3 @ 2",
+            Self::IntervalArguments => "用 @ 分隔两个音高，例如 C4 @ G4",
         }
     }
 }
@@ -27,19 +31,14 @@ impl PitchError {
 pub(super) fn convert_pitch(query: &str) -> Result<String, PitchError> {
     let input = normalize(query);
     let input = input.trim();
-    let folded = input.to_ascii_lowercase();
-    if let Some((_, argument)) = folded
-        .split_once(char::is_whitespace)
-        .filter(|(operation, _)| *operation == "midi")
-    {
-        let note = argument
-            .trim()
-            .parse::<u8>()
-            .ok()
-            .filter(|note| *note <= MAX_MIDI_NOTE)
-            .ok_or(PitchError::MidiRange)?;
-        return format_pitch(note);
+    let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    match operation.to_ascii_lowercase().as_str() {
+        "midi" => return format_pitch(parse_midi(arguments)?),
+        "转调" | "transpose" => return transpose_pitch(arguments),
+        "音程" | "interval" => return pitch_interval(arguments),
+        _ => {}
     }
+    let folded = input.to_ascii_lowercase();
     for (unit, multiplier) in [
         ("khz", 1000.0),
         ("千赫兹", 1000.0),
@@ -58,6 +57,48 @@ pub(super) fn convert_pitch(query: &str) -> Result<String, PitchError> {
         }
     }
     format_pitch(parse_note(input)?)
+}
+
+fn parse_midi(input: &str) -> Result<u8, PitchError> {
+    input
+        .trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|note| *note <= MAX_MIDI_NOTE)
+        .ok_or(PitchError::MidiRange)
+}
+
+fn parse_written_pitch(input: &str) -> Result<u8, PitchError> {
+    let input = input.trim();
+    if let Some((_, arguments)) = input
+        .split_once(char::is_whitespace)
+        .filter(|(operation, _)| operation.eq_ignore_ascii_case("midi"))
+    {
+        return parse_midi(arguments);
+    }
+    parse_note(input)
+}
+
+fn transpose_pitch(input: &str) -> Result<String, PitchError> {
+    let (note, shift) = input
+        .split_once('@')
+        .ok_or(PitchError::TransposeArguments)?;
+    let note = i32::from(parse_written_pitch(note)?);
+    let shift = shift
+        .trim()
+        .parse::<i16>()
+        .map_err(|_| PitchError::TransposeArguments)?;
+    let target = u8::try_from(note + i32::from(shift))
+        .ok()
+        .filter(|note| *note <= MAX_MIDI_NOTE)
+        .ok_or(PitchError::MidiRange)?;
+    format_pitch(target)
+}
+
+fn pitch_interval(input: &str) -> Result<String, PitchError> {
+    let (first, second) = input.split_once('@').ok_or(PitchError::IntervalArguments)?;
+    let distance = i32::from(parse_written_pitch(second)?) - i32::from(parse_written_pitch(first)?);
+    Ok(format!("{distance} 半音 · {} 音分", distance * 100))
 }
 
 fn parse_note(input: &str) -> Result<u8, PitchError> {
@@ -128,6 +169,29 @@ fn nearest_pitch(frequency: f64) -> Result<String, PitchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transposes_and_compares_written_pitches() {
+        assert_eq!(convert_pitch("转调 Bb3 @ 2"), convert_pitch("C4"));
+        assert_eq!(
+            convert_pitch("TRANSPOSE MIDI 81 @ -12"),
+            convert_pitch("A4")
+        );
+        assert_eq!(convert_pitch("转调 B#3 @ 0"), convert_pitch("C4"));
+        for (query, expected) in [
+            ("音程 C4 @ G4", "7 半音 · 700 音分"),
+            ("音程 G4 @ C4", "-7 半音 · -700 音分"),
+            ("interval MIDI 61 @ Db4", "0 半音 · 0 音分"),
+        ] {
+            assert_eq!(convert_pitch(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(convert_pitch("转调 G9 @ 1"), Err(PitchError::MidiRange));
+        assert_eq!(
+            convert_pitch("转调 A4 @ 1/2"),
+            Err(PitchError::TransposeArguments)
+        );
+        assert_eq!(convert_pitch("音程 A4"), Err(PitchError::IntervalArguments));
+    }
 
     #[test]
     fn converts_named_notes_midi_numbers_and_frequencies() {

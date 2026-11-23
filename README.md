@@ -341,6 +341,7 @@
 - 单位可紧跟括号内的算式。例如 `(2**10)B to KiB` 得到 `1 KiB`，`((2 + 1/2) * 2)km to m` 得到 `5000 m`。只输入带单位的算式，也可选择换算目标。
 - 输入 `周期: 50 Hz to ms` 得到 `20 ms`，输入 `周期: 2.5 ms to Hz` 得到 `400 Hz`。周期与频率互为倒数，省略目标单位时会按结果大小选择单位。
 - 输入 `音高: A4` 或 `音高: MIDI 69` 得到 `A4 · MIDI 69 · 440 Hz`。输入 `音高: 442 Hz` 可查到最近的音名 `A4` 和偏高 `7.85 音分`。采用 A4 为 440 Hz 的十二平均律，支持 MIDI 0 至 127，以及 `#`、`b`、`♯`、`♭`。结果中的音名统一用升号表示。 [UNSW 音名、MIDI 编号与频率换算](https://newt.phys.unsw.edu.au/jw/notes.html)
+- 输入 `音高: 转调 Bb3 @ 2` 可把音高升两个半音，得到 `C4`。用 `音高: 音程 C4 @ G4` 可算出 `7 半音 · 700 音分`，交换两端会反转正负号。音高可写音名或 MIDI 编号。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
 - 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。
 - 输入 `1 lbf·ft to N·m` 可将磅力英尺换算为牛米，得到约 `1.3558179483314 N·m`。也可使用 `lbf·in`、`kgf·m`、`N·cm` 或 `kN·m`。只填写数值和来源单位时可选择目标。 [NIST 力矩与扭矩换算](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)
