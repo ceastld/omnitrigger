@@ -55,6 +55,7 @@ use super::{
         median_sorted_values, plot_box_unweighted, report_box_unweighted, summarize_unweighted,
         RunningTotals, StatisticsError, MAX_VALUES,
     },
+    table_preview::TablePreview,
     text_tools::{
         compare_natural, compile_regex, grapheme_common_substring, grapheme_edit_distance,
         newline_pattern, regex_group_index, replace_literal_matches, replace_regex_matches,
@@ -1040,6 +1041,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
+        "表格预览" | "table-preview" => {
+            read_table_for_preview(input)?;
+            return Ok(input.to_owned());
+        }
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
         "函数近似筛选" | "filter-function-near" => return filter_near_function_rows(input),
@@ -5863,6 +5868,24 @@ fn order_records<'a>(
         ordered
     };
     Ok(ordered)
+}
+
+pub(super) fn table_preview_arguments(query: &str) -> Option<&str> {
+    let (operation, data) = split_argument(query)?;
+    (operation == "表格预览" || operation.eq_ignore_ascii_case("table-preview")).then_some(data)
+}
+
+pub(super) fn build_table_preview(input: &str) -> Result<(String, TablePreview), CsvError> {
+    let rows = read_table_for_preview(input)?;
+    Ok((input.to_owned(), TablePreview::from_rows(rows)))
+}
+
+fn read_table_for_preview(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+    let data = input.strip_prefix('\u{feff}').unwrap_or(input);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    read_rows(data, ',')
 }
 
 pub(super) fn csv_count_chart(query: &str) -> Option<Result<(String, BinPlot), CsvError>> {

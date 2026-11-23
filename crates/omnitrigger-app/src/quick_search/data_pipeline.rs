@@ -12,9 +12,9 @@ use super::{
     correlation_plot::CorrelationPlot,
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, build_column_box_plot,
-        build_correlation_plot, build_scatter_plot, column_box_plot_arguments,
-        correlation_plot_arguments, csv_count_chart, scatter_arguments, transform_csv,
-        ColumnReference, CsvError,
+        build_correlation_plot, build_scatter_plot, build_table_preview, column_box_plot_arguments,
+        correlation_plot_arguments, csv_count_chart, scatter_arguments, table_preview_arguments,
+        transform_csv, ColumnReference, CsvError,
     },
     decibel::convert_decibels,
     duration::convert_duration,
@@ -35,6 +35,7 @@ use super::{
         bin_plot_arguments, box_plot_arguments, calculate_bin_plot, calculate_box_plot,
         calculate_statistics, cumulative_plot_arguments, plot_cumulative_distribution,
     },
+    table_preview::TablePreview,
     tempo::calculate_tempo,
     text_tools::transform_text,
     timestamp::convert_timestamp,
@@ -149,32 +150,33 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
     }
 }
 
-pub(super) enum PipelineChart {
+pub(super) enum PipelinePreview {
     Scatter(ScatterPlot),
     BoxPlot(BoxPlot),
     Bins(BinPlot),
     Correlation(CorrelationPlot),
+    Table(TablePreview),
 }
 
 enum PipelineView<'a> {
     Text,
     Trace,
-    Chart(&'a mut Option<PipelineChart>),
+    Preview(&'a mut Option<PipelinePreview>),
 }
 
 pub(super) fn transform_data_pipeline(
     input: &str,
     now: DateTime<FixedOffset>,
-) -> Result<(String, Option<PipelineChart>), DataPipelineError> {
-    let mut chart = None;
-    let text = run_data_pipeline(input, now, &mut chart)?;
-    Ok((text, chart))
+) -> Result<(String, Option<PipelinePreview>), DataPipelineError> {
+    let mut preview = None;
+    let text = run_data_pipeline(input, now, &mut preview)?;
+    Ok((text, preview))
 }
 
 fn run_data_pipeline(
     input: &str,
     now: DateTime<FixedOffset>,
-    chart: &mut Option<PipelineChart>,
+    preview: &mut Option<PipelinePreview>,
 ) -> Result<String, DataPipelineError> {
     let (mode, input) = split_pipeline_input(input);
     let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
@@ -241,7 +243,7 @@ fn run_data_pipeline(
             if mode == DataPipelineMode::StepsCsv {
                 PipelineView::Trace
             } else {
-                PipelineView::Chart(chart)
+                PipelineView::Preview(preview)
             },
             PipelineLocation::Whole,
             &mut remaining_work,
@@ -427,19 +429,19 @@ fn run_pipeline_steps(
         if command == "依次处理" || command.eq_ignore_ascii_case("pipeline") {
             return Err(error("请把子步骤直接写在同一个列表中"));
         }
-        let plotted = match &mut view {
-            PipelineView::Chart(chart) if index == steps.len() => {
-                prepare_pipeline_chart(scope, &query, &error, &csv_error)
+        let preview_text = match &mut view {
+            PipelineView::Preview(preview) if index == steps.len() => {
+                prepare_pipeline_preview(scope, &query, &error, &csv_error)
                     .transpose()?
-                    .map(|(text, plot)| {
-                        **chart = Some(plot);
+                    .map(|(text, prepared)| {
+                        **preview = Some(prepared);
                         text
                     })
             }
             _ => None,
         };
-        let output = if let Some(plotted) = plotted {
-            plotted
+        let output = if let Some(text) = preview_text {
+            text
         } else if scope == Scope::Csv {
             transform_csv(&query).map_err(csv_error)?
         } else {
@@ -496,74 +498,81 @@ fn run_pipeline_steps(
     Ok(trace.unwrap_or_else(|| current.into_owned()))
 }
 
-fn prepare_pipeline_chart(
+fn prepare_pipeline_preview(
     scope: Scope,
     query: &str,
     error: &impl Fn(&'static str) -> DataPipelineError,
     csv_error: &impl Fn(CsvError) -> DataPipelineError,
-) -> Option<Result<(String, PipelineChart), DataPipelineError>> {
+) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
-        Scope::Csv => scatter_arguments(query)
+        Scope::Csv => table_preview_arguments(query)
             .map(|input| {
-                build_scatter_plot(input)
-                    .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                build_table_preview(input)
+                    .map(|(text, table)| (text, PipelinePreview::Table(table)))
                     .map_err(csv_error)
+            })
+            .or_else(|| {
+                scatter_arguments(query).map(|input| {
+                    build_scatter_plot(input)
+                        .map(|(text, plot)| (text, PipelinePreview::Scatter(plot)))
+                        .map_err(csv_error)
+                })
             })
             .or_else(|| {
                 csv_count_chart(query).map(|result| {
                     result
-                        .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
+                        .map(|(text, plot)| (text, PipelinePreview::Bins(plot)))
                         .map_err(csv_error)
                 })
             })
             .or_else(|| {
                 column_box_plot_arguments(query).map(|input| {
                     build_column_box_plot(input)
-                        .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
+                        .map(|(text, plot)| (text, PipelinePreview::BoxPlot(plot)))
                         .map_err(csv_error)
                 })
             })
             .or_else(|| {
                 super::csv_tools::column_cumulative_plot_arguments(query).map(|input| {
                     super::csv_tools::build_column_cumulative_plot(input)
-                        .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                        .map(|(text, plot)| (text, PipelinePreview::Scatter(plot)))
                         .map_err(csv_error)
                 })
             })
             .or_else(|| {
                 correlation_plot_arguments(query).map(|(input, rank)| {
                     build_correlation_plot(input, rank)
-                        .map(|(text, plot)| (text, PipelineChart::Correlation(plot)))
+                        .map(|(text, plot)| (text, PipelinePreview::Correlation(plot)))
                         .map_err(csv_error)
                 })
             }),
         Scope::Equation => equation_chart(query).map(|result| {
             result
-                .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                .map(|(text, plot)| (text, PipelinePreview::Scatter(plot)))
                 .map_err(|cause| error(cause.message()))
         }),
         Scope::LinearFit => plot_request(query).map(|request| {
             calculate_plot(request)
-                .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                .map(|(text, plot)| (text, PipelinePreview::Scatter(plot)))
                 .map_err(|cause| error(cause.message()))
         }),
         Scope::Statistics => box_plot_arguments(query)
             .map(|input| {
                 calculate_box_plot(input)
-                    .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
+                    .map(|(text, plot)| (text, PipelinePreview::BoxPlot(plot)))
                     .map_err(|cause| error(cause.message()))
             })
             .or_else(|| {
                 bin_plot_arguments(query).map(|input| {
                     calculate_bin_plot(input)
-                        .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
+                        .map(|(text, plot)| (text, PipelinePreview::Bins(plot)))
                         .map_err(|cause| error(cause.message()))
                 })
             })
             .or_else(|| {
                 cumulative_plot_arguments(query).map(|input| {
                     plot_cumulative_distribution(input)
-                        .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                        .map(|(text, plot)| (text, PipelinePreview::Scatter(plot)))
                         .map_err(|cause| error(cause.message()))
                 })
             }),

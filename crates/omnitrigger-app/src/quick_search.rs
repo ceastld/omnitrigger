@@ -47,6 +47,7 @@ mod scope;
 mod settings_sections;
 mod solid;
 mod statistics;
+mod table_preview;
 mod tempo;
 mod text_tools;
 mod timecode;
@@ -100,7 +101,7 @@ use conversion::{
     suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
-use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelineChart};
+use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelinePreview};
 use decibel::{convert_decibels, DecibelError};
 use duration::{convert_duration, is_clock_duration, DurationError};
 use equation::{solve_equation, solve_linear_system, EquationError};
@@ -211,14 +212,15 @@ struct ResultValue {
 }
 
 impl ResultValue {
-    fn is_chart(&self) -> bool {
-        matches!(
-            &self.kind,
-            ValueKind::Scatter(_)
-                | ValueKind::BoxPlot(_)
-                | ValueKind::BinPlot(_)
-                | ValueKind::CorrelationPlot(_)
-        )
+    fn visual_preview_height(&self) -> Option<f32> {
+        match &self.kind {
+            ValueKind::Table(table) => Some(table.preview_height()),
+            ValueKind::CorrelationPlot(plot) => Some(plot.preview_height()),
+            ValueKind::Scatter(_) | ValueKind::BoxPlot(_) | ValueKind::BinPlot(_) => {
+                Some(scatter_plot::PREVIEW_HEIGHT)
+            }
+            _ => None,
+        }
     }
 
     fn continuation_hint(&self) -> Option<&'static str> {
@@ -251,6 +253,7 @@ enum ValueKind {
     BoxPlot(box_plot::BoxPlot),
     BinPlot(bin_plot::BinPlot),
     CorrelationPlot(correlation_plot::CorrelationPlot),
+    Table(table_preview::TablePreview),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1048,7 +1051,16 @@ impl Results {
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 Scope::Toml => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
                 Scope::Csv => {
-                    if let Some(arguments) = csv_tools::scatter_arguments(term) {
+                    if let Some(arguments) = csv_tools::table_preview_arguments(term) {
+                        Self::Value(
+                            csv_tools::build_table_preview(arguments)
+                                .map(|(text, table)| ResultValue {
+                                    text,
+                                    kind: ValueKind::Table(table),
+                                })
+                                .map_err(ValueError::Csv),
+                        )
+                    } else if let Some(arguments) = csv_tools::scatter_arguments(term) {
                         Self::plot_value(
                             csv_tools::build_scatter_plot(arguments).map_err(ValueError::Csv),
                         )
@@ -1095,15 +1107,16 @@ impl Results {
                 Scope::DataPipeline => Self::Value(
                     transform_data_pipeline(term, chrono::Local::now().fixed_offset())
                         .map_err(ValueError::DataPipeline)
-                        .map(|(text, chart)| ResultValue {
+                        .map(|(text, preview)| ResultValue {
                             text,
-                            kind: match chart {
-                                Some(PipelineChart::Scatter(plot)) => ValueKind::Scatter(plot),
-                                Some(PipelineChart::BoxPlot(plot)) => ValueKind::BoxPlot(plot),
-                                Some(PipelineChart::Bins(plot)) => ValueKind::BinPlot(plot),
-                                Some(PipelineChart::Correlation(plot)) => {
+                            kind: match preview {
+                                Some(PipelinePreview::Scatter(plot)) => ValueKind::Scatter(plot),
+                                Some(PipelinePreview::BoxPlot(plot)) => ValueKind::BoxPlot(plot),
+                                Some(PipelinePreview::Bins(plot)) => ValueKind::BinPlot(plot),
+                                Some(PipelinePreview::Correlation(plot)) => {
                                     ValueKind::CorrelationPlot(plot)
                                 }
+                                Some(PipelinePreview::Table(table)) => ValueKind::Table(table),
                                 None => ValueKind::Text,
                             },
                         }),
@@ -1433,7 +1446,7 @@ impl Results {
     fn value_preview_expandable(&self) -> bool {
         matches!(
             self,
-            Self::Value(Ok(value)) if value.is_chart()
+            Self::Value(Ok(value)) if value.visual_preview_height().is_some()
                 || value_preview::lines(&value.text).nth(MAX_VALUE_LINES).is_some()
         )
     }
@@ -1444,11 +1457,10 @@ impl Results {
                 132. + items.len().min(DESTINATION_PAGE_SIZE) as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => {
-                if value.is_chart() && value_line_limit == MAX_VALUE_LINES {
-                    let preview = match &value.kind {
-                        ValueKind::CorrelationPlot(plot) => plot.preview_height(),
-                        _ => scatter_plot::PREVIEW_HEIGHT,
-                    };
+                if let Some(preview) = value
+                    .visual_preview_height()
+                    .filter(|_| value_line_limit == MAX_VALUE_LINES)
+                {
                     return 158. + preview + 52.;
                 }
                 let hints = usize::from(value.continuation_hint().is_some())
@@ -2792,9 +2804,9 @@ impl QuickSearch {
             })
     }
 
-    fn render_chart(
+    fn render_visual_preview(
         legend: Div,
-        chart: Div,
+        preview: Div,
         copy_label: &'static str,
         view_label: &'static str,
         cx: &mut Context<Self>,
@@ -2811,15 +2823,15 @@ impl QuickSearch {
                     .justify_between()
                     .child(legend)
                     .child(
-                        button("copy-chart", copy_label, Tone::Primary, true)
+                        button("copy-visual-result", copy_label, Tone::Primary, true)
                             .flex_none()
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     ),
             )
-            .child(chart)
+            .child(preview)
             .child(
                 Self::selection_hint(view_label)
-                    .id("chart-data")
+                    .id("visual-result-data")
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(theme::ACCENT)))
                     .on_click(
@@ -2832,9 +2844,19 @@ impl QuickSearch {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         match &self.results {
             Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(table),
+                ..
+            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
+                table.legend(),
+                table.render(),
+                "复制 CSV  Enter",
+                "F2 查看原文",
+                cx,
+            ),
+            Results::Value(Ok(ResultValue {
                 kind: ValueKind::Scatter(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
@@ -2844,7 +2866,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::BoxPlot(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制摘要  Enter",
@@ -2854,7 +2876,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::BinPlot(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
@@ -2864,7 +2886,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::CorrelationPlot(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
@@ -2974,12 +2996,11 @@ impl QuickSearch {
                         )
                     })
                     .when(self.results.value_preview_expandable(), |result| {
-                        let hint = if output.is_chart() {
-                            "F2 返回图形"
-                        } else if self.expanded_value_pages.is_some() {
-                            "F2 收起预览"
-                        } else {
-                            "F2 展开预览"
+                        let hint = match &output.kind {
+                            ValueKind::Table(_) => "F2 返回表格",
+                            _ if output.visual_preview_height().is_some() => "F2 返回图形",
+                            _ if self.expanded_value_pages.is_some() => "F2 收起预览",
+                            _ => "F2 展开预览",
                         };
                         let page_count = self.expanded_value_pages.as_ref().map_or(0, Vec::len);
                         result.child(
@@ -4095,6 +4116,42 @@ mod tests {
             transform_csv("列箱线摘要 2 编号,金额\nA,\nB,待定"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn csv_table_preview_keeps_original_csv_for_copy_and_later_pipeline_steps() {
+        let input = "编号,金额,备注\r\n001,3.50,\"甲,乙\"\r\n002,2,\"带\r\n换行\"";
+        let direct = for_query(&format!("CSV: 表格预览 {input}"), &[]);
+        assert!(matches!(
+            &direct,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(_),
+                ..
+            }))
+        ));
+        assert!(direct.value_preview_expandable());
+        assert_eq!(direct.refillable_text(), Some(input));
+        let pipeline = for_query(
+            r#"处理: ["文本: 拆分成行 \";\"","CSV: 表格预览"] 货品,数量;茶,2;米,3"#,
+            &[],
+        );
+        assert!(matches!(
+            &pipeline,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(_),
+                ..
+            }))
+        ));
+        assert_eq!(pipeline.refillable_text(), Some("货品,数量\n茶,2\n米,3"));
+        let continued = for_query(
+            &format!(r#"处理: ["CSV: 表格预览","CSV: 选列 2"] {input}"#),
+            &[],
+        );
+        assert_eq!(continued.refillable_text(), Some("金额\r\n3.50\r\n2"));
+        assert_eq!(
+            transform_csv("表格预览 A,B\n1"),
+            Err(CsvError::DifferentColumnCount)
+        );
     }
 
     #[test]

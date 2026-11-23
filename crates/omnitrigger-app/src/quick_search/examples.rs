@@ -3982,6 +3982,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按列预览 CSV 并保留完整原文",
+        query: "CSV: 表格预览 编号,金额,备注\n001,3.50,\"甲,乙\"\n002,2,\"带\n换行\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "由 CSV 生成 Markdown 表格",
         query: "CSV: Markdown 编号,备注\n001,茶|咖啡",
     },
