@@ -728,6 +728,7 @@ enum Operation {
         any: bool,
     },
     CountByColumns(Vec<ColumnReference>),
+    FrequencyByColumns(Vec<ColumnReference>),
     AggregateByColumns {
         columns: Vec<ColumnReference>,
         amount: ColumnReference,
@@ -2005,6 +2006,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CountByColumns(columns)
         }
+        "分组频数" | "group-frequency" => {
+            let (columns, data) = column_reference_arguments(input, CsvError::GroupingColumns)?;
+            input = data;
+            Operation::FrequencyByColumns(columns)
+        }
         "分组合计" | "group-sum" | "分组平均" | "group-average" | "分组最小" | "group-min"
         | "分组最大" | "group-max" | "分组极差" | "group-range" => {
             let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
@@ -2561,6 +2567,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         } => filter_column(&rows, column, &condition, keep_matches),
         Operation::FilterMultiple { filters, any } => filter_multiple_columns(&rows, &filters, any),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
+        Operation::FrequencyByColumns(columns) => frequencies_by_columns(&rows, &columns),
         Operation::AggregateByColumns {
             columns,
             amount,
@@ -4579,14 +4586,56 @@ fn resolve_distinct_columns(
 fn count_by_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
+    Ok(grouped_csv(
+        header,
+        &columns,
+        group_counts(records, &columns),
+        "计数",
+    ))
+}
+
+fn group_counts<'a>(
+    records: &'a [Vec<String>],
+    columns: &[usize],
+) -> HashMap<Vec<&'a str>, (usize, usize)> {
     let mut groups = HashMap::new();
     for (position, row) in records.iter().enumerate() {
         groups
-            .entry(column_key(row, &columns))
+            .entry(column_key(row, columns))
             .and_modify(|(_, count)| *count += 1)
             .or_insert((position, 1_usize));
     }
-    Ok(grouped_csv(header, &columns, groups, "计数"))
+    groups
+}
+
+fn frequencies_by_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
+    let mut groups: Vec<_> = group_counts(records, &columns).into_iter().collect();
+    groups.sort_unstable_by_key(|(_, (position, count))| (std::cmp::Reverse(*count), *position));
+    let mut output = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(
+        &mut output,
+        columns
+            .iter()
+            .map(|&index| header[index].as_str())
+            .chain(["次数", "频率"]),
+        limit,
+    )?;
+    for (key, (_, count)) in groups {
+        let fraction = BigRational::new(count.into(), records.len().into()).to_string();
+        let count = count.to_string();
+        append_bounded_csv_row(
+            &mut output,
+            key.into_iter().chain([count.as_str(), fraction.as_str()]),
+            limit,
+        )?;
+    }
+    Ok(output)
 }
 
 fn aggregate_by_columns(
@@ -6154,6 +6203,19 @@ mod tests {
             transform_csv("分组拟合 [[1],[2,3]] 地区,x,y\n北,1,3\n南,2,待定"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn groups_raw_csv_values_by_frequency_and_uses_first_seen_order_for_ties() {
+        let data = "编号,状态\n001,完\n1,待\n001,完\n\"\",\"\"\n\"\",\"\"\n001,完\n1,待";
+        assert_eq!(
+            transform_csv(&format!(r#"分组频数 ["编号",2] {data}"#)).as_deref(),
+            Ok("编号,状态,次数,频率\r\n001,完,3,3/7\r\n1,待,2,2/7\r\n\"\",\"\",2,2/7")
+        );
+        assert_eq!(
+            transform_csv("group-frequency [1] 编号").as_deref(),
+            Ok("编号,次数,频率")
+        );
     }
 
     #[test]
