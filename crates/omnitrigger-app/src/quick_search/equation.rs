@@ -301,6 +301,10 @@ fn solve_equation_text(
                 return format_function_samples(&integral_samples(arguments)?, "累计积分");
             }
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
+            "数值切线" | "numeric-tangent" => {
+                return numeric_tangent_or_normal(arguments, false)
+            }
+            "数值法线" | "numeric-normal" => return numeric_tangent_or_normal(arguments, true),
             "平均变化率" | "average-rate" => return function_average_rate(arguments),
             "数值二阶导数" | "numeric-second-derivative" => {
                 return numeric_second_derivative(arguments)
@@ -1613,6 +1617,30 @@ fn function_average_rate(input: &str) -> Result<String, EquationError> {
     ))
 }
 
+fn numeric_tangent_or_normal(input: &str, normal: bool) -> Result<String, EquationError> {
+    let (expression, x, step) = derivative_input(input, derivative_step)?;
+    let (y, derivative) = estimate_value_and_derivative(expression, x, step)?;
+    let x = format_coordinate(x);
+    let y = format_coordinate(y);
+    let step = format_result(step).map_err(EquationError::Approximation)?;
+    let line = if normal && derivative == 0.0 {
+        format!("x ≈ {x}")
+    } else {
+        let slope = if normal {
+            -1.0 / derivative
+        } else {
+            derivative
+        };
+        if slope == 0.0 {
+            format!("y ≈ {y}")
+        } else {
+            let slope = format_result(slope).map_err(EquationError::Approximation)?;
+            format!("y ≈ {slope}*(x - ({x})) + ({y})")
+        }
+    };
+    Ok(format!("{line}\r\n切点 ({x}, {y}) · 步长 {step}"))
+}
+
 fn numeric_derivative(input: &str) -> Result<String, EquationError> {
     let (expression, x, step) = derivative_input(input, derivative_step)?;
     let value = estimate_derivative(expression, x, step)?;
@@ -1676,13 +1704,21 @@ fn derivative_coordinates(x: f64, step: f64) -> Result<[f64; 2], EquationError> 
 }
 
 fn estimate_derivative(expression: &str, x: f64, step: f64) -> Result<f64, EquationError> {
+    estimate_value_and_derivative(expression, x, step).map(|(_, derivative)| derivative)
+}
+
+fn estimate_value_and_derivative(
+    expression: &str,
+    x: f64,
+    step: f64,
+) -> Result<(f64, f64), EquationError> {
     let [lower, upper] = derivative_coordinates(x, step)?;
     let value_at =
         |position| evaluate_at_x(expression, position).map_err(EquationError::Approximation);
-    value_at(x)?;
+    let center = value_at(x)?;
     let derivative = difference_quotient(lower, upper, value_at(lower)?, value_at(upper)?);
     if derivative.is_finite() {
-        Ok(derivative)
+        Ok((center, derivative))
     } else {
         Err(EquationError::Approximation(CalculationError::OutOfRange))
     }
@@ -3038,6 +3074,32 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn builds_numeric_tangents_and_normals_at_regular_or_stationary_points() {
+        assert_eq!(
+            solve_equation("数值切线 f(x)=x² @ 2; 0.5").as_deref(),
+            Ok("y ≈ 4*(x - (2)) + (4)\r\n切点 (2, 4) · 步长 0.5")
+        );
+        assert_eq!(
+            solve_equation("数值法线 x² @ 2; 0.5").as_deref(),
+            Ok("y ≈ -0.25*(x - (2)) + (4)\r\n切点 (2, 4) · 步长 0.5")
+        );
+        assert_eq!(
+            solve_equation("numeric-tangent 3 @ 1; 0.5").as_deref(),
+            Ok("y ≈ 3\r\n切点 (1, 3) · 步长 0.5")
+        );
+        assert_eq!(
+            solve_equation("numeric-normal 3 @ 1; 0.5").as_deref(),
+            Ok("x ≈ 1\r\n切点 (1, 3) · 步长 0.5")
+        );
+        assert_eq!(
+            solve_equation("数值切线 sqrt(x) @ 0; 0.1"),
+            Err(EquationError::Approximation(
+                CalculationError::FunctionDomain
+            ))
         );
     }
 
