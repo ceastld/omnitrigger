@@ -41,6 +41,9 @@ pub(super) enum ConversionError {
     InvalidBatteryEnergy,
     InvalidPeriod,
     InvalidPeriodTarget,
+    InvalidWave,
+    InvalidWaveSpeed,
+    InvalidWaveTarget,
     OutOfRange,
     TooLong,
 }
@@ -83,6 +86,9 @@ impl ConversionError {
             Self::InvalidBatteryEnergy => "填写容量和标称电压，例如 电池能量 2500 mAh @ 3.7 V",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
             Self::InvalidPeriodTarget => "频率请选择时间单位，周期请选择频率单位",
+            Self::InvalidWave => "输入大于零的频率或波长，例如 2.4 GHz to mm 或 500 nm to THz",
+            Self::InvalidWaveSpeed => "在 @ 后填写大于零的传播速度，例如 343 m/s",
+            Self::InvalidWaveTarget => "频率请选择长度单位，波长请选择频率单位",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -153,7 +159,7 @@ impl Dimension {
             Self::Pressure => &[
                 "Pa", "kPa", "bar", "psi", "atm", "hPa", "MPa", "mPa", "Torr",
             ],
-            Self::Frequency => &["Hz", "kHz", "MHz", "GHz", "mHz"],
+            Self::Frequency => &["Hz", "kHz", "MHz", "GHz", "mHz", "THz"],
             Self::Energy => &["J", "kJ", "MJ", "Wh", "kWh", "mJ", "mWh", "MWh"],
             Self::Power => &["W", "kW", "mW", "MW", "GW"],
             Self::Density => &["kg/m³", "g/cm³", "g/L", "kg/L"],
@@ -345,6 +351,7 @@ impl Unit {
             "毫赫兹" | "毫赫" => Self::linear("mHz", Frequency, 0.001),
             "兆赫兹" | "兆赫" => Self::linear("MHz", Frequency, 1_000_000.),
             "ghz" | "吉赫兹" | "吉赫" => Self::linear("GHz", Frequency, 1_000_000_000.),
+            "thz" | "太赫兹" | "太赫" => Self::linear("THz", Frequency, 1_000_000_000_000.),
             "j" | "焦" | "焦耳" => Self::linear("J", Energy, 1.),
             "kj" | "千焦" | "千焦耳" => Self::linear("kJ", Energy, 1000.),
             "毫焦" | "毫焦耳" => Self::linear("mJ", Energy, 0.001),
@@ -1176,16 +1183,7 @@ pub(super) fn convert_period(query: &str) -> Result<String, ConversionError> {
                 _ => "ns",
             },
         ),
-        Dimension::Time => (
-            Dimension::Frequency,
-            match reciprocal {
-                value if value >= 1e9 => "GHz",
-                value if value >= 1e6 => "MHz",
-                value if value >= 1e3 => "kHz",
-                value if value < 1. => "mHz",
-                _ => "Hz",
-            },
-        ),
+        Dimension::Time => (Dimension::Frequency, default_frequency_unit(reciprocal)),
         _ => return Err(ConversionError::InvalidPeriod),
     };
     let target = target.unwrap_or(default);
@@ -1197,6 +1195,75 @@ pub(super) fn convert_period(query: &str) -> Result<String, ConversionError> {
         return Err(ConversionError::InvalidPeriodTarget);
     }
     let result = reciprocal / target.scale;
+    if result == 0. {
+        return Err(ConversionError::OutOfRange);
+    }
+    let result = format_result(result).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{result} {}", target.symbol))
+}
+
+fn default_frequency_unit(value: f64) -> &'static str {
+    match value {
+        value if value >= 1e9 => "GHz",
+        value if value >= 1e6 => "MHz",
+        value if value >= 1e3 => "kHz",
+        value if value < 1. => "mHz",
+        _ => "Hz",
+    }
+}
+
+pub(super) fn convert_wave(query: &str) -> Result<String, ConversionError> {
+    const VACUUM_LIGHT_SPEED: f64 = 299_792_458.;
+
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let input = input.trim();
+    let (source, target) = split_conversion(input).map_or((input, None), |(source, target)| {
+        (source, Some(target.trim()))
+    });
+    let (source, speed) = if let Some((source, speed)) = source.split_once(['@', '＠']) {
+        let (amount, unit) =
+            parse_quantity(speed.trim()).map_err(|_| ConversionError::InvalidWaveSpeed)?;
+        if unit.dimension != Dimension::Speed || amount <= 0. {
+            return Err(ConversionError::InvalidWaveSpeed);
+        }
+        (source.trim_end(), amount * unit.scale)
+    } else {
+        (source, VACUUM_LIGHT_SPEED)
+    };
+    let (amount, unit) = parse_quantity(source)?;
+    if amount <= 0. || !matches!(unit.dimension, Dimension::Frequency | Dimension::Length) {
+        return Err(ConversionError::InvalidWave);
+    }
+    let value = speed / (amount * unit.scale);
+    if !value.is_finite() || value <= 0. {
+        return Err(ConversionError::OutOfRange);
+    }
+    let (dimension, default) = if unit.dimension == Dimension::Frequency {
+        let default = match value {
+            value if value >= 1e3 => "km",
+            value if value >= 1. => "m",
+            value if value >= 1e-2 => "cm",
+            value if value >= 1e-3 => "mm",
+            value if value >= 1e-6 => "um",
+            _ => "nm",
+        };
+        (Dimension::Length, default)
+    } else {
+        let default = if value >= 1e12 {
+            "THz"
+        } else {
+            default_frequency_unit(value)
+        };
+        (Dimension::Frequency, default)
+    };
+    let target = Unit::parse(target.unwrap_or(default))?;
+    if target.dimension != dimension {
+        return Err(ConversionError::InvalidWaveTarget);
+    }
+    let result = value / target.scale;
     if result == 0. {
         return Err(ConversionError::OutOfRange);
     }
@@ -1852,6 +1919,34 @@ mod tests {
             ("2e-308 ns", ConversionError::OutOfRange),
         ] {
             assert_eq!(convert_period(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn converts_wavelengths_and_frequencies_using_a_positive_propagation_speed() {
+        for (query, expected) in [
+            ("2.4 GHz to mm", "124.913524166667 mm"),
+            ("1 MHz", "299.792458 m"),
+            ("500 nm", "599.584916 THz"),
+            ("1000 Hz @ 343 m/s to cm", "34.3 cm"),
+            ("34.3 cm ＠ 343 m/s to kHz", "1 kHz"),
+            ("10 Hz @ 36 km/h", "1 m"),
+        ] {
+            assert_eq!(convert_wave(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(convert("1 THz to GHz"), Some(Ok("1000 GHz".into())));
+        for (query, error) in [
+            ("0 Hz", ConversionError::InvalidWave),
+            ("-5 m", ConversionError::InvalidWave),
+            ("1 s", ConversionError::InvalidWave),
+            ("1 Hz @ 0 m/s", ConversionError::InvalidWaveSpeed),
+            ("1 Hz @ 5 kg", ConversionError::InvalidWaveSpeed),
+            ("1 Hz @", ConversionError::InvalidWaveSpeed),
+            ("1 Hz to MHz", ConversionError::InvalidWaveTarget),
+            ("1 m to cm", ConversionError::InvalidWaveTarget),
+            ("2e-308 nm", ConversionError::OutOfRange),
+        ] {
+            assert_eq!(convert_wave(query), Err(error), "{query}");
         }
     }
 

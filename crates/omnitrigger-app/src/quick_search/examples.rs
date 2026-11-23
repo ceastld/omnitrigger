@@ -1394,6 +1394,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "周期: 2.5 ms to Hz",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把频率换算为真空中的波长",
+        query: "波长: 2.4 GHz to mm",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用给定传播速度从波长计算频率",
+        query: "波长: 34.3 cm @ 343 m/s to kHz",
+    },
+    Example {
         icon: Icon::Layers,
         title: "化简宽高比",
         query: "宽高比: 1920×1080",
@@ -4910,6 +4920,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Renminbi
         | Scope::Circuit
         | Scope::Period
+        | Scope::Wave
         | Scope::Pitch
         | Scope::Decibel
         | Scope::Solid
@@ -5087,6 +5098,7 @@ mod tests {
             Scope::Renminbi,
             Scope::Circuit,
             Scope::Period,
+            Scope::Wave,
             Scope::Pitch,
             Scope::Decibel,
             Scope::Solid,
