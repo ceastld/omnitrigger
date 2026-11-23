@@ -14,7 +14,7 @@ use super::matrix::{general_solution, MatrixError, MAX_DIMENSION};
 use super::operators::{split_top_level_commas, visit_additive_terms, NumberComparison};
 use super::plane::{parse_point, PointError};
 use super::scatter_plot::ScatterPlot;
-use super::scientific::interpolate_between;
+use super::scientific::{interpolate_between, named_value, split_name};
 
 const MAX_ROOT_CANDIDATES: usize = 64;
 const FUNCTION_PLOT_INTERVALS: u32 = 32;
@@ -638,13 +638,28 @@ fn split_function_arguments(
 ) -> Result<(&str, &str), EquationError> {
     let (expression, arguments) = input.split_once('@').ok_or(invalid)?;
     let expression = match expression.split_once('=') {
-        Some((name, formula)) if name.trim().eq_ignore_ascii_case("y") => formula.trim(),
+        Some((label, formula)) if has_x_function_label(label) => formula.trim(),
         _ => expression.trim(),
     };
     if expression.is_empty() {
         return Err(invalid);
     }
     Ok((expression, arguments))
+}
+
+fn has_x_function_label(label: &str) -> bool {
+    let label = label.trim();
+    if label.eq_ignore_ascii_case("y") {
+        return true;
+    }
+    let (name, rest) = split_name(label);
+    name.starts_with(|character: char| character.is_ascii_alphabetic() || character == '_')
+        && named_value(name).is_none()
+        && rest
+            .trim_start()
+            .strip_prefix('(')
+            .and_then(|arguments| arguments.strip_suffix(')'))
+            .is_some_and(|argument| argument.trim().eq_ignore_ascii_case("x"))
 }
 
 fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
@@ -1856,6 +1871,24 @@ mod tests {
             solve_equation("采样图 1/x @ -1 到 1; 3").as_deref(),
             Ok("x,近似值\r\n-1,-1\r\n0,\r\n1,1")
         );
+    }
+
+    #[test]
+    fn accepts_named_one_variable_function_labels_in_calculator_equations() {
+        assert_eq!(
+            solve_equation("函数采样 f(x) = x²+1 @ 0 到 2; 3").as_deref(),
+            Ok("x,近似值\r\n0,1\r\n1,2\r\n2,5")
+        );
+        assert_eq!(
+            solve_equation("函数值 h_1 ( X ) = cosd(x) @ 180,0,90").as_deref(),
+            Ok("x,近似值\r\n180,-1\r\n0,1\r\n90,0")
+        );
+        for query in ["函数值 f(y) = x @ 1", "函数值 cos(x) = x @ 1"] {
+            assert_eq!(
+                solve_equation(query),
+                Err(EquationError::Approximation(CalculationError::Invalid))
+            );
+        }
     }
 
     #[test]

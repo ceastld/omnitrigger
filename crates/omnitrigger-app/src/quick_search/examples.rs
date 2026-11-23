@@ -246,6 +246,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用 f(x) 记法计算指定坐标的函数值",
+        query: "方程: 函数值 f(x) = cosd(x) @ 180,0,90",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用二分法求连续函数的一个近似零点",
         query: "方程: 二分求根 cos(x)-x @ 0 到 1",
     },
