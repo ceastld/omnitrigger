@@ -4788,6 +4788,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用精确插值计算指定区间的梯形积分",
+        query: "CSV: 梯形积分 [[\"时间\",\"高度\"],[\"1/2\",\"5/2\"]] 时间,高度\n3,2\n0,-2\n2,\n1,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在原表追加从最小横坐标开始的累计梯形积分",
         query: "CSV: 梯形累计列 [\"积分\",[\"时间\",\"高度\"]] 时间,高度\n3,2\n0,-1\n2,\n1,0",
     },

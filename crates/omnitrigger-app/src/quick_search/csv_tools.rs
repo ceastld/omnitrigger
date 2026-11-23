@@ -227,6 +227,9 @@ pub(super) enum CsvError {
     ScatterTooLarge,
     TrapezoidPointCount,
     TrapezoidDuplicateX,
+    TrapezoidIntervalArguments,
+    TrapezoidIntervalOrder,
+    TrapezoidIntervalRange,
     CumulativeTrapezoidColumnArguments,
     SecantColumnArguments,
     SecantPointCount,
@@ -503,6 +506,11 @@ impl CsvError {
             Self::ScatterTooLarge => "散点图 CSV 超过 1 MiB，请缩小数据范围",
             Self::TrapezoidPointCount => "梯形积分需要 2 至 64 行同时含 x 和 y 的数据",
             Self::TrapezoidDuplicateX => "梯形积分的横坐标须互不相同",
+            Self::TrapezoidIntervalArguments => {
+                "填写两个坐标列，或同时指定计算区间，例如 [[\"时间\",\"高度\"],[\"1/2\",2]]"
+            }
+            Self::TrapezoidIntervalOrder => "计算区间的左端须小于右端",
+            Self::TrapezoidIntervalRange => "计算区间须在完整样点的横坐标范围内",
             Self::CumulativeTrapezoidColumnArguments => {
                 "填写新列名和两个坐标列，例如 [\"累计积分\",[\"时间\",\"高度\"]]"
             }
@@ -5634,7 +5642,7 @@ enum TrapezoidMeasure {
 }
 
 fn trapezoid_statistic(input: &str, measure: TrapezoidMeasure) -> Result<String, CsvError> {
-    let mut table = parse_coordinate_table(input, CsvError::TrapezoidPointCount)?;
+    let mut table = read_trapezoid_samples(input)?;
     let mut value = integrate_trapezoid_samples(
         &mut table.samples,
         measure == TrapezoidMeasure::Area,
@@ -5647,6 +5655,50 @@ fn trapezoid_statistic(input: &str, measure: TrapezoidMeasure) -> Result<String,
         ensure_exact_size(&value).map_err(|_| CsvError::ComputedNumberRange)?;
     }
     Ok(value.to_string())
+}
+
+fn read_trapezoid_samples(input: &str) -> Result<CsvCoordinates, CsvError> {
+    let (argument, data) =
+        json_argument_and_data::<Box<RawValue>>(input, CsvError::ScatterColumns)?;
+    let point_count_error = CsvError::TrapezoidPointCount;
+    if let Ok(columns) = serde_json::from_str::<[ColumnReference; 2]>(argument.get()) {
+        return read_coordinate_table(data, &columns, CsvError::ScatterColumns, point_count_error);
+    }
+
+    let invalid = CsvError::TrapezoidIntervalArguments;
+    let (columns, [left, right]) =
+        serde_json::from_str::<([ColumnReference; 2], [Box<RawValue>; 2])>(argument.get())
+            .map_err(|_| invalid)?;
+    let left = coordinate_argument(&left, invalid)?;
+    let right = coordinate_argument(&right, invalid)?;
+    if left >= right {
+        return Err(CsvError::TrapezoidIntervalOrder);
+    }
+    let mut table = read_coordinate_table(data, &columns, invalid, point_count_error)?;
+    table.sort_distinct()?;
+    let first = &table.samples[0].point.0;
+    let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
+    if left < *first || right > *last {
+        return Err(CsvError::TrapezoidIntervalRange);
+    }
+
+    let left_y = interpolate_coordinate_value(&table.samples, &left)?;
+    let right_y = interpolate_coordinate_value(&table.samples, &right)?;
+    table
+        .samples
+        .retain(|sample| sample.point.0 > left && sample.point.0 < right);
+    table.samples.insert(
+        0,
+        CoordinateSample {
+            row_index: 0,
+            point: (left, left_y),
+        },
+    );
+    table.samples.push(CoordinateSample {
+        row_index: table.samples.len(),
+        point: (right, right_y),
+    });
+    Ok(table)
 }
 
 fn is_cumulative_trapezoid_plot(operation: &str) -> bool {
@@ -7345,6 +7397,38 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn measures_only_the_requested_interval_using_exact_interpolated_endpoints() {
+        let data = "x,y\n3,2\n2,\n0,-2\n1,0";
+        let input = format!("[[\"x\",\"y\"],[\"1/2\",\"5/2\"]] {data}");
+        for (operation, expected) in [
+            ("梯形积分", "7/8"),
+            ("trapezoid-mean", "7/16"),
+            ("trapezoid-area", "11/8"),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("{operation} {input}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        for (bounds, error) in [
+            ("[2,2]", CsvError::TrapezoidIntervalOrder),
+            ("[3,1]", CsvError::TrapezoidIntervalOrder),
+            ("[-1,2]", CsvError::TrapezoidIntervalRange),
+            ("[1,4]", CsvError::TrapezoidIntervalRange),
+            ("[1,\"间距\"]", CsvError::TrapezoidIntervalArguments),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("梯形积分 [[1,2],{bounds}] {data}")),
+                Err(error)
+            );
+        }
+        assert_eq!(
+            transform_csv(&format!("梯形积分 [[1,2],[0,3]] {data}")),
+            transform_csv(&format!("梯形积分 [1,2] {data}"))
+        );
     }
 
     #[test]
