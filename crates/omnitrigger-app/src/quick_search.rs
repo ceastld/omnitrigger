@@ -583,6 +583,9 @@ impl ValueError {
             Self::DataPipeline(DataPipelineError::CsvRowStep { row, index, cause }) => {
                 return format!("第 {row} 个数据行的第 {index} 步失败 · {cause}").into();
             }
+            Self::DataPipeline(DataPipelineError::CsvTableStep { index, row, cause }) => {
+                return format!("第 {index} 步失败 · 第 {row} 个数据行 · {cause}").into();
+            }
             Self::DataPipeline(DataPipelineError::JsonItemStep { item, index, cause }) => {
                 return format!("第 {item} 个数组元素的第 {index} 步失败 · {cause}").into();
             }

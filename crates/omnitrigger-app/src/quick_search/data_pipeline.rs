@@ -75,6 +75,11 @@ pub(super) enum DataPipelineError {
         index: usize,
         cause: &'static str,
     },
+    CsvTableStep {
+        index: usize,
+        row: usize,
+        cause: &'static str,
+    },
     RowStep {
         line: usize,
         index: usize,
@@ -373,6 +378,14 @@ fn run_pipeline_steps(
                 cause,
             },
         };
+        let csv_error = |cause: CsvError| match cause {
+            CsvError::DataRowValue { row, cause }
+                if matches!(location, PipelineLocation::Whole) =>
+            {
+                DataPipelineError::CsvTableStep { index, row, cause }
+            }
+            cause => error(cause.message()),
+        };
         let (raw_step, embed) = match step {
             PipelineStep::Append(command) => (command, false),
             PipelineStep::Embed(template) => (&template.command, true),
@@ -418,9 +431,8 @@ fn run_pipeline_steps(
         }
         let plotted = match &mut view {
             PipelineView::Chart(chart) if index == steps.len() => {
-                prepare_pipeline_chart(scope, &query)
-                    .transpose()
-                    .map_err(error)?
+                prepare_pipeline_chart(scope, &query, &error, &csv_error)
+                    .transpose()?
                     .map(|(text, plot)| {
                         **chart = Some(plot);
                         text
@@ -430,10 +442,11 @@ fn run_pipeline_steps(
         };
         let output = if let Some(plotted) = plotted {
             plotted
+        } else if scope == Scope::Csv {
+            transform_csv(&query).map_err(csv_error)?
         } else {
             match scope {
                 Scope::TextTools => transform_text(&query).map_err(|cause| cause.message()),
-                Scope::Csv => transform_csv(&query).map_err(|cause| cause.message()),
                 Scope::Json => transform_json(&query).map_err(|cause| cause.message()),
                 Scope::Toml => transform_toml(&query).map_err(|cause| cause.message()),
                 Scope::UrlEncoding => {
@@ -488,70 +501,72 @@ fn run_pipeline_steps(
 fn prepare_pipeline_chart(
     scope: Scope,
     query: &str,
-) -> Option<Result<(String, PipelineChart), &'static str>> {
+    error: &impl Fn(&'static str) -> DataPipelineError,
+    csv_error: &impl Fn(CsvError) -> DataPipelineError,
+) -> Option<Result<(String, PipelineChart), DataPipelineError>> {
     match scope {
         Scope::Csv => scatter_arguments(query)
             .map(|input| {
                 build_scatter_plot(input)
                     .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
-                    .map_err(|error| error.message())
+                    .map_err(csv_error)
             })
             .or_else(|| {
                 csv_count_chart(query).map(|result| {
                     result
                         .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
-                        .map_err(|error| error.message())
+                        .map_err(csv_error)
                 })
             })
             .or_else(|| {
                 column_box_plot_arguments(query).map(|input| {
                     build_column_box_plot(input)
                         .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
-                        .map_err(|error| error.message())
+                        .map_err(csv_error)
                 })
             })
             .or_else(|| {
                 super::csv_tools::column_cumulative_plot_arguments(query).map(|input| {
                     super::csv_tools::build_column_cumulative_plot(input)
                         .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
-                        .map_err(|error| error.message())
+                        .map_err(csv_error)
                 })
             })
             .or_else(|| {
                 correlation_plot_arguments(query).map(|(input, rank)| {
                     build_correlation_plot(input, rank)
                         .map(|(text, plot)| (text, PipelineChart::Correlation(plot)))
-                        .map_err(|error| error.message())
+                        .map_err(csv_error)
                 })
             }),
         Scope::Equation => function_plot_arguments(query).map(|input| {
             plot_quadratic_function(input)
                 .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
-                .map_err(|error| error.message())
+                .map_err(|cause| error(cause.message()))
         }),
         Scope::LinearFit => plot_request(query).map(|request| {
             calculate_plot(request)
                 .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
-                .map_err(|error| error.message())
+                .map_err(|cause| error(cause.message()))
         }),
         Scope::Statistics => box_plot_arguments(query)
             .map(|input| {
                 calculate_box_plot(input)
                     .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
-                    .map_err(|error| error.message())
+                    .map_err(|cause| error(cause.message()))
             })
             .or_else(|| {
                 bin_plot_arguments(query).map(|input| {
                     calculate_bin_plot(input)
                         .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
-                        .map_err(|error| error.message())
+                        .map_err(|cause| error(cause.message()))
                 })
             })
             .or_else(|| {
                 cumulative_plot_arguments(query).map(|input| {
                     plot_cumulative_distribution(input)
                         .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
-                        .map_err(|error| error.message())
+                        .map_err(|cause| error(cause.message()))
                 })
             }),
         _ => None,
@@ -734,6 +749,30 @@ mod tests {
         assert!(matches!(
             run_pipeline(r#"[{"模板":"文本: {结果}"}] 依次处理 ["大写"] tea"#),
             Err(DataPipelineError::Step { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn preserves_the_csv_table_row_in_pipeline_step_errors() {
+        let data = "地区,月份,编号\n北,一月,001\n北,一月,002";
+        let steps = r#"["文本: 去空行","CSV: 透视原值 [1,2,3]"]"#;
+        for mode in ["", "步骤CSV "] {
+            assert_eq!(
+                run_pipeline(&format!("{mode}{steps} {data}")),
+                Err(DataPipelineError::CsvTableStep {
+                    index: 2,
+                    row: 2,
+                    cause: "行与列的组合已出现，透视原值要求每个组合只出现一次",
+                })
+            );
+        }
+        assert!(matches!(
+            run_pipeline("[\"CSV: 列累计分布图 2\"] 编号,x\nA,1\nB,待定"),
+            Err(DataPipelineError::CsvTableStep {
+                index: 1,
+                row: 2,
+                ..
+            })
         ));
     }
 
