@@ -24,6 +24,7 @@ use super::{
     matrix::calculate_matrix,
     operators::json_argument_and_tail,
     path_tools::path_component,
+    percentage::compare_percentages,
     pitch::convert_pitch,
     radix::convert_arbitrary_radix,
     scatter_plot::ScatterPlot,
@@ -455,6 +456,7 @@ fn run_pipeline_steps(
                 Scope::Matrix => calculate_matrix(&query).map_err(|cause| cause.message()),
                 Scope::LinearFit => calculate_linear_fit(&query).map_err(|cause| cause.message()),
                 Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
+                Scope::Percentage => compare_percentages(&query).map_err(|cause| cause.message()),
                 Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
                 _ => return Err(error(STEP_SYNTAX)),
             }
@@ -661,6 +663,11 @@ mod tests {
                 r#"["分数: 计算","立体: 球"] 1/4+1/4"#,
                 "表面积 π · 体积 π/6",
             ),
+            (
+                r#"["分数: 计算",{"模板":"百分比: 重复变化 {结果} @ +50%,2"},"百分比: 精确变化 2 到"] 3/2+1/2"#,
+                "125%",
+            ),
+            (r#"["百分比: 精确占比 1 占"] 3"#, "33.(3)%"),
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
@@ -691,6 +698,13 @@ mod tests {
                 }),
             );
         }
+        assert!(matches!(
+            run_pipeline(r#"[{"模板":"百分比: 重复原值 {结果} @ -100%,2"}] 0"#),
+            Err(DataPipelineError::Step {
+                index: 1,
+                cause: "存在 -100% 的变动，无法唯一反推原值",
+            })
+        ));
         assert!(matches!(
             run_pipeline(r#"[{"模板":"文本: {结果}"}] 依次处理 ["大写"] tea"#),
             Err(DataPipelineError::Step { index: 1, .. })

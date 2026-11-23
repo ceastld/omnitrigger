@@ -1167,6 +1167,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在处理流程中从精确分数计算重复变动与总变化率",
+        query: r#"处理: ["分数: 计算",{"模板":"百分比: 重复变化 {结果} @ +50%,2"},"百分比: 精确变化 2 到"] 3/2+1/2"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "串接方程系数和求根",
         query: r#"处理: ["方程: 由根","方程:"] 1/2,3/2,-2"#,
     },
