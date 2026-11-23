@@ -22,6 +22,7 @@ const MAX_FUNCTION_POINTS: u32 = 129;
 const MAX_FUNCTION_INPUTS: usize = 64;
 const BISECTION_ITERATIONS: usize = 128;
 const BISECTION_RESIDUAL_RATIO: f64 = 1e-8;
+const MAX_INTEGRAL_INTERVALS: u32 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
@@ -43,6 +44,8 @@ pub(super) enum EquationError {
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
+    NumericIntegralArguments,
+    NumericIntegralIntervals,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -89,6 +92,10 @@ impl EquationError {
             }
             Self::BisectionSameSign => "两端的函数值须异号，或者一端的函数值等于零",
             Self::BisectionResidual => "区间已缩小，函数值仍未接近零。请检查函数是否连续或缩小区间",
+            Self::NumericIntegralArguments => {
+                "填写被积算式和两个不同的端点，分号后可填 2 至 128 之间的偶数"
+            }
+            Self::NumericIntegralIntervals => "当前精度无法区分积分采样点，请减少子区间数",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -143,6 +150,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
+            "数值积分" | "numeric-integral" => return numeric_integral(arguments),
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -695,13 +703,18 @@ fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, Equ
 }
 
 fn function_interval(input: &str, invalid: EquationError) -> Result<[f64; 2], EquationError> {
+    let [start, end] = function_endpoints(input, invalid)?;
+    Ok([start.min(end), start.max(end)])
+}
+
+fn function_endpoints(input: &str, invalid: EquationError) -> Result<[f64; 2], EquationError> {
     let (start, end) = input.split_once(['到', '至']).ok_or(invalid)?;
     let start = evaluate(start).map_err(EquationError::Approximation)?;
     let end = evaluate(end).map_err(EquationError::Approximation)?;
     if start == end {
         return Err(invalid);
     }
-    Ok([start.min(end), start.max(end)])
+    Ok([start, end])
 }
 
 fn bisect_function_root(input: &str) -> Result<String, EquationError> {
@@ -758,6 +771,79 @@ fn format_bisection_result(x: f64, residual: f64) -> Result<String, EquationErro
     };
     let residual = format_result(residual).map_err(EquationError::Approximation)?;
     Ok(format!("x ≈ {x}\r\n残差 |f(x)| ≈ {residual}"))
+}
+
+fn numeric_integral(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericIntegralArguments;
+    let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let (bounds, intervals) = match arguments.split_once(';') {
+        Some((bounds, intervals)) => {
+            let intervals = intervals
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|count| {
+                    (2..=MAX_INTEGRAL_INTERVALS).contains(count) && count.is_multiple_of(2)
+                })
+                .ok_or(invalid)?;
+            (bounds, intervals)
+        }
+        None => (arguments, 64),
+    };
+    let [start, end] = function_endpoints(bounds, invalid)?;
+    let mut values = Vec::with_capacity(intervals as usize + 1);
+    let mut previous = None;
+    for index in 0..=intervals {
+        let x = interpolate_between(start, end, f64::from(index) / f64::from(intervals));
+        if previous == Some(x) {
+            return Err(EquationError::NumericIntegralIntervals);
+        }
+        previous = Some(x);
+        values.push(evaluate_at_x(expression, x).map_err(EquationError::Approximation)?);
+    }
+    let value = simpson_integral(&values, start, end);
+    let display = format_result(value).map_err(EquationError::Approximation)?;
+    Ok(format!(
+        "积分 ≈ {display}\r\n复合辛普森法 · {intervals} 个子区间"
+    ))
+}
+
+fn simpson_integral(values: &[f64], start: f64, end: f64) -> f64 {
+    let intervals = values.len() - 1;
+    let scale = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return 0.0;
+    }
+    let weighted_sum: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let weight = if index == 0 || index == intervals {
+                1.0
+            } else if index.is_multiple_of(2) {
+                2.0
+            } else {
+                4.0
+            };
+            weight * (value / scale)
+        })
+        .sum();
+    let mean = (weighted_sum / (3.0 * intervals as f64)).clamp(-1.0, 1.0);
+    let span = end - start;
+    let (width, width_scale) = if span.is_finite() {
+        (span, 1.0)
+    } else {
+        // 区间横跨很大的正负端点时，先乘半宽再乘二。
+        (end * 0.5 - start * 0.5, 2.0)
+    };
+    let integral = if width.abs() <= 1.0 || scale <= 1.0 {
+        mean * (width * scale)
+    } else if width.abs() <= scale {
+        (mean * width) * scale
+    } else {
+        (mean * scale) * width
+    };
+    integral * width_scale
 }
 
 fn polynomial_integral(input: &str) -> Result<String, EquationError> {
@@ -1769,6 +1855,35 @@ mod tests {
         assert_eq!(
             solve_equation("采样图 1/x @ -1 到 1; 3").as_deref(),
             Ok("x,近似值\r\n-1,-1\r\n0,\r\n1,1")
+        );
+    }
+
+    #[test]
+    fn integrates_calculator_functions_and_preserves_interval_direction() {
+        assert_eq!(
+            solve_equation("数值积分 x**3 @ 0 到 2; 8").as_deref(),
+            Ok("积分 ≈ 4\r\n复合辛普森法 · 8 个子区间")
+        );
+        assert_eq!(
+            solve_equation("numeric-integral x**3 @ 2 到 0; 8").as_deref(),
+            Ok("积分 ≈ -4\r\n复合辛普森法 · 8 个子区间")
+        );
+        assert_eq!(
+            solve_equation("数值积分 x @ 0 到 2; 3"),
+            Err(EquationError::NumericIntegralArguments)
+        );
+        assert_eq!(
+            solve_equation("数值积分 1/x @ -1 到 1"),
+            Err(EquationError::Approximation(
+                CalculationError::DivisionByZero
+            ))
+        );
+        assert_eq!(
+            solve_equation("数值积分 x @ 1.0000000000000002 到 1; 4"),
+            Err(EquationError::NumericIntegralIntervals)
+        );
+        assert!(
+            (simpson_integral(&[1e-308; 3], -f64::MAX, f64::MAX) - 3.59538626972463).abs() < 1e-14
         );
     }
 

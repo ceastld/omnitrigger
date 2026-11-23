@@ -251,6 +251,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "估算计算器函数在指定区间的积分",
+        query: "方程: 数值积分 sin(x) @ 0 到 pi; 64",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求二次函数在给定区间上的精确定积分",
         query: "方程: 定积分 1/2,-1,3/4 @ 0 到 2",
     },
@@ -5407,6 +5412,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "采样图",
             "函数值",
             "二分求根",
+            "数值积分",
             "定积分",
             "区间极值",
         ],
