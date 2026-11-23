@@ -62,7 +62,7 @@ impl StatisticsError {
             Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
-            Self::InvalidTrimShare => "每端截去的比例须为 0 到小于 50%，例如 10%",
+            Self::InvalidTrimShare => "每端处理的比例须为 0 到小于 50%，例如 10%",
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
             Self::CumulativeThreshold => "用 @ 隔开阈值和观测值，例如 2 @ 1,2,2,3",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
@@ -115,7 +115,10 @@ enum StatisticsOperation {
     },
     MedianAbsoluteDeviation,
     MeanAbsoluteDeviation,
-    TrimmedMean(BigRational),
+    TailAdjustedMean {
+        share: BigRational,
+        winsorized: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -270,13 +273,19 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
                 values.trim(),
             )
         }
-        "截尾平均" | "trimmed-mean" => {
+        operation @ ("截尾平均" | "trimmed-mean" | "缩尾平均" | "winsorized-mean") => {
             let (share, values) = operation_and_arguments(values.trim());
             let share = parse_probability(share)?;
             if share >= BigRational::new(BigInt::from(1u8), BigInt::from(2u8)) {
                 return Err(StatisticsError::InvalidTrimShare);
             }
-            (StatisticsOperation::TrimmedMean(share), values.trim())
+            (
+                StatisticsOperation::TailAdjustedMean {
+                    share,
+                    winsorized: matches!(operation, "缩尾平均" | "winsorized-mean"),
+                },
+                values.trim(),
+            )
         }
         _ => (StatisticsOperation::Sample, input),
     };
@@ -326,8 +335,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         StatisticsOperation::MeanAbsoluteDeviation => {
             mean_absolute_deviation(values, count).map(|value| value.to_string())
         }
-        StatisticsOperation::TrimmedMean(share) => {
-            trimmed_mean(values, count, share).map(|value| value.to_string())
+        StatisticsOperation::TailAdjustedMean { share, winsorized } => {
+            tail_adjusted_mean(values, count, share, winsorized).map(|value| value.to_string())
         }
         StatisticsOperation::RootMeanSquare => {
             let squares = squared_deviation_sum(&values, &BigRational::default())?;
@@ -813,22 +822,31 @@ fn sorted_median(
     Ok(middle.clone())
 }
 
-fn trimmed_mean(
+fn tail_adjusted_mean(
     mut values: Vec<(BigRational, u64)>,
     count: u64,
     share: BigRational,
+    winsorized: bool,
 ) -> Result<BigRational, StatisticsError> {
     let trim = u64::try_from((share * BigInt::from(count)).to_integer())
         .map_err(|_| StatisticsError::FrequencyOverflow)?;
     let limit = count - trim;
     values.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let replacement_sum = if winsorized {
+        let lower = observation_at(&values, trim);
+        let upper = observation_at(&values, limit - 1);
+        (lower + upper) * BigInt::from(trim)
+    } else {
+        BigRational::default()
+    };
     let mut rank = 0;
     for (_, repetitions) in &mut values {
         let next = rank + *repetitions;
         *repetitions = next.min(limit).saturating_sub(rank.max(trim));
         rank = next;
     }
-    bounded(observation_sum(&values)? / BigInt::from(limit - trim))
+    let denominator = if winsorized { count } else { limit - trim };
+    bounded((observation_sum(&values)? + replacement_sum) / BigInt::from(denominator))
 }
 
 fn median_absolute_deviation(
@@ -1382,6 +1400,27 @@ mod tests {
         assert_eq!(
             calculate_statistics("二项累计 0,0,101%"),
             Err(StatisticsError::InvalidProbability)
+        );
+    }
+
+    #[test]
+    fn replaces_tail_values_for_winsorized_means_using_exact_frequencies() {
+        for (query, expected) in [
+            ("缩尾平均 20% 100,0,30,3,2", "67/5"),
+            ("缩尾平均 20% -100,-3,-2,-1,7", "-2"),
+            ("缩尾平均 1/5 频数 0@2,1@3,10@4,100@1", "11/2"),
+            ("WINSORIZED-MEAN 20% 频数 0@1000000000,1@1000000000", "1/2"),
+            ("缩尾平均 49% 1/3", "1/3"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("缩尾平均 50% 1,2"),
+            Err(StatisticsError::InvalidTrimShare)
         );
     }
 
