@@ -2,6 +2,7 @@ mod actions;
 mod applications;
 mod aspect_ratio;
 mod batch;
+mod box_plot;
 mod calculator;
 mod calendar;
 mod cidr;
@@ -235,6 +236,7 @@ enum ValueKind {
     Color(u32),
     ColorContrast([u32; 2]),
     Scatter(scatter_plot::ScatterPlot),
+    BoxPlot(box_plot::BoxPlot),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1069,7 +1071,18 @@ impl Results {
                     }
                 }
                 Scope::Statistics => {
-                    Self::text_value(calculate_statistics(term).map_err(ValueError::Statistics))
+                    if let Some(values) = statistics::box_plot_arguments(term) {
+                        Self::Value(
+                            statistics::calculate_box_plot(values)
+                                .map(|(text, plot)| ResultValue {
+                                    text,
+                                    kind: ValueKind::BoxPlot(plot),
+                                })
+                                .map_err(ValueError::Statistics),
+                        )
+                    } else {
+                        Self::text_value(calculate_statistics(term).map_err(ValueError::Statistics))
+                    }
                 }
                 Scope::Triangle => {
                     Self::text_value(calculate_triangle(term).map_err(ValueError::Triangle))
@@ -1337,7 +1350,7 @@ impl Results {
     fn value_preview_expandable(&self) -> bool {
         matches!(
             self,
-            Self::Value(Ok(value)) if !matches!(&value.kind, ValueKind::Scatter(_))
+            Self::Value(Ok(value)) if !matches!(&value.kind, ValueKind::Scatter(_) | ValueKind::BoxPlot(_))
                 && value_preview::lines(&value.text).nth(MAX_VALUE_LINES).is_some()
         )
     }
@@ -1348,7 +1361,7 @@ impl Results {
                 132. + items.len().min(DESTINATION_PAGE_SIZE) as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => {
-                if matches!(&value.kind, ValueKind::Scatter(_)) {
+                if matches!(&value.kind, ValueKind::Scatter(_) | ValueKind::BoxPlot(_)) {
                     return 158. + scatter_plot::PREVIEW_HEIGHT + 28.;
                 }
                 let hints = usize::from(value.continuation_hint().is_some())
@@ -2692,24 +2705,43 @@ impl QuickSearch {
             })
     }
 
+    fn render_chart(
+        legend: Div,
+        chart: Div,
+        copy_label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .h(px(38.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(legend)
+                    .child(
+                        button("copy-chart", copy_label, Tone::Primary, true)
+                            .flex_none()
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
+            )
+            .child(chart)
+    }
+
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         match &self.results {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Scatter(plot),
                 ..
-            })) => div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    row.justify_between().child(plot.legend()).child(
-                        button("copy-scatter", "复制 CSV  Enter", Tone::Primary, true)
-                            .flex_none()
-                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                    ),
-                )
-                .child(plot.render()),
+            })) => Self::render_chart(plot.legend(), plot.render(), "复制 CSV  Enter", cx),
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::BoxPlot(plot),
+                ..
+            })) => Self::render_chart(plot.legend(), plot.render(), "复制摘要  Enter", cx),
             Results::Value(Ok(output)) => {
                 let result = &output.text;
                 let line_limit = self.value_line_limit();
@@ -3864,6 +3896,25 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn box_plot_copies_the_same_exact_summary_as_the_text_command() {
+        let values = "频数 1@1,2@1,3@1,4@1,8@1";
+        let plot = for_query(&format!("统计: 箱线图 {values}"), &[]);
+        let expected = calculate_statistics(&format!("箱线摘要 {values}")).unwrap();
+        assert!(matches!(
+            &plot,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::BoxPlot(_),
+                ..
+            }))
+        ));
+        assert_eq!(plot.refillable_text(), Some(expected.as_str()));
+        assert_eq!(
+            calculate_statistics(&format!("box-plot {values}")).as_deref(),
+            Ok(expected.as_str())
+        );
     }
 
     #[test]

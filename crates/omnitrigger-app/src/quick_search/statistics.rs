@@ -3,6 +3,7 @@ use std::{borrow::Borrow, collections::BTreeMap};
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
+use super::box_plot::BoxPlot;
 use super::calculator::normalize;
 use super::fraction::{
     calculate_fraction, combination_count, ensure_exact_size, format_signed_square_root,
@@ -145,7 +146,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             StatisticsOperation::Quantiles(QuantileReport::Quartiles),
             values.trim(),
         ),
-        "箱线摘要" | "box-summary" => (
+        "箱线摘要" | "box-summary" | "箱线图" | "box-plot" => (
             StatisticsOperation::Quantiles(QuantileReport::BoxSummary),
             values.trim(),
         ),
@@ -301,22 +302,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         _ => (StatisticsOperation::Sample, input),
     };
-    let (prefix, values) = operation_and_arguments(input);
-    let use_frequencies = matches!(prefix.to_ascii_lowercase().as_str(), "频数" | "frequency");
-    let input = if use_frequencies {
-        values.trim()
-    } else {
-        input
-    };
-    let values = observation_terms(input)?
-        .into_iter()
-        .map(|term| parse_observation(term, use_frequencies))
-        .collect::<Result<Vec<_>, _>>()?;
-    let count = values.iter().try_fold(0_u64, |count, (_, repetitions)| {
-        count
-            .checked_add(*repetitions)
-            .ok_or(StatisticsError::FrequencyOverflow)
-    })?;
+    let (values, count) = read_observations(input)?;
     match operation {
         StatisticsOperation::Sample | StatisticsOperation::Population => summarize(
             values,
@@ -1170,11 +1156,7 @@ fn report_quantiles(
     let middle = quantile(&BigRational::new(1.into(), 2.into()))?;
     let quartiles = format!("Q1 {lower} · 中位数 {middle} · Q3 {upper}");
     if matches!(report, QuantileReport::BoxSummary) {
-        let (lower_fence, upper_fence) = inner_fences(&lower, &upper)?;
-        Ok(format!(
-            "{quartiles}\n{}",
-            report_box_summary(&values, &lower_fence, &upper_fence)
-        ))
+        Ok(box_details(&values, &lower, &upper)?.report(&quartiles))
     } else {
         let spread = bounded(&upper - &lower)?;
         Ok(format!("{quartiles}\n四分位距 {spread}"))
@@ -1208,29 +1190,72 @@ fn inner_fences(
     Ok((bounded(lower - &offset)?, bounded(upper + offset)?))
 }
 
-fn report_box_summary(
-    values: &[(BigRational, u64)],
-    lower_fence: &BigRational,
-    upper_fence: &BigRational,
-) -> String {
-    let first_inside = values.partition_point(|(value, _)| value < lower_fence);
-    let after_inside = values.partition_point(|(value, _)| value <= upper_fence);
+pub(super) fn box_plot_arguments(input: &str) -> Option<&str> {
+    let (operation, values) = operation_and_arguments(input.trim());
+    (operation == "箱线图" || operation.eq_ignore_ascii_case("box-plot")).then_some(values.trim())
+}
+
+pub(super) fn calculate_box_plot(input: &str) -> Result<(String, BoxPlot), StatisticsError> {
+    let input = normalize(input);
+    let (mut values, count) = read_observations(input.trim())?;
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let (lower, upper) = quartile_bounds(&values, count)?;
+    let middle = interpolate_quantile(&values, count, &BigRational::new(1.into(), 2.into()))?;
+    let details = box_details(&values, &lower, &upper)?;
+    let min = &values.first().expect("至少含一个观测值").0;
+    let max = &values.last().expect("至少含一个观测值").0;
+    let plot = BoxPlot::new(
+        [min, max],
+        [&lower, &middle, &upper],
+        details.whiskers,
+        &details.outliers,
+    );
+    let quartiles = format!("Q1 {lower} · 中位数 {middle} · Q3 {upper}");
+    Ok((details.report(&quartiles), plot))
+}
+
+struct BoxDetails<'a> {
+    fences: [BigRational; 2],
+    whiskers: [&'a BigRational; 2],
+    outliers: BTreeMap<&'a BigRational, u64>,
+}
+
+fn box_details<'a>(
+    values: &'a [(BigRational, u64)],
+    lower: &BigRational,
+    upper: &BigRational,
+) -> Result<BoxDetails<'a>, StatisticsError> {
+    let (lower_fence, upper_fence) = inner_fences(lower, upper)?;
+    let first_inside = values.partition_point(|(value, _)| value < &lower_fence);
+    let after_inside = values.partition_point(|(value, _)| value <= &upper_fence);
     let lower_whisker = &values[first_inside].0;
     let upper_whisker = &values[after_inside - 1].0;
     let mut outliers = BTreeMap::<_, u64>::new();
     for (value, repetitions) in values[..first_inside].iter().chain(&values[after_inside..]) {
         *outliers.entry(value).or_default() += repetitions;
     }
-    let outliers = if outliers.is_empty() {
-        "无".to_owned()
-    } else {
-        outliers
-            .into_iter()
-            .map(|(value, repetitions)| format!("{value}（{repetitions} 次）"))
-            .collect::<Vec<_>>()
-            .join("、")
-    };
-    format!("内围栏 {lower_fence} … {upper_fence}\n须端 {lower_whisker} … {upper_whisker}\n离群值 {outliers}")
+    Ok(BoxDetails {
+        fences: [lower_fence, upper_fence],
+        whiskers: [lower_whisker, upper_whisker],
+        outliers,
+    })
+}
+
+impl BoxDetails<'_> {
+    fn report(&self, quartiles: &str) -> String {
+        let [lower_fence, upper_fence] = &self.fences;
+        let [lower_whisker, upper_whisker] = self.whiskers;
+        let outliers = if self.outliers.is_empty() {
+            "无".to_owned()
+        } else {
+            self.outliers
+                .iter()
+                .map(|(value, repetitions)| format!("{value}（{repetitions} 次）"))
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        format!("{quartiles}\n内围栏 {lower_fence} … {upper_fence}\n须端 {lower_whisker} … {upper_whisker}\n离群值 {outliers}")
+    }
 }
 
 fn interpolate_quantile(
@@ -1256,6 +1281,28 @@ pub(super) fn interpolate_ordered_quantile<'a>(
     let upper = at_rank(rank + 1);
     let fraction = position - BigInt::from(rank);
     bounded(lower + (upper - lower) * fraction)
+}
+
+type WeightedObservations = Vec<(BigRational, u64)>;
+
+fn read_observations(input: &str) -> Result<(WeightedObservations, u64), StatisticsError> {
+    let (prefix, values) = operation_and_arguments(input);
+    let use_frequencies = matches!(prefix.to_ascii_lowercase().as_str(), "频数" | "frequency");
+    let input = if use_frequencies {
+        values.trim()
+    } else {
+        input
+    };
+    let values = observation_terms(input)?
+        .into_iter()
+        .map(|term| parse_observation(term, use_frequencies))
+        .collect::<Result<Vec<_>, _>>()?;
+    let count = values.iter().try_fold(0_u64, |count, (_, repetitions)| {
+        count
+            .checked_add(*repetitions)
+            .ok_or(StatisticsError::FrequencyOverflow)
+    })?;
+    Ok((values, count))
 }
 
 fn operation_and_arguments(input: &str) -> (&str, &str) {

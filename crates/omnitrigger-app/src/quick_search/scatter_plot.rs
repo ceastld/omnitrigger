@@ -7,7 +7,7 @@ use crate::theme::{self, rgb};
 pub(super) const PREVIEW_HEIGHT: f32 = 134.;
 const AXIS_WIDTH: f32 = 81.;
 const AXIS_GAP: f32 = 8.;
-const POSITION_STEPS: u16 = 4096;
+pub(super) const POSITION_STEPS: u16 = 4096;
 const PLOT_PADDING: f32 = 9.;
 
 #[derive(PartialEq, Eq)]
@@ -257,7 +257,11 @@ fn axis_label(text: String) -> Div {
         .child(text)
 }
 
-fn normalized_position(value: &BigRational, min: &BigRational, range: &BigRational) -> u16 {
+pub(super) fn normalized_position(
+    value: &BigRational,
+    min: &BigRational,
+    range: &BigRational,
+) -> u16 {
     if range.numer().sign() == num_bigint::Sign::NoSign {
         return POSITION_STEPS / 2;
     }

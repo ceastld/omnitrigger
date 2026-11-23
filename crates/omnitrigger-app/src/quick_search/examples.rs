@@ -396,6 +396,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 箱线摘要 100,3,1,4,2",
     },
     Example {
+        icon: Icon::Layers,
+        title: "在搜索框查看四分位数和离群观测的箱线图",
+        query: "统计: 箱线图 1,2,3,4,8",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "求绝对偏差的中位数",
         query: "统计: 中位绝对偏差 0,1/2,1,10",
@@ -5427,6 +5432,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "独立性卡方",
                     "期望频数",
                     "箱线摘要",
+                    "箱线图",
                     "截尾平均",
                     "缩尾平均",
                     "基尼系数",
