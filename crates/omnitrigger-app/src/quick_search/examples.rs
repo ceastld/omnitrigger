@@ -371,6 +371,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在同一张图对照函数和指定点的近似切线",
+        query: "方程: 数值切线图 sin(x) @ 0; -pi..pi; 33",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "根据数值切线斜率求法线",
         query: "方程: 数值法线 x² @ 2; 0.5",
     },
@@ -5638,6 +5643,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "数值导数",
             "平均变化率",
             "数值切线",
+            "数值切线图",
             "数值法线",
             "数值二阶导数",
             "导数采样",

@@ -69,6 +69,7 @@ pub(super) enum EquationError {
     NumericAreaArguments,
     NumericArcLengthArguments,
     NumericDerivativeArguments,
+    TangentPlotArguments,
     AverageRateArguments,
     NumericDerivativeStep,
     DerivativeSampleArguments,
@@ -161,6 +162,9 @@ impl EquationError {
             }
             Self::NumericDerivativeArguments => {
                 "填写要估算导数的算式和横坐标，可在分号后填写正步长"
+            }
+            Self::TangentPlotArguments => {
+                "填写函数、切点横坐标和绘图范围，例如 sin(x) @ 0; -pi..pi; 33"
             }
             Self::AverageRateArguments => {
                 "填写函数算式和两个不同的横坐标，例如 x² @ 1..3"
@@ -303,6 +307,9 @@ fn solve_equation_text(
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
             "数值切线" | "numeric-tangent" => {
                 return numeric_tangent_or_normal(arguments, false)
+            }
+            "数值切线图" | "numeric-tangent-plot" => {
+                return sample_tangent_comparison(arguments)?.csv()
             }
             "数值法线" | "numeric-normal" => return numeric_tangent_or_normal(arguments, true),
             "平均变化率" | "average-rate" => return function_average_rate(arguments),
@@ -714,6 +721,7 @@ pub(super) fn equation_chart(input: &str) -> Option<Result<(String, ScatterPlot)
         "函数对照图" | "compare-function-plot" => Some(plot_function_comparison(arguments)),
         "参数图" | "parametric-plot" => Some(plot_parametric_samples(arguments)),
         "极坐标图" | "polar-plot" => Some(plot_polar_samples(arguments)),
+        "数值切线图" | "numeric-tangent-plot" => Some(plot_tangent_comparison(arguments)),
         _ => None,
     }
 }
@@ -811,6 +819,12 @@ fn plot_samples(samples: &[(f64, Option<f64>)]) -> Result<ScatterPlot, EquationE
             [display(y_min)?, display(y_max)?],
         );
     Ok(plot)
+}
+
+fn plot_tangent_comparison(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let comparison = sample_tangent_comparison(&input)?;
+    Ok((comparison.csv()?, comparison.plot()?))
 }
 
 fn plot_function_comparison(input: &str) -> Result<(String, ScatterPlot), EquationError> {
@@ -1016,6 +1030,35 @@ fn sample_function_comparison(input: &str) -> Result<FunctionComparison, Equatio
     let invalid = EquationError::FunctionComparisonPlotArguments;
     let (expressions, bounds) = function_comparison_arguments(input, invalid)?;
     FunctionComparison::evaluate(expressions, sampled_coordinates(bounds, invalid)?.map(Ok))
+}
+
+fn sample_tangent_comparison(input: &str) -> Result<FunctionComparison, EquationError> {
+    let invalid = EquationError::TangentPlotArguments;
+    let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let (center, bounds) = arguments.split_once(';').ok_or(invalid)?;
+    let center = evaluate(center).map_err(EquationError::Approximation)?;
+    let coordinates = sampled_coordinates(bounds, invalid)?;
+    let (value, slope) =
+        estimate_value_and_derivative(expression, center, derivative_step(center))?;
+    let rows = coordinates
+        .map(|x| {
+            let function = function_sample_value(expression, x)?;
+            let offset = x - center;
+            let tangent = if slope == 0.0 {
+                value
+            } else if offset.is_finite() {
+                slope.mul_add(offset, value)
+            } else {
+                let half_offset = x * 0.5 - center * 0.5;
+                slope.mul_add(half_offset, value * 0.5) * 2.0
+            };
+            Ok((x, vec![function, tangent.is_finite().then_some(tangent)]))
+        })
+        .collect::<Result<_, EquationError>>()?;
+    Ok(FunctionComparison {
+        expressions: vec!["原函数".to_owned(), "切线".to_owned()],
+        rows,
+    })
 }
 
 fn function_comparison_arguments(
@@ -3074,6 +3117,24 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn overlays_the_numeric_tangent_on_the_sampled_function_grid() {
+        let command = "数值切线图 x @ 0; -1..1; 3";
+        let (csv, plot) = equation_chart(command).unwrap().unwrap();
+        assert_eq!(csv, "x,原函数,切线\r\n-1,-1,-1\r\n0,0,0\r\n1,1,1");
+        assert_eq!(plot.point_count(), 6);
+        assert_eq!(csv, solve_equation(command).unwrap());
+        let (csv, plot) = equation_chart("numeric-tangent-plot sqrt(x) @ 1; -1..1; 3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(plot.point_count(), 5);
+        assert!(csv.lines().nth(1).unwrap().starts_with("-1,\"\","));
+        assert_eq!(
+            solve_equation("数值切线图 x @ 0"),
+            Err(EquationError::TangentPlotArguments)
         );
     }
 
