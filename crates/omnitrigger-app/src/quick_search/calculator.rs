@@ -63,8 +63,12 @@ pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
     evaluate_with_coordinate(query, None)
 }
 
+pub(super) fn evaluate_at_x(query: &str, x: f64) -> Result<f64, CalculationError> {
+    evaluate_with_coordinate(query, Some(x))
+}
+
 pub(super) fn sample_at_x(query: &str, x: f64) -> Result<Option<f64>, CalculationError> {
-    match evaluate_with_coordinate(query, Some(x)) {
+    match evaluate_at_x(query, x) {
         Ok(value) => Ok(Some(value)),
         Err(
             CalculationError::DivisionByZero

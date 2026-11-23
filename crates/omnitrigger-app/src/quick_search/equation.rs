@@ -4,7 +4,7 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{
-    evaluate, format_result, normalize, sample_at_x, CalculationError, QUERY_LIMIT,
+    evaluate, evaluate_at_x, format_result, normalize, sample_at_x, CalculationError, QUERY_LIMIT,
 };
 use super::fraction::{
     calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
@@ -20,6 +20,8 @@ const MAX_ROOT_CANDIDATES: usize = 64;
 const FUNCTION_PLOT_INTERVALS: u32 = 32;
 const MAX_FUNCTION_POINTS: u32 = 129;
 const MAX_FUNCTION_INPUTS: usize = 64;
+const BISECTION_ITERATIONS: usize = 128;
+const BISECTION_RESIDUAL_RATIO: f64 = 1e-8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
@@ -38,6 +40,9 @@ pub(super) enum EquationError {
     FunctionSampleArguments,
     FunctionSampleHasNoValues,
     FunctionValuesArguments,
+    BisectionArguments,
+    BisectionSameSign,
+    BisectionResidual,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -79,6 +84,11 @@ impl EquationError {
             Self::FunctionValuesArguments => {
                 "填写带 x 的算式，用 @ 隔开 1 至 64 个以逗号分隔的横坐标"
             }
+            Self::BisectionArguments => {
+                "填写要求零点的算式和两个不同的端点，例如 cos(x)-x @ 0 到 1"
+            }
+            Self::BisectionSameSign => "两端的函数值须异号，或者一端的函数值等于零",
+            Self::BisectionResidual => "区间已缩小，函数值仍未接近零。请检查函数是否连续或缩小区间",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -132,6 +142,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数值" | "function-values" => {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
+            "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -643,15 +654,7 @@ fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, Equati
         }
         None => (bounds, 33),
     };
-    let (start, end) = bounds.split_once(['到', '至']).ok_or(invalid)?;
-    let mut start = evaluate(start).map_err(EquationError::Approximation)?;
-    let mut end = evaluate(end).map_err(EquationError::Approximation)?;
-    if start == end {
-        return Err(invalid);
-    }
-    if start > end {
-        std::mem::swap(&mut start, &mut end);
-    }
+    let [start, end] = function_interval(bounds, invalid)?;
     let last = count - 1;
     let mut samples = Vec::with_capacity(count as usize);
     for index in 0..count {
@@ -689,6 +692,72 @@ fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, Equ
         csv.push_str(&format!("\r\n{x},{y}"));
     }
     Ok(csv)
+}
+
+fn function_interval(input: &str, invalid: EquationError) -> Result<[f64; 2], EquationError> {
+    let (start, end) = input.split_once(['到', '至']).ok_or(invalid)?;
+    let start = evaluate(start).map_err(EquationError::Approximation)?;
+    let end = evaluate(end).map_err(EquationError::Approximation)?;
+    if start == end {
+        return Err(invalid);
+    }
+    Ok([start.min(end), start.max(end)])
+}
+
+fn bisect_function_root(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::BisectionArguments;
+    let (expression, interval) = split_function_arguments(input, invalid)?;
+    let [mut left, mut right] = function_interval(interval, invalid)?;
+    let value_at = |x| evaluate_at_x(expression, x).map_err(EquationError::Approximation);
+    let mut left_value = value_at(left)?;
+    let mut right_value = value_at(right)?;
+    if left_value == 0.0 {
+        return format_bisection_result(left, 0.0);
+    }
+    if right_value == 0.0 {
+        return format_bisection_result(right, 0.0);
+    }
+    if left_value.is_sign_negative() == right_value.is_sign_negative() {
+        return Err(EquationError::BisectionSameSign);
+    }
+    let initial_residual = left_value.abs().min(right_value.abs());
+    for _ in 0..BISECTION_ITERATIONS {
+        let middle = left.midpoint(right);
+        if middle == left || middle == right {
+            break;
+        }
+        let value = value_at(middle)?;
+        if value == 0.0 {
+            return format_bisection_result(middle, 0.0);
+        }
+        if value.is_sign_negative() == left_value.is_sign_negative() {
+            (left, left_value) = (middle, value);
+        } else {
+            (right, right_value) = (middle, value);
+        }
+    }
+    let (x, residual) = if left_value.abs() <= right_value.abs() {
+        (left, left_value.abs())
+    } else {
+        (right, right_value.abs())
+    };
+    if residual / initial_residual > BISECTION_RESIDUAL_RATIO {
+        return Err(EquationError::BisectionResidual);
+    }
+    format_bisection_result(x, residual)
+}
+
+fn format_bisection_result(x: f64, residual: f64) -> Result<String, EquationError> {
+    // 保留可无损读回的横坐标，使显示的残差对应同一个浮点数。
+    let x = if x == 0.0 {
+        "0".to_owned()
+    } else if (1e-6..1e15).contains(&x.abs()) {
+        x.to_string()
+    } else {
+        format!("{x:e}")
+    };
+    let residual = format_result(residual).map_err(EquationError::Approximation)?;
+    Ok(format!("x ≈ {x}\r\n残差 |f(x)| ≈ {residual}"))
 }
 
 fn polynomial_integral(input: &str) -> Result<String, EquationError> {
@@ -1700,6 +1769,39 @@ mod tests {
         assert_eq!(
             solve_equation("采样图 1/x @ -1 到 1; 3").as_deref(),
             Ok("x,近似值\r\n-1,-1\r\n0,\r\n1,1")
+        );
+    }
+
+    #[test]
+    fn bisects_sign_change_intervals_and_rejects_jumps_without_a_small_residual() {
+        let result = solve_equation("二分求根 cos(x)-x @ 1 到 0").unwrap();
+        let value: f64 = result
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("x ≈ ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((value - 0.7390851332151607).abs() < 1e-14);
+        assert!(result.contains("残差 |f(x)| ≈ "));
+        assert_eq!(
+            solve_equation("bisect-root x^2 @ 0 到 2").as_deref(),
+            Ok("x ≈ 0\r\n残差 |f(x)| ≈ 0")
+        );
+        assert_eq!(
+            solve_equation("二分求根 x^2+1 @ -1 到 1"),
+            Err(EquationError::BisectionSameSign)
+        );
+        assert_eq!(
+            solve_equation("二分求根 floor(x)-0.5 @ 0 到 2"),
+            Err(EquationError::BisectionResidual)
+        );
+        assert_eq!(
+            solve_equation("二分求根 1/x @ -1 到 1"),
+            Err(EquationError::Approximation(
+                CalculationError::DivisionByZero
+            ))
         );
     }
 

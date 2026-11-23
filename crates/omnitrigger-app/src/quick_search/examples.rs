@@ -241,6 +241,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用二分法求连续函数的一个近似零点",
+        query: "方程: 二分求根 cos(x)-x @ 0 到 1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求二次函数在给定区间上的精确定积分",
         query: "方程: 定积分 1/2,-1,3/4 @ 0 到 2",
     },
@@ -5396,6 +5401,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "函数采样",
             "采样图",
             "函数值",
+            "二分求根",
             "定积分",
             "区间极值",
         ],
