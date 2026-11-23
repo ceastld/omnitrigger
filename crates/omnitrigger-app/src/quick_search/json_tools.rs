@@ -11,7 +11,7 @@ use num_rational::BigRational;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
-use super::csv_tools::csv_cell;
+use super::csv_tools::{append_bounded_csv_row, csv_cell};
 use super::fraction::{ensure_exact_size, parse_fraction_literal};
 use super::operators::{FieldSortOrder, NumberComparison, MAX_SORT_FIELDS};
 use super::statistics::{median_sorted_values, MAX_VALUES};
@@ -218,12 +218,19 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "合并对象" | "merge-objects" => return merge_json_objects(source),
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
-        "列指针" | "列路径" | "list-pointers" => return write_pointer_leaves(source, false),
+        "列指针" | "列路径" | "list-pointers" => {
+            return write_json_pointer_results(source, PointerResultMode::Leaves)
+        }
         "找键" | "find-key" => return find_json_key_paths(source),
         "找值" | "find-value" => return find_json_value_paths(source),
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
-        "展平" | "flatten" => return write_pointer_leaves(source, true),
+        "展平" | "flatten" => {
+            return write_json_pointer_results(source, PointerResultMode::Flattened)
+        }
+        "叶子csv" | "leaves-csv" => {
+            return write_json_pointer_results(source, PointerResultMode::Csv)
+        }
         "改键" | "rename-key" => return rename_json_key(source),
         "改值" | "replace" => return write_json_value(source, false),
         "加路径" | "add-path" => return write_json_value(source, true),
@@ -1964,15 +1971,6 @@ fn append_pointer_key(pointer: &mut String, key: &str) {
     }
 }
 
-fn write_pointer_leaves(source: &str, include_values: bool) -> Result<String, JsonError> {
-    let mode = if include_values {
-        PointerResultMode::Flattened
-    } else {
-        PointerResultMode::Leaves
-    };
-    write_json_pointer_results(source, mode)
-}
-
 fn find_json_key_paths(query: &str) -> Result<String, JsonError> {
     let (key, source) = json_value_and_source(query, JsonError::KeySearchArguments)?;
     let key =
@@ -1990,6 +1988,7 @@ fn find_json_value_paths(query: &str) -> Result<String, JsonError> {
 enum PointerResultMode<'a> {
     Leaves,
     Flattened,
+    Csv,
     Key(&'a str),
     Value(&'a JsonScalar),
 }
@@ -1999,10 +1998,10 @@ fn write_json_pointer_results(
     mode: PointerResultMode<'_>,
 ) -> Result<String, JsonError> {
     let include_values = matches!(mode, PointerResultMode::Flattened);
-    let (opening, closing, size_error) = if include_values {
-        ('{', '}', JsonError::FlattenedObjectTooLarge)
-    } else {
-        ('[', ']', JsonError::PointerListTooLarge)
+    let (opening, closing, size_error) = match mode {
+        PointerResultMode::Flattened => ("{", Some('}'), JsonError::FlattenedObjectTooLarge),
+        PointerResultMode::Csv => ("指针,类型,原值", None, JsonError::CsvOutputTooLarge),
+        _ => ("[", Some(']'), JsonError::PointerListTooLarge),
     };
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let mut pending = vec![(root, None::<(usize, String)>, false)];
@@ -2032,7 +2031,9 @@ fn write_json_pointer_results(
             _ => Vec::new(),
         };
         let emit = match mode {
-            PointerResultMode::Leaves | PointerResultMode::Flattened => children.is_empty(),
+            PointerResultMode::Leaves | PointerResultMode::Flattened | PointerResultMode::Csv => {
+                children.is_empty()
+            }
             PointerResultMode::Key(_) => matches_key,
             PointerResultMode::Value(expected) => json_scalar(value)?.as_ref() == Some(expected),
         };
@@ -2042,6 +2043,17 @@ fn write_json_pointer_results(
             pending.push((child, Some((path.len(), key)), matches_key));
         }
         if !emit {
+            continue;
+        }
+        if matches!(mode, PointerResultMode::Csv) {
+            if path.contains('\0') {
+                return Err(JsonError::CsvNullCharacter);
+            }
+            append_bounded_csv_row(
+                &mut result,
+                [path.as_str(), json_type_name(value), raw].into_iter(),
+                size_error,
+            )?;
             continue;
         }
         let encoded = serde_json::to_string(&path).map_err(json_parse_error)?;
@@ -2061,7 +2073,9 @@ fn write_json_pointer_results(
             result.push_str(raw);
         }
     }
-    result.push(closing);
+    if let Some(closing) = closing {
+        result.push(closing);
+    }
     Ok(result)
 }
 
@@ -2725,7 +2739,7 @@ mod tests {
     #[test]
     fn enumerates_resolvable_leaf_pointers_in_document_order() {
         let source = r#"{"商品":[{"a/b":9007199254740993},{"~":null},[]],"":"", "a\nb":{}}"#;
-        let listed = write_pointer_leaves(source, false).unwrap();
+        let listed = write_json_pointer_results(source, PointerResultMode::Leaves).unwrap();
         assert_eq!(
             listed,
             r#"["/商品/0/a~1b","/商品/1/~0","/商品/2","/","/a\nb"]"#
@@ -2743,15 +2757,18 @@ mod tests {
         }
         for source in ["[]", "{}", "23", "null"] {
             assert_eq!(
-                write_pointer_leaves(source, false).as_deref(),
+                write_json_pointer_results(source, PointerResultMode::Leaves).as_deref(),
                 Ok(r#"[""]"#)
             );
         }
         assert_eq!(
-            write_pointer_leaves(r#"{"a":{"x":1,"\u0078":2}}"#, false),
+            write_json_pointer_results(r#"{"a":{"x":1,"\u0078":2}}"#, PointerResultMode::Leaves),
             Err(JsonError::DuplicateKey)
         );
-        assert_eq!(write_pointer_leaves("[1,]", false), Err(JsonError::Invalid));
+        assert_eq!(
+            write_json_pointer_results("[1,]", PointerResultMode::Leaves),
+            Err(JsonError::Invalid)
+        );
     }
 
     #[test]
@@ -2874,6 +2891,38 @@ mod tests {
         assert_eq!(
             transform_json(r#"找键 "x" {"对象":{"x":null,"\u0078":1}}"#),
             Err(JsonError::DuplicateKey)
+        );
+    }
+
+    #[test]
+    fn exports_json_leaves_with_pointer_type_and_original_literal() {
+        assert_eq!(
+            transform_json(
+                r#"叶子CSV {"报告":[{"a/b":9007199254740993},{"~":1.20e+2},[]],"空":null,"字符串":"\u8336","带,号":{},"":true}"#
+            )
+            .as_deref(),
+            Ok(concat!(
+                "指针,类型,原值\r\n",
+                "/报告/0/a~1b,number,9007199254740993\r\n",
+                "/报告/1/~0,number,1.20e+2\r\n",
+                "/报告/2,array,[]\r\n",
+                "/空,null,null\r\n",
+                "/字符串,string,\"\"\"\\u8336\"\"\"\r\n",
+                "\"/带,号\",object,{}\r\n",
+                "/,boolean,true"
+            ))
+        );
+        assert_eq!(
+            transform_json("leaves-csv []").as_deref(),
+            Ok("指针,类型,原值\r\n\"\",array,[]")
+        );
+        assert_eq!(
+            transform_json(r#"叶子CSV {"a":1,"\u0061":2}"#),
+            Err(JsonError::DuplicateKey)
+        );
+        assert_eq!(
+            transform_json(r#"叶子CSV {"\u0000":1}"#),
+            Err(JsonError::CsvNullCharacter)
         );
     }
 
@@ -3313,17 +3362,21 @@ mod tests {
         let depth = 256;
         let nested = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
         assert_eq!(
-            write_pointer_leaves(&nested, false).unwrap(),
+            write_json_pointer_results(&nested, PointerResultMode::Leaves).unwrap(),
             format!(r#"["{}"]"#, "/0".repeat(depth))
         );
         let wide = format!(r#"{{"{}":[{}0]}}"#, "x".repeat(1500), "0,".repeat(849));
         assert_eq!(
-            write_pointer_leaves(&wide, false),
+            write_json_pointer_results(&wide, PointerResultMode::Leaves),
             Err(JsonError::PointerListTooLarge)
         );
         assert_eq!(
-            write_pointer_leaves(&wide, true),
+            write_json_pointer_results(&wide, PointerResultMode::Flattened),
             Err(JsonError::FlattenedObjectTooLarge)
+        );
+        assert_eq!(
+            write_json_pointer_results(&wide, PointerResultMode::Csv),
+            Err(JsonError::CsvOutputTooLarge)
         );
     }
 

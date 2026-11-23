@@ -3085,6 +3085,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 JSON 标量和空容器的指针与类型导出为 CSV",
+        query: r#"JSON: 叶子CSV {"金额":[1.20e+2,null],"a/b":{},"清单":[]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留存在指定路径的 JSON 数组项",
         query: r#"JSON: 有路径 /状态 [{"编号":"001","状态":null},{"编号":"002"}]"#,
     },
