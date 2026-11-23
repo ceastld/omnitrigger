@@ -214,6 +214,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
                 return format_function_samples(&integral_samples(arguments)?, "累计积分");
             }
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
+            "数值二阶导数" | "numeric-second-derivative" => {
+                return numeric_second_derivative(arguments)
+            }
             "导数采样" | "sample-derivative" | "导数采样图" | "derivative-plot" => {
                 return format_function_samples(&derivative_samples(arguments)?, "近似导数");
             }
@@ -1367,23 +1370,49 @@ fn format_bisection_result(
 }
 
 fn numeric_derivative(input: &str) -> Result<String, EquationError> {
+    let (expression, x, step) = derivative_input(input, derivative_step)?;
+    let value = estimate_derivative(expression, x, step)?;
+    derivative_report("中心差分", value, x, step)
+}
+
+fn numeric_second_derivative(input: &str) -> Result<String, EquationError> {
+    let default_step = |x: f64| f64::EPSILON.sqrt().sqrt() * x.abs().max(1.0);
+    let (expression, x, step) = derivative_input(input, default_step)?;
+    let [lower, upper] = derivative_coordinates(x, step)?;
+    let value_at =
+        |position| evaluate_at_x(expression, position).map_err(EquationError::Approximation);
+    let center = value_at(x)?;
+    let left = difference_quotient(lower, x, value_at(lower)?, center);
+    let right = difference_quotient(x, upper, center, value_at(upper)?);
+    let value = 2.0 * difference_quotient(lower, upper, left, right);
+    derivative_report("二阶中心差分", value, x, step)
+}
+
+fn derivative_input(
+    input: &str,
+    default_step: impl Fn(f64) -> f64,
+) -> Result<(&str, f64, f64), EquationError> {
     let invalid = EquationError::NumericDerivativeArguments;
     let (expression, arguments) = split_function_arguments(input, invalid)?;
     let (center, step) = arguments
         .split_once(';')
         .map_or((arguments, None), |(center, step)| (center, Some(step)));
-    let display = |value| format_result(value).map_err(EquationError::Approximation);
     let x = evaluate(center).map_err(EquationError::Approximation)?;
     let step = match step {
         Some(step) => evaluate(step).map_err(EquationError::Approximation)?,
-        None => derivative_step(x),
+        None => default_step(x),
     };
     if step <= 0.0 {
         return Err(invalid);
     }
+    Ok((expression, x, step))
+}
+
+fn derivative_report(label: &str, value: f64, x: f64, step: f64) -> Result<String, EquationError> {
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
     Ok(format!(
-        "中心差分 ≈ {}\r\nx = {} · 步长 {}",
-        display(estimate_derivative(expression, x, step)?)?,
+        "{label} ≈ {}\r\nx = {} · 步长 {}",
+        display(value)?,
         display(x)?,
         display(step)?
     ))
@@ -1393,28 +1422,35 @@ fn derivative_step(x: f64) -> f64 {
     f64::EPSILON.cbrt() * x.abs().max(1.0)
 }
 
-fn estimate_derivative(expression: &str, x: f64, step: f64) -> Result<f64, EquationError> {
+fn derivative_coordinates(x: f64, step: f64) -> Result<[f64; 2], EquationError> {
     let lower = x - step;
     let upper = x + step;
     if lower == x || upper == x || !lower.is_finite() || !upper.is_finite() {
         return Err(EquationError::NumericDerivativeStep);
     }
+    Ok([lower, upper])
+}
+
+fn estimate_derivative(expression: &str, x: f64, step: f64) -> Result<f64, EquationError> {
+    let [lower, upper] = derivative_coordinates(x, step)?;
     let value_at =
         |position| evaluate_at_x(expression, position).map_err(EquationError::Approximation);
     value_at(x)?;
-    let left = value_at(lower)?;
-    let right = value_at(upper)?;
-    let delta_y = right - left;
-    let delta_x = upper - lower;
-    let derivative = if delta_y.is_finite() && delta_x.is_finite() {
-        delta_y / delta_x
-    } else {
-        (right * 0.5 - left * 0.5) / (upper * 0.5 - lower * 0.5)
-    };
+    let derivative = difference_quotient(lower, upper, value_at(lower)?, value_at(upper)?);
     if derivative.is_finite() {
         Ok(derivative)
     } else {
         Err(EquationError::Approximation(CalculationError::OutOfRange))
+    }
+}
+
+fn difference_quotient(start: f64, end: f64, first: f64, second: f64) -> f64 {
+    let delta_y = second - first;
+    let delta_x = end - start;
+    if delta_y.is_finite() && delta_x.is_finite() {
+        delta_y / delta_x
+    } else {
+        (second * 0.5 - first * 0.5) / (end * 0.5 - start * 0.5)
     }
 }
 
@@ -2628,6 +2664,29 @@ mod tests {
         assert_eq!(
             solve_equation("sample-derivative unknown(x) @ 0..1; 2"),
             Err(EquationError::Approximation(CalculationError::Invalid))
+        );
+    }
+
+    #[test]
+    fn estimates_second_derivatives_and_preserves_the_point_and_step() {
+        assert_eq!(
+            solve_equation("数值二阶导数 x^2 @ 2; 0.5").as_deref(),
+            Ok("二阶中心差分 ≈ 2\r\nx = 2 · 步长 0.5")
+        );
+        let default = solve_equation("numeric-second-derivative x³ @ 2").unwrap();
+        let (value, context) = default.split_once("\r\n").unwrap();
+        let value = value
+            .strip_prefix("二阶中心差分 ≈ ")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!((value - 12.0).abs() < 1e-6);
+        assert_eq!(context, "x = 2 · 步长 0.000244140625");
+        assert_eq!(
+            solve_equation("数值二阶导数 sqrt(x) @ 0; 0.01"),
+            Err(EquationError::Approximation(
+                CalculationError::FunctionDomain
+            ))
         );
     }
 
