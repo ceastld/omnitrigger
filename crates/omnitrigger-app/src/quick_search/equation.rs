@@ -54,6 +54,7 @@ pub(super) enum EquationError {
     FunctionComparisonArguments,
     FunctionComparisonPlotArguments,
     ParametricSampleArguments,
+    ParametricPlotHasNoPoints,
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
@@ -121,6 +122,7 @@ impl EquationError {
             Self::ParametricSampleArguments => {
                 "按 x、y 的顺序填写两个带 t 的算式，再填两个不同的端点和可选的 2 至 129 个采样点"
             }
+            Self::ParametricPlotHasNoPoints => "该区间没有横坐标和纵坐标均有限的采样点",
             Self::BisectionArguments => {
                 "填写要求零点的算式或等式和两个不同的端点，例如 cos(x)=x @ 0 到 1"
             }
@@ -215,7 +217,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数对照图" | "compare-function-plot" => {
                 return sample_function_comparison(arguments)?.csv();
             }
-            "参数采样" | "sample-parametric" => {
+            "参数采样" | "sample-parametric" | "参数图" | "parametric-plot" => {
                 return format_parametric_samples(&parametric_samples(arguments)?);
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
@@ -632,6 +634,7 @@ pub(super) fn equation_chart(input: &str) -> Option<Result<(String, ScatterPlot)
         "导数采样图" | "derivative-plot" => Some(plot_sampled_derivative(arguments)),
         "积分采样图" | "integral-plot" => Some(plot_sampled_integral(arguments)),
         "函数对照图" | "compare-function-plot" => Some(plot_function_comparison(arguments)),
+        "参数图" | "parametric-plot" => Some(plot_parametric_samples(arguments)),
         _ => None,
     }
 }
@@ -735,6 +738,21 @@ fn plot_function_comparison(input: &str) -> Result<(String, ScatterPlot), Equati
     let input = normalize_equation(input)?;
     let comparison = sample_function_comparison(&input)?;
     Ok((comparison.csv()?, comparison.plot()?))
+}
+
+fn plot_parametric_samples(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let samples = parametric_samples(&input)?;
+    let points = samples
+        .iter()
+        .filter_map(|sample| sample.x.zip(sample.y))
+        .map(|(x, y)| Ok((sample_rational(x)?, sample_rational(y)?)))
+        .collect::<Result<Vec<_>, EquationError>>()?;
+    if points.is_empty() {
+        return Err(EquationError::ParametricPlotHasNoPoints);
+    }
+    let plot = ScatterPlot::from_parametric_samples(&points, samples.len());
+    Ok((format_parametric_samples(&samples)?, plot))
 }
 
 fn sample_rational(value: f64) -> Result<BigRational, EquationError> {
@@ -2785,6 +2803,19 @@ mod tests {
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
         );
+    }
+
+    #[test]
+    fn parametric_chart_only_draws_complete_points_and_keeps_all_csv_rows() {
+        let command = r#"参数图 ["sqrt(t)","t²"] @ -1..1; 3"#;
+        let (csv, plot) = equation_chart(command).unwrap().unwrap();
+        assert_eq!(plot.point_count(), 2);
+        assert_eq!(csv, solve_equation(command).unwrap());
+        assert!(csv.contains("-1,\"\",1"));
+        assert!(matches!(
+            equation_chart(r#"parametric-plot ["sqrt(t)","t"] @ -2..-1; 3"#),
+            Some(Err(EquationError::ParametricPlotHasNoPoints))
+        ));
     }
 
     #[test]

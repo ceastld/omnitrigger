@@ -301,6 +301,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按相同比例绘制平面参数采样图",
+        query: r#"方程: 参数图 ["cosd(t)","sind(t)"] @ 0..360; 65"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用二分法求连续函数的一个近似零点",
         query: "方程: 二分求根 cos(x)-x @ 0 到 1",
     },
@@ -5570,6 +5575,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "函数对照",
             "函数对照图",
             "参数采样",
+            "参数图",
             "二分求根",
             "数值积分",
             "数值面积",

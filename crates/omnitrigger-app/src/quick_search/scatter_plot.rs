@@ -4,6 +4,9 @@ use num_rational::BigRational;
 
 use crate::theme::{self, rgb};
 
+use super::calculator::format_round_trip;
+use super::fraction::format_significant_digits;
+
 pub(super) const PREVIEW_HEIGHT: f32 = 134.;
 const AXIS_WIDTH: f32 = 81.;
 const MAX_AXIS_LABEL_WIDTH: f32 = 167.;
@@ -41,6 +44,7 @@ enum ScatterKind {
     Cumulative { observations: u64 },
     Function,
     SampledFunction { requested: usize },
+    Parametric { requested: usize },
 }
 
 impl ScatterPlot {
@@ -102,6 +106,13 @@ impl ScatterPlot {
         )
     }
 
+    pub(super) fn from_parametric_samples(
+        points: &[(BigRational, BigRational)],
+        requested: usize,
+    ) -> Self {
+        Self::prepare(points, &[], ScatterKind::Parametric { requested }, None)
+    }
+
     pub(super) fn from_sampled_series(
         series: Vec<SampledSeries>,
         x_bounds: [&BigRational; 2],
@@ -138,11 +149,19 @@ impl ScatterPlot {
         let y = points.iter().chain(curve).map(|(_, y)| y);
         let min_y = y.clone().min().expect("图形至少有一个数据点");
         let max_y = y.max().expect("图形至少有一个数据点");
+        let measured = [[min_x, max_x], [min_y, max_y]];
+        let square =
+            matches!(kind, ScatterKind::Parametric { .. }).then(|| square_plot_bounds(measured));
+        let [[min_x, max_x], [min_y, max_y]] = square
+            .as_ref()
+            .map_or(measured, |axes| axes.each_ref().map(|axis| axis.each_ref()));
         let range_x = max_x - min_x;
         let range_y = max_y - min_y;
         let zero_axes = if matches!(
             kind,
-            ScatterKind::Function | ScatterKind::SampledFunction { .. }
+            ScatterKind::Function
+                | ScatterKind::SampledFunction { .. }
+                | ScatterKind::Parametric { .. }
         ) {
             let zero = BigRational::default();
             [
@@ -160,13 +179,26 @@ impl ScatterPlot {
                 normalized_position(y, min_y, &range_y),
             )
         };
+        let label = |value: &BigRational| {
+            if square.is_none() {
+                return value.to_string();
+            }
+            let rounded = format_significant_digits(value.clone(), 17);
+            rounded
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .map_or(rounded, format_round_trip)
+        };
         Self {
             locations: points.iter().map(place).collect(),
             curve: curve.iter().map(place).collect(),
-            x: [min_x.to_string(), max_x.to_string()],
-            y: [min_y.to_string(), max_y.to_string()],
+            x: [min_x, max_x].map(label),
+            y: [min_y, max_y].map(label),
             axis_names: match kind {
-                ScatterKind::Observations | ScatterKind::Function => ["x", "y"],
+                ScatterKind::Observations
+                | ScatterKind::Function
+                | ScatterKind::Parametric { .. } => ["x", "y"],
                 ScatterKind::SampledFunction { .. } => ["x", "近似值"],
                 ScatterKind::Residuals => ["x", "残差"],
                 ScatterKind::Cumulative { .. } => ["观测值", "累计频率"],
@@ -231,6 +263,9 @@ impl ScatterPlot {
             ScatterKind::SampledFunction { requested } => {
                 (format!("近似采样 · {points}/{requested} 个有效点"), "")
             }
+            ScatterKind::Parametric { requested } => {
+                (format!("参数采样 · {points}/{requested} 个有效点"), "")
+            }
         };
         div()
             .flex()
@@ -273,6 +308,8 @@ impl ScatterPlot {
         let [zero_x, zero_y] = self.zero_axes;
         let axis = rgb(theme::BORDER_HI);
         let line = rgb(theme::ACCENT_2);
+        let square = matches!(self.kind, ScatterKind::Parametric { .. });
+        let marker = px(if square { 2. } else { 3. });
         let plot = canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
@@ -337,10 +374,13 @@ impl ScatterPlot {
                     let center = place(position);
                     window.paint_quad(
                         fill(
-                            Bounds::new(center - point(px(3.), px(3.)), size(px(6.), px(6.))),
+                            Bounds::new(
+                                center - point(marker, marker),
+                                size(marker * 2., marker * 2.),
+                            ),
                             *color,
                         )
-                        .corner_radii(px(3.)),
+                        .corner_radii(marker),
                     );
                 }
             },
@@ -396,10 +436,10 @@ impl ScatterPlot {
                         .child(axis_label(self.x[1].clone())),
                 )
         };
-        div().flex().gap(px(AXIS_GAP)).child(vertical).child(
+        let axes = div().flex().gap(px(AXIS_GAP)).child(vertical).child(
             div()
-                .flex_1()
-                .min_w_0()
+                .when(square, |body| body.w(px(PREVIEW_HEIGHT)).flex_none())
+                .when(!square, |body| body.flex_1().min_w_0())
                 .flex()
                 .flex_col()
                 .child(
@@ -411,8 +451,28 @@ impl ScatterPlot {
                         .child(plot),
                 )
                 .child(horizontal),
-        )
+        );
+        if square {
+            div().w_full().flex().justify_center().child(axes)
+        } else {
+            axes
+        }
     }
+}
+
+fn square_plot_bounds(measured: [[&BigRational; 2]; 2]) -> [[BigRational; 2]; 2] {
+    let side = measured
+        .map(|[minimum, maximum]| maximum - minimum)
+        .into_iter()
+        .max()
+        .expect("平面图包含两个轴");
+    let limit = BigRational::from_float(f64::MAX).expect("最大浮点数为有限值");
+    measured.map(|[minimum, maximum]| {
+        let padding = (&side - (maximum - minimum)) / BigInt::from(2u8);
+        let lower = (minimum - padding).clamp(-&limit, &limit - &side);
+        let upper = &lower + &side;
+        [lower, upper]
+    })
 }
 
 fn axis_label(text: String) -> Div {
@@ -454,6 +514,26 @@ mod tests {
         assert_eq!(plot.locations, [(POSITION_STEPS / 2, POSITION_STEPS / 2)]);
         assert_eq!(plot.zero_axes[0], Some(POSITION_STEPS / 2));
         assert!(!plot.has_curve());
+    }
+
+    #[test]
+    fn parametric_plot_keeps_the_same_unit_on_both_axes() {
+        let points = [(0, 0), (1, 0), (2, 1)].map(|(x, y)| {
+            (
+                BigRational::from_integer(x.into()),
+                BigRational::from_integer(y.into()),
+            )
+        });
+        let plot = ScatterPlot::from_parametric_samples(&points, 3);
+        assert_eq!(plot.x, ["0", "2"]);
+        assert_eq!(plot.y, ["-0.5", "1.5"]);
+        assert_eq!(plot.locations, [(0, 1024), (2048, 1024), (4096, 3072)]);
+
+        let limit = BigRational::from_float(f64::MAX).unwrap();
+        let points = [(BigRational::default(), -&limit), (limit.clone(), limit)];
+        let plot = ScatterPlot::from_parametric_samples(&points, 2);
+        assert_eq!(plot.locations, [(2048, 0), (4096, 4096)]);
+        assert_eq!(plot.x, plot.y);
     }
 
     #[test]
