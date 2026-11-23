@@ -41,6 +41,7 @@ mod renminbi;
 mod scientific;
 mod scope;
 mod settings_sections;
+mod solid;
 mod statistics;
 mod tempo;
 mod text_tools;
@@ -127,6 +128,7 @@ use rectangle::{calculate_rectangle, RectangleError};
 use renminbi::{uppercase_renminbi, RenminbiError};
 use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
+use solid::{calculate_solid, SolidError};
 use statistics::{calculate_statistics, StatisticsError};
 use tempo::{calculate_tempo, TempoError};
 use text_tools::{count_text, transform_text, TextError};
@@ -402,6 +404,7 @@ enum ValueError {
     Paper(PaperError),
     Pitch(PitchError),
     Decibel(DecibelError),
+    Solid(SolidError),
     Tempo(TempoError),
     Rectangle(RectangleError),
     Cidr(CidrError),
@@ -517,6 +520,7 @@ impl ValueError {
             Self::Paper(error) => error.message(),
             Self::Pitch(error) => error.message(),
             Self::Decibel(error) => error.message(),
+            Self::Solid(error) => error.message(),
             Self::Tempo(error) => error.message(),
             Self::Rectangle(error) => error.message(),
             Self::Cidr(error) => error.message(),
@@ -913,6 +917,7 @@ impl Results {
                 }
                 Scope::Paper => Self::text_value(calculate_paper(term).map_err(ValueError::Paper)),
                 Scope::Pitch => Self::text_value(convert_pitch(term).map_err(ValueError::Pitch)),
+                Scope::Solid => Self::text_value(calculate_solid(term).map_err(ValueError::Solid)),
                 Scope::Tempo => Self::text_value(calculate_tempo(term).map_err(ValueError::Tempo)),
                 Scope::Decibel => {
                     Self::text_value(convert_decibels(term).map_err(ValueError::Decibel))

@@ -1371,6 +1371,26 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "分贝: 转幅度比 20 dB",
     },
     Example {
+        icon: Icon::Layers,
+        title: "按半径和高求圆柱的表面积与体积",
+        query: "立体: 圆柱 3,5",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按半径求球的表面积与体积",
+        query: "立体: 球 1/2",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按边长求立方体的表面积与体积",
+        query: "立体: 立方体 1/2",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按长宽高求长方体的表面积与体积",
+        query: "立体: 长方体 2,3,4",
+    },
+    Example {
         icon: Icon::Clock,
         title: "按每分钟拍数计算一拍时长",
         query: "节拍: 120 BPM",
@@ -4738,6 +4758,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Period
         | Scope::Pitch
         | Scope::Decibel
+        | Scope::Solid
         | Scope::Tempo
         | Scope::AspectRatio
         | Scope::MapScale
@@ -4766,6 +4787,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Tempo
             if ["时长", "速度"]
                 .iter()
+                .any(|operation| operation.starts_with(term)) => {}
+        Scope::Solid
+            if ["圆柱", "球", "立方体", "长方体"]
+                .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Decibel
             if ["功率比", "幅度比", "转功率比", "转幅度比"]
@@ -4878,6 +4903,7 @@ mod tests {
             Scope::Period,
             Scope::Pitch,
             Scope::Decibel,
+            Scope::Solid,
             Scope::Tempo,
             Scope::AspectRatio,
             Scope::MapScale,

@@ -341,7 +341,7 @@ fn circle_point(input: &str) -> Result<Point2, CircleError> {
     })
 }
 
-fn multiple_of_pi(value: &BigRational) -> String {
+pub(super) fn multiple_of_pi(value: &BigRational) -> String {
     if value.numer().sign() == Sign::NoSign {
         return "0".to_owned();
     }
