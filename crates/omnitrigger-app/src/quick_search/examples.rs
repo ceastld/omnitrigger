@@ -4813,6 +4813,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在原表追加向前回溯窗口内的精确积分",
+        query: "CSV: 时间窗积分列 [\"窗积分\",[\"时间\",\"高度\"],\"3/2\"] 时间,高度\n3,4\n0,0\n2,\n1,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定横坐标查询分段直线上的精确插值",
         query: "CSV: 线性插值 [[\"时间\",\"高度\"],[\"1/2\",2]] 时间,高度\n3,3\n0,0\n2,\n1,2",
     },
@@ -5769,6 +5774,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "梯形累计列",
             "差商列",
             "时间窗平均列",
+            "时间窗积分列",
             "线性插值",
             "等距插值",
             "水平交点",

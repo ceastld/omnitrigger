@@ -235,8 +235,8 @@ pub(super) enum CsvError {
     SecantColumnArguments,
     SecantPointCount,
     SecantDuplicateX,
-    CoordinateWindowMeanArguments,
-    CoordinateWindowMeanPointCount,
+    CoordinateWindowArguments,
+    CoordinateWindowPointCount,
     CoordinateInterpolationArguments,
     CoordinateInterpolationPointCount,
     CoordinateDuplicateX,
@@ -527,10 +527,10 @@ impl CsvError {
             }
             Self::SecantPointCount => "差商列需要 2 至 64 行同时含 x 和 y 的数据",
             Self::SecantDuplicateX => "差商列的横坐标须互不相同",
-            Self::CoordinateWindowMeanArguments => {
+            Self::CoordinateWindowArguments => {
                 "填写新列名、两个坐标列和正的窗口长度，例如 [\"窗均值\",[\"时间\",\"高度\"],\"3/2\"]"
             }
-            Self::CoordinateWindowMeanPointCount => "时间窗平均列需要 2 至 64 个完整样点",
+            Self::CoordinateWindowPointCount => "时间窗计算需要 2 至 64 个完整样点",
             Self::CoordinateInterpolationArguments => {
                 "填写两个坐标列和 1 至 64 个数值横坐标，例如 [[\"时间\",\"高度\"],[\"1/2\",2]]"
             }
@@ -1143,7 +1143,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return append_sampled_coordinate_column(input, CoordinateColumn::Secant)
         }
         "时间窗平均列" | "time-window-mean-column" => {
-            return append_coordinate_window_mean(input)
+            return append_coordinate_window_measure(input, CoordinateWindowMeasure::Mean)
+        }
+        "时间窗积分列" | "time-window-integral-column" => {
+            return append_coordinate_window_measure(input, CoordinateWindowMeasure::Integral)
         }
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
@@ -5958,8 +5961,16 @@ fn append_sampled_coordinate_column(
     )
 }
 
-fn append_coordinate_window_mean(input: &str) -> Result<String, CsvError> {
-    let invalid = CsvError::CoordinateWindowMeanArguments;
+enum CoordinateWindowMeasure {
+    Mean,
+    Integral,
+}
+
+fn append_coordinate_window_measure(
+    input: &str,
+    measure: CoordinateWindowMeasure,
+) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateWindowArguments;
     let ((name, coordinates, width), data) =
         json_argument_and_data::<(String, [ColumnReference; 2], Box<RawValue>)>(input, invalid)?;
     let width = coordinate_argument(&width, invalid)?;
@@ -5971,8 +5982,8 @@ fn append_coordinate_window_mean(input: &str) -> Result<String, CsvError> {
         &name,
         &coordinates,
         invalid,
-        CsvError::CoordinateWindowMeanPointCount,
-        |samples, values| fill_coordinate_window_means(samples, values, &width),
+        CsvError::CoordinateWindowPointCount,
+        |samples, values| fill_coordinate_window_measurements(samples, values, &width, measure),
     )
 }
 
@@ -6000,10 +6011,11 @@ fn append_coordinate_column(
     })
 }
 
-fn fill_coordinate_window_means(
+fn fill_coordinate_window_measurements(
     samples: &mut [CoordinateSample],
     cells: &mut [String],
     width: &BigRational,
+    measure: CoordinateWindowMeasure,
 ) -> Result<(), CsvError> {
     sort_distinct_coordinates(samples)?;
     let mut areas = Vec::with_capacity(samples.len());
@@ -6017,9 +6029,13 @@ fn fill_coordinate_window_means(
         let (preceding_x, preceding_y) = &samples[preceding].point;
         let start_y = interpolate_coordinate_value(samples, &start)?;
         let partial_area = (&start - preceding_x) * (preceding_y + start_y) / &two;
-        let mean = (&areas[index] - &areas[preceding] - partial_area) / (x - start);
-        ensure_exact_size(&mean).map_err(|_| CsvError::ComputedNumberRange)?;
-        cells[sample.row_index] = mean.to_string();
+        let integral = &areas[index] - &areas[preceding] - partial_area;
+        let value = match measure {
+            CoordinateWindowMeasure::Mean => integral / (x - start),
+            CoordinateWindowMeasure::Integral => integral,
+        };
+        ensure_exact_size(&value).map_err(|_| CsvError::ComputedNumberRange)?;
+        cells[sample.row_index] = value.to_string();
     }
     Ok(())
 }
@@ -7910,11 +7926,26 @@ mod tests {
         );
         assert_eq!(
             transform_csv(&format!("时间窗平均列 [\"均值\",[2,3],0] {data}")),
-            Err(CsvError::CoordinateWindowMeanArguments)
+            Err(CsvError::CoordinateWindowArguments)
         );
         assert_eq!(
             transform_csv("时间窗平均列 [\"均值\",[1,2],1] x,y\n1/2,1\n0.5,2"),
             Err(CsvError::CoordinateDuplicateX)
+        );
+    }
+
+    #[test]
+    fn integrates_exact_trailing_windows_at_irregular_samples_in_original_row_order() {
+        let query =
+            "时间窗积分列 [\"窗口积分\",[2,3],\"3/2\"] 编号,x,y\n003,3,4\n000,0,0\n002,2,\n001,1,2";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("编号,x,y,窗口积分\r\n003,3,4,39/8\r\n000,0,0,\"\"\r\n002,2,\"\",\"\"\r\n001,1,2,1")
+        );
+        assert_eq!(
+            transform_csv("time-window-integral-column [\"面积\",[1,2],3] x,y\n0,-2\n2,-2")
+                .as_deref(),
+            Ok("x,y,面积\r\n0,-2,\"\"\r\n2,-2,-4")
         );
     }
 
