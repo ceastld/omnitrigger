@@ -4569,6 +4569,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "分组查看有效数值、缺失值与精确平均值",
+        query: "CSV: 分组数值摘要 [\"地区\"] \"金额\" 地区,金额\n南,1/2\n北,待定\n南,2\n北,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看选定 CSV 数值列两两之间的精确相关系数",
         query: "CSV: 相关矩阵 [\"x\",\"y\",\"z\",\"固定\"] x,y,z,固定\n-1,2,1,5\n0,0,-2,5\n1,-2,1,5\n8,,9,6",
     },

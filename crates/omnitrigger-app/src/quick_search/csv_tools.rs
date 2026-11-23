@@ -751,6 +751,10 @@ enum Operation {
     },
     ColumnBins(ColumnReference, Vec<BigRational>),
     NumericProfile(Vec<ColumnReference>),
+    GroupNumericProfile {
+        columns: Vec<ColumnReference>,
+        amount: ColumnReference,
+    },
     PairMatrix {
         columns: Vec<ColumnReference>,
         statistic: PairMatrixStatistic,
@@ -2019,6 +2023,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::GroupMedian { columns, amount }
         }
+        "分组数值摘要" | "group-numeric-profile" => {
+            let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
+            let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
+            input = data;
+            Operation::GroupNumericProfile { columns, amount }
+        }
         "分组拟合" | "group-fit" => {
             let ((columns, coordinates), data) = json_argument_and_data::<(
                 Vec<ColumnReference>,
@@ -2568,6 +2578,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 .map_err(csv_column_statistics_error)
         }
         Operation::NumericProfile(columns) => numeric_column_profile(&rows, &columns),
+        Operation::GroupNumericProfile { columns, amount } => {
+            grouped_numeric_profile(&rows, &columns, amount)
+        }
         Operation::PairMatrix { columns, statistic } => {
             column_pair_matrix(&rows, &columns, statistic, false).map(|(csv, _)| csv)
         }
@@ -5270,6 +5283,16 @@ fn numeric_column_values_at(
         .collect()
 }
 
+const NUMERIC_PROFILE_HEADINGS: [&str; 7] = [
+    "数值数",
+    "空白数",
+    "非数值数",
+    "最小值",
+    "最大值",
+    "平均值",
+    "中位数",
+];
+
 fn numeric_column_profile(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -5277,88 +5300,119 @@ fn numeric_column_profile(
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
     let mut output = String::new();
-    let limit = CsvError::Statistics(StatisticsError::TooManyValues);
-    let headings = [
-        "列号",
-        "列名",
-        "数值数",
-        "空白数",
-        "非数值数",
-        "最小值",
-        "最大值",
-        "平均值",
-        "中位数",
-    ];
+    let limit = CsvError::StatisticsOutputTooLarge;
     append_bounded_csv_row(
         &mut output,
-        headings.into_iter(),
-        CsvError::StatisticsOutputTooLarge,
+        ["列号", "列名"].into_iter().chain(NUMERIC_PROFILE_HEADINGS),
+        limit,
     )?;
     for column in columns {
-        let mut numbers = Vec::new();
-        let mut totals = RunningTotals::default();
-        let mut blanks = 0usize;
-        let mut other = 0usize;
-        for (index, row) in records.iter().enumerate() {
-            let cell = row[column].trim();
-            if cell.is_empty() {
-                blanks += 1;
-                continue;
-            }
-            match parse_fraction_literal(cell) {
-                Ok(number) => {
-                    if numbers.len() == MAX_VALUES {
-                        return Err(limit);
-                    }
-                    totals.push(number.clone()).map_err(CsvError::Statistics)?;
-                    numbers.push(number);
-                }
-                Err(error @ (FractionError::OutOfRange | FractionError::TooLong)) => {
-                    return Err(CsvError::DataRowValue {
-                        row: index + 1,
-                        cause: error.message(),
-                    });
-                }
-                Err(_) => other += 1,
-            }
-        }
-        numbers.sort_unstable();
-        let [min, max, average, median] = if let Some(min) = numbers.first() {
-            let max = numbers.last().expect("至少有一个数值");
-            let average = totals.format(true).map_err(CsvError::Statistics)?;
-            let median = median_sorted_values(&numbers)
-                .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
-            [
-                min.to_string(),
-                max.to_string(),
-                average,
-                median.to_string(),
-            ]
-        } else {
-            Default::default()
-        };
+        let cells = records
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (index + 1, row[column].as_str()));
+        let values = numeric_profile(cells)?;
         let ordinal = (column + 1).to_string();
-        let numeric_count = numbers.len().to_string();
-        let blanks = blanks.to_string();
-        let other = other.to_string();
-        let values = [
-            ordinal.as_str(),
-            header[column].as_str(),
-            numeric_count.as_str(),
-            blanks.as_str(),
-            other.as_str(),
-            min.as_str(),
-            max.as_str(),
-            average.as_str(),
-            median.as_str(),
-        ];
         append_bounded_csv_row(
             &mut output,
-            values.into_iter(),
-            CsvError::StatisticsOutputTooLarge,
+            [ordinal.as_str(), header[column].as_str()]
+                .into_iter()
+                .chain(values.iter().map(String::as_str)),
+            limit,
         )?;
     }
     Ok(output)
+}
+
+fn grouped_numeric_profile(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    amount: ColumnReference,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
+    let amount = amount.resolve(header)?;
+    validate_column_width(&[amount], header.len())?;
+    let mut output = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(
+        &mut output,
+        columns
+            .iter()
+            .map(|&index| header[index].as_str())
+            .chain(NUMERIC_PROFILE_HEADINGS),
+        limit,
+    )?;
+    for group in grouped_row_positions(records, &columns) {
+        let values = numeric_profile(
+            group
+                .iter()
+                .map(|&index| (index + 1, records[index][amount].as_str())),
+        )?;
+        let key = column_key(&records[group[0]], &columns);
+        append_bounded_csv_row(
+            &mut output,
+            key.into_iter().chain(values.iter().map(String::as_str)),
+            limit,
+        )?;
+    }
+    Ok(output)
+}
+
+fn numeric_profile<'a>(
+    cells: impl Iterator<Item = (usize, &'a str)>,
+) -> Result<[String; 7], CsvError> {
+    let mut numbers = Vec::new();
+    let mut totals = RunningTotals::default();
+    let mut blanks = 0usize;
+    let mut other = 0usize;
+    for (row, cell) in cells {
+        let cell = cell.trim();
+        if cell.is_empty() {
+            blanks += 1;
+            continue;
+        }
+        match parse_fraction_literal(cell) {
+            Ok(number) => {
+                if numbers.len() == MAX_VALUES {
+                    return Err(CsvError::Statistics(StatisticsError::TooManyValues));
+                }
+                totals.push(number.clone()).map_err(CsvError::Statistics)?;
+                numbers.push(number);
+            }
+            Err(error @ (FractionError::OutOfRange | FractionError::TooLong)) => {
+                return Err(CsvError::DataRowValue {
+                    row,
+                    cause: error.message(),
+                });
+            }
+            Err(_) => other += 1,
+        }
+    }
+    numbers.sort_unstable();
+    let [min, max, average, median] = if let Some(min) = numbers.first() {
+        let max = numbers.last().expect("至少有一个数值");
+        let average = totals.format(true).map_err(CsvError::Statistics)?;
+        let median = median_sorted_values(&numbers)
+            .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
+        [
+            min.to_string(),
+            max.to_string(),
+            average,
+            median.to_string(),
+        ]
+    } else {
+        Default::default()
+    };
+    Ok([
+        numbers.len().to_string(),
+        blanks.to_string(),
+        other.to_string(),
+        min,
+        max,
+        average,
+        median,
+    ])
 }
 
 #[derive(Clone, Copy)]
@@ -5498,7 +5552,7 @@ fn column_pair_matrix(
                 if name.trim().is_empty() {
                     format!("第 {} 列", index + 1)
                 } else if names.iter().filter(|&&other| other == name).count() > 1 {
-                    format!("{name}（第 {} 列）", index + 1)
+                    format!("{} {name}", index + 1)
                 } else {
                     name.to_owned()
                 }
@@ -7860,6 +7914,21 @@ mod tests {
             transform_csv("相关矩阵 [1,2] x,y\n1,2\n待定,4"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn profiles_each_csv_group_in_order_with_exact_statistics_and_missing_counts() {
+        let data =
+            "地区,阶段,金额\n南,批,1/2\n北,现货,待定\n南,批,2\n北,现货, \n南,现货,\n南,批,待定";
+        assert_eq!(
+            transform_csv(&format!(r#"分组数值摘要 ["地区",2] "金额" {data}"#)).as_deref(),
+            Ok(concat!(
+                "地区,阶段,数值数,空白数,非数值数,最小值,最大值,平均值,中位数\r\n",
+                "南,批,2,0,1,1/2,2,5/4,5/4\r\n",
+                "北,现货,0,1,1,\"\",\"\",\"\",\"\"\r\n",
+                "南,现货,0,1,0,\"\",\"\",\"\",\"\"",
+            ))
+        );
     }
 
     #[test]
