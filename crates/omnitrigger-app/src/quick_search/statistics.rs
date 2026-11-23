@@ -543,7 +543,8 @@ fn moving_median(input: &str) -> Result<String, StatisticsError> {
     for window in values.windows(width) {
         ordered.extend(window);
         ordered.sort_unstable();
-        medians.push(median_sorted_values(&ordered)?.to_string());
+        let median = median_sorted_values(&ordered).map_err(StatisticsError::Evaluation)?;
+        medians.push(median.to_string());
         ordered.clear();
     }
     Ok(medians.join("\n"))
@@ -572,12 +573,14 @@ fn moving_quantile(input: &str) -> Result<String, StatisticsError> {
 
 pub(super) fn median_sorted_values(
     values: &[impl Borrow<BigRational>],
-) -> Result<BigRational, StatisticsError> {
+) -> Result<BigRational, FractionError> {
     let count = values.len();
     let middle = values[count / 2].borrow();
     if count.is_multiple_of(2) {
         let previous = values[count / 2 - 1].borrow();
-        bounded((previous + middle) / BigInt::from(2))
+        let value = (previous + middle) / BigInt::from(2);
+        ensure_exact_size(&value)?;
+        Ok(value)
     } else {
         Ok(middle.clone())
     }

@@ -307,6 +307,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "拟合一条受异常值影响较小的直线",
+        query: "拟合: 稳健直线 0,1; 1,3; 2,5; 3,7; 4,100",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用同一条拟合直线预测多个 x",
         query: "拟合: 预测 1/2,0,3 @ 0,1; 1,3; 2,5",
     },
@@ -5146,6 +5151,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "多项式预测",
             "多项式摘要",
             "加权多项式",
+            "稳健直线",
             "残差",
             "误差",
             "过原点",

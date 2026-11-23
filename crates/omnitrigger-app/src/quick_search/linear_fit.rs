@@ -10,6 +10,7 @@ use super::fraction::{
 };
 use super::matrix::{least_squares_with_weights, MatrixError};
 use super::operators::split_top_level_commas;
+use super::statistics::median_sorted_values;
 
 const MAX_POINTS: usize = 64;
 const MAX_PREDICTIONS: usize = 64;
@@ -134,6 +135,11 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
                 || operation.eq_ignore_ascii_case("weighted-polynomial") =>
         {
             return weighted_polynomial(rest.trim());
+        }
+        Some((operation, rest))
+            if operation == "稳健直线" || operation.eq_ignore_ascii_case("theil-sen") =>
+        {
+            return robust_line(rest.trim());
         }
         Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
@@ -386,6 +392,34 @@ fn weighted_polynomial(input: &str) -> Result<String, LinearFitError> {
         return Err(LinearFitError::WeightedFitRank);
     }
     fit_polynomial_coefficients(degree, &points, Some(&weights)).map(format_power_expression)
+}
+
+fn robust_line(input: &str) -> Result<String, LinearFitError> {
+    let points = parse_paired_points(input)?.collect::<Result<Vec<_>, _>>()?;
+    let mut slopes = Vec::new();
+    for (index, (x, y)) in points.iter().enumerate() {
+        for (other_x, other_y) in &points[index + 1..] {
+            if x != other_x {
+                let slope = (other_y - y) / (other_x - x);
+                check_size([&slope])?;
+                slopes.push(slope);
+            }
+        }
+    }
+    if slopes.is_empty() {
+        return Err(LinearFitError::ConstantX);
+    }
+    slopes.sort_unstable();
+    let slope = median_sorted_values(&slopes).map_err(LinearFitError::Evaluation)?;
+    let mut intercepts = Vec::with_capacity(points.len());
+    for (x, y) in points {
+        let intercept = y - &slope * x;
+        check_size([&intercept])?;
+        intercepts.push(intercept);
+    }
+    intercepts.sort_unstable();
+    let intercept = median_sorted_values(&intercepts).map_err(LinearFitError::Evaluation)?;
+    Ok(format_power_expression(vec![intercept, slope]))
 }
 
 fn fit_polynomial_coefficients(
@@ -738,6 +772,22 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fits_a_theil_sen_line_with_outliers_duplicate_x_and_exact_medians() {
+        assert_eq!(
+            calculate_linear_fit("稳健直线 0,1; 1,3; 2,5; 3,7; 4,100").as_deref(),
+            Ok("2*x + 1")
+        );
+        assert_eq!(
+            calculate_linear_fit("THEIL-SEN 0,0; 0,1; 2,2").as_deref(),
+            Ok("3*x/4 + 1/2")
+        );
+        assert_eq!(
+            calculate_linear_fit("稳健直线 1,0; 1,1"),
+            Err(LinearFitError::ConstantX)
+        );
+    }
 
     #[test]
     fn fits_polynomials_with_exact_nonnegative_weights() {

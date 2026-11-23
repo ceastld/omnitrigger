@@ -4558,7 +4558,8 @@ fn median_by_columns(
         .into_iter()
         .map(|(key, (position, mut values))| {
             values.sort_unstable();
-            let median = median_sorted_values(&values).map_err(CsvError::Statistics)?;
+            let median = median_sorted_values(&values)
+                .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
             Ok((key, (position, median)))
         })
         .collect::<Result<Vec<_>, CsvError>>()?;
