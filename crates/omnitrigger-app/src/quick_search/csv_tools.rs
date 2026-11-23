@@ -53,7 +53,7 @@ use super::{
         newline_pattern, regex_group_index, replace_literal_matches, replace_regex_matches,
         GraphemeRange, TextError, TextLengthUnit, UnicodeForm, MAX_TEXT_COMPARISON_WORK,
     },
-    timestamp::timestamp_clock_difference,
+    timestamp::{timestamp_clock_difference, timestamp_zone_converter},
     url_encoding::url_parameter_values,
 };
 
@@ -119,6 +119,7 @@ pub(super) enum CsvError {
     DateDifferenceColumnArguments,
     ClockDifferenceColumnArguments,
     TimestampDifferenceColumnArguments,
+    TimestampZoneColumnArguments,
     DateOffsetColumnArguments,
     WorkdayOffsetColumnArguments,
     WorkdayOffsetExceptions,
@@ -280,6 +281,9 @@ impl CsvError {
             }
             Self::TimestampDifferenceColumnArguments => {
                 "填写新列名、开始时间戳列和结束时间戳列，例如 [\"时长\",\"开始\",\"结束\"]"
+            }
+            Self::TimestampZoneColumnArguments => {
+                "填写新列名、来源列和目标时区，例如 [\"标准时间\",\"时间\",\"UTC\"]"
             }
             Self::DateOffsetColumnArguments => {
                 "填写新列名、来源日期列和整数偏移量列，例如 [\"到期日期\",\"日期\",\"天数\"]"
@@ -1544,6 +1548,21 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 )?;
             input = data;
             Operation::DateDifferenceColumn(name, start, end)
+        }
+        "时区换算列" | "timestamp-zone-column" => {
+            let invalid = CsvError::TimestampZoneColumnArguments;
+            let ((name, source, target), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(input, invalid)?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(invalid);
+            }
+            let convert = timestamp_zone_converter(&target).map_err(|_| invalid)?;
+            return append_transformed_csv_column(data, &name, source, |row, value| {
+                convert(value).map_err(|error| CsvError::DataRowValue {
+                    row,
+                    cause: error.message(),
+                })
+            });
         }
         "时间戳差列" | "timestamp-difference-column" => {
             let ((name, start, end), data) =
@@ -7709,6 +7728,25 @@ null"#
                 Err(CsvError::MovingColumnArguments)
             );
         }
+    }
+
+    #[test]
+    fn appends_timestamp_conversions_in_the_target_zone_and_reports_the_source_row() {
+        let input = "时区换算列 [\"UTC时间\",\"时间\",\"UTC\"] 编号,时间\nA,1970-01-01T08:00:00+08:00\nB,-1ns\nC,";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("编号,时间,UTC时间\r\nA,1970-01-01T08:00:00+08:00,1970-01-01T00:00:00Z\r\nB,-1ns,1969-12-31T23:59:59.999999999Z\r\nC,\"\",\"\""),
+        );
+        assert!(matches!(
+            transform_csv(
+                "时区换算列 [\"UTC时间\",1,\"UTC\"] 时间\n0\n2026-03-08 02:30 America/New_York"
+            ),
+            Err(CsvError::DataRowValue { row: 2, .. }),
+        ));
+        assert_eq!(
+            transform_csv(r#"时区换算列 ["标准",1,"Invalid/Zone"] 时间"#),
+            Err(CsvError::TimestampZoneColumnArguments),
+        );
     }
 
     #[test]

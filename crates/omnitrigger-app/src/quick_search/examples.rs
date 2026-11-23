@@ -1913,6 +1913,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "以毫秒精确表示纪元前一纳秒",
+        query: "时间戳: -1ns to ms",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把带小数的毫秒时间戳换回日期",
+        query: "时间戳: -0.000001 ms",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按地区时区换算时间",
         query: "时间戳: 1700000000 to America/New_York",
     },
@@ -3861,6 +3871,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "用带时区的时间戳求每行实际时长",
         query: "CSV: 时间戳差列 [\"时长\",\"开始\",\"结束\"] 开始,结束\n2026-03-08T01:30:00-05:00,2026-03-08T03:30:00-04:00\n1ns,-1ns",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将 CSV 的时间戳列换算到同一时区",
+        query: "CSV: 时区换算列 [\"UTC时间\",\"时间\",\"UTC\"] 编号,时间\nA,1970-01-01T08:00:00+08:00\nB,-1ns",
     },
     Example {
         icon: Icon::Clock,

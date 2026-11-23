@@ -127,9 +127,16 @@ impl TimestampUnit {
         let count = whole + i128::from(time.timestamp_subsec_nanos()) / self.nanos_per_unit();
         match self {
             Self::Seconds => count.to_string(),
-            Self::Milliseconds => format!("{count} ms"),
-            Self::Microseconds => format!("{count} µs"),
-            Self::Nanoseconds => format!("{count} ns"),
+            _ => format!("{count} {}", self.symbol()),
+        }
+    }
+
+    fn symbol(self) -> &'static str {
+        match self {
+            Self::Seconds => "s",
+            Self::Milliseconds => "ms",
+            Self::Microseconds => "µs",
+            Self::Nanoseconds => "ns",
         }
     }
 }
@@ -144,6 +151,7 @@ enum DisplayZone {
 enum DisplayTargets<'a> {
     Single(DisplayZone),
     Multiple(Vec<(&'a str, DisplayZone)>),
+    Epoch(TimestampUnit),
 }
 
 enum TimestampAlignment {
@@ -218,6 +226,10 @@ fn convert_timestamp_with_local(
     let display_time = |time: DateTime<Utc>, format| match &target_zone {
         None => format_display_time(time, format, &DisplayZone::Utc, &to_local),
         Some(DisplayTargets::Single(zone)) => format_display_time(time, format, zone, &to_local),
+        Some(DisplayTargets::Epoch(unit)) => {
+            ensure_four_digit_year(time.year())?;
+            format_timestamp_delta(unix_nanos(time), Some(unit.symbol()))
+        }
         Some(DisplayTargets::Multiple(zones)) => {
             let rows = zones
                 .iter()
@@ -301,8 +313,10 @@ fn convert_timestamp_with_local(
         return Ok(unit.format_unix(now));
     }
     let source = named_time_source(input);
-    if source.is_none() && (suffixed.is_some() || integer(input)) {
-        return display_time(parse_unix(quantity, unit)?, unit.date_format());
+    if source.is_none() && (suffixed.is_some() || unix_number(input)) {
+        let time = parse_unix(quantity, unit)?;
+        let precision = unit.max(TimestampUnit::from_subsecond(time.timestamp_subsec_nanos()));
+        return display_time(time, precision.date_format());
     }
 
     let time = parse_explicit_time(input, source)?;
@@ -663,6 +677,19 @@ pub(super) fn timestamp_clock_difference(start: &str, end: &str) -> Result<Strin
     format_timestamp_delta(end - start, None)
 }
 
+pub(super) fn timestamp_zone_converter(
+    target: &str,
+) -> Result<impl Fn(&str) -> Result<String, TimestampError>, TimestampError> {
+    let zone = parse_display_zone(&normalize(target))?;
+    Ok(move |source: &str| {
+        let time = interval_endpoint(normalize(source).trim(), None)?;
+        let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
+        format_display_time(time, unit.date_format(), &zone, &|time| {
+            time.with_timezone(&Local).fixed_offset()
+        })
+    })
+}
+
 fn format_timestamp_delta(delta: i128, output: Option<&str>) -> Result<String, TimestampError> {
     let sign = if delta.is_negative() { "-" } else { "" };
     if let Some(unit) = output {
@@ -681,7 +708,7 @@ fn interval_endpoint(
         TimestampUnit::split_suffix(&lower).unwrap_or((TimestampUnit::Seconds, &lower));
     let time = if matches!(lower.as_str(), "现在" | "now") {
         now.ok_or(TimestampError::Invalid)?
-    } else if integer(quantity.trim_end()) {
+    } else if unix_number(quantity.trim_end()) {
         parse_unix(quantity.trim_end(), unit)?
     } else {
         return parse_explicit_time(value, named_time_source(value));
@@ -768,6 +795,10 @@ fn parse_offset_time(input: &str) -> Result<DateTime<Utc>, TimestampError> {
 
 fn parse_display_targets(input: &str) -> Result<DisplayTargets<'_>, TimestampError> {
     if !input.contains([',', '、']) {
+        let unit = input.trim().to_ascii_lowercase();
+        if let Some((unit, "")) = TimestampUnit::split_suffix(&unit) {
+            return Ok(DisplayTargets::Epoch(unit));
+        }
         return parse_display_zone(input).map(DisplayTargets::Single);
     }
     parse_named_display_targets(input).map(DisplayTargets::Multiple)
@@ -842,7 +873,48 @@ fn integer(input: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+fn unix_number(input: &str) -> bool {
+    integer(input) || unix_decimal_parts(input).is_some()
+}
+
+fn unix_decimal_parts(input: &str) -> Option<(&str, &str)> {
+    let (whole, fraction) = input.split_once('.')?;
+    ((integer(whole) || matches!(whole, "" | "+" | "-"))
+        && !fraction.is_empty()
+        && fraction.bytes().all(|byte| byte.is_ascii_digit()))
+    .then_some((whole, fraction))
+}
+
 fn parse_unix(input: &str, unit: TimestampUnit) -> Result<DateTime<Utc>, TimestampError> {
+    if let Some((whole, fraction)) = unix_decimal_parts(input) {
+        let scale = unit.nanos_per_unit();
+        let digits = scale.ilog10() as usize;
+        let (kept, excess) = fraction.split_at(digits.min(fraction.len()));
+        if excess.bytes().any(|digit| digit != b'0') {
+            return Err(TimestampError::UnsupportedPrecision);
+        }
+        let parse_digits = |digits: &str| {
+            if digits.is_empty() {
+                Ok(0)
+            } else {
+                digits
+                    .parse::<i128>()
+                    .map_err(|_| TimestampError::OutOfRange)
+            }
+        };
+        let base = parse_digits(whole.trim_start_matches(['+', '-']))?;
+        let remainder = parse_digits(kept)? * (scale / 10_i128.pow(kept.len() as u32));
+        let nanos = base
+            .checked_mul(scale)
+            .and_then(|base| base.checked_add(remainder))
+            .ok_or(TimestampError::OutOfRange)?;
+        let nanos = if whole.starts_with('-') {
+            -nanos
+        } else {
+            nanos
+        };
+        return timestamp_from_unix_units(nanos, TimestampUnit::Nanoseconds);
+    }
     if !integer(input) {
         return Err(TimestampError::Invalid);
     }
@@ -871,6 +943,47 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_fractional_unix_timestamps_without_rounding_or_losing_the_sign() {
+        let now = DateTime::UNIX_EPOCH;
+        for (input, expected) in [
+            ("-0.000001 ms", "1969-12-31T23:59:59.999999999Z"),
+            ("1.5ms", "1970-01-01T00:00:00.001500Z"),
+            ("+.5s", "1970-01-01T00:00:00.500Z"),
+            ("1.0000ns to ns", "1 ns"),
+            ("间隔 -.5s 到 0.5s to ms", "1000 ms"),
+        ] {
+            assert_eq!(
+                convert_timestamp(input, now).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_timestamp("0.0000000001s", now),
+            Err(TimestampError::UnsupportedPrecision),
+        );
+    }
+
+    #[test]
+    fn converts_to_unix_units_with_exact_fractional_and_negative_values() {
+        let now = DateTime::from_timestamp(0, 1_234_567).unwrap();
+        for (input, expected) in [
+            ("-1ns to ms", "-0.000001 ms"),
+            ("1970-01-01T08:00:00.123456789+08:00 to ns", "123456789 ns"),
+            ("1500ms to s", "1.5 s"),
+            ("1ms to 微秒", "1000 µs"),
+            ("现在 to ms", "1.234567 ms"),
+            ("序列 0 @ 1ns @ 2 to ns", "0 ns\n1 ns"),
+        ] {
+            assert_eq!(
+                convert_timestamp(input, now).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+    }
 
     #[test]
     fn repeats_a_local_clock_time_by_date_and_preserves_gap_and_fold_information() {
