@@ -4793,6 +4793,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "为各完整样点追加与前一完整样点的差商",
+        query: "CSV: 差商列 [\"斜率\",[\"时间\",\"高度\"]] 时间,高度\n3,3\n0,0\n2,\n1,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按横坐标绘制 CSV 的累计梯形积分",
         query: "CSV: 梯形累计图 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0",
     },
@@ -5686,6 +5691,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "梯形平均",
             "梯形面积",
             "梯形累计列",
+            "差商列",
             "梯形累计图",
             "曲线图",
             "残差图",

@@ -228,6 +228,9 @@ pub(super) enum CsvError {
     TrapezoidPointCount,
     TrapezoidDuplicateX,
     CumulativeTrapezoidColumnArguments,
+    SecantColumnArguments,
+    SecantPointCount,
+    SecantDuplicateX,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -496,6 +499,11 @@ impl CsvError {
             Self::CumulativeTrapezoidColumnArguments => {
                 "填写新列名和两个坐标列，例如 [\"累计积分\",[\"时间\",\"高度\"]]"
             }
+            Self::SecantColumnArguments => {
+                "填写新列名和两个坐标列，例如 [\"斜率\",[\"时间\",\"高度\"]]"
+            }
+            Self::SecantPointCount => "差商列需要 2 至 64 行同时含 x 和 y 的数据",
+            Self::SecantDuplicateX => "差商列的横坐标须互不相同",
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -1078,7 +1086,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return trapezoid_statistic(input, TrapezoidMeasure::Area)
         }
         "梯形累计列" | "cumulative-trapezoid-column" => {
-            return append_trapezoid_integral_column(input)
+            return append_sampled_coordinate_column(input, CoordinateColumn::CumulativeIntegral)
+        }
+        "差商列" | "secant-column" => {
+            return append_sampled_coordinate_column(input, CoordinateColumn::Secant)
         }
         operation if is_cumulative_trapezoid_plot(operation) => {
             return cumulative_trapezoid_coordinates(input)?.to_csv();
@@ -5470,8 +5481,22 @@ fn cumulative_trapezoid_coordinates(input: &str) -> Result<CsvCoordinates, CsvEr
     Ok(table)
 }
 
-fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
-    let invalid = CsvError::CumulativeTrapezoidColumnArguments;
+enum CoordinateColumn {
+    CumulativeIntegral,
+    Secant,
+}
+
+fn append_sampled_coordinate_column(
+    input: &str,
+    operation: CoordinateColumn,
+) -> Result<String, CsvError> {
+    let (invalid, point_count_error) = match operation {
+        CoordinateColumn::CumulativeIntegral => (
+            CsvError::CumulativeTrapezoidColumnArguments,
+            CsvError::TrapezoidPointCount,
+        ),
+        CoordinateColumn::Secant => (CsvError::SecantColumnArguments, CsvError::SecantPointCount),
+    };
     let ((name, coordinates), data) =
         json_argument_and_data::<(String, [ColumnReference; 2])>(input, invalid)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -5481,15 +5506,38 @@ fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
     let rows = read_rows(data, ',')?;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, &coordinates, invalid)?;
-    let mut samples = collect_coordinate_samples(records, &columns, CsvError::TrapezoidPointCount)?;
-    let mut totals = vec![String::new(); records.len()];
-    integrate_trapezoid_samples(&mut samples, false, |sample, total| {
-        totals[sample.row_index] = total.to_string();
-    })?;
-    let mut totals = totals.into_iter();
+    let mut samples = collect_coordinate_samples(records, &columns, point_count_error)?;
+    let mut values = vec![String::new(); records.len()];
+    match operation {
+        CoordinateColumn::CumulativeIntegral => {
+            integrate_trapezoid_samples(&mut samples, false, |sample, total| {
+                values[sample.row_index] = total.to_string();
+            })?;
+        }
+        CoordinateColumn::Secant => fill_secant_slopes(&mut samples, &mut values)?,
+    }
+    let mut values = values.into_iter();
     write_appended_column(header, records, &name, |_| {
-        Ok(totals.next().expect("每行均有一个追加单元格"))
+        Ok(values.next().expect("每行均有一个追加单元格"))
     })
+}
+
+fn fill_secant_slopes(
+    samples: &mut [CoordinateSample],
+    cells: &mut [String],
+) -> Result<(), CsvError> {
+    samples.sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
+    for pair in samples.windows(2) {
+        let (left, first) = &pair[0].point;
+        let (right, last) = &pair[1].point;
+        if left == right {
+            return Err(CsvError::SecantDuplicateX);
+        }
+        let slope = (last - first) / (right - left);
+        ensure_exact_size(&slope).map_err(|_| CsvError::ComputedNumberRange)?;
+        cells[pair[1].row_index] = slope.to_string();
+    }
+    Ok(())
 }
 
 fn integrate_trapezoid_samples(
@@ -7137,6 +7185,23 @@ mod tests {
         assert_eq!(
             transform_csv("梯形平均 [1,2] x,y\n1/2,2\n0.50,3"),
             Err(CsvError::TrapezoidDuplicateX)
+        );
+    }
+
+    #[test]
+    fn appends_exact_secant_slopes_in_the_input_order_and_preserves_gaps() {
+        let input = "差商列 [\"斜率\",[\"x\",\"y\"]] 编号,x,y\n003,3,3\n000,0,0\n002,2,\n001,1,2";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("编号,x,y,斜率\r\n003,3,3,1/2\r\n000,0,0,\"\"\r\n002,2,\"\",\"\"\r\n001,1,2,2")
+        );
+        assert_eq!(
+            transform_csv("secant-column [\"斜率\",[1,2]] x,y\n1/2,2\n0.50,3"),
+            Err(CsvError::SecantDuplicateX)
+        );
+        assert_eq!(
+            transform_csv("差商列 [\"斜率\",[1,2]] x,y\n1/2,2\n0.50,"),
+            Err(CsvError::SecantPointCount)
         );
     }
 
