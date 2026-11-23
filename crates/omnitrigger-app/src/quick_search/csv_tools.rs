@@ -235,6 +235,7 @@ pub(super) enum CsvError {
     CoordinateInterpolationPointCount,
     CoordinateDuplicateX,
     CoordinateInterpolationRange,
+    CoordinateResampleArguments,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     GroupSelectionArguments,
@@ -516,6 +517,9 @@ impl CsvError {
             Self::CoordinateInterpolationPointCount => "线性插值需要 2 至 64 行同时含 x 和 y 的数据",
             Self::CoordinateDuplicateX => "完整样点的横坐标须互不相同",
             Self::CoordinateInterpolationRange => "查询横坐标须在完整样点的范围内",
+            Self::CoordinateResampleArguments => {
+                "填写两个坐标列和 2 至 64 个采样点，例如 [[\"时间\",\"高度\"],5]"
+            }
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
@@ -1108,6 +1112,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return append_sampled_coordinate_column(input, CoordinateColumn::Secant)
         }
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
+        "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
         operation if is_cumulative_trapezoid_plot(operation) => {
             return cumulative_trapezoid_coordinates(input)?.to_csv();
@@ -5448,20 +5453,7 @@ fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
         .enumerate()
         .map(|(row_index, raw)| {
             let x = coordinate_argument(raw, invalid)?;
-            let y = match table
-                .samples
-                .binary_search_by(|sample| sample.point.0.cmp(&x))
-            {
-                Ok(index) => table.samples[index].point.1.clone(),
-                Err(right) if right > 0 && right < table.samples.len() => {
-                    let (left_x, left_y) = &table.samples[right - 1].point;
-                    let (right_x, right_y) = &table.samples[right].point;
-                    let progress = (&x - left_x) / (right_x - left_x);
-                    interpolate_fraction(left_y, right_y, &progress)
-                        .map_err(|_| CsvError::ComputedNumberRange)?
-                }
-                Err(_) => return Err(CsvError::CoordinateInterpolationRange),
-            };
+            let y = interpolate_coordinate_value(&table.samples, &x)?;
             Ok(CoordinateSample {
                 row_index,
                 point: (x, y),
@@ -5470,6 +5462,56 @@ fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
         .collect::<Result<Vec<_>, CsvError>>()?;
     table.samples = samples;
     table.to_csv()
+}
+
+fn resample_coordinate_table(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateResampleArguments;
+    let ((columns, count), data) =
+        json_argument_and_data::<([ColumnReference; 2], usize)>(input, invalid)?;
+    if !(2..=MAX_POINTS).contains(&count) {
+        return Err(invalid);
+    }
+    let mut table = read_coordinate_table(
+        data,
+        &columns,
+        invalid,
+        CsvError::CoordinateInterpolationPointCount,
+    )?;
+    table.sort_distinct()?;
+    let first = &table.samples[0].point.0;
+    let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
+    let intervals = BigInt::from(count - 1);
+    let samples = (0..count)
+        .map(|row_index| {
+            let progress = BigRational::new(BigInt::from(row_index), intervals.clone());
+            let x = interpolate_fraction(first, last, &progress)
+                .map_err(|_| CsvError::ComputedNumberRange)?;
+            let y = interpolate_coordinate_value(&table.samples, &x)?;
+            Ok(CoordinateSample {
+                row_index,
+                point: (x, y),
+            })
+        })
+        .collect::<Result<Vec<_>, CsvError>>()?;
+    table.samples = samples;
+    table.to_csv()
+}
+
+fn interpolate_coordinate_value(
+    samples: &[CoordinateSample],
+    x: &BigRational,
+) -> Result<BigRational, CsvError> {
+    match samples.binary_search_by(|sample| sample.point.0.cmp(x)) {
+        Ok(index) => Ok(samples[index].point.1.clone()),
+        Err(right) if right > 0 && right < samples.len() => {
+            let (left_x, left_y) = &samples[right - 1].point;
+            let (right_x, right_y) = &samples[right].point;
+            let progress = (x - left_x) / (right_x - left_x);
+            interpolate_fraction(left_y, right_y, &progress)
+                .map_err(|_| CsvError::ComputedNumberRange)
+        }
+        Err(_) => Err(CsvError::CoordinateInterpolationRange),
+    }
 }
 
 fn coordinate_argument(raw: &RawValue, invalid: CsvError) -> Result<BigRational, CsvError> {
@@ -7348,6 +7390,23 @@ mod tests {
         assert_eq!(
             transform_csv("梯形平均 [1,2] x,y\n1/2,2\n0.50,3"),
             Err(CsvError::TrapezoidDuplicateX)
+        );
+    }
+
+    #[test]
+    fn resamples_irregular_points_on_an_exact_even_grid() {
+        let data = "x,y\n3,3\n1,2\n2,\n0,0";
+        assert_eq!(
+            transform_csv(&format!("等距插值 [[\"x\",\"y\"],5] {data}")).as_deref(),
+            Ok("x,y\r\n0,0\r\n3/4,3/2\r\n3/2,9/4\r\n9/4,21/8\r\n3,3")
+        );
+        assert_eq!(
+            transform_csv(&format!("resample-linear [[1,2],2] {data}")).as_deref(),
+            Ok("x,y\r\n0,0\r\n3,3")
+        );
+        assert_eq!(
+            transform_csv(&format!("等距插值 [[1,2],65] {data}")),
+            Err(CsvError::CoordinateResampleArguments)
         );
     }
 
