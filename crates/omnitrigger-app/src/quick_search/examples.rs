@@ -1104,6 +1104,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按比例分摊一段时长",
+        query: "时长: 分摊 01:30:00 @ 1:2",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "就近舍入到指定的时长步长",
         query: "时长: 舍入 01:07:30 @ 15分钟",
     },
@@ -4459,6 +4464,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "扣除休息",
                     "比率",
                     "缩放",
+                    "分摊",
                     "舍入",
                     "向下取整",
                     "向上取整",

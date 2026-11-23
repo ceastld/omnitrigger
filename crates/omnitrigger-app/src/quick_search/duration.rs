@@ -6,6 +6,7 @@ use num_rational::BigRational;
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 use super::fraction::calculate_fraction;
+use super::ratio_allocation::{allocate_shares, split_allocation, RatioAllocationError};
 
 pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
@@ -28,6 +29,8 @@ pub(super) enum DurationError {
     InvalidFrequency,
     InvalidScaleFactor,
     InvalidRoundingArguments,
+    InvalidAllocation,
+    Allocation(RatioAllocationError),
 }
 
 impl DurationError {
@@ -47,6 +50,8 @@ impl DurationError {
             Self::InvalidFrequency => "按 时长@次数 填写每组，次数须为正整数",
             Self::InvalidScaleFactor => "用 @ 分隔时长和缩放系数，系数可写 2/3、50% 或精确算式",
             Self::InvalidRoundingArguments => "用 @ 分隔时长和正的舍入步长，例如 01:07:30 @ 15分钟",
+            Self::InvalidAllocation => "用 @ 分隔总时长和配比，例如 01:30:00 @ 1:2",
+            Self::Allocation(error) => error.message(),
         }
     }
 }
@@ -72,6 +77,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
             return Err(DurationError::Invalid);
         }
         return duration_ratio(values);
+    }
+    if matches!(operation, "分摊" | "allocate") {
+        return allocate_duration(values, output);
     }
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
@@ -167,6 +175,31 @@ fn scaled_duration(input: &str) -> Result<i128, DurationError> {
         return Err(DurationError::Precision);
     }
     i128::try_from(scaled.numer()).map_err(|_| DurationError::OutOfRange)
+}
+
+fn allocate_duration(input: &str, output: Option<&str>) -> Result<String, DurationError> {
+    let (total, weights) = split_allocation(input).map_err(|error| match error {
+        RatioAllocationError::Incomplete => DurationError::InvalidAllocation,
+        other => DurationError::Allocation(other),
+    })?;
+    let total = BigRational::from_integer(bounded_duration_value(total.trim())?.into());
+    let shares = allocate_shares(&total, weights).map_err(DurationError::Allocation)?;
+    let shares = shares
+        .into_iter()
+        .map(|share| {
+            if !share.is_integer() {
+                return Err(DurationError::Precision);
+            }
+            let share = i128::try_from(share.numer()).map_err(|_| DurationError::OutOfRange)?;
+            let nanos = share.unsigned_abs();
+            let sign = if share < 0 { "-" } else { "" };
+            match output {
+                Some(unit) => format_duration_unit(nanos, sign, unit),
+                None => Ok(format_clock_duration(nanos, sign)),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(shares.join("\n"))
 }
 
 enum DurationRounding {
@@ -698,6 +731,37 @@ mod tests {
             convert_duration("排序 0.5ns,1ns"),
             Err(DurationError::Precision)
         );
+    }
+
+    #[test]
+    fn allocates_durations_as_exact_shares_in_input_order() {
+        for (query, expected) in [
+            ("分摊 01:30:00 @ 1:2", "00:30:00\n01:00:00"),
+            ("分摊 23:45 到 01:15 按 1/2:1/4 to min", "60 min\n30 min"),
+            ("allocate -6ns @ 1:0:2 to ns", "-2 ns\n0 ns\n-4 ns"),
+            ("分摊 0s @ 2:3 to iso", "PT0S\nPT0S"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, expected) in [
+            ("分摊 1ns @ 1:2", DurationError::Precision),
+            ("分摊 6ns @ 1:", DurationError::InvalidAllocation),
+            (
+                "分摊 6ns @ 1",
+                DurationError::Allocation(RatioAllocationError::ShareCount),
+            ),
+            (
+                "分摊 6ns @ 0:0",
+                DurationError::Allocation(RatioAllocationError::ZeroTotalWeight),
+            ),
+            (
+                "分摊 6ns @ 1:-1",
+                DurationError::Allocation(RatioAllocationError::NegativeWeight),
+            ),
+            ("分摊 6ns @ 1:2 to kg", DurationError::InvalidUnit),
+        ] {
+            assert_eq!(convert_duration(query), Err(expected), "{query}");
+        }
     }
 
     #[test]

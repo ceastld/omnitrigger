@@ -29,6 +29,17 @@ impl RatioAllocationError {
 
 pub(super) fn allocate_ratio(query: &str) -> Result<String, RatioAllocationError> {
     let input = normalize(query);
+    let (total, weights) = split_allocation(&input)?;
+    let total = calculate_fraction(total).map_err(RatioAllocationError::Evaluation)?;
+    let shares = allocate_shares(&total, weights)?;
+    Ok(shares
+        .into_iter()
+        .map(|share| share.to_string())
+        .collect::<Vec<_>>()
+        .join(" · "))
+}
+
+pub(super) fn split_allocation(input: &str) -> Result<(&str, Vec<&str>), RatioAllocationError> {
     let (total, weights) = input
         .split_once(['@', '按'])
         .ok_or(RatioAllocationError::Incomplete)?;
@@ -42,7 +53,13 @@ pub(super) fn allocate_ratio(query: &str) -> Result<String, RatioAllocationError
     if weights.iter().any(|weight| weight.trim().is_empty()) {
         return Err(RatioAllocationError::Incomplete);
     }
-    let total = calculate_fraction(total).map_err(RatioAllocationError::Evaluation)?;
+    Ok((total, weights))
+}
+
+pub(super) fn allocate_shares(
+    total: &BigRational,
+    weights: Vec<&str>,
+) -> Result<Vec<BigRational>, RatioAllocationError> {
     let mut parsed_weights = Vec::with_capacity(weights.len());
     let mut sum = BigRational::default();
     for weight in weights {
@@ -60,11 +77,11 @@ pub(super) fn allocate_ratio(query: &str) -> Result<String, RatioAllocationError
 
     let mut shares = Vec::with_capacity(parsed_weights.len());
     for weight in parsed_weights {
-        let share = (&total * weight) / &sum;
+        let share = (total * weight) / &sum;
         ensure_exact_size(&share).map_err(RatioAllocationError::Evaluation)?;
-        shares.push(share.to_string());
+        shares.push(share);
     }
-    Ok(shares.join(" · "))
+    Ok(shares)
 }
 
 #[cfg(test)]
