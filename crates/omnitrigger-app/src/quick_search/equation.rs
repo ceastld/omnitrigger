@@ -18,6 +18,9 @@ pub(super) enum EquationError {
     IntersectionArguments,
     ThreePointArguments,
     VertexFormArguments,
+    TangentArguments,
+    IntegralArguments,
+    ExtremaArguments,
     InequalityArguments,
     NonQuadratic,
     SystemRows,
@@ -39,6 +42,9 @@ impl EquationError {
                 "填写三个横坐标互不相同的点，每个点写 x, y，各点用分号或换行隔开"
             }
             Self::VertexFormArguments => "按顶点横坐标、顶点纵坐标、二次项系数的顺序填写",
+            Self::TangentArguments => "填写函数系数和切点横坐标，例如 1,0,0 @ 2",
+            Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
+            Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
             Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
             Self::Evaluation(error) => error.message(),
@@ -63,6 +69,11 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
                 return quadratic_through_points(arguments.trim_start())
             }
             "由顶点" | "from-vertex" => return quadratic_from_vertex(arguments.trim_start()),
+            "切线" | "tangent" => return polynomial_tangent(arguments.trim_start()),
+            "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
+            "区间极值" | "interval-extrema" => {
+                return polynomial_interval_extrema(arguments.trim_start())
+            }
             "配方" | "complete-the-square" => {
                 return describe_quadratic(arguments.trim_start(), true);
             }
@@ -187,6 +198,104 @@ fn quadratic_from_vertex(input: &str) -> Result<String, EquationError> {
     let b = -&a * &h * BigInt::from(2u8);
     let c = &a * &h * h + k;
     format_quadratic_coefficients(a, b, c)
+}
+
+fn polynomial_tangent(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::TangentArguments;
+    let (coefficients, point) = input.split_once('@').ok_or(invalid)?;
+    let [a, b, c] = coefficient_row(coefficients)?;
+    let x = equation_value(point, invalid)?;
+    let ax = &a * &x;
+    let slope = &ax * BigInt::from(2u8) + b;
+    let intercept = c - ax * x;
+    format_quadratic_coefficients(BigRational::default(), slope, intercept)
+}
+
+fn polynomial_integral(input: &str) -> Result<String, EquationError> {
+    let ([a, b, c], [start, end]) = polynomial_bounds(input, EquationError::IntegralArguments)?;
+    let cubic = a / BigInt::from(3u8);
+    let quadratic = b / BigInt::from(2u8);
+    let antiderivative = |x: BigRational| ((&cubic * &x + &quadratic) * &x + &c) * x;
+    let value = antiderivative(end) - antiderivative(start);
+    ensure_exact_size(&value).map_err(EquationError::Evaluation)?;
+    Ok(value.to_string())
+}
+
+fn polynomial_interval_extrema(input: &str) -> Result<String, EquationError> {
+    let ([a, b, c], [mut start, mut end]) =
+        polynomial_bounds(input, EquationError::ExtremaArguments)?;
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+    if a.numer().sign() == Sign::NoSign && b.numer().sign() == Sign::NoSign && start < end {
+        return Ok(format!("最小值 {c} · 最大值 {c}（区间内任意 x）"));
+    }
+    let mut points = vec![start.clone()];
+    if start < end {
+        if a.numer().sign() != Sign::NoSign {
+            let vertex = -&b / (&a * BigInt::from(2u8));
+            if start < vertex && vertex < end {
+                points.push(vertex);
+            }
+        }
+        points.push(end);
+    }
+    let values = points
+        .into_iter()
+        .map(|x| {
+            let y = (&a * &x + &b) * &x + &c;
+            for value in [&x, &y] {
+                ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+            }
+            Ok((x, y))
+        })
+        .collect::<Result<Vec<_>, EquationError>>()?;
+    let extrema = |label, bound| {
+        let positions = values
+            .iter()
+            .filter(|(_, y)| y == bound)
+            .map(|(x, _)| x.to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        format!("{label} {bound}（x = {positions}）")
+    };
+    let minimum = values
+        .iter()
+        .map(|(_, y)| y)
+        .min()
+        .expect("至少计算一个端点");
+    let maximum = values
+        .iter()
+        .map(|(_, y)| y)
+        .max()
+        .expect("至少计算一个端点");
+    Ok(format!(
+        "{}\n{}",
+        extrema("最小值", minimum),
+        extrema("最大值", maximum)
+    ))
+}
+
+fn polynomial_bounds(
+    input: &str,
+    invalid: EquationError,
+) -> Result<([BigRational; 3], [BigRational; 2]), EquationError> {
+    let (coefficients, bounds) = input.split_once('@').ok_or(invalid)?;
+    let (start, end) = bounds.split_once(['到', '至']).ok_or(invalid)?;
+    Ok((
+        coefficient_row(coefficients)?,
+        [
+            equation_value(start, invalid)?,
+            equation_value(end, invalid)?,
+        ],
+    ))
+}
+
+fn equation_value(input: &str, invalid: EquationError) -> Result<BigRational, EquationError> {
+    calculate_fraction(input).map_err(|error| match error {
+        FractionError::Invalid | FractionError::Incomplete => invalid,
+        _ => EquationError::Evaluation(error),
+    })
 }
 
 fn format_quadratic_coefficients(
@@ -557,6 +666,51 @@ mod tests {
         assert_eq!(
             solve_linear_system("1,2,3; 2,4,6").as_deref(),
             Ok("无穷多解")
+        );
+    }
+
+    #[test]
+    fn finds_interval_extrema_and_lists_both_positions_of_a_tied_bound() {
+        for (input, expected) in [
+            (
+                "区间极值 1/2,-1,3/4 @ 0 到 2",
+                "最小值 1/4（x = 1）\n最大值 3/4（x = 0、2）",
+            ),
+            (
+                "interval-extrema -1,0,0 @ 1 到 -1",
+                "最小值 -1（x = -1、1）\n最大值 0（x = 0）",
+            ),
+            (
+                "区间极值 0,0,3/4 @ -1 到 2",
+                "最小值 3/4 · 最大值 3/4（区间内任意 x）",
+            ),
+            (
+                "区间极值 0,1,0 @ 2 到 2",
+                "最小值 2（x = 2）\n最大值 2（x = 2）",
+            ),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            solve_equation("区间极值 1,0,0 @ 1"),
+            Err(EquationError::ExtremaArguments)
+        );
+    }
+
+    #[test]
+    fn calculates_exact_tangent_coefficients_and_signed_integrals() {
+        for (input, expected) in [
+            ("切线 1/2,-1,3/4 @ 2", "0,1,-5/4"),
+            ("tangent 1/2,-1,3/4 @ 1", "0,0,1/4"),
+            ("定积分 1/2,-1,3/4 @ 0 到 2", "5/6"),
+            ("integral 1/2,-1,3/4 @ 2 至 0", "-5/6"),
+            ("定积分 1,0,0 @ 1/2 到 1/2", "0"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            solve_equation("定积分 1,0,0 @ 1"),
+            Err(EquationError::IntegralArguments)
         );
     }
 

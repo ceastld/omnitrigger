@@ -137,6 +137,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求二次函数在指定横坐标的切线系数",
+        query: "方程: 切线 1/2,-1,3/4 @ 2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求二次函数在给定区间上的精确定积分",
+        query: "方程: 定积分 1/2,-1,3/4 @ 0 到 2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求二次函数在闭区间上的最小值和最大值",
+        query: "方程: 区间极值 1/2,-1,3/4 @ 0 到 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "联立求解两个二元一次方程",
         query: "联立: 2,1,5; 1,-1,1",
     },
