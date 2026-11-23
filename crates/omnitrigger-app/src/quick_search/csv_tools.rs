@@ -44,7 +44,7 @@ use super::{
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
-    radix::convert_radix_integer,
+    radix::{convert_radix_fraction, convert_radix_integer},
     statistics::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
@@ -468,7 +468,13 @@ enum Operation {
         arithmetic: ColumnArithmetic,
     },
     ConvertDataColumn(String, ColumnReference, String),
-    RadixColumn(String, ColumnReference, u32, u32),
+    RadixColumn {
+        name: String,
+        source: ColumnReference,
+        from: u32,
+        to: u32,
+        fractional: bool,
+    },
     NumericComparisonColumn(String, ColumnReference, ColumnReference, NumberComparison),
     OutlierColumn(String, ColumnReference),
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
@@ -1264,7 +1270,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ClockDifferenceColumn(name, start, end)
         }
-        "进制列" | "radix-column" => {
+        kind @ ("进制列" | "radix-column" | "进制小数列" | "radix-fraction-column") => {
             let ((name, source, from, to), data) =
                 json_argument_and_data::<(String, ColumnReference, u32, u32)>(
                     input,
@@ -1277,7 +1283,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 return Err(CsvError::RadixColumnArguments);
             }
             input = data;
-            Operation::RadixColumn(name, source, from, to)
+            Operation::RadixColumn {
+                name,
+                source,
+                from,
+                to,
+                fractional: matches!(kind, "进制小数列" | "radix-fraction-column"),
+            }
         }
         "数据换算列" | "convert-data-column" => {
             let ((name, source, target), data) =
@@ -1880,11 +1892,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amounts,
             unit,
         } => date_offset_column(&rows, &name, source, amounts, unit),
-        Operation::RadixColumn(name, source, from, to) => {
-            append_from_one_column(&rows, &name, source, |value| {
-                convert_radix_integer(value, from, to).map_err(|error| error.message())
-            })
-        }
+        Operation::RadixColumn {
+            name,
+            source,
+            from,
+            to,
+            fractional,
+        } => append_from_one_column(&rows, &name, source, |value| {
+            let result = if fractional {
+                convert_radix_fraction(value, from, to)
+            } else {
+                convert_radix_integer(value, from, to)
+            };
+            result.map_err(|error| error.message())
+        }),
         Operation::UrlParameterColumn(name, source, key) => {
             append_from_one_column(&rows, &name, source, |address| {
                 url_parameter_values(address, &key).map_err(|error| error.message())
@@ -6670,6 +6691,29 @@ null"#
             transform_csv("进制列 [\"结果\",1,1,10] 编号"),
             Err(CsvError::RadixColumnArguments)
         );
+    }
+
+    #[test]
+    fn converts_finite_and_repeating_radix_fractions_in_csv() {
+        assert_eq!(
+            transform_csv(concat!(
+                "进制小数列 [\"二进制\",\"值\",10,2]\n编号,值\n",
+                "001,10.625\n002,0.1\n003,0.(9)\n004, -0.5 \n005,"
+            ))
+            .as_deref(),
+            Ok(concat!(
+                "编号,值,二进制\r\n001,10.625,1010.101\r\n002,0.1,0.0(0011)\r\n",
+                "003,0.(9),1\r\n004, -0.5 ,-0.1\r\n005,\"\",\"\""
+            ))
+        );
+        assert_eq!(
+            transform_csv("radix-fraction-column [\"结果\",1,2,10]\n值\n0.0(0011)").as_deref(),
+            Ok("值,结果\r\n0.0(0011),0.1"),
+        );
+        assert!(matches!(
+            transform_csv("进制小数列 [\"结果\",1,2,10]\n值\n0.1\n0.(2)"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]

@@ -233,7 +233,15 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     }
 }
 
-fn convert_radix_fraction(number: &str, source: u32, target: u32) -> Result<String, RadixError> {
+pub(super) fn convert_radix_fraction(
+    number: &str,
+    source: u32,
+    target: u32,
+) -> Result<String, RadixError> {
+    if [source, target].iter().any(|base| !(2..=36).contains(base)) {
+        return Err(RadixError::Base);
+    }
+    let number = number.trim();
     let sign = if number.starts_with('-') {
         Sign::Minus
     } else {
