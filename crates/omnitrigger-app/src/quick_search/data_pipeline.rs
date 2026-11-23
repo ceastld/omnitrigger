@@ -505,6 +505,13 @@ fn prepare_pipeline_chart(
                 })
             })
             .or_else(|| {
+                super::csv_tools::column_cumulative_plot_arguments(query).map(|input| {
+                    super::csv_tools::build_column_cumulative_plot(input)
+                        .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                        .map_err(|error| error.message())
+                })
+            })
+            .or_else(|| {
                 correlation_plot_arguments(query).map(|(input, rank)| {
                     build_correlation_plot(input, rank)
                         .map(|(text, plot)| (text, PipelineChart::Correlation(plot)))

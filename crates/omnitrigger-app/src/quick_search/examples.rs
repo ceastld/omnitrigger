@@ -4599,6 +4599,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看金额列的累计频率并跳过空白",
+        query: "CSV: 列累计分布图 \"金额\" 编号,金额\nA,1/2\nB,0.5\nC,\nD,3\nE,5",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看选定 CSV 数值列两两之间的精确相关系数",
         query: "CSV: 相关矩阵 [\"x\",\"y\",\"z\",\"固定\"] x,y,z,固定\n-1,2,1,5\n0,0,-2,5\n1,-2,1,5\n8,,9,6",
     },

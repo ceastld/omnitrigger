@@ -1049,6 +1049,13 @@ impl Results {
                         Self::plot_value(
                             csv_tools::build_scatter_plot(arguments).map_err(ValueError::Csv),
                         )
+                    } else if let Some(arguments) =
+                        csv_tools::column_cumulative_plot_arguments(term)
+                    {
+                        Self::plot_value(
+                            csv_tools::build_column_cumulative_plot(arguments)
+                                .map_err(ValueError::Csv),
+                        )
                     } else if let Some(arguments) = csv_tools::column_box_plot_arguments(term) {
                         Self::Value(
                             csv_tools::build_column_box_plot(arguments)
@@ -4088,6 +4095,23 @@ mod tests {
         ));
         let expected = transform_csv(&format!("列分箱 {input}")).unwrap();
         assert_eq!(results.refillable_text(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn cumulative_csv_column_chart_preserves_fractions_and_skips_blank_values() {
+        let data = "编号,金额\nA,1/2\nB,0.5\nC,\nD,3\nE,5";
+        let results = for_query(&format!(r#"CSV: 列累计分布图 "金额" {data}"#), &[]);
+        assert!(matches!(
+            &results,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.point_count() == 3 && plot.has_curve()
+        ));
+        let expected = "值,累计次数,累计频率\r\n1/2,2,1/2\r\n3,3,3/4\r\n5,4,1";
+        assert_eq!(results.refillable_text(), Some(expected));
+        assert_eq!(
+            transform_csv(&format!("列累计分布 2 {data}")).as_deref(),
+            Ok(expected)
+        );
     }
 
     #[test]

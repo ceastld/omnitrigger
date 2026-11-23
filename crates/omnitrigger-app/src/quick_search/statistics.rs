@@ -701,12 +701,32 @@ pub(super) fn plot_cumulative_distribution(
 ) -> Result<(String, ScatterPlot), StatisticsError> {
     let input = normalize(input);
     let (values, count) = read_observations(input.trim())?;
+    Ok(prepare_cumulative_plot(values, count))
+}
+
+pub(super) fn report_cumulative_unweighted(
+    values: Vec<BigRational>,
+) -> Result<String, StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    Ok(cumulative_csv(&frequency_groups(values), count))
+}
+
+pub(super) fn plot_cumulative_unweighted(
+    values: Vec<BigRational>,
+) -> Result<(String, ScatterPlot), StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    Ok(prepare_cumulative_plot(values, count))
+}
+
+fn prepare_cumulative_plot(values: Vec<(BigRational, u64)>, count: u64) -> (String, ScatterPlot) {
     let frequencies = frequency_groups(values);
     let points = cumulative_rows(&frequencies, count)
         .map(|(value, _, share)| (value.clone(), share))
         .collect::<Vec<_>>();
     let plot = ScatterPlot::from_cumulative_distribution(&points, count);
-    Ok((cumulative_csv(&frequencies, count), plot))
+    (cumulative_csv(&frequencies, count), plot)
 }
 
 pub(super) fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, StatisticsError> {
