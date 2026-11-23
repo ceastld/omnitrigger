@@ -8,7 +8,7 @@ use super::fraction::{
 };
 use super::operators::split_top_level_commas;
 
-const MAX_DIMENSION: usize = 8;
+pub(super) const MAX_DIMENSION: usize = 8;
 const MAX_POWER: u32 = 64;
 pub(super) type Matrix = Vec<Vec<BigRational>>;
 
@@ -130,7 +130,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         }
         "通解" | "general-solution" => {
             let (left, right) = parse_pair(input)?;
-            general_solution(left, right)
+            general_solution(left, right, None)
         }
         "最小二乘" | "least-squares" => {
             let (left, right) = parse_pair(input)?;
@@ -432,7 +432,11 @@ fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
         .collect())
 }
 
-fn general_solution(mut coefficients: Matrix, constants: Matrix) -> Result<String, MatrixError> {
+pub(super) fn general_solution(
+    mut coefficients: Matrix,
+    constants: Matrix,
+    names: Option<&[&str]>,
+) -> Result<String, MatrixError> {
     if coefficients.len() != constants.len() || constants[0].len() != 1 {
         return Err(MatrixError::GeneralSolutionDimensions);
     }
@@ -471,7 +475,13 @@ fn general_solution(mut coefficients: Matrix, constants: Matrix) -> Result<Strin
     let mut lines: Vec<_> = expressions
         .into_iter()
         .enumerate()
-        .map(|(index, value)| format!("x{} = {value}", SUBSCRIPTS[index]))
+        .map(|(index, value)| {
+            if let Some(name) = names.and_then(|names| names.get(index)) {
+                format!("{name} = {value}")
+            } else {
+                format!("x{} = {value}", SUBSCRIPTS[index])
+            }
+        })
         .collect();
     if !free_variables.is_empty() {
         let parameters: Vec<_> = free_variables

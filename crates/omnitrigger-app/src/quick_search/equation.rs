@@ -8,6 +8,7 @@ use super::fraction::{
     calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
     format_square_root, FractionError,
 };
+use super::matrix::{general_solution, MatrixError, MAX_DIMENSION};
 use super::operators::{split_top_level_commas, NumberComparison};
 use super::plane::{parse_point, PointError};
 
@@ -30,6 +31,7 @@ pub(super) enum EquationError {
     InequalityArguments,
     NonQuadratic,
     SystemRows,
+    ThreeVariableRows,
     Evaluation(FractionError),
 }
 
@@ -60,6 +62,7 @@ impl EquationError {
             Self::NonQuadratic => "二次项系数 a 须非零",
             Self::SystemRows => "输入 x + y = 3; x - y = 1，或每行按 x 系数、y 系数、右侧常数填写",
             Self::Evaluation(error) => error.message(),
+            Self::ThreeVariableRows => "填写最多八条含 x、y、z 的展开式方程，用分号或换行隔开",
         }
     }
 }
@@ -185,6 +188,7 @@ fn expanded_equation_coefficients(input: &str) -> Result<[BigRational; 3], Equat
 enum PolynomialForm {
     Quadratic,
     TwoVariableLinear,
+    ThreeVariableLinear,
 }
 
 fn move_polynomial_terms(
@@ -208,18 +212,20 @@ fn polynomial_expression(
     parse_polynomial(input, form, matches!(form, PolynomialForm::Quadratic))
 }
 
-fn parse_polynomial(
+fn parse_polynomial<const N: usize>(
     input: &str,
     form: PolynomialForm,
     allow_product_terms: bool,
-) -> Result<[BigRational; 3], EquationError> {
+) -> Result<[BigRational; N], EquationError> {
     let input = input.trim();
-    let mut coefficients = std::array::from_fn::<_, 3, _>(|_| BigRational::default());
+    let mut coefficients = std::array::from_fn::<_, N, _>(|_| BigRational::default());
     let mut add_term = |term: &str| -> Result<(), EquationError> {
         let term = term.trim();
         match expanded_polynomial_term(term, form) {
             Ok((index, coefficient)) => {
-                let value = &mut coefficients[index];
+                let value = coefficients
+                    .get_mut(index)
+                    .ok_or(EquationError::ExpressionArguments)?;
                 *value += coefficient;
                 ensure_exact_size(value).map_err(EquationError::Evaluation)
             }
@@ -275,13 +281,18 @@ fn expanded_polynomial_term(
 ) -> Result<(usize, BigRational), EquationError> {
     let invalid = EquationError::ExpressionArguments;
     let variable = term
-        .rmatch_indices(['x', 'X', 'y', 'Y'])
+        .rmatch_indices(['x', 'X', 'y', 'Y', 'z', 'Z'])
         .find(|(index, _)| {
             let tail = term[index + 1..].trim_start();
             tail.is_empty() || tail.starts_with(['*', '×', '/', '^', '²'])
         });
+    let constant_index = if matches!(form, PolynomialForm::ThreeVariableLinear) {
+        3
+    } else {
+        2
+    };
     let Some((index, variable)) = variable else {
-        return equation_value(term, invalid).map(|constant| (2, constant));
+        return equation_value(term, invalid).map(|constant| (constant_index, constant));
     };
     let prefix = term[..index].trim_end();
     let coefficient = if let Some(coefficient) = prefix.strip_suffix(['*', '×']) {
@@ -305,6 +316,10 @@ fn expanded_polynomial_term(
         (PolynomialForm::TwoVariableLinear, _, 0) => 2,
         (PolynomialForm::TwoVariableLinear, "x" | "X", 1) => 0,
         (PolynomialForm::TwoVariableLinear, "y" | "Y", 1) => 1,
+        (PolynomialForm::ThreeVariableLinear, _, 0) => 3,
+        (PolynomialForm::ThreeVariableLinear, "x" | "X", 1) => 0,
+        (PolynomialForm::ThreeVariableLinear, "y" | "Y", 1) => 1,
+        (PolynomialForm::ThreeVariableLinear, "z" | "Z", 1) => 2,
         _ => return Err(invalid),
     };
     let tail = tail.trim_start();
@@ -1134,9 +1149,13 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
         return Err(EquationError::Evaluation(FractionError::TooLong));
     }
     let input = normalize(query).replace('·', "*");
-    let (parametric, input) = input
-        .trim_start()
-        .split_once(char::is_whitespace)
+    let command = input.trim_start().split_once(char::is_whitespace);
+    if let Some((_, arguments)) = command.filter(|(operation, _)| {
+        *operation == "三元" || operation.eq_ignore_ascii_case("three-variables")
+    }) {
+        return solve_three_variable_system(arguments);
+    }
+    let (parametric, input) = command
         .filter(|(operation, _)| *operation == "通解" || operation.eq_ignore_ascii_case("general"))
         .map_or((false, input.as_ref()), |(_, rows)| (true, rows));
     let (first, second) = input
@@ -1193,6 +1212,43 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
         ensure_exact_size(value).map_err(EquationError::Evaluation)?;
     }
     Ok(format!("x = {x} · y = {y}"))
+}
+
+fn solve_three_variable_system(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::ThreeVariableRows;
+    let rows: Vec<_> = input
+        .trim()
+        .split([';', '\n'])
+        .take(MAX_DIMENSION + 1)
+        .collect();
+    if rows.len() > MAX_DIMENSION {
+        return Err(invalid);
+    }
+    let mut coefficients = Vec::with_capacity(rows.len());
+    let mut constants = Vec::with_capacity(rows.len());
+    let parse = |input: &str| {
+        parse_polynomial::<4>(input, PolynomialForm::ThreeVariableLinear, false).map_err(|error| {
+            match error {
+                EquationError::ExpressionArguments => invalid,
+                _ => error,
+            }
+        })
+    };
+    for row in rows {
+        let (left, right) = row.split_once('=').ok_or(invalid)?;
+        let left = parse(left)?;
+        let right = parse(right)?;
+        let [x, y, z, constant] = std::array::from_fn(|index| &left[index] - &right[index]);
+        for value in [&x, &y, &z, &constant] {
+            ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+        }
+        coefficients.push(vec![x, y, z]);
+        constants.push(vec![-constant]);
+    }
+    general_solution(coefficients, constants, Some(&["x", "y", "z"])).map_err(|error| match error {
+        MatrixError::Evaluation(error) => EquationError::Evaluation(error),
+        _ => invalid,
+    })
 }
 
 fn linear_system_row(input: &str) -> Result<[BigRational; 3], EquationError> {
@@ -1264,6 +1320,32 @@ mod tests {
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn solves_three_named_variables_and_reports_free_parameters() {
+        for (input, expected) in [
+            ("三元 x+y+z=6; x-y=0; z=2", "x = 2\ny = 2\nz = 2"),
+            (
+                "三元 x+z=2; y=1",
+                "x = 2 - t₁\ny = 1\nz = t₁\nt₁ 为任意实数",
+            ),
+            ("三元 z=1; z=2", "无解"),
+            (
+                "three-variables x+y+z=1; Y+Z=2/3; X+Z=2/3",
+                "x = 1/3\ny = 1/3\nz = 1/3",
+            ),
+        ] {
+            assert_eq!(
+                solve_linear_system(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            solve_linear_system("三元 x+y+z²=1"),
+            Err(EquationError::ThreeVariableRows)
+        );
     }
 
     #[test]

@@ -247,6 +247,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接解三元一次方程组",
+        query: "联立: 三元 x+y+z=6; x-y=0; z=2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用最小二乘法拟合直线",
         query: "拟合: 0,1; 1,3; 2,5",
     },
@@ -5089,7 +5094,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "定积分",
             "区间极值",
         ],
-        Scope::LinearSystem => &["通解"],
+        Scope::LinearSystem => &["通解", "三元"],
         Scope::LinearFit => &["插值"],
         Scope::Matrix => &["通解"],
         Scope::Date => &[
