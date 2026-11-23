@@ -261,6 +261,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接填写左右两式并求它们相等时的近似横坐标",
+        query: "方程: 二分求根 cos(x)=x @ 0..1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "估算计算器函数在指定区间的积分",
         query: "方程: 数值积分 sin(x) @ 0 到 pi; 64",
     },

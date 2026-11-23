@@ -88,7 +88,7 @@ impl EquationError {
                 "填写带 x 的算式，用 @ 隔开 1 至 64 个以逗号分隔的横坐标"
             }
             Self::BisectionArguments => {
-                "填写要求零点的算式和两个不同的端点，例如 cos(x)-x @ 0 到 1"
+                "填写要求零点的算式或等式和两个不同的端点，例如 cos(x)=x @ 0 到 1"
             }
             Self::BisectionSameSign => "两端的函数值须异号，或者一端的函数值等于零",
             Self::BisectionResidual => "区间已缩小，函数值仍未接近零。请检查函数是否连续或缩小区间",
@@ -754,14 +754,47 @@ fn bisect_function_root(input: &str) -> Result<String, EquationError> {
     let invalid = EquationError::BisectionArguments;
     let (expression, interval) = split_function_arguments(input, invalid)?;
     let [mut left, mut right] = function_interval(interval, invalid)?;
-    let value_at = |x| evaluate_at_x(expression, x).map_err(EquationError::Approximation);
+    let expression = expression
+        .strip_prefix('=')
+        .unwrap_or(expression)
+        .trim_start();
+    let (first, second) = match expression
+        .split_once("==")
+        .or_else(|| expression.split_once('='))
+    {
+        Some((first, second)) => {
+            if first.contains('=') || second.contains('=') {
+                return Err(invalid);
+            }
+            (first, Some(second))
+        }
+        None => (expression, None),
+    };
+    let residual_name = if second.is_some() {
+        "|左式 − 右式|"
+    } else {
+        "|f(x)|"
+    };
+    let value_at = |x| {
+        let first = evaluate_at_x(first, x).map_err(EquationError::Approximation)?;
+        let second = second
+            .map(|expression| evaluate_at_x(expression, x))
+            .transpose()
+            .map_err(EquationError::Approximation)?
+            .unwrap_or_default();
+        let residual = first - second;
+        if !residual.is_finite() {
+            return Err(EquationError::Approximation(CalculationError::OutOfRange));
+        }
+        Ok(residual)
+    };
     let mut left_value = value_at(left)?;
     let mut right_value = value_at(right)?;
     if left_value == 0.0 {
-        return format_bisection_result(left, 0.0);
+        return format_bisection_result(left, 0.0, residual_name);
     }
     if right_value == 0.0 {
-        return format_bisection_result(right, 0.0);
+        return format_bisection_result(right, 0.0, residual_name);
     }
     if left_value.is_sign_negative() == right_value.is_sign_negative() {
         return Err(EquationError::BisectionSameSign);
@@ -774,7 +807,7 @@ fn bisect_function_root(input: &str) -> Result<String, EquationError> {
         }
         let value = value_at(middle)?;
         if value == 0.0 {
-            return format_bisection_result(middle, 0.0);
+            return format_bisection_result(middle, 0.0, residual_name);
         }
         if value.is_sign_negative() == left_value.is_sign_negative() {
             (left, left_value) = (middle, value);
@@ -790,10 +823,14 @@ fn bisect_function_root(input: &str) -> Result<String, EquationError> {
     if residual / initial_residual > BISECTION_RESIDUAL_RATIO {
         return Err(EquationError::BisectionResidual);
     }
-    format_bisection_result(x, residual)
+    format_bisection_result(x, residual, residual_name)
 }
 
-fn format_bisection_result(x: f64, residual: f64) -> Result<String, EquationError> {
+fn format_bisection_result(
+    x: f64,
+    residual: f64,
+    residual_name: &str,
+) -> Result<String, EquationError> {
     // 保留可无损读回的横坐标，使显示的残差对应同一个浮点数。
     let x = if x == 0.0 {
         "0".to_owned()
@@ -803,7 +840,7 @@ fn format_bisection_result(x: f64, residual: f64) -> Result<String, EquationErro
         format!("{x:e}")
     };
     let residual = format_result(residual).map_err(EquationError::Approximation)?;
-    Ok(format!("x ≈ {x}\r\n残差 |f(x)| ≈ {residual}"))
+    Ok(format!("x ≈ {x}\r\n残差 {residual_name} ≈ {residual}"))
 }
 
 fn numeric_integral(input: &str) -> Result<String, EquationError> {
@@ -1953,6 +1990,22 @@ mod tests {
         );
         assert!(
             (simpson_integral(&[1e-308; 3], -f64::MAX, f64::MAX) - 3.59538626972463).abs() < 1e-14
+        );
+    }
+
+    #[test]
+    fn bisects_two_expression_equalities_and_reports_their_residual() {
+        let single = solve_equation("二分求根 cos(x)-x @ 0 到 1").unwrap();
+        let equation = solve_equation("二分求根 cos(x)=x @ 0 到 1").unwrap();
+        assert_eq!(equation.lines().next(), single.lines().next());
+        assert!(equation.contains("残差 |左式 − 右式| ≈ "));
+        assert_eq!(
+            solve_equation("二分求根 x**3 == 8 @ 0..4").as_deref(),
+            Ok("x ≈ 2\r\n残差 |左式 − 右式| ≈ 0")
+        );
+        assert_eq!(
+            solve_equation("二分求根 2=x=2 @ 0..4"),
+            Err(EquationError::BisectionArguments)
         );
     }
 
