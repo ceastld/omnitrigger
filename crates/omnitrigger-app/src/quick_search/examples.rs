@@ -1492,6 +1492,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按截止频率反求 RC 电容",
+        query: "电路: RC电容 1 kΩ @ 1 kHz",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按截止频率反求 RC 电阻",
+        query: "电路: RC电阻 100 nF @ 1 kHz",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按功率和用时计算耗电量",
         query: "电路: 耗电 1.5 kW @ 2h",
     },
@@ -4845,6 +4855,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "RC",
             "RC充电",
             "RC放电",
+            "RC电容",
+            "RC电阻",
             "耗电",
             "电池能量",
         ],

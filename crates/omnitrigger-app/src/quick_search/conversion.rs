@@ -46,6 +46,7 @@ pub(super) enum ConversionError {
     InvalidRcFilter,
     InvalidRcCharge,
     InvalidRcDischarge,
+    InvalidRcDesign,
     InvalidEnergyUse,
     InvalidBatteryEnergy,
     InvalidPeriod,
@@ -101,6 +102,7 @@ impl ConversionError {
             Self::InvalidRcFilter => "输入正电阻和正电容，例如 RC 1 kΩ,1 μF",
             Self::InvalidRcCharge => "输入低于 100% 的目标充电比例，例如 RC充电 50% @ 1 kΩ,1 μF",
             Self::InvalidRcDischarge => "输入大于零的剩余比例，例如 RC放电 25% @ 1 kΩ,1 μF",
+            Self::InvalidRcDesign => "输入已知元件和截止频率，例如 RC电容 1 kΩ @ 1 kHz",
             Self::InvalidEnergyUse => "填写非负功率和用时，例如 耗电 1.5 kW @ 2h",
             Self::InvalidBatteryEnergy => "填写容量和标称电压，例如 电池能量 2500 mAh @ 3.7 V",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
@@ -1039,6 +1041,8 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
             "rc" | "rc滤波" | "rc-filter" => return calculate_rc_filter(values),
             "rc充电" | "rc-charge" => return calculate_rc_transition(values, true),
             "rc放电" | "rc-discharge" => return calculate_rc_transition(values, false),
+            "rc电容" | "rc-capacitance" => return calculate_rc_component(values, false),
+            "rc电阻" | "rc-resistance" => return calculate_rc_component(values, true),
             "耗电" | "energy-use" => return calculate_energy_use(values),
             "电池能量" | "battery-energy" => return calculate_battery_energy(values),
             _ => {}
@@ -1149,18 +1153,39 @@ fn rc_time_constant(input: &str) -> Result<f64, ConversionError> {
     else {
         return Err(invalid);
     };
-    let CircuitInput::Resistance(resistance) =
-        CircuitInput::parse(resistance).map_err(|error| {
-            if error == ConversionError::OutOfRange {
-                error
-            } else {
-                invalid
-            }
-        })?
+    let resistance = rc_resistance(resistance)?;
+    let (amount, scale) = rc_capacitance(capacitance)?;
+    let farads = amount * scale;
+    let time = if farads.is_normal() {
+        resistance * farads
+    } else {
+        // 先换算电阻的倍率，保留电容换算成法拉时可能下溢的结果。
+        (resistance * scale) * amount
+    };
+    if !time.is_finite() || time == 0.0 {
+        return Err(ConversionError::OutOfRange);
+    }
+    Ok(time)
+}
+
+fn rc_resistance(input: &str) -> Result<f64, ConversionError> {
+    let invalid = ConversionError::InvalidRcFilter;
+    let CircuitInput::Resistance(resistance) = CircuitInput::parse(input).map_err(|error| {
+        if error == ConversionError::OutOfRange {
+            error
+        } else {
+            invalid
+        }
+    })?
     else {
         return Err(invalid);
     };
-    let farads = capacitance.trim().strip_suffix(['F', 'f']).ok_or(invalid)?;
+    Ok(resistance)
+}
+
+fn rc_capacitance(input: &str) -> Result<(f64, f64), ConversionError> {
+    let invalid = ConversionError::InvalidRcFilter;
+    let farads = input.trim().strip_suffix(['F', 'f']).ok_or(invalid)?;
     let (amount, scale) = [
         ('m', 1e-3),
         ('μ', 1e-6),
@@ -1176,17 +1201,7 @@ fn rc_time_constant(input: &str) -> Result<f64, ConversionError> {
     if amount <= 0.0 {
         return Err(invalid);
     }
-    let farads = amount * scale;
-    let time = if farads.is_normal() {
-        resistance * farads
-    } else {
-        // 先换算电阻的倍率，保留电容换算成法拉时可能下溢的结果。
-        (resistance * scale) * amount
-    };
-    if !time.is_finite() || time == 0.0 {
-        return Err(ConversionError::OutOfRange);
-    }
-    Ok(time)
+    Ok((amount, scale))
 }
 
 fn calculate_rc_filter(input: &str) -> Result<String, ConversionError> {
@@ -1235,6 +1250,46 @@ fn calculate_rc_transition(input: &str, charging: bool) -> Result<String, Conver
     };
     let time = tau * factor;
     format_positive_quantity(time, &Unit::parse(default_time_unit(time))?)
+}
+
+fn calculate_rc_component(input: &str, find_resistance: bool) -> Result<String, ConversionError> {
+    let invalid = ConversionError::InvalidRcDesign;
+    let (known, frequency) = input.split_once('@').ok_or(invalid)?;
+    let (frequency, unit) = parse_quantity(frequency.trim()).map_err(|_| invalid)?;
+    if frequency <= 0.0 || unit.dimension != Dimension::Frequency {
+        return Err(invalid);
+    }
+    let (known, scale) = if find_resistance {
+        rc_capacitance(known)
+    } else {
+        rc_resistance(known).map(|value| (value, 1.0))
+    }
+    .map_err(|error| match error {
+        ConversionError::InvalidRcFilter => invalid,
+        _ => error,
+    })?;
+    let product = (known * scale) * (frequency * unit.scale);
+    let output = if product.is_normal() {
+        TAU.recip() / product
+    } else {
+        // 避免中间乘积溢出或下溢时丢失可表示的元件值。
+        (TAU.recip().ln() - known.ln() - scale.ln() - frequency.ln() - unit.scale.ln()).exp()
+    };
+    if !output.is_finite() || output <= 0.0 {
+        return Err(ConversionError::OutOfRange);
+    }
+    if find_resistance {
+        return format_circuit_value(output, "Ω");
+    }
+    let (factor, unit) = match output {
+        value if value >= 1.0 => (1.0, "F"),
+        value if value >= 1e-3 => (1e-3, "mF"),
+        value if value >= 1e-6 => (1e-6, "μF"),
+        value if value >= 1e-9 => (1e-9, "nF"),
+        _ => (1e-12, "pF"),
+    };
+    let amount = format_result(output / factor).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{amount} {unit}"))
 }
 
 fn calculate_battery_energy(input: &str) -> Result<String, ConversionError> {
@@ -2840,6 +2895,29 @@ mod tests {
                 calculate_circuit(query),
                 Err(ConversionError::InvalidLoadedVoltageDivider),
                 "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn calculates_the_missing_component_for_an_rc_cutoff_frequency() {
+        for (query, unit, expected) in [
+            ("RC电容 1 kΩ @ 1 kHz", " nF", 159.154943091895),
+            ("rc-resistance 100 nF @ 1 kHz", " kΩ", 1.59154943091895),
+        ] {
+            let value = calculate_circuit(query).unwrap();
+            let amount = value.strip_suffix(unit).unwrap().parse::<f64>().unwrap();
+            assert!((amount - expected).abs() < 1e-10, "{query}: {value}");
+        }
+        for query in [
+            "RC电容 1 μF @ 1 kHz",
+            "RC电阻 0 F @ 1 Hz",
+            "RC电阻 100 nF @ 0 Hz",
+            "RC电容 1 kΩ @ 1 s",
+        ] {
+            assert_eq!(
+                calculate_circuit(query),
+                Err(ConversionError::InvalidRcDesign)
             );
         }
     }
