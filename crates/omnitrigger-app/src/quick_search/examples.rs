@@ -187,6 +187,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接输入 x、y 的两条方程",
+        query: "联立: x + y = 3; x - y = 1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用最小二乘法拟合直线",
         query: "拟合: 0,1; 1,3; 2,5",
     },

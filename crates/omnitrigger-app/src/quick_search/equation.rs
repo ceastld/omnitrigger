@@ -50,7 +50,7 @@ impl EquationError {
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
-            Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
+            Self::SystemRows => "输入 x + y = 3; x - y = 1，或每行按 x 系数、y 系数、右侧常数填写",
             Self::Evaluation(error) => error.message(),
         }
     }
@@ -118,14 +118,24 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
 
 fn expanded_equation_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
     let Some((left, right)) = input.split_once('=') else {
-        return expanded_polynomial(input);
+        return expanded_polynomial(input, PolynomialForm::Quadratic);
     };
-    move_polynomial_terms(left, right)
+    move_polynomial_terms(left, right, PolynomialForm::Quadratic)
 }
 
-fn move_polynomial_terms(left: &str, right: &str) -> Result<[BigRational; 3], EquationError> {
-    let [a, b, c] = expanded_polynomial(left)?;
-    let [right_a, right_b, right_c] = expanded_polynomial(right)?;
+#[derive(Clone, Copy)]
+enum PolynomialForm {
+    Quadratic,
+    TwoVariableLinear,
+}
+
+fn move_polynomial_terms(
+    left: &str,
+    right: &str,
+    form: PolynomialForm,
+) -> Result<[BigRational; 3], EquationError> {
+    let [a, b, c] = expanded_polynomial(left, form)?;
+    let [right_a, right_b, right_c] = expanded_polynomial(right, form)?;
     let coefficients = [a - right_a, b - right_b, c - right_c];
     for value in &coefficients {
         ensure_exact_size(value).map_err(EquationError::Evaluation)?;
@@ -133,12 +143,15 @@ fn move_polynomial_terms(left: &str, right: &str) -> Result<[BigRational; 3], Eq
     Ok(coefficients)
 }
 
-fn expanded_polynomial(input: &str) -> Result<[BigRational; 3], EquationError> {
+fn expanded_polynomial(
+    input: &str,
+    form: PolynomialForm,
+) -> Result<[BigRational; 3], EquationError> {
     let input = input.trim();
     let mut coefficients = std::array::from_fn::<_, 3, _>(|_| BigRational::default());
     let mut add_term = |term: &str| -> Result<(), EquationError> {
-        let (degree, coefficient) = expanded_polynomial_term(term.trim())?;
-        let value = &mut coefficients[2 - degree];
+        let (index, coefficient) = expanded_polynomial_term(term.trim(), form)?;
+        let value = &mut coefficients[index];
         *value += coefficient;
         ensure_exact_size(value).map_err(EquationError::Evaluation)
     };
@@ -174,14 +187,19 @@ fn expanded_polynomial(input: &str) -> Result<[BigRational; 3], EquationError> {
     Ok(coefficients)
 }
 
-fn expanded_polynomial_term(term: &str) -> Result<(usize, BigRational), EquationError> {
+fn expanded_polynomial_term(
+    term: &str,
+    form: PolynomialForm,
+) -> Result<(usize, BigRational), EquationError> {
     let invalid = EquationError::ExpressionArguments;
-    let variable = term.rmatch_indices(['x', 'X']).find(|(index, _)| {
-        let tail = term[index + 1..].trim_start();
-        tail.is_empty() || tail.starts_with(['*', '/', '^', '²'])
-    });
-    let Some((index, _)) = variable else {
-        return equation_value(term, invalid).map(|constant| (0, constant));
+    let variable = term
+        .rmatch_indices(['x', 'X', 'y', 'Y'])
+        .find(|(index, _)| {
+            let tail = term[index + 1..].trim_start();
+            tail.is_empty() || tail.starts_with(['*', '/', '^', '²'])
+        });
+    let Some((index, variable)) = variable else {
+        return equation_value(term, invalid).map(|constant| (2, constant));
     };
     let prefix = term[..index].trim_end();
     let coefficient = if let Some(coefficient) = prefix.strip_suffix('*') {
@@ -213,9 +231,16 @@ fn expanded_polynomial_term(term: &str) -> Result<(usize, BigRational), Equation
     } else {
         (1, tail)
     };
+    let index = match (form, variable, degree) {
+        (PolynomialForm::Quadratic, "x" | "X", _) => 2 - degree,
+        (PolynomialForm::TwoVariableLinear, _, 0) => 2,
+        (PolynomialForm::TwoVariableLinear, "x" | "X", 1) => 0,
+        (PolynomialForm::TwoVariableLinear, "y" | "Y", 1) => 1,
+        _ => return Err(invalid),
+    };
     let tail = tail.trim_start();
     if tail.is_empty() {
-        return Ok((degree, value));
+        return Ok((index, value));
     }
     if tail.starts_with("**") {
         return Err(invalid);
@@ -247,8 +272,8 @@ fn expanded_polynomial_term(term: &str) -> Result<(usize, BigRational), Equation
         })?
     };
     match operator {
-        "*" => Ok((degree, value * scalar)),
-        "/" if scalar.numer().sign() != Sign::NoSign => Ok((degree, value / scalar)),
+        "*" => Ok((index, value * scalar)),
+        "/" if scalar.numer().sign() != Sign::NoSign => Ok((index, value / scalar)),
         "/" => Err(EquationError::Evaluation(FractionError::ZeroDenominator)),
         _ => Err(invalid),
     }
@@ -643,7 +668,7 @@ fn inequality_arguments(
             _ => error,
         })?
     } else {
-        move_polynomial_terms(&input[..index], right)?
+        move_polynomial_terms(&input[..index], right, PolynomialForm::Quadratic)?
     };
     Ok((comparison, coefficients))
 }
@@ -796,9 +821,10 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
     let (first, second) = input
         .split_once([';', '\n'])
         .ok_or(EquationError::SystemRows)?;
-    let row = |text| match coefficient_row(text) {
+    let row = |text: &str| match linear_system_row(text) {
         Err(
             EquationError::Coefficients
+            | EquationError::ExpressionArguments
             | EquationError::Evaluation(FractionError::Invalid | FractionError::Incomplete),
         ) => Err(EquationError::SystemRows),
         result => result,
@@ -848,6 +874,16 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
     Ok(format!("x = {x} · y = {y}"))
 }
 
+fn linear_system_row(input: &str) -> Result<[BigRational; 3], EquationError> {
+    if let Some((left, right)) = input.split_once('=') {
+        let [x, y, constant] =
+            move_polynomial_terms(left, right, PolynomialForm::TwoVariableLinear)?;
+        Ok([x, y, -constant])
+    } else {
+        coefficient_row(input)
+    }
+}
+
 fn parameter_expression(
     constant: BigRational,
     slope: BigRational,
@@ -876,6 +912,30 @@ fn parameter_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solves_two_variable_systems_written_as_equations() {
+        for (input, expected) in [
+            ("x + y = 3; x - y = 1", "x = 2 · y = 1"),
+            ("3x + Y = x + 5; X - y = 1", "x = 2 · y = 1"),
+            ("x/2 + Y = 2\nx - y = 1", "x = 2 · y = 1"),
+            ("x + y = 3; 1,-1,1", "x = 2 · y = 1"),
+            (
+                "通解 x + 2y = 3; 2x + 4y = 6",
+                "x = 3 - 2t · y = t（t 为任意实数）",
+            ),
+            ("x = 1; x = 2", "无解"),
+        ] {
+            assert_eq!(
+                solve_linear_system(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in ["xy = 2; x = 1", "x² + y = 1; x = 1", "x + y = 1; x = y = 3"] {
+            assert_eq!(solve_linear_system(input), Err(EquationError::SystemRows));
+        }
+    }
 
     #[test]
     fn describes_free_parameters_only_when_the_two_equations_are_consistent() {
