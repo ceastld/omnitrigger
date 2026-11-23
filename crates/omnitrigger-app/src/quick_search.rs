@@ -2817,7 +2817,15 @@ impl QuickSearch {
                                         .or_else(|| is_directory.then(|| "文件夹".to_owned())),
                                 ),
                                 Destination::OpenWindow(window) => {
-                                    (Icon::Grid, window.title.clone(), window.process.clone())
+                                    let detail = if window.minimized {
+                                        Some(window.process.as_deref().map_or_else(
+                                            || "已最小化".to_owned(),
+                                            |process| format!("已最小化 · {process}"),
+                                        ))
+                                    } else {
+                                        window.process.clone()
+                                    };
+                                    (Icon::Grid, window.title.clone(), detail)
                                 }
                                 Destination::Trigger(id) => {
                                     let trigger = self

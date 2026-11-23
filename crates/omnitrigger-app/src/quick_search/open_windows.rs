@@ -22,12 +22,17 @@ struct WindowSummary<'a> {
 struct WindowFilter<'a> {
     process: Option<&'a str>,
     excluded_process: Option<&'a str>,
+    minimized: Option<bool>,
     terms: &'a str,
 }
 
 impl WindowFilter<'_> {
     fn matches_process(&self, process: &str) -> bool {
         self.process.is_none_or(|name| process == name) && self.excluded_process != Some(process)
+    }
+
+    fn matches_state(&self, minimized: bool) -> bool {
+        self.minimized.is_none_or(|expected| expected == minimized)
     }
 }
 
@@ -97,14 +102,17 @@ impl OpenWindowsIndex {
         };
         let Some(filter) = window_query(filter) else {
             return Results::OpenWindowsUnavailable(
-                "进程和排除进程各接受一个程序文件名，例如 排除进程=notepad.exe。文件名含空格时用双引号包住。".into(),
+                "状态可用 已最小化 或 未最小化。进程和排除进程各填一个程序文件名，文件名含空格时加双引号。".into(),
             );
         };
         let query = filter.terms;
         let terms: Vec<_> = query.split_whitespace().collect();
         let mut matches: Vec<_> = windows
             .iter()
-            .filter(|window| filter.matches_process(&window.process_key))
+            .filter(|window| {
+                filter.matches_process(&window.process_key)
+                    && filter.matches_state(window.window.minimized)
+            })
             .filter_map(|window| {
                 let process_key = if filter.process.is_some() {
                     ""
@@ -191,7 +199,25 @@ fn export_windows<'a>(
 fn window_query(mut query: &str) -> Option<WindowFilter<'_>> {
     let mut process = None;
     let mut excluded_process = None;
+    let mut minimized = None;
     loop {
+        if let Some(input) = query
+            .strip_prefix("状态=")
+            .or_else(|| query.strip_prefix("state="))
+        {
+            if minimized.is_some() {
+                return None;
+            }
+            let (state, terms) =
+                input.split_at(input.find(char::is_whitespace).unwrap_or(input.len()));
+            minimized = Some(match state {
+                "已最小化" | "minimized" => true,
+                "未最小化" | "not-minimized" => false,
+                _ => return None,
+            });
+            query = terms.trim_start();
+            continue;
+        }
         let (slot, input) = if let Some(input) = query
             .strip_prefix("进程=")
             .or_else(|| query.strip_prefix("process="))
@@ -215,6 +241,7 @@ fn window_query(mut query: &str) -> Option<WindowFilter<'_>> {
     Some(WindowFilter {
         process,
         excluded_process,
+        minimized,
         terms: query,
     })
 }
@@ -383,6 +410,35 @@ mod tests {
             Results::Value(Ok(result)) if result.text == "标题,程序文件名"
         ));
         for query in ["排除进程=", "排除进程=a.exe 排除进程=b.exe"] {
+            assert!(matches!(
+                index.results(query),
+                Results::OpenWindowsUnavailable(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn combines_window_state_and_process_filters_with_export_and_title_terms() {
+        let query = search_key("进程=Notes.exe 状态＝已最小化 报告");
+        let filter = window_query(&query).unwrap();
+        assert_eq!(filter.terms, "报告");
+        assert!(filter.matches_process("notes.exe"));
+        assert!(!filter.matches_process("code.exe"));
+        assert!(filter.matches_state(true));
+        assert!(!filter.matches_state(false));
+
+        let filter = window_query("state=not-minimized exclude-process=a.exe").unwrap();
+        assert!(filter.matches_state(false));
+        assert!(!filter.matches_state(true));
+        let filter = window_query("报告").unwrap();
+        assert!(filter.matches_state(true) && filter.matches_state(false));
+
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        assert!(matches!(
+            index.results("输出=CSV 状态=已最小化 进程=notes.exe"),
+            Results::Value(Ok(result)) if result.text == "标题,程序文件名"
+        ));
+        for query in ["状态=", "状态=最大化", "状态=已最小化 state=not-minimized"] {
             assert!(matches!(
                 index.results(query),
                 Results::OpenWindowsUnavailable(_)

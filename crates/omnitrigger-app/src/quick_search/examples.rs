@@ -849,6 +849,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Grid,
+        title: "查找当前已最小化的窗口",
+        query: "窗口: 状态=已最小化",
+    },
+    Example {
+        icon: Icon::Grid,
         title: "打开 Windows 的蓝牙设置",
         query: "系统设置: 蓝牙",
     },

@@ -21,6 +21,7 @@ use crate::{shortcut_target_process, shortcut_target_title, ShortcutTarget};
 pub struct OpenWindow {
     pub title: String,
     pub process: Option<String>,
+    pub minimized: bool,
     target: ShortcutTarget,
     identity: (u32, u32),
 }
@@ -89,6 +90,7 @@ fn inspect_window(handle: HWND) -> Option<OpenWindow> {
     (window_identity(handle) == Some(identity)).then(|| OpenWindow {
         title: title.to_owned(),
         process,
+        minimized: unsafe { IsIconic(handle) }.as_bool(),
         target,
         identity,
     })
@@ -132,11 +134,13 @@ mod tests {
         let original = OpenWindow {
             title: "初始标题".to_owned(),
             process: None,
+            minimized: false,
             target: ShortcutTarget(42),
             identity: (10, 20),
         };
         let mut current = original.clone();
         current.title = "新标题".to_owned();
+        current.minimized = true;
         assert!(original.same_window(&current));
         current.identity = (10, 21);
         assert!(!original.same_window(&current));
