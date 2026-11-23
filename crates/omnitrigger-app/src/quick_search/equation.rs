@@ -790,8 +790,23 @@ fn sampled_coordinates(
     };
     let [start, end] = function_interval(bounds, invalid)?;
     let last = count - 1;
-    Ok((0..count)
-        .map(move |index| interpolate_between(start, end, f64::from(index) / f64::from(last))))
+    Ok((0..count).map(move |index| sample_grid_coordinate(start, end, index, last)))
+}
+
+fn sample_grid_coordinate(start: f64, end: f64, index: u32, last: u32) -> f64 {
+    let intervals = f64::from(last);
+    if index == 0 || index == last || start.is_sign_negative() == end.is_sign_negative() {
+        return interpolate_between(start, end, f64::from(index) / intervals);
+    }
+
+    // 用二进制可精确表示的权重，避免跨零时丢失两端贡献的抵消。
+    let scale = f64::from(last.next_power_of_two());
+    let left_weight = f64::from(last - index) / scale;
+    let right_weight = f64::from(index) / scale;
+    let left = start * left_weight;
+    let right = end * right_weight;
+    let error = start.mul_add(left_weight, -left) + end.mul_add(right_weight, -right);
+    (((left + right) + error) * (scale / intervals)).clamp(start.min(end), start.max(end))
 }
 
 fn derivative_samples(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
@@ -1462,7 +1477,7 @@ fn integrate_samples(
     let mut values = Vec::with_capacity(intervals as usize + 1);
     let mut previous = None;
     for index in 0..=intervals {
-        let x = interpolate_between(start, end, f64::from(index) / f64::from(intervals));
+        let x = sample_grid_coordinate(start, end, index, intervals);
         if previous == Some(x) {
             return Err(EquationError::NumericIntegralIntervals);
         }
@@ -2493,6 +2508,18 @@ mod tests {
         }
         let first = solve_equation("求导 x² - 2x + 1").unwrap();
         assert_eq!(solve_equation(&format!("求导 {first}")).as_deref(), Ok("2"));
+    }
+
+    #[test]
+    fn preserves_the_zero_grid_point_and_distinguishes_nearby_nonzero_coordinates() {
+        let samples = function_sample_points("sqrt(x) @ -1..2; 13").unwrap();
+        assert_eq!(samples[4], (0.0, Some(0.0)));
+        assert!(sample_grid_coordinate(-1.0, 2.0000000000000004, 4, 12) > 0.0);
+        assert_eq!(
+            sample_grid_coordinate(-f64::MAX / 2.0, f64::MAX, 4, 12),
+            0.0
+        );
+        assert_eq!(sample_grid_coordinate(2.0, -1.0, 8, 12), 0.0);
     }
 
     #[test]
