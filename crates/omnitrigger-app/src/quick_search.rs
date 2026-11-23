@@ -209,6 +209,10 @@ struct ResultValue {
 }
 
 impl ResultValue {
+    fn is_chart(&self) -> bool {
+        matches!(&self.kind, ValueKind::Scatter(_) | ValueKind::BoxPlot(_))
+    }
+
     fn continuation_hint(&self) -> Option<&'static str> {
         match &self.kind {
             ValueKind::Calculation | ValueKind::ExactCalculation { can_continue: true } => {
@@ -1350,8 +1354,8 @@ impl Results {
     fn value_preview_expandable(&self) -> bool {
         matches!(
             self,
-            Self::Value(Ok(value)) if !matches!(&value.kind, ValueKind::Scatter(_) | ValueKind::BoxPlot(_))
-                && value_preview::lines(&value.text).nth(MAX_VALUE_LINES).is_some()
+            Self::Value(Ok(value)) if value.is_chart()
+                || value_preview::lines(&value.text).nth(MAX_VALUE_LINES).is_some()
         )
     }
 
@@ -1361,8 +1365,8 @@ impl Results {
                 132. + items.len().min(DESTINATION_PAGE_SIZE) as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => {
-                if matches!(&value.kind, ValueKind::Scatter(_) | ValueKind::BoxPlot(_)) {
-                    return 158. + scatter_plot::PREVIEW_HEIGHT + 28.;
+                if value.is_chart() && value_line_limit == MAX_VALUE_LINES {
+                    return 158. + scatter_plot::PREVIEW_HEIGHT + 52.;
                 }
                 let hints = usize::from(value.continuation_hint().is_some())
                     + usize::from(self.value_preview_expandable());
@@ -2709,6 +2713,7 @@ impl QuickSearch {
         legend: Div,
         chart: Div,
         copy_label: &'static str,
+        view_label: &'static str,
         cx: &mut Context<Self>,
     ) -> Div {
         div()
@@ -2729,6 +2734,15 @@ impl QuickSearch {
                     ),
             )
             .child(chart)
+            .child(
+                Self::selection_hint(view_label)
+                    .id("chart-data")
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgb(theme::ACCENT)))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_value_preview(window, cx)),
+                    ),
+            )
     }
 
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
@@ -2737,11 +2751,23 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Scatter(plot),
                 ..
-            })) => Self::render_chart(plot.legend(), plot.render(), "复制 CSV  Enter", cx),
+            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+                plot.legend(),
+                plot.render(),
+                "复制 CSV  Enter",
+                "F2 查看数据",
+                cx,
+            ),
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::BoxPlot(plot),
                 ..
-            })) => Self::render_chart(plot.legend(), plot.render(), "复制摘要  Enter", cx),
+            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+                plot.legend(),
+                plot.render(),
+                "复制摘要  Enter",
+                "F2 查看摘要",
+                cx,
+            ),
             Results::Value(Ok(output)) => {
                 let result = &output.text;
                 let line_limit = self.value_line_limit();
@@ -2845,7 +2871,9 @@ impl QuickSearch {
                         )
                     })
                     .when(self.results.value_preview_expandable(), |result| {
-                        let hint = if self.expanded_value_pages.is_some() {
+                        let hint = if output.is_chart() {
+                            "F2 返回图形"
+                        } else if self.expanded_value_pages.is_some() {
                             "F2 收起预览"
                         } else {
                             "F2 展开预览"
@@ -3961,7 +3989,8 @@ mod tests {
     fn scatter_preview_preserves_exact_csv_for_copy_and_refill() {
         let query = "拟合: 散点图 100000000000000000000,1/2; 100000000000000000001,1/2";
         let results = for_query(query, &[]);
-        assert!(!results.value_preview_expandable());
+        assert!(results.value_preview_expandable());
+        assert!(results.height(MAX_VALUE_LINES) > results.height(EXPANDED_VALUE_LINES));
         let expected = "x,y\r\n100000000000000000000,1/2\r\n100000000000000000001,1/2";
         assert_eq!(results.refillable_text(), Some(expected));
         let Results::Value(Ok(ResultValue {
