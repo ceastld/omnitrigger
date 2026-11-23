@@ -104,7 +104,7 @@ use csv_tools::{transform_csv, CsvError};
 use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelinePreview};
 use decibel::{convert_decibels, DecibelError};
 use duration::{convert_duration, is_clock_duration, DurationError};
-use equation::{solve_equation, solve_linear_system, EquationError};
+use equation::{solve_equation_output, solve_linear_system, EquationError, EquationOutput};
 use examples::{
     function_examples, matching_examples, tool_index_examples, tool_operation_examples, Example,
     EXAMPLES,
@@ -1137,7 +1137,24 @@ impl Results {
                     if let Some(result) = equation::equation_chart(term) {
                         Self::plot_value(result.map_err(ValueError::Equation))
                     } else {
-                        Self::text_value(solve_equation(term).map_err(ValueError::Equation))
+                        Self::Value(
+                            solve_equation_output(term)
+                                .map_err(ValueError::Equation)
+                                .and_then(|output| match output {
+                                    EquationOutput::Text(text) => Ok(ResultValue {
+                                        text,
+                                        kind: ValueKind::Text,
+                                    }),
+                                    EquationOutput::Table(text) => {
+                                        let table = csv_tools::parse_table_preview(&text)
+                                            .map_err(ValueError::Csv)?;
+                                        Ok(ResultValue {
+                                            text,
+                                            kind: ValueKind::Table(table),
+                                        })
+                                    }
+                                }),
+                        )
                     }
                 }
                 Scope::LinearSystem => {
@@ -4285,6 +4302,32 @@ mod tests {
     }
 
     #[test]
+    fn equation_sampling_previews_columns_and_keeps_the_original_csv() {
+        let query = r#"方程: 参数采样 ["sqrt(t)","t²"] @ -1..1; 3"#;
+        let result = for_query(query, &[]);
+        assert!(matches!(
+            &result,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(_),
+                ..
+            }))
+        ));
+        assert!(result.value_preview_expandable());
+        assert_eq!(
+            result.refillable_text(),
+            Some("t,x,y\r\n-1,\"\",1\r\n0,0,0\r\n1,1,1")
+        );
+        let scalar = for_query("方程: 数值弧长 x @ 0..1; 8", &[]);
+        assert!(matches!(
+            scalar,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Text,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
     fn csv_column_bin_chart_uses_a_named_column_and_retains_exact_bin_data() {
         let input = r#"["金额","0,1/2,2"] 编号,金额
 001,-1
@@ -4382,7 +4425,7 @@ mod tests {
         ));
         assert_eq!(pipeline.refillable_text(), Some(csv));
         assert_eq!(
-            solve_equation("函数图 x² @ 2 到 2"),
+            equation::solve_equation("函数图 x² @ 2 到 2"),
             Err(EquationError::FunctionPlotArguments)
         );
     }

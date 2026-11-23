@@ -165,10 +165,59 @@ impl EquationError {
     }
 }
 
+pub(super) enum EquationOutput {
+    Text(String),
+    Table(String),
+}
+
 pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
+    solve_equation_output(query).map(|output| match output {
+        EquationOutput::Text(text) | EquationOutput::Table(text) => text,
+    })
+}
+
+pub(super) fn solve_equation_output(query: &str) -> Result<EquationOutput, EquationError> {
     let input = normalize_equation(query)?;
-    if let Some((operation, arguments)) = input.trim().split_once(char::is_whitespace) {
-        match operation.to_ascii_lowercase().as_str() {
+    let command = input
+        .trim()
+        .split_once(char::is_whitespace)
+        .map(|(operation, arguments)| (operation.to_ascii_lowercase(), arguments));
+    let command = command
+        .as_ref()
+        .map(|(operation, arguments)| (operation.as_str(), *arguments));
+    if let Some(table) =
+        command.and_then(|(operation, arguments)| solve_equation_table(operation, arguments))
+    {
+        return table.map(EquationOutput::Table);
+    }
+    solve_equation_text(&input, command).map(EquationOutput::Text)
+}
+
+fn solve_equation_table(operation: &str, arguments: &str) -> Option<Result<String, EquationError>> {
+    Some(match operation {
+        "函数采样" | "sample-function" => function_sample_points(arguments)
+            .and_then(|samples| format_function_samples(&samples, "近似值")),
+        "函数值" | "function-values" => function_samples_for_inputs(arguments)
+            .and_then(|samples| format_function_samples(&samples, "近似值")),
+        "两侧采样" | "approach-samples" => function_approach_samples(arguments),
+        "函数对照" | "compare-functions" => compare_function_values(arguments),
+        "参数采样" | "sample-parametric" => {
+            parametric_samples(arguments).and_then(|samples| format_parametric_samples(&samples))
+        }
+        "积分采样" | "sample-integral" => integral_samples(arguments)
+            .and_then(|samples| format_function_samples(&samples, "累计积分")),
+        "导数采样" | "sample-derivative" => derivative_samples(arguments)
+            .and_then(|samples| format_function_samples(&samples, "近似导数")),
+        _ => return None,
+    })
+}
+
+fn solve_equation_text(
+    input: &str,
+    command: Option<(&str, &str)>,
+) -> Result<String, EquationError> {
+    if let Some((operation, arguments)) = command {
+        match operation {
             "不等式" | "inequality" => return solve_inequality(arguments.trim_start()),
             "顶点" | "vertex" => return describe_quadratic(arguments.trim_start(), false),
             "摘要" | "summary" => return quadratic_summary(arguments.trim_start()),
@@ -201,7 +250,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数图" | "function-plot" => {
                 return quadratic_curve_points(arguments).map(|points| curve_csv(&points));
             }
-            "函数采样" | "sample-function" | "采样图" | "sample-plot" => {
+            "采样图" | "sample-plot" => {
                 return format_function_samples(&function_sample_points(arguments)?, "近似值");
             }
             "采样极值" | "sample-extrema" => return sampled_function_extrema(arguments),
@@ -213,15 +262,10 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "找异号区间" | "sign-change-intervals" => return sampled_sign_changes(arguments),
             "搜索零点" | "search-roots" => return refine_sampled_roots(arguments),
-            "函数值" | "function-values" => {
-                return format_function_samples(&function_samples_for_inputs(arguments)?, "近似值");
-            }
-            "两侧采样" | "approach-samples" => return function_approach_samples(arguments),
-            "函数对照" | "compare-functions" => return compare_function_values(arguments),
             "函数对照图" | "compare-function-plot" => {
                 return sample_function_comparison(arguments)?.csv();
             }
-            "参数采样" | "sample-parametric" | "参数图" | "parametric-plot" => {
+            "参数图" | "parametric-plot" => {
                 return format_parametric_samples(&parametric_samples(arguments)?);
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
@@ -229,14 +273,14 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "积分对照" | "compare-integrals" => return compare_numeric_integrals(arguments),
             "数值面积" | "numeric-area" => return numeric_function_area(arguments),
             "数值弧长" | "numeric-arc-length" => return numeric_function_arc_length(arguments),
-            "积分采样" | "sample-integral" | "积分采样图" | "integral-plot" => {
+            "积分采样图" | "integral-plot" => {
                 return format_function_samples(&integral_samples(arguments)?, "累计积分");
             }
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
             "数值二阶导数" | "numeric-second-derivative" => {
                 return numeric_second_derivative(arguments)
             }
-            "导数采样" | "sample-derivative" | "导数采样图" | "derivative-plot" => {
+            "导数采样图" | "derivative-plot" => {
                 return format_function_samples(&derivative_samples(arguments)?, "近似导数");
             }
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
@@ -254,9 +298,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         }
     }
     let coefficients = if input.contains('=') {
-        expanded_equation_coefficients(&input)?
+        expanded_equation_coefficients(input)?
     } else {
-        coefficient_row(&input)?
+        coefficient_row(input)?
     };
     solve_equation_coefficients(coefficients)
 }

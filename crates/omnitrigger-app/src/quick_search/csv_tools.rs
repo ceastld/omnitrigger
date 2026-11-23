@@ -5905,8 +5905,12 @@ pub(super) fn table_preview_arguments(query: &str) -> Option<&str> {
 }
 
 pub(super) fn build_table_preview(input: &str) -> Result<(String, TablePreview), CsvError> {
-    let rows = read_table_for_preview(input)?;
-    Ok((input.to_owned(), TablePreview::from_rows(rows)))
+    let table = parse_table_preview(input)?;
+    Ok((input.to_owned(), table))
+}
+
+pub(super) fn parse_table_preview(input: &str) -> Result<TablePreview, CsvError> {
+    read_table_for_preview(input).map(TablePreview::from_rows)
 }
 
 fn read_table_for_preview(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
