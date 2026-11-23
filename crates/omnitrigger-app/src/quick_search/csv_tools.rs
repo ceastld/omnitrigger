@@ -192,6 +192,7 @@ pub(super) enum CsvError {
     GroupingColumns,
     GroupFitColumns,
     GroupFitTooLarge,
+    FittedColumnsArguments,
     LinearFit(LinearFitError),
     ScatterColumns,
     ScatterPointCount,
@@ -411,6 +412,9 @@ impl CsvError {
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
             Self::GroupFitColumns => "填写分组列和两列不同的坐标，例如 [[\"区域\"],[\"x\",\"y\"]]",
             Self::GroupFitTooLarge => "分组拟合结果超过 1 MiB，请缩小表格范围",
+            Self::FittedColumnsArguments => {
+                "填写分组列、x 和 y 坐标列及两个新列名，例如 [[\"区域\"],[\"x\",\"y\"],[\"预测\",\"残差\"]]"
+            }
             Self::LinearFit(error) => error.message(),
             Self::ScatterColumns => "填写 x 和 y 两列不同的列名或列号，例如 [\"时间\",\"温度\"]",
             Self::ScatterPointCount => "散点图需要 2 至 64 行同时含 x 和 y 的数据",
@@ -907,6 +911,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
+        "拟合列" | "fit-columns" => return append_fit_columns(input),
         operation if is_scatter_operation(operation) => {
             return parse_scatter_table(input)?.to_csv();
         }
@@ -4674,6 +4679,100 @@ fn parse_scatter_table(input: &str) -> Result<CsvScatter, CsvError> {
     Ok(CsvScatter { headers, points })
 }
 
+fn append_fit_columns(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::FittedColumnsArguments;
+    let ((group_by, coordinates, names), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, [ColumnReference; 2], [String; 2])>(
+            input, invalid,
+        )?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let rows = read_rows(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if names[0] == names[1]
+        || names
+            .iter()
+            .any(|name| name.trim().is_empty() || name.contains('\0') || header.contains(name))
+    {
+        return Err(invalid);
+    }
+    let group_by = resolve_distinct_columns(header, &group_by, CsvError::GroupingColumns)?;
+    let coordinates = resolve_distinct_columns(header, &coordinates, invalid)?;
+    let mut sums = HashMap::<_, PairedSums>::new();
+    let mut values = Vec::with_capacity(records.len());
+    for (index, row) in records.iter().enumerate() {
+        let parse = |column: usize| {
+            let text = row[column].trim();
+            (!text.is_empty())
+                .then(|| parse_fraction_literal(text))
+                .transpose()
+                .map_err(|error| CsvError::DataRowValue {
+                    row: index + 1,
+                    cause: error.message(),
+                })
+        };
+        let x = parse(coordinates[0])?;
+        let y = parse(coordinates[1])?;
+        if let (Some(x), Some(y)) = (&x, &y) {
+            sums.entry(column_key(row, &group_by))
+                .or_default()
+                .record(x, y)
+                .map_err(|error| CsvError::DataRowValue {
+                    row: index + 1,
+                    cause: error.message(),
+                })?;
+        }
+        values.push((x, y));
+    }
+    let mut fits = HashMap::with_capacity(sums.len());
+    for (key, sums) in sums {
+        match sums.fit_line() {
+            Ok(fit) => {
+                fits.insert(key, fit);
+            }
+            Err(LinearFitError::ConstantX) => {}
+            Err(error) => return Err(CsvError::LinearFit(error)),
+        }
+    }
+
+    let mut output = String::new();
+    let limit = CsvError::AddedColumnTooLarge;
+    append_bounded_csv_row(
+        &mut output,
+        header.iter().chain(&names).map(String::as_str),
+        limit,
+    )?;
+    for (index, (row, (x, y))) in records.iter().zip(values).enumerate() {
+        let fit = fits.get(&column_key(row, &group_by));
+        let at_row = |cause| CsvError::DataRowValue {
+            row: index + 1,
+            cause,
+        };
+        let [predicted, residual] = if let (Some(fit), Some(x)) = (fit, x) {
+            let predicted = fit.predict(&x).map_err(|error| at_row(error.message()))?;
+            let residual = if let Some(y) = y {
+                let value = y - &predicted;
+                ensure_exact_size(&value).map_err(|error| at_row(error.message()))?;
+                value.to_string()
+            } else {
+                String::new()
+            };
+            [predicted.to_string(), residual]
+        } else {
+            Default::default()
+        };
+        let new_fields = [predicted.as_str(), residual.as_str()];
+        append_bounded_csv_row(
+            &mut output,
+            row.iter().map(String::as_str).chain(new_fields),
+            limit,
+        )?;
+    }
+    Ok(output)
+}
+
 fn fit_by_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -5575,6 +5674,24 @@ mod tests {
             transform_csv("散点图 [1,2] x,y\n1,2\n待定,3"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn appends_group_predictions_and_residuals_in_the_original_csv_order() {
+        let data = "区域,x,y\r\n北,0,0\r\n南,2,4\r\n北,1,1\r\n北,2,1\r\n北,3,\r\n南,2,5\r\n北,,1";
+        assert_eq!(
+            transform_csv(&format!(r#"拟合列 [["区域"],["x",3],["预测","残差"]] {data}"#)).as_deref(),
+            Ok("区域,x,y,预测,残差\r\n北,0,0,1/6,-1/6\r\n南,2,4,\"\",\"\"\r\n北,1,1,2/3,1/3\r\n北,2,1,7/6,-1/6\r\n北,3,\"\",5/3,\"\"\r\n南,2,5,\"\",\"\"\r\n北,\"\",1,\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("fit-columns [[],[1,2],[\"预测\",\"残差\"]] x,y\n0,2\n1,3\n2,")
+                .as_deref(),
+            Ok("x,y,预测,残差\r\n0,2,2,0\r\n1,3,3,0\r\n2,\"\",4,\"\"")
+        );
+        assert_eq!(
+            transform_csv("拟合列 [[],[1,2],[\"x\",\"残差\"]] x,y"),
+            Err(CsvError::FittedColumnsArguments)
+        );
     }
 
     #[test]

@@ -4424,6 +4424,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在原表逐行追加同组拟合值和残差",
+        query: "CSV: 拟合列 [[\"区域\"],[\"x\",\"y\"],[\"预测\",\"残差\"]] 区域,x,y\n北,0,0\n北,1,1\n北,2,1\n北,3,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "直接使用 CSV 指定的两列绘制散点图",
         query: "CSV: 散点图 [\"时间\",\"温度\"] 编号,时间,温度\n001,0,1/2\n002,1,2\n003,2,\n004,3,3/2\n005,4,4",
     },

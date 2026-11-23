@@ -169,11 +169,7 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         intercept,
         products,
     } = &fit;
-    let predict_y = |x: &BigRational| {
-        let y = slope * x + intercept;
-        check_size([&y])?;
-        Ok::<_, LinearFitError>(y)
-    };
+    let predict_y = |x: &BigRational| fit.predict(x);
     match output {
         FitOutput::Summary => {}
         FitOutput::Errors => {
@@ -829,6 +825,12 @@ pub(super) struct FittedLine {
 }
 
 impl FittedLine {
+    pub(super) fn predict(&self, x: &BigRational) -> Result<BigRational, LinearFitError> {
+        let y = &self.slope * x + &self.intercept;
+        check_size([&y])?;
+        Ok(y)
+    }
+
     pub(super) fn r_squared(&self) -> Result<Option<BigRational>, LinearFitError> {
         if self.products.square_y.numer().sign() == Sign::NoSign {
             return Ok(None);
