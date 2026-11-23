@@ -8,7 +8,7 @@ use std::{
 
 use chrono::{
     format::{parse, Item, Parsed, StrftimeItems},
-    Datelike, NaiveDate,
+    DateTime, Datelike, NaiveDate, Utc,
 };
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
@@ -53,7 +53,7 @@ use super::{
         newline_pattern, regex_group_index, replace_literal_matches, replace_regex_matches,
         GraphemeRange, TextError, TextLengthUnit, UnicodeForm, MAX_TEXT_COMPARISON_WORK,
     },
-    timestamp::{timestamp_clock_difference, timestamp_zone_converter},
+    timestamp::{absolute_timestamp, timestamp_clock_difference, timestamp_zone_converter},
     url_encoding::url_parameter_values,
 };
 
@@ -176,6 +176,7 @@ pub(super) enum CsvError {
     RegexCheckColumnsInputTooLarge,
     RegexIssuesTooLarge,
     NumericRangeCheckArguments,
+    TimestampRangeCheckArguments,
     ValidationRulesArguments,
     ValidationRulesTooLarge,
     AllowedValuesCheckArguments,
@@ -388,6 +389,7 @@ impl CsvError {
             Self::RegexCheckColumnsInputTooLarge => "所选列的文本合计超过 16 KiB，请缩小表格范围",
             Self::RegexIssuesTooLarge => "正则检查结果超过 1 MiB，请缩小表格范围",
             Self::NumericRangeCheckArguments => "填写列列表和两个数值字符串，下界须不大于上界",
+            Self::TimestampRangeCheckArguments => "填写列列表和两个明确的时间戳字符串，开始须不晚于结束",
             Self::ValidationRulesArguments => "填写最多 64 条列规则，例如 [[\"日期\",\"日期\"],[\"编号\",\"正则\",\"^A\"]]",
             Self::ValidationRulesTooLarge => "规则检查结果超过 1 MiB，请缩小表格范围",
             Self::AllowedValuesCheckArguments => "填写列列表和非空的允许值列表，每个允许值只写一次",
@@ -447,6 +449,11 @@ enum ColumnValidation {
     },
     AllowedValues(HashSet<String>),
     Json,
+    Timestamp,
+    TimestampRange {
+        lower: DateTime<Utc>,
+        upper: DateTime<Utc>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -467,6 +474,12 @@ enum ColumnRuleOutput {
 }
 
 impl ColumnValidation {
+    fn timestamp_range(lower: &str, upper: &str) -> Option<Self> {
+        let lower = absolute_timestamp(lower).ok()?;
+        let upper = absolute_timestamp(upper).ok()?;
+        (lower <= upper).then_some(Self::TimestampRange { lower, upper })
+    }
+
     fn length_range((unit, lower, upper): (String, usize, usize)) -> Result<Self, CsvError> {
         let unit = TextLengthUnit::parse(&unit).ok_or(CsvError::LengthCheckArguments)?;
         if lower > upper {
@@ -507,6 +520,8 @@ impl ColumnValidation {
             Self::NumericRange { .. } => "数值范围",
             Self::AllowedValues(_) => "允许值",
             Self::Json => "JSON",
+            Self::Timestamp => "时间戳",
+            Self::TimestampRange { .. } => "时间范围",
         }
     }
 
@@ -520,6 +535,10 @@ impl ColumnValidation {
             Self::Pattern(pattern) => pattern.is_match(cell),
             Self::AllowedValues(values) => values.contains(cell),
             Self::Json => serde_json::from_str::<&RawValue>(cell).is_ok(),
+            Self::Timestamp => absolute_timestamp(cell).is_ok(),
+            Self::TimestampRange { lower, upper } => {
+                absolute_timestamp(cell).is_ok_and(|value| lower <= &value && &value <= upper)
+            }
             Self::NumericRange { lower, upper } => {
                 parse_fraction_literal(cell).is_ok_and(|value| lower <= &value && &value <= upper)
             }
@@ -1017,13 +1036,16 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "检查日期列"
         | "check-date-columns"
         | "检查json列"
-        | "check-json-columns" => {
+        | "check-json-columns"
+        | "检查时间戳列"
+        | "check-timestamp-columns" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             let validation = match operation.as_str() {
                 "检查日期列" | "check-date-columns" => ColumnValidation::Date,
                 "检查json列" | "check-json-columns" => ColumnValidation::Json,
+                "检查时间戳列" | "check-timestamp-columns" => ColumnValidation::Timestamp,
                 _ => ColumnValidation::Number,
             };
             Operation::CheckColumns(columns, validation)
@@ -1074,6 +1096,17 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CheckColumns(columns, ColumnValidation::Pattern(pattern))
         }
+        "检查时间范围" | "check-timestamp-range" => {
+            let invalid = CsvError::TimestampRangeCheckArguments;
+            let ((columns, [lower, upper]), data) =
+                json_argument_and_data::<(Vec<ColumnReference>, [String; 2])>(input, invalid)?;
+            if columns.is_empty() {
+                return Err(invalid);
+            }
+            let validation = ColumnValidation::timestamp_range(&lower, &upper).ok_or(invalid)?;
+            input = data;
+            Operation::CheckColumns(columns, validation)
+        }
         "检查数值范围" | "check-numeric-range" => {
             let ((columns, [lower, upper]), data) =
                 json_argument_and_data::<(Vec<ColumnReference>, [String; 2])>(
@@ -1114,6 +1147,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                             "数值" | "number" => ColumnValidation::Number,
                             "日期" | "date" => ColumnValidation::Date,
                             "json" => ColumnValidation::Json,
+                            "时间戳" | "timestamp" => ColumnValidation::Timestamp,
                             _ => return Err(invalid),
                         };
                         Ok((column, validation))
@@ -1134,6 +1168,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     {
                         let range =
                             ColumnValidation::numeric_range(&lower, &upper).ok_or(invalid)?;
+                        Ok((column, range))
+                    }
+                    ColumnRuleInput::Range(column, kind, lower, upper)
+                        if kind == "时间范围" || kind.eq_ignore_ascii_case("timestamp-range") =>
+                    {
+                        let range =
+                            ColumnValidation::timestamp_range(&lower, &upper).ok_or(invalid)?;
                         Ok((column, range))
                     }
                     ColumnRuleInput::Allowed(column, kind, values)
@@ -3194,10 +3235,11 @@ fn check_columns(
         }
         ColumnValidation::Date | ColumnValidation::DatePattern(_) => CsvError::DateIssuesTooLarge,
         ColumnValidation::Pattern(_) => CsvError::RegexIssuesTooLarge,
-        ColumnValidation::LengthRange(..) => CsvError::ValidationRulesTooLarge,
-        ColumnValidation::AllowedValues(_) | ColumnValidation::Json => {
-            CsvError::ValidationRulesTooLarge
-        }
+        ColumnValidation::LengthRange(..)
+        | ColumnValidation::AllowedValues(_)
+        | ColumnValidation::Json
+        | ColumnValidation::Timestamp
+        | ColumnValidation::TimestampRange { .. } => CsvError::ValidationRulesTooLarge,
     };
     let rules: Vec<_> = columns
         .into_iter()
@@ -5406,6 +5448,36 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn compares_timestamps_across_offsets_with_inclusive_nanosecond_bounds() {
+        let input = "检查时间范围 [[\"时间\"],[\"0\",\"1ns\"]] 时间\n1970-01-01T08:00:00+08:00\n0.000001ms\n2ns\n-1ns";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n3,1,时间,2ns\r\n4,1,时间,-1ns"),
+        );
+        assert_eq!(
+            transform_csv("检查规则 [[1,\"时间范围\",\"0\",\"1ns\"]] 时间\n2ns").as_deref(),
+            Ok("数据行,列号,列名,规则号,规则,内容\r\n1,1,时间,1,时间范围,2ns"),
+        );
+        assert_eq!(
+            transform_csv(r#"检查时间范围 [[1],["1ns","0"]] 时间"#),
+            Err(CsvError::TimestampRangeCheckArguments),
+        );
+    }
+
+    #[test]
+    fn reports_ambiguous_and_inexact_timestamps_with_their_source_cells() {
+        let input = "检查时间戳列 [\"时间\"] 时间\n-0.000001ms\n2026-11-01T01:30:00-04:00\n2026-11-01 01:30 America/New_York\n0.1ns\n现在";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n3,1,时间,2026-11-01 01:30 America/New_York\r\n4,1,时间,0.1ns\r\n5,1,时间,现在"),
+        );
+        assert_eq!(
+            transform_csv("检查规则 [[1,\"时间戳\"]] 时间\n\"\"").as_deref(),
+            Ok("数据行,列号,列名,规则号,规则,内容\r\n1,1,时间,1,时间戳,\"\""),
+        );
     }
 
     #[test]

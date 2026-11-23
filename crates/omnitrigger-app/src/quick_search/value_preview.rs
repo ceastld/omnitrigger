@@ -56,12 +56,7 @@ fn positioned_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
         let mut pending = Some((start, line.strip_suffix('\r').unwrap_or(line)));
         std::iter::from_fn(move || {
             let (start, line) = pending.take()?;
-            let mut columns = 0;
-            let overflow = line.grapheme_indices(true).find_map(|(index, grapheme)| {
-                columns += column_width(grapheme, columns);
-                (columns > COLUMNS).then_some(index)
-            });
-            if let Some(index) = overflow {
+            if let Some(index) = wrap_point(line) {
                 let (first, rest) = line.split_at(index);
                 pending = Some((start + index, rest));
                 Some((start, first))
@@ -70,6 +65,29 @@ fn positioned_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
             }
         })
     })
+}
+
+fn wrap_point(line: &str) -> Option<usize> {
+    let mut column = 0;
+    let mut seen_text = false;
+    let mut break_after = None;
+    for (index, grapheme) in line.grapheme_indices(true) {
+        let whitespace = matches!(grapheme, " " | "\t");
+        let separator = whitespace || matches!(grapheme, "," | "，");
+        column += column_width(grapheme, column);
+        if column > COLUMNS {
+            return Some(if whitespace {
+                index
+            } else {
+                break_after.unwrap_or(index)
+            });
+        }
+        if separator && seen_text && column >= COLUMNS / 2 {
+            break_after = Some(index + grapheme.len());
+        }
+        seen_text |= !separator;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -85,6 +103,21 @@ mod tests {
         let prefix = "x".repeat(39);
         let mixed = format!("{prefix}👩‍💻a");
         assert_eq!(lines(&mixed).collect::<Vec<_>>(), [prefix.as_str(), "👩‍💻a"]);
+    }
+
+    #[test]
+    fn prefers_word_and_field_boundaries_and_keeps_the_same_page_offsets() {
+        let prefix = "1".repeat(38);
+        let text = format!("{prefix} dB · -45°");
+        assert_eq!(lines(&text).collect::<Vec<_>>(), [&text[..39], "dB · -45°"]);
+        assert_eq!(page_starts(&text, 1), [0, 39]);
+        assert_eq!(lines(&text[39..]).next(), Some("dB · -45°"));
+        let fields = format!("{prefix},梨,茶");
+        assert_eq!(lines(&fields).collect::<Vec<_>>(), [&fields[..39], "梨,茶"]);
+        for prefix in ["  ", "100 Hz,"] {
+            let long_word = format!("{prefix}{}", "x".repeat(COLUMNS));
+            assert_eq!(lines(&long_word).next(), Some(&long_word[..COLUMNS]));
+        }
     }
 
     #[test]

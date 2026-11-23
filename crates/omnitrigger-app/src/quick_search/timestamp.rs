@@ -672,9 +672,13 @@ fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, Timesta
 }
 
 pub(super) fn timestamp_clock_difference(start: &str, end: &str) -> Result<String, TimestampError> {
-    let start = unix_nanos(interval_endpoint(&normalize(start), None)?);
-    let end = unix_nanos(interval_endpoint(&normalize(end), None)?);
+    let start = unix_nanos(absolute_timestamp(start)?);
+    let end = unix_nanos(absolute_timestamp(end)?);
     format_timestamp_delta(end - start, None)
+}
+
+pub(super) fn absolute_timestamp(source: &str) -> Result<DateTime<Utc>, TimestampError> {
+    interval_endpoint(normalize(source).trim(), None)
 }
 
 pub(super) fn timestamp_zone_converter(
@@ -682,7 +686,7 @@ pub(super) fn timestamp_zone_converter(
 ) -> Result<impl Fn(&str) -> Result<String, TimestampError>, TimestampError> {
     let zone = parse_display_zone(&normalize(target))?;
     Ok(move |source: &str| {
-        let time = interval_endpoint(normalize(source).trim(), None)?;
+        let time = absolute_timestamp(source)?;
         let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
         format_display_time(time, unit.date_format(), &zone, &|time| {
             time.with_timezone(&Local).fixed_offset()

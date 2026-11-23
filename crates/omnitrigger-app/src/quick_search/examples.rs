@@ -3768,6 +3768,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位缺少偏移或无效的时间戳",
+        query: "CSV: 检查时间戳列 [\"时间\"] 时间\n-0.000001ms\n2026-11-01T01:30:00-04:00\n2026-11-01 01:30 America/New_York\n0.1ns",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "定位超出时间范围的单元格",
+        query: "CSV: 检查时间范围 [[\"时间\"],[\"0\",\"1ns\"]] 时间\n1970-01-01T08:00:00+08:00\n0.000001ms\n2ns\n-1ns",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把选中的 CSV 数值列统一成固定小数位",
         query: "CSV: 小数列 [[\"金额\",3],2] 编号,金额,比率\n001,2.675,1/8\n002,,-0.005",
     },
