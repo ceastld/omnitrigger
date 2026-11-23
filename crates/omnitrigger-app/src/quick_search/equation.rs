@@ -61,6 +61,7 @@ pub(super) enum EquationError {
     NumericIntegralIntervals,
     IntegralSampleArguments,
     NumericAreaArguments,
+    NumericArcLengthArguments,
     NumericDerivativeArguments,
     NumericDerivativeStep,
     DerivativeSampleArguments,
@@ -131,6 +132,9 @@ impl EquationError {
             }
             Self::NumericAreaArguments => {
                 "用数组填写两条算式，再填两个不同端点和可选的偶数子区间数"
+            }
+            Self::NumericArcLengthArguments => {
+                "填写函数算式和不同的区间端点，分号后可填 2 至 128 的偶数子区间数"
             }
             Self::NumericDerivativeArguments => {
                 "填写要估算导数的算式和横坐标，可在分号后填写正步长"
@@ -210,6 +214,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
             "数值面积" | "numeric-area" => return numeric_function_area(arguments),
+            "数值弧长" | "numeric-arc-length" => return numeric_function_arc_length(arguments),
             "积分采样" | "sample-integral" | "积分采样图" | "integral-plot" => {
                 return format_function_samples(&integral_samples(arguments)?, "累计积分");
             }
@@ -1484,6 +1489,16 @@ fn numeric_function_area(input: &str) -> Result<String, EquationError> {
     display_integral("面积", value, intervals)
 }
 
+fn numeric_function_arc_length(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericArcLengthArguments;
+    let (expression, bounds) = split_function_arguments(input, invalid)?;
+    let ([left, right], intervals) = numeric_integral_range(bounds, invalid)?;
+    let value = integrate_samples([left.min(right), left.max(right)], intervals, |x| {
+        estimate_derivative(expression, x, derivative_step(x)).map(|slope| slope.hypot(1.0))
+    })?;
+    display_integral("弧长", value, intervals)
+}
+
 fn numeric_integral_range(
     arguments: &str,
     invalid: EquationError,
@@ -2715,6 +2730,28 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn estimates_arc_length_for_linear_functions_and_reports_unavailable_derivatives() {
+        assert_eq!(
+            solve_equation("数值弧长 f(x)=x @ 1..0; 8").as_deref(),
+            Ok("弧长 ≈ 1.4142135623731\r\n复合辛普森法 · 8 个子区间")
+        );
+        assert_eq!(
+            solve_equation("numeric-arc-length 4 @ -2 to 2").as_deref(),
+            Ok("弧长 ≈ 4\r\n复合辛普森法 · 64 个子区间")
+        );
+        assert_eq!(
+            solve_equation("数值弧长 sqrt(x) @ 0..2"),
+            Err(EquationError::Approximation(
+                CalculationError::FunctionDomain
+            ))
+        );
+        assert_eq!(
+            solve_equation("数值弧长 x @ 0..2; 3"),
+            Err(EquationError::NumericArcLengthArguments)
         );
     }
 

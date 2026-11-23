@@ -316,6 +316,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "估算光滑曲线在给定区间内的弧长",
+        query: "方程: 数值弧长 sin(x) @ 0..pi; 64",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用中心差分估算指定坐标处的导数",
         query: "方程: 数值导数 sin(x) @ 0; 0.0001",
     },
@@ -5562,6 +5567,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "二分求根",
             "数值积分",
             "数值面积",
+            "数值弧长",
             "数值导数",
             "数值二阶导数",
             "导数采样",
