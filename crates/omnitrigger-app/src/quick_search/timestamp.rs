@@ -29,6 +29,7 @@ pub(super) enum TimestampError {
     ZoneCandidateArguments,
     CivilDayArguments,
     OffsetChangesArguments,
+    DailyClockArguments,
     InvalidSourceZone,
     SourceClockGap,
     SourceClockFold,
@@ -56,6 +57,7 @@ impl TimestampError {
             }
             Self::CivilDayArguments => "填写完整日期和明确时区，例如 2026-03-08 America/New_York",
             Self::OffsetChangesArguments => "填写四位年份和明确时区，例如 2026 America/New_York",
+            Self::DailyClockArguments => "填写当地起始时刻、明确时区和 1 至 128 天，例如 2026-03-07 02:30 America/New_York @ 3",
             Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
             Self::SourceClockGap => "该地区跳过了这一时刻，请检查输入的钟表时间",
             Self::SourceClockFold => "该地区的钟表时间出现两次，可用“时区候选”查看两次的 UTC 偏移",
@@ -177,6 +179,9 @@ fn convert_timestamp_with_local(
     }
     if operation == "偏移变更" || operation.eq_ignore_ascii_case("offset-changes") {
         return timezone_offset_changes(argument);
+    }
+    if operation == "每日同刻" || operation.eq_ignore_ascii_case("daily-clock") {
+        return daily_clock_series(argument);
     }
     let table =
         operation.eq_ignore_ascii_case("时区csv") || operation.eq_ignore_ascii_case("zone-csv");
@@ -441,6 +446,50 @@ fn timezone_offset_changes(input: &str) -> Result<String, TimestampError> {
     Ok(output)
 }
 
+fn daily_clock_series(input: &str) -> Result<String, TimestampError> {
+    let invalid = TimestampError::DailyClockArguments;
+    let (source, count) = input.split_once('@').ok_or(invalid)?;
+    let (clock, zone) = source
+        .trim()
+        .rsplit_once(char::is_whitespace)
+        .ok_or(invalid)?;
+    let clock = clock.trim_end();
+    let count = count.trim().parse::<usize>().map_err(|_| invalid)?;
+    if !(1..=MAX_SERIES_TIMESTAMPS).contains(&count) {
+        return Err(invalid);
+    }
+    if has_extra_subsecond_digits(clock) {
+        return Err(TimestampError::UnsupportedPrecision);
+    }
+    let zone = explicit_timezone(zone, invalid)?;
+    let mut clock = parse_named_clock(clock)?;
+    let mut output = String::from("当地时间,UTC,状态");
+    for index in 0..count {
+        let unresolved = zone.to_ambiguous_timestamp(clock);
+        let mut add =
+            |candidate: Result<Timestamp, jiff::Error>, status| -> Result<(), TimestampError> {
+                let time = utc_from_timestamp(candidate.map_err(|_| TimestampError::OutOfRange)?)?;
+                ensure_four_digit_year(time.year())?;
+                let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
+                let utc = time.to_rfc3339_opts(unit.date_format(), true);
+                output.push_str(&format!("\r\n{clock},{utc},{status}"));
+                Ok(())
+            };
+        match unresolved.offset() {
+            AmbiguousOffset::Gap { .. } => output.push_str(&format!("\r\n{clock},\"\",跳过")),
+            AmbiguousOffset::Fold { .. } => {
+                add(unresolved.earlier(), "第一次")?;
+                add(unresolved.later(), "第二次")?;
+            }
+            AmbiguousOffset::Unambiguous { .. } => add(unresolved.unambiguous(), "正常")?,
+        }
+        if index + 1 < count {
+            clock = clock.tomorrow().map_err(|_| TimestampError::OutOfRange)?;
+        }
+    }
+    Ok(output)
+}
+
 fn explicit_timezone(zone: &str, invalid: TimestampError) -> Result<TimeZone, TimestampError> {
     match parse_display_zone(zone)? {
         DisplayZone::Utc => Ok(TimeZone::UTC),
@@ -503,17 +552,20 @@ fn validate_explicit_time(
 ) -> Result<DateTime<Utc>, TimestampError> {
     ensure_four_digit_year(time.year())?;
     let fraction = time.timestamp_subsec_nanos();
-    let extra_precision = input.split_once('.').is_some_and(|(_, digits)| {
+    if fraction >= 1_000_000_000 || has_extra_subsecond_digits(input) {
+        return Err(TimestampError::UnsupportedPrecision);
+    }
+    Ok(time)
+}
+
+fn has_extra_subsecond_digits(input: &str) -> bool {
+    input.split_once('.').is_some_and(|(_, digits)| {
         digits
             .bytes()
             .take_while(u8::is_ascii_digit)
             .skip(9)
             .any(|digit| digit != b'0')
-    });
-    if fraction >= 1_000_000_000 || extra_precision {
-        return Err(TimestampError::UnsupportedPrecision);
-    }
-    Ok(time)
+    })
 }
 
 fn align_timestamp(
@@ -819,6 +871,26 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeats_a_local_clock_time_by_date_and_preserves_gap_and_fold_information() {
+        let now = DateTime::UNIX_EPOCH;
+        assert_eq!(
+            convert_timestamp("每日同刻 2026-03-07 02:30 America/New_York @ 3", now).as_deref(),
+            Ok("当地时间,UTC,状态\r\n2026-03-07T02:30:00,2026-03-07T07:30:00Z,正常\r\n2026-03-08T02:30:00,\"\",跳过\r\n2026-03-09T02:30:00,2026-03-09T06:30:00Z,正常"),
+        );
+        assert_eq!(
+            convert_timestamp("daily-clock 2026-11-01 01:30 America/New_York @ 1", now).as_deref(),
+            Ok("当地时间,UTC,状态\r\n2026-11-01T01:30:00,2026-11-01T05:30:00Z,第一次\r\n2026-11-01T01:30:00,2026-11-01T06:30:00Z,第二次"),
+        );
+        assert_eq!(
+            convert_timestamp(
+                "每日同刻 2026-03-08 02:30:00.0000000001 America/New_York @ 1",
+                now
+            ),
+            Err(TimestampError::UnsupportedPrecision),
+        );
+    }
 
     #[test]
     fn lists_utc_offset_changes_in_the_requested_utc_year() {

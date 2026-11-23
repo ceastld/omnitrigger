@@ -1028,7 +1028,7 @@ impl Results {
                 Scope::Toml => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
                 Scope::Csv => Self::text_value(transform_csv(term).map_err(ValueError::Csv)),
                 Scope::DataPipeline => Self::text_value(
-                    transform_data_pipeline(term, chrono::Local::now().date_naive())
+                    transform_data_pipeline(term, chrono::Local::now().fixed_offset())
                         .map_err(ValueError::DataPipeline),
                 ),
                 Scope::Fraction => Self::Value(

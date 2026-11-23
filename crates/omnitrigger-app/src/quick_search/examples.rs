@@ -917,6 +917,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用 UTC 起止时刻创建两列 CSV",
+        query: r#"处理: ["时间戳: 日区间","CSV: 选列名 [\"开始UTC\",\"结束UTC\"]"] 2026-03-08 America/New_York"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "提取 CSV 数值列并计算中位数",
         query: "处理: [\"CSV: 选列 2\",\"文本: 间隔取行 2,1\",\"统计: 分位数 50%\"] 名称,金额\n茶,1/2\n咖啡,5/2\n豆浆,3/2",
     },
@@ -1935,6 +1940,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "查看某年时区偏移变更",
         query: "时间戳: 偏移变更 2026 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "用当地时区逐日列出同一个钟表时刻",
+        query: "时间戳: 每日同刻 2026-03-07 02:30 America/New_York @ 3",
     },
     Example {
         icon: Icon::Clock,
@@ -5076,6 +5086,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "时区候选",
                     "日区间",
                     "偏移变更",
+                    "每日同刻",
                     "序列",
                 ]
                 .into_iter()

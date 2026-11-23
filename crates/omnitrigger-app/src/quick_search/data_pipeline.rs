@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, FixedOffset};
 use serde_json::value::RawValue;
 
 use super::{
@@ -23,6 +23,7 @@ use super::{
     statistics::calculate_statistics,
     tempo::calculate_tempo,
     text_tools::transform_text,
+    timestamp::convert_timestamp,
     toml_tools::transform_toml,
     url_encoding::convert_url_component,
 };
@@ -30,7 +31,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、节拍、分贝、立体、波长、电路、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、时长、进制、音高、节拍、分贝、立体、波长、电路、分数或统计命令";
 const STEP_RESULT_SLOT: &str = "{结果}";
 const STEP_TEMPLATE_SYNTAX: &str = "模板的工具前缀之后须正好有一个 {结果}";
 
@@ -131,7 +132,7 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
 
 pub(super) fn transform_data_pipeline(
     input: &str,
-    today: NaiveDate,
+    now: DateTime<FixedOffset>,
 ) -> Result<String, DataPipelineError> {
     let (mode, input) = split_pipeline_input(input);
     let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
@@ -150,7 +151,7 @@ pub(super) fn transform_data_pipeline(
             run_pipeline_steps(
                 &steps,
                 value,
-                today,
+                now,
                 false,
                 PipelineLocation::CsvRow(row),
                 &mut remaining_work,
@@ -169,7 +170,7 @@ pub(super) fn transform_data_pipeline(
                 values.into_iter().map(|value| (None, value)),
                 false,
                 &steps,
-                today,
+                now,
                 &mut remaining_work,
             )
         }
@@ -180,21 +181,21 @@ pub(super) fn transform_data_pipeline(
                 entries.into_iter().map(|(key, value)| (Some(key), value)),
                 true,
                 &steps,
-                today,
+                now,
                 &mut remaining_work,
             )
         }
         DataPipelineMode::Rows | DataPipelineMode::RowsCsv => run_pipeline_rows(
             &steps,
             source,
-            today,
+            now,
             mode == DataPipelineMode::RowsCsv,
             &mut remaining_work,
         ),
         _ => run_pipeline_steps(
             &steps,
             source,
-            today,
+            now,
             mode == DataPipelineMode::StepsCsv,
             PipelineLocation::Whole,
             &mut remaining_work,
@@ -206,7 +207,7 @@ fn run_pipeline_json<'a>(
     values: impl IntoIterator<Item = (Option<String>, &'a RawValue)>,
     object: bool,
     steps: &[PipelineStep],
-    today: NaiveDate,
+    now: DateTime<FixedOffset>,
     remaining_work: &mut usize,
 ) -> Result<String, DataPipelineError> {
     let (open, close) = if object { ("{", '}') } else { ("[", ']') };
@@ -227,7 +228,7 @@ fn run_pipeline_json<'a>(
         } else {
             PipelineLocation::JsonItem(item)
         };
-        let text = run_pipeline_steps(steps, &input, today, false, location, remaining_work)?;
+        let text = run_pipeline_steps(steps, &input, now, false, location, remaining_work)?;
         let encoded = serde_json::to_string(&text)
             .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?;
         let key = key
@@ -259,7 +260,7 @@ fn run_pipeline_json<'a>(
 fn run_pipeline_rows(
     steps: &[PipelineStep],
     source: &str,
-    today: NaiveDate,
+    now: DateTime<FixedOffset>,
     csv: bool,
     remaining_work: &mut usize,
 ) -> Result<String, DataPipelineError> {
@@ -277,7 +278,7 @@ fn run_pipeline_rows(
         let output = run_pipeline_steps(
             steps,
             input,
-            today,
+            now,
             false,
             PipelineLocation::Line(line),
             remaining_work,
@@ -300,7 +301,7 @@ fn run_pipeline_rows(
 fn run_pipeline_steps(
     steps: &[PipelineStep],
     source: &str,
-    today: NaiveDate,
+    now: DateTime<FixedOffset>,
     trace_steps: bool,
     location: PipelineLocation,
     remaining_work: &mut usize,
@@ -347,6 +348,7 @@ fn run_pipeline_steps(
             && !matches!(
                 scope,
                 Scope::Date
+                    | Scope::Timestamp
                     | Scope::Duration
                     | Scope::Radix
                     | Scope::Pitch
@@ -368,7 +370,12 @@ fn run_pipeline_steps(
             Scope::Toml => transform_toml(&query).map_err(|cause| cause.message()),
             Scope::UrlEncoding => convert_url_component(&query).map_err(|cause| cause.message()),
             Scope::Path => path_component(&query).map_err(|cause| cause.message()),
-            Scope::Date => calculate_date(&query, today).map_err(|cause| cause.message()),
+            Scope::Date => {
+                calculate_date(&query, now.date_naive()).map_err(|cause| cause.message())
+            }
+            Scope::Timestamp => {
+                convert_timestamp(&query, now.to_utc()).map_err(|cause| cause.message())
+            }
             Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
             Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
             Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
@@ -406,7 +413,21 @@ mod tests {
     use super::*;
 
     fn run_pipeline(input: &str) -> Result<String, DataPipelineError> {
-        transform_data_pipeline(input, NaiveDate::from_ymd_opt(2024, 2, 18).unwrap())
+        let now = DateTime::parse_from_rfc3339("2024-02-18T23:30:00-08:00").unwrap();
+        transform_data_pipeline(input, now)
+    }
+
+    #[test]
+    fn combines_timestamp_output_with_other_steps_and_reuses_the_request_clock() {
+        let query = r#"["时间戳: 日区间","CSV: 选列名 [\"开始UTC\",\"结束UTC\"]"] 2026-03-08 America/New_York"#;
+        assert_eq!(
+            run_pipeline(query).as_deref(),
+            Ok("开始UTC,结束UTC\r\n2026-03-08T05:00:00Z,2026-03-09T04:00:00Z"),
+        );
+        assert_eq!(
+            run_pipeline(r#"["时间戳:","时间戳:"] 现在"#).as_deref(),
+            Ok("2024-02-19T07:30:00Z"),
+        );
     }
 
     #[test]
