@@ -5,6 +5,7 @@ use chrono::NaiveDate;
 use super::{
     calendar::calculate_date,
     csv_tools::{append_bounded_csv_row, transform_csv},
+    decibel::convert_decibels,
     duration::convert_duration,
     fraction::simplify_fraction,
     json_tools::transform_json,
@@ -13,7 +14,9 @@ use super::{
     pitch::convert_pitch,
     radix::convert_arbitrary_radix,
     scope::{scoped_query, Scope},
+    solid::calculate_solid,
     statistics::calculate_statistics,
+    tempo::calculate_tempo,
     text_tools::transform_text,
     toml_tools::transform_toml,
     url_encoding::convert_url_component,
@@ -22,7 +25,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、节拍、分贝、立体、分数或统计命令";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -77,6 +80,9 @@ pub(super) fn transform_data_pipeline(
             Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
             Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
             Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
+            Scope::Tempo => calculate_tempo(&query).map_err(|cause| cause.message()),
+            Scope::Decibel => convert_decibels(&query).map_err(|cause| cause.message()),
+            Scope::Solid => calculate_solid(&query).map_err(|cause| cause.message()),
             Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
             Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
@@ -134,6 +140,20 @@ mod tests {
             (
                 r#"["日期: 月末序列","文本: 按行拼接 \", \""] 本月,2"#,
                 "2024-02-29, 2024-03-31",
+            ),
+        ] {
+            assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
+        }
+    }
+
+    #[test]
+    fn passes_values_between_math_tempo_decibel_and_solid_tools() {
+        for (input, expected) in [
+            (r#"["分数: 计算","节拍: 速度 4秒 @"] 2*4"#, "120 BPM"),
+            (r#"["分贝: 转功率比","分数: 计算"] 20 dB"#, "100"),
+            (
+                r#"["分数: 计算","立体: 球"] 1/4+1/4"#,
+                "表面积 π · 体积 π/6",
             ),
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");

@@ -849,6 +849,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用算式算出拍数并换算节拍速度",
+        query: r#"处理: ["分数: 计算","节拍: 速度 4秒 @"] 2*4"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把逐行输入的值相加并输出精确分数",
         query: "处理: [\"文本: 按行拼接 \\\"+\\\"\",\"分数: 计算\"] 1/3\n1/6",
     },
