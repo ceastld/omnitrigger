@@ -41,6 +41,8 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         match operation.to_ascii_lowercase().as_str() {
             "不等式" | "inequality" => return solve_inequality(arguments.trim_start()),
             "顶点" | "vertex" => return describe_quadratic(arguments.trim_start(), false),
+            "判别式" | "discriminant" => return quadratic_discriminant(arguments.trim_start()),
+            "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
             "配方" | "complete-the-square" => {
                 return describe_quadratic(arguments.trim_start(), true);
             }
@@ -72,12 +74,37 @@ fn quadratic_center(a: &BigRational, b: BigRational, c: BigRational) -> (BigRati
     (center, distance_squared)
 }
 
+fn quadratic_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
+    let coefficients = coefficient_row(input)?;
+    if coefficients[0].numer().sign() == Sign::NoSign {
+        return Err(EquationError::NonQuadratic);
+    }
+    Ok(coefficients)
+}
+
+fn quadratic_discriminant(input: &str) -> Result<String, EquationError> {
+    let [a, b, c] = quadratic_coefficients(input)?;
+    let discriminant = &b * &b - a * c * BigInt::from(4u8);
+    ensure_exact_size(&discriminant).map_err(EquationError::Evaluation)?;
+    Ok(discriminant.to_string())
+}
+
+fn quadratic_root_sum_and_product(input: &str) -> Result<String, EquationError> {
+    let [a, b, c] = quadratic_coefficients(input)?;
+    let sum = -b / &a;
+    let product = c / a;
+    for value in [&sum, &product] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    Ok(format!("根和 {sum}\n根积 {product}"))
+}
+
 fn describe_quadratic(input: &str, complete_square: bool) -> Result<String, EquationError> {
-    let [a, b, c] = coefficient_row(input)?;
-    let extremum = match a.numer().sign() {
-        Sign::Plus => "最小值",
-        Sign::Minus => "最大值",
-        Sign::NoSign => return Err(EquationError::NonQuadratic),
+    let [a, b, c] = quadratic_coefficients(input)?;
+    let extremum = if a.numer().sign() == Sign::Plus {
+        "最小值"
+    } else {
+        "最大值"
     };
     let (x, distance_squared) = quadratic_center(&a, b, c);
     let y = -&a * distance_squared;
@@ -359,6 +386,23 @@ mod tests {
             solve_equation("配方 0,2,1"),
             Err(EquationError::NonQuadratic)
         );
+    }
+
+    #[test]
+    fn calculates_the_discriminant_and_vieta_values_exactly() {
+        for (query, expected) in [
+            ("判别式 2,-3,1", "1"),
+            ("discriminant 1/2,1/2,1/8", "0"),
+            ("判别式 1,0,1", "-4"),
+            ("韦达 2,-3,1", "根和 3/2\n根积 1/2"),
+            ("vieta 1,0,1", "根和 0\n根积 1"),
+            ("韦达 -1/2,3/2,1/2", "根和 3\n根积 -1"),
+        ] {
+            assert_eq!(solve_equation(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["判别式 0,1,2", "韦达 0,1,2"] {
+            assert_eq!(solve_equation(query), Err(EquationError::NonQuadratic));
+        }
     }
 
     #[test]

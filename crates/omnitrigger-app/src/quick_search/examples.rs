@@ -71,6 +71,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算二次方程的精确判别式",
+        query: "方程: 判别式 1,0,1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用韦达定理计算两根之和与积",
+        query: "方程: 韦达 2,-3,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "联立求解两个二元一次方程",
         query: "联立: 2,1,5; 1,-1,1",
     },
@@ -4064,7 +4074,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Equation
             if !term.is_empty()
-                && ["不等式", "顶点", "配方"]
+                && ["不等式", "顶点", "配方", "判别式", "韦达"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::LinearFit
