@@ -313,6 +313,7 @@
 - 用 `bitand`、`bitor`、`bitxor` 计算按位与、或、异或，用 `shl`、`shr` 左移或右移。也可用 `popcount(0xff)` 统计二进制中的 `1`，结果为 `8`。这些函数支持不超过 `2^53 - 1` 的非负整数。
 - 输入 `180° to rad`、`1 atm to kPa` 或 `2 MHz to kHz` 可换算角度、压强和频率。压强和频率的单位前缀区分 `m`（毫）与 `M`（兆）。
 - 输入 `120 rpm to °/s` 得到 `720 °/s`。角速度可在每分钟转数、每秒转数、弧度和角度速率之间换算，支持 `rpm`、`rev/s`、`rad/s`、`°/s`、`rad/min` 和 `°/min`。
+- 输入 `2 ha to 亩` 得到 `30 亩`，输入 `3 市亩 to m²` 得到 `2000 m²`。也可换算平方毫米、平方英寸、平方码和平方英里，例如 `645.16 mm² to in²` 得到 `1 in²`。 [国家统计局公顷与亩换算](https://www.stats.gov.cn/hd/cjwtjd/202302/t20230207_1902270.html) · [NIST 面积换算](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)
 - 输入 `8 Mbps to MB/s` 可换算数据速率，结果为 `1 MB/s`。
 - 输入 `1 GiB to [MiB, KiB, Gib]` 可一次得到 `1024 MiB`、`1048576 KiB` 和 `8 Gib`。方括号内最多填写 8 个目标单位，按填写顺序逐行输出。也能在批量换算中使用。
 - 用 `数据换算: 9007199254740993 B to KiB` 可得到精确分数 `9007199254740993/1024 KiB`。数据量和数据速率都可用分数或精确算式作为输入，例如 `数据换算: 1 MiB/s to MB/s` 得到 `16384/15625 MB/s`。

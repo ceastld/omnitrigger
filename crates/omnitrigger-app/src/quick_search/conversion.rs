@@ -129,7 +129,9 @@ impl Dimension {
             Self::Time => &["s", "min", "h", "ms", "d", "μs", "ns"],
             Self::Temperature => &["°C", "°F", "K"],
             Self::TemperatureDifference => &["Δ°C", "Δ°F", "ΔK"],
-            Self::Area => &["m²", "ft²", "ha", "km²", "cm²", "acre"],
+            Self::Area => &[
+                "m²", "ft²", "ha", "km²", "cm²", "acre", "亩", "mm²", "in²", "yd²", "mi²",
+            ],
             Self::Volume => &["L", "mL", "usgal", "impgal", "m³"],
             Self::Speed => &["km/h", "m/s", "mph", "kn"],
             Self::Data => &[
@@ -270,11 +272,22 @@ impl Unit {
             "dk" | "deltak" | "Δk" | "δk" | "开尔文温差" => {
                 Self::linear("ΔK", TemperatureDifference, 1.)
             }
+            "mm²" | "mm^2" | "mm2" | "平方毫米" => Self::linear("mm²", Area, 1e-6),
             "cm²" | "cm^2" | "cm2" | "平方厘米" => Self::linear("cm²", Area, 0.0001),
             "m²" | "m^2" | "m2" | "平方米" => Self::linear("m²", Area, 1.),
-            "km²" | "km^2" | "km2" | "平方千米" => Self::linear("km²", Area, 1_000_000.),
+            "km²" | "km^2" | "km2" | "平方千米" | "平方公里" => {
+                Self::linear("km²", Area, 1_000_000.)
+            }
+            "in²" | "in^2" | "in2" | "平方英寸" => {
+                Self::linear("in²", Area, INCH_IN_METERS.powi(2))
+            }
             "ft²" | "ft^2" | "ft2" | "平方英尺" => Self::linear("ft²", Area, 0.092_903_04),
-            "ha" | "公顷" => Self::linear("ha", Area, 10_000.),
+            "yd²" | "yd^2" | "yd2" | "平方码" => Self::linear("yd²", Area, 0.9144_f64.powi(2)),
+            "mi²" | "mi^2" | "mi2" | "平方英里" => {
+                Self::linear("mi²", Area, METERS_PER_MILE.powi(2))
+            }
+            "ha" | "hectare" | "hectares" | "公顷" => Self::linear("ha", Area, 10_000.),
+            "亩" | "市亩" | "mu" => Self::linear("亩", Area, 10_000. / 15.),
             "acre" | "acres" | "英亩" => Self::linear("acre", Area, 4_046.856_422_4),
             "ml" | "cm³" | "cm^3" | "cm3" | "毫升" => Self::linear("mL", Volume, 0.001),
             "l" | "liter" | "litre" | "升" => Self::linear("L", Volume, 1.),
@@ -1571,6 +1584,26 @@ fn format_with_unit(value: impl std::fmt::Display, target: &Unit) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_chinese_and_square_imperial_area_units() {
+        for (query, expected) in [
+            ("2 ha to 亩", "30 亩"),
+            ("3 市亩 to m²", "2000 m²"),
+            ("1 平方公里 to mu", "1500 亩"),
+            ("645.16 mm² to in²", "1 in²"),
+            ("9 ft² to yd2", "1 yd²"),
+            ("1 mi^2 to 英亩", "640 acre"),
+        ] {
+            assert_eq!(convert(query).unwrap().as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert("1 亩 to m"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
+        let targets = suggested_targets("2 ha").unwrap();
+        assert!(targets.iter().any(|item| item.expression == "2 ha to 亩"));
+    }
 
     #[test]
     fn converts_data_amounts_and_rates_without_rounding_the_input_or_result() {

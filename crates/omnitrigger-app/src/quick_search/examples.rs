@@ -684,6 +684,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "在公顷、亩和平方米等面积单位间换算",
+        query: "2 ha to 亩",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "把同一个数值换算成多个目标单位",
         query: "1 GiB to [MiB, KiB, Gib]",
     },
