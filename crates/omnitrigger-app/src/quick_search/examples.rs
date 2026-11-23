@@ -316,6 +316,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 超几何概率 10,4,3,2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算列联表的皮尔逊卡方和自由度",
+        query: "统计: 独立性卡方 1,2; 3,4",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算独立性假设下的各格期望频数",
+        query: "统计: 期望频数 1,2; 3,4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "保留分数和根式的均方根",
         query: "统计: 均方根 1/2,3/2",
@@ -4312,6 +4322,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "几何概率",
                     "几何累计",
                     "超几何概率",
+                    "独立性卡方",
+                    "期望频数",
                     "箱线摘要",
                     "截尾平均",
                     "移动合计",

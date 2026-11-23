@@ -8,7 +8,7 @@ use super::operators::split_top_level_commas;
 
 const MAX_DIMENSION: usize = 8;
 const MAX_POWER: u32 = 64;
-type Matrix = Vec<Vec<BigRational>>;
+pub(super) type Matrix = Vec<Vec<BigRational>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MatrixError {
@@ -142,7 +142,7 @@ fn parse_pair(input: &str) -> Result<(Matrix, Matrix), MatrixError> {
     Ok((parse_matrix(left)?, parse_matrix(right)?))
 }
 
-fn parse_matrix(input: &str) -> Result<Matrix, MatrixError> {
+pub(super) fn parse_matrix(input: &str) -> Result<Matrix, MatrixError> {
     let rows: Vec<_> = input
         .trim()
         .split([';', '\n'])
@@ -536,7 +536,7 @@ fn transpose(matrix: Matrix) -> Matrix {
     result
 }
 
-fn format_matrix(matrix: Matrix) -> String {
+pub(super) fn format_matrix(matrix: Matrix) -> String {
     matrix
         .into_iter()
         .map(|row| {

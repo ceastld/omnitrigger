@@ -12,6 +12,7 @@ use super::linear_fit::{
     calculate_correlation, calculate_covariance, calculate_kendall_correlation,
     calculate_rank_correlation, LinearFitError,
 };
+use super::matrix::{format_matrix, parse_matrix, MatrixError};
 use super::operators::split_top_level_commas;
 
 pub(super) const MAX_VALUES: usize = 128;
@@ -34,6 +35,9 @@ pub(super) enum StatisticsError {
     BinomialArguments,
     GeometricArguments,
     HypergeometricArguments,
+    InvalidContingencyTable,
+    ZeroContingencyMargin,
+    ContingencyInput(MatrixError),
     InvalidWindowWidth,
     WindowQuantileArguments,
     SampleWindowWidth,
@@ -68,6 +72,9 @@ impl StatisticsError {
             Self::HypergeometricArguments => {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
             }
+            Self::InvalidContingencyTable => "填写至少两行两列非负整数，用分号或换行分隔各行",
+            Self::ZeroContingencyMargin => "列联表每行和每列的合计须大于零",
+            Self::ContingencyInput(error) => error.message(),
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
             Self::WindowQuantileArguments => "先填窗口宽度和分位概率，例如 3,25%，再输入数值",
             Self::SampleWindowWidth => "移动样本方差与样本标准差至少需要两个数值",
@@ -235,6 +242,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "几何概率" | "geometric" => return geometric_probability(values, false),
         "几何累计" | "geometric-cdf" => return geometric_probability(values, true),
         "超几何概率" | "hypergeometric" => return hypergeometric_probability(values),
+        "独立性卡方" | "chi-square" => return contingency_table(values, false),
+        "期望频数" | "expected-counts" => return contingency_table(values, true),
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
@@ -987,6 +996,61 @@ fn hypergeometric_probability(input: &str) -> Result<String, StatisticsError> {
     Ok(bounded(probability)?.to_string())
 }
 
+fn contingency_table(input: &str, show_expected: bool) -> Result<String, StatisticsError> {
+    let table = parse_matrix(input).map_err(StatisticsError::ContingencyInput)?;
+    let rows = table.len();
+    let columns = table[0].len();
+    if rows < 2
+        || columns < 2
+        || table
+            .iter()
+            .flatten()
+            .any(|count| !count.is_integer() || count.numer().sign() == Sign::Minus)
+    {
+        return Err(StatisticsError::InvalidContingencyTable);
+    }
+
+    let row_totals: Vec<BigInt> = table
+        .iter()
+        .map(|row| row.iter().map(BigRational::numer).sum())
+        .collect();
+    let column_totals: Vec<BigInt> = (0..columns)
+        .map(|column| table.iter().map(|row| row[column].numer()).sum())
+        .collect();
+    if row_totals
+        .iter()
+        .chain(&column_totals)
+        .any(|total| total.sign() == Sign::NoSign)
+    {
+        return Err(StatisticsError::ZeroContingencyMargin);
+    }
+
+    let total: BigInt = row_totals.iter().sum();
+    let expected = row_totals
+        .iter()
+        .map(|row| {
+            column_totals
+                .iter()
+                .map(|column| bounded(BigRational::new(row * column, total.clone())))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if show_expected {
+        return Ok(format_matrix(expected));
+    }
+
+    let chi_square = table
+        .iter()
+        .flatten()
+        .zip(expected.iter().flatten())
+        .try_fold(BigRational::default(), |sum, (observed, expected)| {
+            let difference = observed - expected;
+            bounded(sum + &difference * &difference / expected)
+        })?;
+    let degrees_of_freedom = (rows - 1) * (columns - 1);
+    Ok(format!("χ² {chi_square}\n自由度 {degrees_of_freedom}"))
+}
+
 fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
     let probability = if let Some(percent) = input.strip_suffix('%') {
         calculate_fraction(percent).map(|value| value / BigInt::from(100))
@@ -1207,6 +1271,42 @@ mod tests {
         assert_eq!(
             calculate_statistics("移动样本标准差 1 5,6"),
             Err(StatisticsError::SampleWindowWidth)
+        );
+    }
+
+    #[test]
+    fn computes_pearson_chi_square_and_expected_counts_exactly() {
+        for (input, expected) in [
+            ("独立性卡方 1,2; 3,4", "χ² 5/63\n自由度 1"),
+            ("期望频数 1,2; 3,4", "6/5, 9/5\n14/5, 21/5"),
+            ("chi-square 0,1; 1,0", "χ² 2\n自由度 1"),
+            ("独立性卡方 2,3,4; 4,6,8", "χ² 0\n自由度 2"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "独立性卡方 1,2",
+            "独立性卡方 -1,2; 3,4",
+            "期望频数 1/3,2; 3,4",
+        ] {
+            assert_eq!(
+                calculate_statistics(input),
+                Err(StatisticsError::InvalidContingencyTable),
+            );
+        }
+        for input in ["独立性卡方 0,0; 1,1", "期望频数 0,1; 0,4"] {
+            assert_eq!(
+                calculate_statistics(input),
+                Err(StatisticsError::ZeroContingencyMargin),
+            );
+        }
+        assert_eq!(
+            calculate_statistics("期望频数 1,2; 3,4,5"),
+            Err(StatisticsError::ContingencyInput(MatrixError::UnevenRows)),
         );
     }
 
