@@ -45,6 +45,7 @@ pub(super) enum StatisticsError {
     ZeroPreviousValue,
     NonPositiveHarmonicValue,
     InvalidGiniValues,
+    GiniMeanDifferenceCount,
     StandardErrorCount,
     StandardScoresConstant,
     VariationSampleCount,
@@ -83,6 +84,7 @@ impl StatisticsError {
             Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
             Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
             Self::InvalidGiniValues => "基尼系数需要非负观测值，且总和须大于零",
+            Self::GiniMeanDifferenceCount => "基尼平均差需要至少两个观测值",
             Self::StandardErrorCount => "均值标准误至少需要两个观测值",
             Self::StandardScoresConstant => "标准分需要至少两个不同的观测值",
             Self::VariationSampleCount => "样本变异系数至少需要两个观测值",
@@ -109,6 +111,7 @@ enum StatisticsOperation {
     RootMeanSquare,
     HarmonicMean,
     GiniCoefficient,
+    GiniMeanDifference,
     StandardError,
     CoefficientOfVariation {
         sample: bool,
@@ -187,6 +190,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "调和平均" | "harmonic-mean" => (StatisticsOperation::HarmonicMean, values.trim()),
         "基尼系数" | "gini" | "gini-coefficient" => {
             (StatisticsOperation::GiniCoefficient, values.trim())
+        }
+        "基尼平均差" | "gini-mean-difference" => {
+            (StatisticsOperation::GiniMeanDifference, values.trim())
         }
         "标准误" | "均值标准误" | "sem" | "standard-error" => {
             (StatisticsOperation::StandardError, values.trim())
@@ -346,6 +352,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         StatisticsOperation::GiniCoefficient => {
             gini_coefficient(values, count).map(|value| value.to_string())
+        }
+        StatisticsOperation::GiniMeanDifference => {
+            gini_mean_difference(values, count).map(|value| value.to_string())
         }
         StatisticsOperation::RootMeanSquare => {
             let squares = squared_deviation_sum(&values, &BigRational::default())?;
@@ -832,7 +841,7 @@ fn sorted_median(
 }
 
 fn gini_coefficient(
-    mut values: Vec<(BigRational, u64)>,
+    values: Vec<(BigRational, u64)>,
     count: u64,
 ) -> Result<BigRational, StatisticsError> {
     if values
@@ -841,6 +850,28 @@ fn gini_coefficient(
     {
         return Err(StatisticsError::InvalidGiniValues);
     }
+    let (value_sum, difference_sum) = gini_totals(values)?;
+    if value_sum.numer().sign() == Sign::NoSign {
+        return Err(StatisticsError::InvalidGiniValues);
+    }
+    bounded(difference_sum / (value_sum * BigInt::from(count)))
+}
+
+fn gini_mean_difference(
+    values: Vec<(BigRational, u64)>,
+    count: u64,
+) -> Result<BigRational, StatisticsError> {
+    if count < 2 {
+        return Err(StatisticsError::GiniMeanDifferenceCount);
+    }
+    let (_, difference_sum) = gini_totals(values)?;
+    let twice_pairs = BigInt::from(count) * BigInt::from(count - 1);
+    bounded(difference_sum * BigInt::from(2) / twice_pairs)
+}
+
+fn gini_totals(
+    mut values: Vec<(BigRational, u64)>,
+) -> Result<(BigRational, BigRational), StatisticsError> {
     values.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
     let mut seen = 0_u64;
     let mut value_sum = BigRational::default();
@@ -853,10 +884,7 @@ fn gini_coefficient(
         value_sum = bounded(value_sum + value * multiplicity)?;
         seen += repetitions;
     }
-    if value_sum.numer().sign() == Sign::NoSign {
-        return Err(StatisticsError::InvalidGiniValues);
-    }
-    bounded(difference_sum / (value_sum * BigInt::from(count)))
+    Ok((value_sum, difference_sum))
 }
 
 fn tail_adjusted_mean(
@@ -1437,6 +1465,30 @@ mod tests {
         assert_eq!(
             calculate_statistics("二项累计 0,0,101%"),
             Err(StatisticsError::InvalidProbability)
+        );
+    }
+
+    #[test]
+    fn calculates_gini_mean_differences_between_distinct_observations() {
+        for (query, expected) in [
+            ("基尼平均差 1,2,5", "8/3"),
+            ("GINI-MEAN-DIFFERENCE -1/2,0,1/2", "2/3"),
+            ("基尼平均差 频数 0@2,3@2", "2"),
+            (
+                "基尼平均差 频数 0@1000000000,1@1000000000",
+                "1000000000/1999999999",
+            ),
+            ("基尼平均差 0,0,0", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("基尼平均差 1/2"),
+            Err(StatisticsError::GiniMeanDifferenceCount)
         );
     }
 
