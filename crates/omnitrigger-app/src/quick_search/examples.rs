@@ -4273,6 +4273,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计 CSV 函数值落入各区间的次数和频率",
+        query: "CSV: 函数分箱 [[1,2],\"x*y\",\"0,1/2,2\"]\n量,系数\n-1,2\n0,1\n1/2,1\n2,1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用分箱图查看 CSV 函数值的区间次数",
+        query: "CSV: 函数分箱图 [[1,2],\"x*y\",\"0,1/2,2\"]\n量,系数\n-1,2\n0,1\n1/2,1\n2,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按精确数值比较两列并标记是否达标",
         query: "CSV: 数值比较列 [\"达标\",\"实测\",2,\">=\"] 实测,门槛\n1.50,3/2\n1,2\n,0",
     },

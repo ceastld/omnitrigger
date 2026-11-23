@@ -4,7 +4,8 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{
-    evaluate, evaluate_at_x, format_result, normalize, sample_at_x, CalculationError, QUERY_LIMIT,
+    evaluate, evaluate_at_x, format_result, format_round_trip as format_coordinate, normalize,
+    sample_at_x, CalculationError, QUERY_LIMIT,
 };
 use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{
@@ -1205,17 +1206,6 @@ fn format_bisection_result(
     let x = format_coordinate(x);
     let residual = format_result(residual).map_err(EquationError::Approximation)?;
     Ok(format!("x ≈ {x}\r\n残差 {residual_name} ≈ {residual}"))
-}
-
-fn format_coordinate(x: f64) -> String {
-    // 保留可无损读回的横坐标，供后续代入或求根。
-    if x == 0.0 {
-        "0".to_owned()
-    } else if (1e-6..1e15).contains(&x.abs()) {
-        x.to_string()
-    } else {
-        format!("{x:e}")
-    }
 }
 
 fn numeric_derivative(input: &str) -> Result<String, EquationError> {

@@ -4116,6 +4116,44 @@ mod tests {
     }
 
     #[test]
+    fn csv_function_bin_chart_uses_finite_values_and_includes_the_lower_edge() {
+        let input = "[[\"数值\"],\"sqrt(x)\",\"0.3,2\"] 数值\n0\n0.09\n1\n4\n-1\n\"\"";
+        let expected = "下界,上界,次数,频率\r\n-∞,0.3,1,1/4\r\n0.3,2,2,1/2\r\n2,+∞,1,1/4";
+        let results = for_query(&format!("CSV: 函数分箱图 {input}"), &[]);
+        assert!(matches!(
+            &results,
+            Results::Value(Ok(ResultValue { kind: ValueKind::BinPlot(plot), .. }))
+                if plot.bin_count() == 3
+        ));
+        assert_eq!(results.refillable_text(), Some(expected));
+        assert_eq!(
+            transform_csv(&format!("function-bins {input}")).as_deref(),
+            Ok(expected)
+        );
+        let pipeline = for_query(
+            r#"处理: ["文本: 拆分成行 \";\"","CSV: 函数分箱图 [[1,2],\"x*y\",\"0,2\"]"] X,Y;1,2;-1,3;2,1"#,
+            &[],
+        );
+        assert!(matches!(
+            &pipeline,
+            Results::Value(Ok(ResultValue { kind: ValueKind::BinPlot(plot), .. }))
+                if plot.bin_count() == 3
+        ));
+        assert_eq!(
+            pipeline.refillable_text(),
+            Some("下界,上界,次数,频率\r\n-∞,0,1,1/3\r\n0,2,0,0\r\n2,+∞,2,2/3")
+        );
+        assert_eq!(
+            transform_csv("函数分箱 [[1],\"x\",\"1,1.00000000000000001\"] X\n1"),
+            Err(CsvError::FunctionBinEdges)
+        );
+        assert_eq!(
+            transform_csv("函数分箱 [[1],\"sqrt(x)\",\"0\"] X\n-1"),
+            Err(CsvError::FunctionBinEmpty)
+        );
+    }
+
+    #[test]
     fn cumulative_csv_column_chart_preserves_fractions_and_skips_blank_values() {
         let data = "编号,金额\nA,1/2\nB,0.5\nC,\nD,3\nE,5";
         let results = for_query(&format!(r#"CSV: 列累计分布图 "金额" {data}"#), &[]);

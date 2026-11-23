@@ -5,7 +5,7 @@ use num_rational::BigRational;
 
 use super::bin_plot::BinPlot;
 use super::box_plot::BoxPlot;
-use super::calculator::normalize;
+use super::calculator::{evaluate, format_round_trip, normalize};
 use super::fraction::{
     calculate_fraction, combination_count, ensure_exact_size, format_signed_square_root,
     format_square_root, rational_power, FractionError, MAX_COMBINATORIAL_ARGUMENT,
@@ -730,6 +730,15 @@ fn prepare_cumulative_plot(values: Vec<(BigRational, u64)>, count: u64) -> (Stri
 }
 
 pub(super) fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, StatisticsError> {
+    parse_bin_edges_with(input, |term| {
+        calculate_fraction(term).map_err(StatisticsError::Evaluation)
+    })
+}
+
+fn parse_bin_edges_with<Value: PartialOrd>(
+    input: &str,
+    evaluate_term: impl Fn(&str) -> Result<Value, StatisticsError>,
+) -> Result<Vec<Value>, StatisticsError> {
     let terms: Vec<_> = split_top_level_commas(input)
         .take(MAX_BIN_EDGES + 1)
         .collect();
@@ -741,7 +750,7 @@ pub(super) fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, Statistic
     }
     let edges: Vec<_> = terms
         .into_iter()
-        .map(|term| calculate_fraction(term).map_err(StatisticsError::Evaluation))
+        .map(evaluate_term)
         .collect::<Result<_, _>>()?;
     if edges.windows(2).any(|edge| edge[0] >= edge[1]) {
         return Err(StatisticsError::InvalidBinEdges);
@@ -783,7 +792,30 @@ fn plot_binned_frequencies(
     edges: &[BigRational],
 ) -> (String, BinPlot) {
     let bins = count_bins(values, edges);
-    let labels = bin_labels(edges);
+    plot_bin_counts(
+        bin_labels(edges.iter().map(ToString::to_string)),
+        bins,
+        count,
+    )
+}
+
+pub(super) fn plot_binned_float_values(
+    values: Vec<f64>,
+    input: &str,
+) -> Result<(String, BinPlot), StatisticsError> {
+    let edges = parse_bin_edges_with(input, |term| {
+        evaluate(term).map_err(|_| StatisticsError::InvalidBinEdges)
+    })?;
+    if values.is_empty() {
+        return Err(StatisticsError::Incomplete);
+    }
+    let count = values.len() as u64;
+    let bins = count_bins(values.into_iter().map(|value| (value, 1)), &edges);
+    let labels = bin_labels(edges.into_iter().map(format_round_trip));
+    Ok(plot_bin_counts(labels, bins, count))
+}
+
+fn plot_bin_counts(labels: Vec<String>, bins: Vec<u64>, count: u64) -> (String, BinPlot) {
     let csv = bin_csv(&labels, &bins, count);
     (csv, BinPlot::new(labels, bins, count))
 }
@@ -793,10 +825,14 @@ fn report_binned_frequencies(
     count: u64,
     edges: &[BigRational],
 ) -> String {
-    bin_csv(&bin_labels(edges), &count_bins(values, edges), count)
+    let labels = bin_labels(edges.iter().map(ToString::to_string));
+    bin_csv(&labels, &count_bins(values, edges), count)
 }
 
-fn count_bins(values: Vec<(BigRational, u64)>, edges: &[BigRational]) -> Vec<u64> {
+fn count_bins<Value: PartialOrd>(
+    values: impl IntoIterator<Item = (Value, u64)>,
+    edges: &[Value],
+) -> Vec<u64> {
     let mut bins = vec![0; edges.len() + 1];
     for (value, occurrences) in values {
         let index = edges.partition_point(|edge| edge <= &value);
@@ -806,9 +842,9 @@ fn count_bins(values: Vec<(BigRational, u64)>, edges: &[BigRational]) -> Vec<u64
     bins
 }
 
-fn bin_labels(edges: &[BigRational]) -> Vec<String> {
+fn bin_labels(edges: impl Iterator<Item = String>) -> Vec<String> {
     std::iter::once("-∞".to_owned())
-        .chain(edges.iter().map(ToString::to_string))
+        .chain(edges)
         .chain(std::iter::once("+∞".to_owned()))
         .collect()
 }

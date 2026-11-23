@@ -195,6 +195,17 @@ pub(super) fn format_result(value: f64) -> Result<String, CalculationError> {
     ))
 }
 
+pub(super) fn format_round_trip(value: f64) -> String {
+    // 保留可无损读回的浮点数，供后续计算。
+    if value == 0.0 {
+        "0".to_owned()
+    } else if (1e-6..1e15).contains(&value.abs()) {
+        value.to_string()
+    } else {
+        format!("{value:e}")
+    }
+}
+
 struct Parser<'a> {
     rest: &'a str,
     coordinates: Coordinates,

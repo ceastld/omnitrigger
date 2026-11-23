@@ -22,8 +22,8 @@ use serde_json::value::RawValue;
 
 use super::scientific::{average, median};
 use super::statistics::{
-    interpolate_ordered_quantile, parse_bin_edges, parse_probability, plot_binned_unweighted,
-    report_binned_unweighted, unweighted_box_fences,
+    interpolate_ordered_quantile, parse_bin_edges, parse_probability, plot_binned_float_values,
+    plot_binned_unweighted, report_binned_unweighted, unweighted_box_fences,
 };
 use super::{
     bin_plot::BinPlot,
@@ -170,6 +170,9 @@ pub(super) enum CsvError {
     FunctionColumnArguments,
     FunctionFilterArguments,
     FunctionSortArguments,
+    FunctionBinArguments,
+    FunctionBinEdges,
+    FunctionBinEmpty,
     FunctionRankArguments,
     FunctionSummaryArguments,
     FunctionSummaryRange,
@@ -418,6 +421,11 @@ impl CsvError {
             }
             Self::FunctionSummaryRange => "函数统计结果超出计算范围",
             Self::FunctionColumnLimit => "CSV 函数运算每次最多处理 128 条数据",
+            Self::FunctionBinArguments => {
+                "填写一至两列、算式和区间边界，例如 [[1,2],\"x*y\",\"0,1/2,2\"]"
+            }
+            Self::FunctionBinEdges => "填写 1 至 16 个可区分的有限升序边界，用逗号隔开",
+            Self::FunctionBinEmpty => "所选行没有有限的函数值",
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
             Self::InvalidColumnValue => "输入列号或带双引号的列名，再输入带双引号的值",
@@ -1027,6 +1035,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
         "函数排序" | "sort-function" => return sort_function_rows(input),
+        "函数分箱" | "function-bins" | "函数分箱图" | "function-bin-plot" => {
+            return build_function_bin_plot(input).map(|(csv, _)| csv);
+        }
         "函数排名列" | "rank-function-column" => return rank_function_rows(input),
         "函数摘要" | "summary-function" => return summarize_function_rows(input),
         operation if is_scatter_operation(operation) => {
@@ -5768,6 +5779,7 @@ pub(super) fn csv_count_chart(query: &str) -> Option<Result<(String, BinPlot), C
     let (operation, rest) = split_argument(query)?;
     match operation.to_ascii_lowercase().as_str() {
         "列分箱图" | "column-bin-plot" => Some(build_column_bin_plot(rest)),
+        "函数分箱图" | "function-bin-plot" => Some(build_function_bin_plot(rest)),
         "分组频数图" | "group-frequency-plot" => Some(build_group_frequency_plot(rest)),
         _ => None,
     }
@@ -5807,6 +5819,24 @@ fn build_column_bin_plot(input: &str) -> Result<(String, BinPlot), CsvError> {
     let (csv, plot) =
         plot_binned_unweighted(values, &edges).map_err(csv_column_statistics_error)?;
     Ok((csv, plot.with_label(header[column].clone())))
+}
+
+fn build_function_bin_plot(input: &str) -> Result<(String, BinPlot), CsvError> {
+    fn bin_error(error: StatisticsError) -> CsvError {
+        match error {
+            StatisticsError::Incomplete => CsvError::FunctionBinEmpty,
+            StatisticsError::InvalidBinEdges => CsvError::FunctionBinEdges,
+            error => CsvError::Statistics(error),
+        }
+    }
+
+    let invalid = CsvError::FunctionBinArguments;
+    let ((columns, expression, edges), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, String, String)>(input, invalid)?;
+    let FunctionRows { values, .. } = read_function_rows(data, &columns, &expression, invalid)?;
+    let (csv, plot) = plot_binned_float_values(values.into_iter().flatten().collect(), &edges)
+        .map_err(bin_error)?;
+    Ok((csv, plot.with_label(expression.trim().to_owned())))
 }
 
 pub(super) fn column_box_plot_arguments(query: &str) -> Option<&str> {
