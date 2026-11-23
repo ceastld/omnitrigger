@@ -1435,6 +1435,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算两个串联电阻的空载分压",
+        query: "电路: 分压 12 V @ 1 kΩ,2 kΩ",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按功率和用时计算耗电量",
         query: "电路: 耗电 1.5 kW @ 2h",
     },
@@ -4889,7 +4894,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Circuit
             if !term.is_empty()
-                && ["串联", "并联", "耗电", "电池能量"]
+                && ["串联", "并联", "分压", "耗电", "电池能量"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Equation
