@@ -127,6 +127,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "由三点求通过各点的函数系数",
+        query: "方程: 过三点 0,3/4 ; 1/2,3/8 ; 2,3/4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "由顶点和开口系数求二次函数",
+        query: "方程: 由顶点 3/2,-1/4,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "联立求解两个二元一次方程",
         query: "联立: 2,1,5; 1,-1,1",
     },

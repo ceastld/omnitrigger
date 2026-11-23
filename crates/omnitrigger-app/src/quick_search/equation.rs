@@ -8,12 +8,15 @@ use super::fraction::{
     calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root, FractionError,
 };
 use super::operators::{split_top_level_commas, NumberComparison};
+use super::plane::{parse_point, PointError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
     Coefficients,
     RootArguments,
     IntersectionArguments,
+    ThreePointArguments,
+    VertexFormArguments,
     InequalityArguments,
     NonQuadratic,
     SystemRows,
@@ -31,6 +34,10 @@ impl EquationError {
             Self::IntersectionArguments => {
                 "分别填写两条曲线的 a, b, c 三个系数，两组用分号或换行隔开"
             }
+            Self::ThreePointArguments => {
+                "填写三个横坐标互不相同的点，每个点写 x, y，各点用分号或换行隔开"
+            }
+            Self::VertexFormArguments => "按顶点横坐标、顶点纵坐标、二次项系数的顺序填写",
             Self::NonQuadratic => "二次项系数 a 须非零",
             Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
             Self::Evaluation(error) => error.message(),
@@ -51,6 +58,10 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
             "由根" | "from-roots" => return quadratic_from_roots(arguments.trim_start()),
             "交点" | "intersections" => return polynomial_intersections(arguments.trim_start()),
+            "过三点" | "through-points" => {
+                return quadratic_through_points(arguments.trim_start())
+            }
+            "由顶点" | "from-vertex" => return quadratic_from_vertex(arguments.trim_start()),
             "配方" | "complete-the-square" => {
                 return describe_quadratic(arguments.trim_start(), true);
             }
@@ -128,7 +139,61 @@ fn quadratic_from_roots(input: &str) -> Result<String, EquationError> {
     }
     let b = -&a * (&first + &second);
     let c = &a * first * second;
-    for value in [&b, &c] {
+    format_quadratic_coefficients(a, b, c)
+}
+
+fn quadratic_through_points(input: &str) -> Result<String, EquationError> {
+    let mut points = input.split([';', '；', '\n']);
+    let (Some(first), Some(second), Some(third), None) =
+        (points.next(), points.next(), points.next(), points.next())
+    else {
+        return Err(EquationError::ThreePointArguments);
+    };
+    let parse = |point| {
+        parse_point(point).map_err(|error| match error {
+            PointError::Arguments
+            | PointError::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
+                EquationError::ThreePointArguments
+            }
+            PointError::Evaluation(error) => EquationError::Evaluation(error),
+        })
+    };
+    let [x0, y0] = parse(first)?;
+    let [x1, y1] = parse(second)?;
+    let [x2, y2] = parse(third)?;
+    if x0 == x1 || x1 == x2 || x0 == x2 {
+        return Err(EquationError::ThreePointArguments);
+    }
+    let first_slope = (&y1 - &y0) / (&x1 - &x0);
+    let second_slope = (y2 - y1) / (&x2 - &x1);
+    let a = (second_slope - &first_slope) / (x2 - &x0);
+    let b = first_slope - &a * (&x0 + x1);
+    let c = y0 - (&a * &x0 + &b) * x0;
+    format_quadratic_coefficients(a, b, c)
+}
+
+fn quadratic_from_vertex(input: &str) -> Result<String, EquationError> {
+    let [h, k, a] = coefficient_row(input).map_err(|error| match error {
+        EquationError::Coefficients
+        | EquationError::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
+            EquationError::VertexFormArguments
+        }
+        _ => error,
+    })?;
+    if a.numer().sign() == Sign::NoSign {
+        return Err(EquationError::NonQuadratic);
+    }
+    let b = -&a * &h * BigInt::from(2u8);
+    let c = &a * &h * h + k;
+    format_quadratic_coefficients(a, b, c)
+}
+
+fn format_quadratic_coefficients(
+    a: BigRational,
+    b: BigRational,
+    c: BigRational,
+) -> Result<String, EquationError> {
+    for value in [&a, &b, &c] {
         ensure_exact_size(value).map_err(EquationError::Evaluation)?;
     }
     Ok(format!("{a},{b},{c}"))
@@ -426,6 +491,40 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovers_quadratic_coefficients_from_a_fractional_vertex_and_curvature() {
+        let coefficients = solve_equation("由顶点 3/2,-1/4,2").unwrap();
+        assert_eq!(coefficients, "2,-6,17/4");
+        assert_eq!(
+            solve_equation(&format!("顶点 {coefficients}")).as_deref(),
+            Ok("x = 3/2 · y = -1/4（最小值）"),
+        );
+        assert_eq!(
+            solve_equation("from-vertex 1,2,0"),
+            Err(EquationError::NonQuadratic)
+        );
+        assert_eq!(
+            solve_equation("由顶点 1,2"),
+            Err(EquationError::VertexFormArguments)
+        );
+    }
+
+    #[test]
+    fn recovers_a_polynomial_through_three_distinct_abscissas_exactly() {
+        assert_eq!(
+            solve_equation("过三点 0,3/4 ; 1/2,3/8 ; 2,3/4").as_deref(),
+            Ok("1/2,-1,3/4"),
+        );
+        assert_eq!(
+            solve_equation("through-points 3,7 ; 1,3 ; 2,5").as_deref(),
+            Ok("0,2,1"),
+        );
+        assert_eq!(
+            solve_equation("过三点 1,2 ; 1,3 ; 2,4"),
+            Err(EquationError::ThreePointArguments),
+        );
+    }
 
     #[test]
     fn intersects_quadratic_and_linear_graphs_with_exact_coordinates() {
