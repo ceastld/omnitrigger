@@ -159,6 +159,7 @@ pub(super) enum CsvError {
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
+    PivotCountColumns,
     UnpivotArguments,
     UnpivotColumns,
     PivotTooLarge,
@@ -333,6 +334,9 @@ impl CsvError {
             Self::PivotColumns => {
                 "用 JSON 数组填写互不重复的行、列和数值列，例如 [\"地区\",\"状态\",\"金额\"]"
             }
+            Self::PivotCountColumns => {
+                "用 JSON 数组填写两个不同的行、列分类，例如 [\"地区\",\"状态\"]"
+            }
             Self::UnpivotArguments => {
                 "用 JSON 数组填写保留列、展开后的列名和值列名，例如 [[\"地区\"],\"月份\",\"金额\"]"
             }
@@ -492,7 +496,7 @@ enum Operation {
         limit: usize,
         highest: bool,
     },
-    PivotSum([ColumnReference; 3]),
+    Pivot(Vec<ColumnReference>),
     Unpivot(Vec<ColumnReference>, [String; 2]),
     ColumnStatistics {
         column: ColumnReference,
@@ -1451,10 +1455,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ColumnBins(column, edges)
         }
-        "透视合计" | "pivot-sum" => {
-            let (columns, data) = json_argument_and_data(input, CsvError::PivotColumns)?;
+        "透视合计" | "pivot-sum" | "透视计数" | "pivot-count" => {
+            let (column_count, invalid) =
+                if matches!(operation.as_str(), "透视计数" | "pivot-count") {
+                    (2, CsvError::PivotCountColumns)
+                } else {
+                    (3, CsvError::PivotColumns)
+                };
+            let (columns, data) = json_argument_and_data::<Vec<ColumnReference>>(input, invalid)?;
+            if columns.len() != column_count {
+                return Err(invalid);
+            }
             input = data;
-            Operation::PivotSum(columns)
+            Operation::Pivot(columns)
         }
         "逆透视" | "unpivot" => {
             let ((columns, label, value), data) =
@@ -1804,7 +1817,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             limit,
             highest,
         } => select_group_extrema(&rows, &columns, amount, limit, highest),
-        Operation::PivotSum(columns) => pivot_sum(&rows, &columns),
+        Operation::Pivot(columns) => pivot_csv(&rows, &columns),
         Operation::Unpivot(columns, names) => unpivot(&rows, &columns, &names),
         Operation::ColumnStatistics { column, sample } => {
             summarize_unweighted(numeric_column_values(&rows, column)?, sample)
@@ -3573,18 +3586,30 @@ fn column_key<'a>(row: &'a [String], columns: &[usize]) -> Vec<&'a str> {
     columns.iter().map(|&index| row[index].as_str()).collect()
 }
 
-fn pivot_sum(rows: &[Vec<String>], columns: &[ColumnReference; 3]) -> Result<String, CsvError> {
+fn pivot_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_distinct_columns(header, columns, CsvError::PivotColumns)?;
-    let (row_column, column_column, amount_column) = (columns[0], columns[1], columns[2]);
+    let counting = columns.len() == 2;
+    let invalid = if counting {
+        CsvError::PivotCountColumns
+    } else {
+        CsvError::PivotColumns
+    };
+    let columns = resolve_distinct_columns(header, columns, invalid)?;
+    let (row_column, column_column) = (columns[0], columns[1]);
+    let amount_column = columns.get(2).copied();
+    let one = BigRational::from_integer(1.into());
     let mut row_labels = Vec::new();
     let mut column_labels = Vec::new();
     let mut row_positions = HashMap::new();
     let mut column_positions = HashMap::new();
     let mut totals = HashMap::<_, BigRational>::new();
     for record in records {
-        let value =
-            parse_fraction_literal(&record[amount_column]).map_err(|_| CsvError::InvalidNumber)?;
+        let value = match amount_column {
+            Some(column) => {
+                parse_fraction_literal(&record[column]).map_err(|_| CsvError::InvalidNumber)?
+            }
+            None => one.clone(),
+        };
         let row_label = record[row_column].as_str();
         let column_label = record[column_column].as_str();
         let row = *row_positions.entry(row_label).or_insert_with(|| {
@@ -3606,8 +3631,12 @@ fn pivot_sum(rows: &[Vec<String>], columns: &[ColumnReference; 3]) -> Result<Str
         output.push(',');
         output.push_str(&csv_cell(label));
     }
-    let separators = column_labels.len().saturating_mul(row_labels.len());
-    if output.len().saturating_add(separators) > MAX_PIVOT_BYTES {
+    let minimum_cell_bytes = 1 + usize::from(counting);
+    let minimum_body_bytes = column_labels
+        .len()
+        .saturating_mul(row_labels.len())
+        .saturating_mul(minimum_cell_bytes);
+    if output.len().saturating_add(minimum_body_bytes) > MAX_PIVOT_BYTES {
         return Err(CsvError::PivotTooLarge);
     }
     for (row, label) in row_labels.into_iter().enumerate() {
@@ -3617,6 +3646,8 @@ fn pivot_sum(rows: &[Vec<String>], columns: &[ColumnReference; 3]) -> Result<Str
             output.push(',');
             if let Some(value) = totals.get(&(row, column)) {
                 output.push_str(&value.to_string());
+            } else if counting {
+                output.push('0');
             }
         }
         if output.len() > MAX_PIVOT_BYTES {
@@ -5221,6 +5252,36 @@ mod tests {
             ),
         ] {
             assert_eq!(transform_csv(query), Err(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn counts_csv_pivot_pairs_and_outputs_zero_for_unobserved_pairs() {
+        let input = "地区,状态,备注\n南,\"待办,稍后\",x\n北,完成,y\n南,完成,z\n南,完成,z";
+        assert_eq!(
+            transform_csv(&format!("透视计数 [1,\"状态\"] {input}")).as_deref(),
+            Ok("地区,\"待办,稍后\",完成\r\n南,1,2\r\n北,0,1")
+        );
+        assert_eq!(
+            transform_csv("pivot-count [1,2] 地区,状态\n南,\n北,完成").as_deref(),
+            Ok("地区,\"\",完成\r\n南,1,0\r\n北,0,1")
+        );
+        assert_eq!(
+            transform_csv("透视计数 [1,2] 地区,状态").as_deref(),
+            Ok("地区")
+        );
+        for (query, error) in [
+            (
+                "透视计数 [1,2,3] 地区,状态,金额",
+                CsvError::PivotCountColumns,
+            ),
+            (
+                "透视计数 [1,\"地区\"] 地区,状态",
+                CsvError::PivotCountColumns,
+            ),
+            ("透视计数 [1,3] 地区,状态", CsvError::ColumnOutOfRange),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
         }
     }
 
