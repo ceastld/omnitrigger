@@ -47,7 +47,9 @@ fn looks_like_expression(query: &str) -> bool {
     let (name, tail) = split_name(query);
     let tail = tail.trim_start();
     match named_value(name) {
-        Some(NamedValue::Constant(_)) => tail.is_empty() || Operator::prefix(tail).is_some(),
+        Some(NamedValue::Constant(_)) => {
+            tail.is_empty() || Operator::prefix(tail).is_some() || tail.starts_with(is_superscript)
+        }
         Some(NamedValue::Function(_) | NamedValue::Aggregate(_)) => {
             tail.is_empty() || tail.starts_with('(')
         }
@@ -175,6 +177,43 @@ struct Parser<'a> {
     coordinate: Option<f64>,
 }
 
+fn superscript_digit(character: char) -> Option<usize> {
+    "⁰¹²³⁴⁵⁶⁷⁸⁹".chars().position(|digit| digit == character)
+}
+
+fn is_superscript(character: char) -> bool {
+    matches!(character, '⁺' | '⁻') || superscript_digit(character).is_some()
+}
+
+fn superscript_exponent(input: &str) -> Result<Option<(f64, usize)>, CalculationError> {
+    let Some(first) = input.chars().next().filter(|&first| is_superscript(first)) else {
+        return Ok(None);
+    };
+    let digits_start = if matches!(first, '⁺' | '⁻') {
+        first.len_utf8()
+    } else {
+        0
+    };
+    let mut exponent = 0.0;
+    let mut width = digits_start;
+    for character in input[digits_start..].chars() {
+        let Some(digit) = superscript_digit(character) else {
+            break;
+        };
+        exponent = exponent * 10.0 + digit as f64;
+        width += character.len_utf8();
+    }
+    if width == digits_start {
+        return Err(if width == input.len() {
+            CalculationError::Incomplete
+        } else {
+            CalculationError::Invalid
+        });
+    }
+    let exponent = if first == '⁻' { -exponent } else { exponent };
+    Ok(Some((exponent, width)))
+}
+
 impl Parser<'_> {
     fn expression(&mut self, min_binding: u8) -> Result<f64, CalculationError> {
         let mut lhs = match self.peek() {
@@ -205,6 +244,12 @@ impl Parser<'_> {
             Some(_) => return Err(CalculationError::Invalid),
             None => return Err(CalculationError::Incomplete),
         };
+
+        let rest = self.rest.trim_start();
+        if let Some((exponent, width)) = superscript_exponent(rest)? {
+            self.rest = &rest[width..];
+            lhs = finite(Operator::Power.apply(lhs, exponent)?)?;
+        }
 
         while let Some((operator, width)) = Operator::prefix(self.rest.trim_start()) {
             let (left, right) = operator.binding_power();
@@ -365,6 +410,27 @@ fn finite(value: f64) -> Result<f64, CalculationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_superscript_integer_powers_and_keeps_normal_operator_precedence() {
+        for (query, expected) in [
+            ("2¹⁰", "1024"),
+            ("2⁻³", "0.125"),
+            ("-3²", "-9"),
+            ("(-3)²", "9"),
+            ("2^3²", "512"),
+            ("2²**3", "64"),
+            ("sqrt(9)⁺²", "9"),
+            ("0x10²", "256"),
+        ] {
+            assert!(looks_like_calculation(query), "{query}");
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert!(looks_like_calculation("π²"));
+        assert_eq!(calculate("2⁻"), Err(CalculationError::Incomplete));
+        assert_eq!(calculate("2² ³"), Err(CalculationError::Invalid));
+        assert_eq!(evaluate_at_x("x² + 1", 3.0), Ok(10.0));
+    }
 
     #[test]
     fn evaluates_prefixed_integer_literals_inside_arithmetic() {

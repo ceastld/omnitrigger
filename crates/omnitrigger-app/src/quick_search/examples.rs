@@ -81,6 +81,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算带上标整数指数的算式",
+        query: "2¹⁰",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算平方根",
         query: "sqrt(2)",
     },
