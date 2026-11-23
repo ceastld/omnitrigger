@@ -553,6 +553,12 @@ impl ValueError {
             Self::DataPipeline(DataPipelineError::Arguments) => {
                 "填写 1 至 8 条单行命令，再粘贴要处理的数据"
             }
+            Self::DataPipeline(DataPipelineError::RowStep { line, index, cause }) => {
+                return format!("第 {line} 行的第 {index} 步失败 · {cause}").into();
+            }
+            Self::DataPipeline(DataPipelineError::RowOutputTooLarge { line }) => {
+                return format!("第 {line} 行使逐行结果超过 1 MiB，请缩小数据范围").into();
+            }
             Self::Text(error) => error.message(),
             Self::Csv(CsvError::DataRowValue { row, cause }) => {
                 return format!("第 {row} 个数据行 · {cause}").into();

@@ -30,32 +30,119 @@ const STEP_SYNTAX: &str =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
     Arguments,
-    Step { index: usize, cause: &'static str },
+    Step {
+        index: usize,
+        cause: &'static str,
+    },
+    RowStep {
+        line: usize,
+        index: usize,
+        cause: &'static str,
+    },
+    RowOutputTooLarge {
+        line: usize,
+    },
 }
 
-pub(super) fn step_csv_arguments(input: &str) -> Option<&str> {
-    let mut parts = input.trim_start().splitn(2, char::is_whitespace);
-    let operation = parts.next()?;
-    (operation.eq_ignore_ascii_case("步骤CSV") || operation.eq_ignore_ascii_case("steps-csv"))
-        .then(|| parts.next().unwrap_or(""))
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DataPipelineMode {
+    LastResult,
+    StepsCsv,
+    Rows,
+    RowsCsv,
+}
+
+pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
+    let input = input.trim_start();
+    let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    match operation.to_ascii_lowercase().as_str() {
+        "步骤csv" | "steps-csv" => (DataPipelineMode::StepsCsv, arguments),
+        "逐行" | "rows" => (DataPipelineMode::Rows, arguments),
+        "逐行csv" | "rows-csv" => (DataPipelineMode::RowsCsv, arguments),
+        _ => (DataPipelineMode::LastResult, input),
+    }
 }
 
 pub(super) fn transform_data_pipeline(
     input: &str,
     today: NaiveDate,
 ) -> Result<String, DataPipelineError> {
-    let csv_arguments = step_csv_arguments(input);
-    let (steps, source) = json_argument_and_tail::<Vec<String>>(csv_arguments.unwrap_or(input))
-        .ok_or(DataPipelineError::Arguments)?;
+    let (mode, input) = split_pipeline_input(input);
+    let (steps, source) =
+        json_argument_and_tail::<Vec<String>>(input).ok_or(DataPipelineError::Arguments)?;
     if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len()) || source.trim().is_empty() {
         return Err(DataPipelineError::Arguments);
     }
+    let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
+    if matches!(mode, DataPipelineMode::Rows | DataPipelineMode::RowsCsv) {
+        run_pipeline_rows(
+            &steps,
+            source,
+            today,
+            mode == DataPipelineMode::RowsCsv,
+            &mut remaining_work,
+        )
+    } else {
+        run_pipeline_steps(
+            &steps,
+            source,
+            today,
+            mode == DataPipelineMode::StepsCsv,
+            None,
+            &mut remaining_work,
+        )
+    }
+}
+
+fn run_pipeline_rows(
+    steps: &[String],
+    source: &str,
+    today: NaiveDate,
+    csv: bool,
+    remaining_work: &mut usize,
+) -> Result<String, DataPipelineError> {
+    let mut result = if csv {
+        String::from("输入,结果")
+    } else {
+        String::new()
+    };
+    let mut separator = "";
+    for (index, input) in source.lines().enumerate() {
+        if input.trim().is_empty() {
+            continue;
+        }
+        let line = index + 1;
+        let output = run_pipeline_steps(steps, input, today, false, Some(line), remaining_work)?;
+        let error = DataPipelineError::RowOutputTooLarge { line };
+        if csv {
+            append_bounded_csv_row(&mut result, [input, output.as_str()].into_iter(), error)?;
+        } else {
+            if result.len() + separator.len() + output.len() > MAX_PIPELINE_OUTPUT_BYTES {
+                return Err(error);
+            }
+            result.push_str(separator);
+            result.push_str(&output);
+            separator = "\n";
+        }
+    }
+    Ok(result)
+}
+
+fn run_pipeline_steps(
+    steps: &[String],
+    source: &str,
+    today: NaiveDate,
+    trace_steps: bool,
+    line: Option<usize>,
+    remaining_work: &mut usize,
+) -> Result<String, DataPipelineError> {
     let mut current = Cow::Borrowed(source);
-    let mut trace = csv_arguments.map(|_| String::from("步骤,命令,结果"));
+    let mut trace = trace_steps.then(|| String::from("步骤,命令,结果"));
     for (index, step) in steps.iter().enumerate() {
-        let error = |cause| DataPipelineError::Step {
-            index: index + 1,
-            cause,
+        let index = index + 1;
+        let error = |cause| match line {
+            Some(line) => DataPipelineError::RowStep { line, index, cause },
+            None => DataPipelineError::Step { index, cause },
         };
         if step.contains(['\r', '\n', '\0']) {
             return Err(error(STEP_SYNTAX));
@@ -105,8 +192,11 @@ pub(super) fn transform_data_pipeline(
         if output.len() > MAX_PIPELINE_OUTPUT_BYTES {
             return Err(error("处理结果超过 1 MiB，请缩小数据范围"));
         }
+        *remaining_work = remaining_work
+            .checked_sub(output.len())
+            .ok_or_else(|| error("逐行处理中间结果合计超过 8 MiB，请缩小数据范围"))?;
         if let Some(trace) = &mut trace {
-            let number = (index + 1).to_string();
+            let number = index.to_string();
             append_bounded_csv_row(
                 trace,
                 [number.as_str(), step.as_str(), output.as_str()].into_iter(),
@@ -272,6 +362,40 @@ mod tests {
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn processes_each_source_line_through_the_same_steps() {
+        assert_eq!(
+            run_pipeline("逐行 [\"分数: 计算\",\"立体: 球\"]\r\n1/4+1/4\r\n\r\n1").as_deref(),
+            Ok("表面积 π · 体积 π/6\n表面积 4π · 体积 4π/3")
+        );
+        assert_eq!(
+            run_pipeline(concat!(
+                r#"ROWS-CSV ["JSON: 取值 /金额","分数:"]"#,
+                "\n{\"金额\":0.50}\n{\"金额\":1.25}"
+            ))
+            .as_deref(),
+            Ok("输入,结果\r\n\"{\"\"金额\"\":0.50}\",1/2\r\n\"{\"\"金额\"\":1.25}\",5/4")
+        );
+        assert_eq!(
+            run_pipeline("逐行 [\"文本: 公共片段\"]\n\"甲\" \"乙\"\n\"甲茶\" \"乙茶\"").as_deref(),
+            Ok("\n茶")
+        );
+        assert!(matches!(
+            run_pipeline("逐行 [\"文本: 大写\",\"分数:\"]\n1/2\n\n茶"),
+            Err(DataPipelineError::RowStep {
+                line: 3,
+                index: 2,
+                ..
+            })
+        ));
+        let data = "a".repeat(MAX_PIPELINE_OUTPUT_BYTES / 4);
+        let repeated = format!("逐行 [\"文本: 大写\"]\n{data}\n{data}\n{data}\n{data}");
+        assert_eq!(
+            run_pipeline(&repeated),
+            Err(DataPipelineError::RowOutputTooLarge { line: 4 })
+        );
     }
 
     #[test]

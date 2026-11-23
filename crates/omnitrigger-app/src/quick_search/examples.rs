@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use crate::assets::Icon;
 
 use super::calculator::narrow_ascii_graphic;
-use super::data_pipeline::step_csv_arguments;
+use super::data_pipeline::split_pipeline_input;
 use super::operators::json_argument_and_tail;
 use super::scientific::split_name;
 use super::scope::{parse_scope, scoped_query, tool_example_keyword, Scope};
@@ -31,7 +31,7 @@ impl Example {
         let (prefix, input) = self.query.split_once([':', '：'])?;
         let scope = parse_scope(prefix)?;
         if scope == Scope::DataPipeline {
-            let arguments = step_csv_arguments(input).unwrap_or(input);
+            let (_, arguments) = split_pipeline_input(input);
             let (_, data) = json_argument_and_tail::<Vec<String>>(arguments)?;
             return (!data.is_empty()).then_some(self.query.len() - data.len());
         }
@@ -867,6 +867,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "将每一步的输出与执行命令导出为 CSV",
         query: "处理: 步骤CSV [\"文本: 大写\",\"文本: 按行拼接 \\\", \\\"\"] 茶 a\n咖啡 b",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "对每条分数算式分别计算球的表面积和体积",
+        query: "处理: 逐行 [\"分数: 计算\",\"立体: 球\"]\n1/4+1/4\n1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "逐条提取 JSON 金额并输出精确分数",
+        query: "处理: 逐行CSV [\"JSON: 取值 /金额\",\"分数:\"]\n{\"金额\":0.50}\n{\"金额\":1.25}",
     },
     Example {
         icon: Icon::Browser,
@@ -4857,7 +4867,12 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if ["月初序列", "月末序列", "季初序列", "季末序列"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
-        Scope::DataPipeline if "步骤csv".starts_with(&term.to_ascii_lowercase()) => {}
+        Scope::DataPipeline
+            if ["步骤csv", "逐行", "逐行csv"].into_iter().any(|operation| {
+                operation
+                    .get(..term.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(term))
+            }) => {}
         Scope::Date
         | Scope::Duration
         | Scope::BatchConversion
@@ -4995,6 +5010,16 @@ mod tests {
             assert!(tool_operation_examples(scope, prefix).is_some());
             assert_eq!(tool_operation_examples(scope, with_argument), None);
         }
+    }
+
+    #[test]
+    fn selects_only_data_in_the_row_pipeline_example() {
+        let items = tool_operation_examples(Scope::DataPipeline, "逐行CSV").unwrap();
+        assert_eq!(items.len(), 1);
+        let example = &EXAMPLES[items[0]];
+        let start = example.argument_start().unwrap();
+        assert!(example.query[..start].ends_with("\"分数:\"]\n"));
+        assert_eq!(&example.query[start..], "{\"金额\":0.50}\n{\"金额\":1.25}");
     }
 
     #[test]
