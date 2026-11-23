@@ -5,10 +5,13 @@ use chrono::NaiveDate;
 use super::{
     calendar::calculate_date,
     csv_tools::{append_bounded_csv_row, transform_csv},
+    duration::convert_duration,
     fraction::simplify_fraction,
     json_tools::transform_json,
     operators::json_argument_and_tail,
     path_tools::path_component,
+    pitch::convert_pitch,
+    radix::convert_arbitrary_radix,
     scope::{scoped_query, Scope},
     statistics::calculate_statistics,
     text_tools::transform_text,
@@ -19,7 +22,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、分数或统计命令";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -71,6 +74,9 @@ pub(super) fn transform_data_pipeline(
             Scope::UrlEncoding => convert_url_component(&query).map_err(|cause| cause.message()),
             Scope::Path => path_component(&query).map_err(|cause| cause.message()),
             Scope::Date => calculate_date(&query, today).map_err(|cause| cause.message()),
+            Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
+            Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
+            Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
             Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
             Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
@@ -132,6 +138,28 @@ mod tests {
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn combines_duration_radix_and_pitch_operations_with_data_steps() {
+        for (input, expected) in [
+            (
+                r#"["时长: 分摊 01:30:00 @","文本: 按行拼接 \", \""] 1:2"#,
+                "00:30:00, 01:00:00",
+            ),
+            (r#"["进制: 罗马数字","分数: 计算"] CDXCIX"#, "499"),
+            (r#"["进制: 小数"] 0.1 从 10 到 2"#, "0.0(0011)"),
+            (
+                r#"["进制: 罗马数字","音高: MIDI"] LXIX"#,
+                "A4 · MIDI 69 · 440 Hz",
+            ),
+        ] {
+            assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert!(matches!(
+            run_pipeline(r#"["文本: 大写","进制: 罗马数字"] ic"#),
+            Err(DataPipelineError::Step { index: 2, .. }),
+        ));
     }
 
     #[test]
