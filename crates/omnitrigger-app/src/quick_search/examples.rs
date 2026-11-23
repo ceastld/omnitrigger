@@ -1482,6 +1482,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "估算 RC 充电达到指定比例的时间",
+        query: "电路: RC充电 50% @ 1 kΩ,1 μF",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "估算 RC 放电到指定比例的时间",
+        query: "电路: RC放电 25% @ 1 kΩ,1 μF",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按功率和用时计算耗电量",
         query: "电路: 耗电 1.5 kW @ 2h",
     },
@@ -4833,6 +4843,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "负载分压",
             "分流",
             "RC",
+            "RC充电",
+            "RC放电",
             "耗电",
             "电池能量",
         ],

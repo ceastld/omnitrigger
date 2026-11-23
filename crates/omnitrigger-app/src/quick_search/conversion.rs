@@ -7,9 +7,12 @@ use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
 use super::batch::{map_batch_csv, map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
-use super::fraction::{calculate_fraction, ensure_exact_size, parse_fraction_literal};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, format_significant_digits, parse_fraction_literal,
+};
 use super::operators::split_top_level_commas;
 use super::radix::Base;
+use super::statistics::parse_probability;
 use super::InputSuggestion;
 
 const MAX_CONVERSION_TARGETS: usize = 8;
@@ -41,6 +44,8 @@ pub(super) enum ConversionError {
     InvalidLoadedVoltageDivider,
     InvalidCurrentDivider,
     InvalidRcFilter,
+    InvalidRcCharge,
+    InvalidRcDischarge,
     InvalidEnergyUse,
     InvalidBatteryEnergy,
     InvalidPeriod,
@@ -94,6 +99,8 @@ impl ConversionError {
             }
             Self::InvalidCurrentDivider => "输入总电流和两个正电阻，例如 分流 6 mA @ 1 kΩ,2 kΩ",
             Self::InvalidRcFilter => "输入正电阻和正电容，例如 RC 1 kΩ,1 μF",
+            Self::InvalidRcCharge => "输入低于 100% 的目标充电比例，例如 RC充电 50% @ 1 kΩ,1 μF",
+            Self::InvalidRcDischarge => "输入大于零的剩余比例，例如 RC放电 25% @ 1 kΩ,1 μF",
             Self::InvalidEnergyUse => "填写非负功率和用时，例如 耗电 1.5 kW @ 2h",
             Self::InvalidBatteryEnergy => "填写容量和标称电压，例如 电池能量 2500 mAh @ 3.7 V",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
@@ -1030,6 +1037,8 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
             }
             "分流" | "current-divider" => return calculate_divider(values, Divider::Current),
             "rc" | "rc滤波" | "rc-filter" => return calculate_rc_filter(values),
+            "rc充电" | "rc-charge" => return calculate_rc_transition(values, true),
+            "rc放电" | "rc-discharge" => return calculate_rc_transition(values, false),
             "耗电" | "energy-use" => return calculate_energy_use(values),
             "电池能量" | "battery-energy" => return calculate_battery_energy(values),
             _ => {}
@@ -1132,7 +1141,7 @@ fn calculate_divider(input: &str, divider: Divider) -> Result<String, Conversion
     format_circuit_value(output, unit)
 }
 
-fn calculate_rc_filter(input: &str) -> Result<String, ConversionError> {
+fn rc_time_constant(input: &str) -> Result<f64, ConversionError> {
     let invalid = ConversionError::InvalidRcFilter;
     let mut components = split_top_level_commas(input);
     let (Some(resistance), Some(capacitance), None) =
@@ -1177,11 +1186,55 @@ fn calculate_rc_filter(input: &str) -> Result<String, ConversionError> {
     if !time.is_finite() || time == 0.0 {
         return Err(ConversionError::OutOfRange);
     }
+    Ok(time)
+}
+
+fn calculate_rc_filter(input: &str) -> Result<String, ConversionError> {
+    let time = rc_time_constant(input)?;
     let frequency = TAU.recip() / time;
     let time = format_positive_quantity(time, &Unit::parse(default_time_unit(time))?)?;
     let frequency =
         format_positive_quantity(frequency, &Unit::parse(default_frequency_unit(frequency))?)?;
     Ok(format!("{time} · {frequency}"))
+}
+
+fn calculate_rc_transition(input: &str, charging: bool) -> Result<String, ConversionError> {
+    let invalid = if charging {
+        ConversionError::InvalidRcCharge
+    } else {
+        ConversionError::InvalidRcDischarge
+    };
+    let (ratio, components) = input.split_once('@').ok_or(invalid)?;
+    let ratio = parse_probability(ratio.trim()).map_err(|_| invalid)?;
+    let one = BigRational::from_integer(1.into());
+    let remaining = if charging { &one - ratio } else { ratio };
+    if remaining.numer().bits() == 0 {
+        return Err(invalid);
+    }
+    let tau = rc_time_constant(components).map_err(|error| match error {
+        ConversionError::InvalidRcFilter => invalid,
+        _ => error,
+    })?;
+    if remaining == one {
+        return Ok("0 s".to_owned());
+    }
+    // 先用精确分数求补量，避免接近初始值时有效位丢失。
+    let use_complement = remaining >= BigRational::new(1.into(), 2.into());
+    let portion = if use_complement {
+        one - remaining
+    } else {
+        remaining
+    };
+    let portion = format_significant_digits(portion, 17)
+        .parse::<f64>()
+        .map_err(|_| ConversionError::OutOfRange)?;
+    let factor = if use_complement {
+        -(-portion).ln_1p()
+    } else {
+        -portion.ln()
+    };
+    let time = tau * factor;
+    format_positive_quantity(time, &Unit::parse(default_time_unit(time))?)
 }
 
 fn calculate_battery_energy(input: &str) -> Result<String, ConversionError> {
@@ -2789,6 +2842,35 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn calculates_duration_to_reach_an_rc_charging_or_discharging_fraction() {
+        for (query, unit, expected) in [
+            ("RC充电 50% @ 1 kΩ,1 μF", " μs", 693.147180559945),
+            ("rc-discharge 1/4 @ 1 kΩ,1 μF", " ms", 1.38629436111989),
+            ("RC充电 1-1e-21 @ 1 kΩ,1 μF", " ms", 48.3542869528750),
+        ] {
+            let result = calculate_circuit(query).unwrap();
+            let duration = result.strip_suffix(unit).unwrap().parse::<f64>().unwrap();
+            assert!((duration - expected).abs() < 1e-10, "{query}: {result}");
+        }
+        assert_eq!(
+            calculate_circuit("RC充电 0% @ 1 kΩ,1 μF").as_deref(),
+            Ok("0 s")
+        );
+        assert_eq!(
+            calculate_circuit("RC放电 100% @ 1 kΩ,1 μF").as_deref(),
+            Ok("0 s")
+        );
+        assert_eq!(
+            calculate_circuit("RC充电 100% @ 1 kΩ,1 μF"),
+            Err(ConversionError::InvalidRcCharge),
+        );
+        assert_eq!(
+            calculate_circuit("RC放电 0% @ 1 kΩ,1 μF"),
+            Err(ConversionError::InvalidRcDischarge),
+        );
     }
 
     #[test]
