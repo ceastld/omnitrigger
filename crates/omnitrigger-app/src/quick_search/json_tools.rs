@@ -450,12 +450,19 @@ fn select_json_wildcard(query: &str) -> Result<String, JsonError> {
     let (path, source) = json_value_and_source(query, JsonError::WildcardPathArguments)?;
     let segments = serde_json::from_str::<Vec<Option<String>>>(path.get())
         .map_err(|_| JsonError::WildcardPathArguments)?;
+    json_wildcard_values(source, &segments)
+}
+
+pub(super) fn json_wildcard_values(
+    source: &str,
+    segments: &[Option<String>],
+) -> Result<String, JsonError> {
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let mut matches = vec![root];
     for segment in segments {
         let mut children = Vec::new();
         for value in matches {
-            if let Some(key) = &segment {
+            if let Some(key) = segment {
                 match select_member(value, key) {
                     Ok(child) => children.push(child),
                     Err(JsonError::MissingValue) => (),

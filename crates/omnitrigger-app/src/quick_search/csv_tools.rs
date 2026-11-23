@@ -38,8 +38,8 @@ use super::{
         MAX_DECIMAL_PLACES,
     },
     json_tools::{
-        json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens, JsonCellContent,
-        JsonError,
+        json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
+        json_wildcard_values, JsonCellContent, JsonError,
     },
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
@@ -132,6 +132,7 @@ pub(super) enum CsvError {
     RegexReplaceColumnArguments,
     RegexReplaceColumnInputTooLarge,
     JsonPointerColumnArguments,
+    JsonWildcardColumnArguments,
     JsonPointerColumn(JsonError),
     UrlParameterColumnArguments,
     DataConversionTarget(ConversionError),
@@ -299,6 +300,9 @@ impl CsvError {
             Self::RegexReplaceColumnInputTooLarge => "正则替换列的来源文本超过 16 KiB，请缩小表格范围",
             Self::JsonPointerColumnArguments => {
                 "填写新列名、含 JSON 的来源列和指针，例如 [\"城市\",\"数据\",\"/城市\"]"
+            }
+            Self::JsonWildcardColumnArguments => {
+                "填写新列名、含 JSON 的来源列和路径数组，例如 [\"金额\",\"数据\",[\"订单\",null,\"金额\"]]"
             }
             Self::JsonPointerColumn(error) => error.message(),
             Self::UrlParameterColumnArguments => {
@@ -487,6 +491,7 @@ enum Operation {
     },
     TextColumn(String, ColumnReference, TextColumnComputation),
     JsonPointerColumn(String, ColumnReference, Vec<String>, JsonCellContent),
+    JsonWildcardColumn(String, ColumnReference, Vec<Option<String>>),
     UrlParameterColumn(String, ColumnReference, String),
     JsonExpandRows(String, ColumnReference, Vec<String>),
     SpreadsheetDateColumn(String, ColumnReference, SpreadsheetDateSystem, bool),
@@ -1202,6 +1207,18 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     Operation::JsonPointerColumn(name, source, keys, content)
                 }
             }
+        }
+        "json通配列" | "json-wildcard-column" => {
+            let invalid = CsvError::JsonWildcardColumnArguments;
+            let ((name, source, segments), data) =
+                json_argument_and_data::<(String, ColumnReference, Vec<Option<String>>)>(
+                    input, invalid,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(invalid);
+            }
+            input = data;
+            Operation::JsonWildcardColumn(name, source, segments)
         }
         kind @ ("表格序号列"
         | "spreadsheet-serial-column"
@@ -1924,6 +1941,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                         cause: error.message(),
                     }
                 })
+            })
+        }
+        Operation::JsonWildcardColumn(name, source, segments) => {
+            append_from_one_column(&rows, &name, source, |value| {
+                json_wildcard_values(value, &segments).map_err(|error| error.message())
             })
         }
         Operation::JsonExpandRows(name, source, keys) => {
@@ -6736,6 +6758,32 @@ null"#
             ),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn adds_json_wildcard_arrays_to_csv_without_losing_original_cells() {
+        let record = r#"001,"{""订单"":[{""金额"":1.20},{""备注"":""缺价""},{""金额"":null}]}""#;
+        let input = format!(
+            "JSON通配列 [\"金额数组\",\"详情\",[\"订单\",null,\"金额\"]]\n编号,详情\n{record}\n002,{{}}\n003,"
+        );
+        assert_eq!(
+            transform_csv(&input).as_deref(),
+            Ok(format!(
+                "编号,详情,金额数组\r\n{record},\"[1.20,null]\"\r\n002,{{}},[]\r\n003,\"\",\"\""
+            )
+            .as_str())
+        );
+        assert_eq!(
+            transform_csv("JSON通配列 [\"金额数组\",1,[null]]\n详情\n{}\n[1"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: JsonError::Incomplete.message(),
+            })
+        );
+        assert_eq!(
+            transform_csv("JSON通配列 [\"金额\",1,[true]]\n详情"),
+            Err(CsvError::JsonWildcardColumnArguments)
+        );
     }
 
     #[test]
