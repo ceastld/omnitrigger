@@ -326,6 +326,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看从区间左端点开始的累计积分",
+        query: "方程: 积分采样 x @ 0..2; 3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "绘制区间上的累计近似积分",
+        query: "方程: 积分采样图 sin(x) @ 0..pi; 17",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求二次函数在给定区间上的精确定积分",
         query: "方程: 定积分 1/2,-1,3/4 @ 0 到 2",
     },
@@ -5544,6 +5554,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "数值导数",
             "导数采样",
             "导数采样图",
+            "积分采样",
+            "积分采样图",
             "定积分",
             "区间极值",
         ],

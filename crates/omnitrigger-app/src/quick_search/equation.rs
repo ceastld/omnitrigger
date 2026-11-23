@@ -59,6 +59,7 @@ pub(super) enum EquationError {
     TooManySampledBrackets,
     NumericIntegralArguments,
     NumericIntegralIntervals,
+    IntegralSampleArguments,
     NumericDerivativeArguments,
     NumericDerivativeStep,
     DerivativeSampleArguments,
@@ -124,6 +125,9 @@ impl EquationError {
                 "填写被积算式和两个不同的端点，分号后可填 2 至 128 之间的偶数"
             }
             Self::NumericIntegralIntervals => "当前精度无法区分积分采样点，请减少子区间数",
+            Self::IntegralSampleArguments => {
+                "填写被积算式和不同的区间端点，分号后可填 2 至 129 的采样点数"
+            }
             Self::NumericDerivativeArguments => {
                 "填写要估算导数的算式和横坐标，可在分号后填写正步长"
             }
@@ -201,6 +205,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
+            "积分采样" | "sample-integral" | "积分采样图" | "integral-plot" => {
+                return format_function_samples(&integral_samples(arguments)?, "累计积分");
+            }
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
             "导数采样" | "sample-derivative" | "导数采样图" | "derivative-plot" => {
                 return format_function_samples(&derivative_samples(arguments)?, "近似导数");
@@ -603,6 +610,7 @@ pub(super) fn equation_chart(input: &str) -> Option<Result<(String, ScatterPlot)
         "函数图" | "function-plot" => Some(plot_quadratic_function(arguments)),
         "采样图" | "sample-plot" => Some(plot_sampled_function(arguments)),
         "导数采样图" | "derivative-plot" => Some(plot_sampled_derivative(arguments)),
+        "积分采样图" | "integral-plot" => Some(plot_sampled_integral(arguments)),
         "函数对照图" | "compare-function-plot" => Some(plot_function_comparison(arguments)),
         _ => None,
     }
@@ -664,6 +672,13 @@ fn plot_sampled_derivative(input: &str) -> Result<(String, ScatterPlot), Equatio
     let samples = derivative_samples(&input)?;
     let plot = plot_samples(&samples)?.with_axis_names(["x".to_owned(), "导数".to_owned()]);
     Ok((format_function_samples(&samples, "近似导数")?, plot))
+}
+
+fn plot_sampled_integral(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let samples = integral_samples(&input)?;
+    let plot = plot_samples(&samples)?.with_axis_names(["x".to_owned(), "积分".to_owned()]);
+    Ok((format_function_samples(&samples, "累计积分")?, plot))
 }
 
 fn plot_samples(samples: &[(f64, Option<f64>)]) -> Result<ScatterPlot, EquationError> {
@@ -794,6 +809,28 @@ fn derivative_samples(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationEr
             Ok((x, value))
         })
         .collect()
+}
+
+fn integral_samples(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
+    let invalid = EquationError::IntegralSampleArguments;
+    let (expression, bounds) = split_function_arguments(input, invalid)?;
+    let mut coordinates = sampled_coordinates(bounds, invalid)?;
+    let start = coordinates.next().expect("至少有两个采样点");
+    let mut previous = function_sample_value(expression, start)?.map(|value| (start, value, 0.0));
+    let mut samples = vec![(start, previous.map(|(_, _, total)| total))];
+    for x in coordinates {
+        if let Some((left, first, total)) = previous {
+            let midpoint = interpolate_between(left, x, 0.5);
+            let middle = function_sample_value(expression, midpoint)?;
+            let last = function_sample_value(expression, x)?;
+            previous = middle.zip(last).and_then(|(middle, last)| {
+                let sum = total + simpson_integral(&[first, middle, last], left, x);
+                sum.is_finite().then_some((x, last, sum))
+            });
+        }
+        samples.push((x, previous.map(|(_, _, total)| total)));
+    }
+    Ok(samples)
 }
 
 fn function_samples_for_inputs(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
@@ -2480,6 +2517,27 @@ mod tests {
                 Err(EquationError::Approximation(CalculationError::Invalid))
             );
         }
+    }
+
+    #[test]
+    fn samples_integrals_from_the_lower_endpoint_without_crossing_undefined_spans() {
+        let input = "f(x)=x @ 2..0; 3";
+        let expected = "x,累计积分\r\n0,0\r\n1,0.5\r\n2,2";
+        assert_eq!(
+            solve_equation(&format!("积分采样 {input}")).as_deref(),
+            Ok(expected)
+        );
+        let (csv, plot) = plot_sampled_integral(input).unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(plot.point_count(), 3);
+        assert_eq!(
+            solve_equation("sample-integral 1/(x-1) @ 0..4; 3").as_deref(),
+            Ok("x,累计积分\r\n0,0\r\n2,\r\n4,")
+        );
+        assert_eq!(
+            solve_equation("积分采样 sqrt(x) @ -1..1; 3").as_deref(),
+            Ok("x,累计积分\r\n-1,\r\n0,\r\n1,")
+        );
     }
 
     #[test]
