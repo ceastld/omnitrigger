@@ -111,7 +111,9 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
             ))
         }
         "夹角余弦" | "余弦相似度" | "cosine" => vector_cosine(&left, &right),
-        "距离" | "distance" => euclidean_distance(&left, &right),
+        "距离" | "distance" => Ok(format_square_root(&squared_euclidean_distance(
+            &left, &right,
+        )?)),
         "曼哈顿距离" | "manhattan-distance" | "切比雪夫距离" | "chebyshev-distance" => {
             let mut differences = vector_difference(&left, &right)?.into_iter().map(|value| {
                 if value.numer().sign() == Sign::Minus {
@@ -192,18 +194,15 @@ fn vector_difference(
         .collect()
 }
 
-pub(super) fn euclidean_distance(
+pub(super) fn squared_euclidean_distance(
     left: &[BigRational],
     right: &[BigRational],
-) -> Result<String, VectorError> {
+) -> Result<BigRational, VectorError> {
     if left.len() != right.len() {
         return Err(VectorError::Dimensions);
     }
     let differences = vector_difference(left, right)?;
-    Ok(format_square_root(&dot_product(
-        &differences,
-        &differences,
-    )?))
+    dot_product(&differences, &differences)
 }
 
 fn format_vector(values: &[BigRational]) -> String {

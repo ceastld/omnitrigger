@@ -37,8 +37,8 @@ use super::{
     duration::{elapsed_clock_interval, format_clock_duration},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, format_significant_digits,
-        interpolate_fraction, parse_fraction_literal, rounded_decimal, FractionError,
-        MAX_DECIMAL_PLACES,
+        format_square_root, interpolate_fraction, parse_fraction_literal, rounded_decimal,
+        FractionError, MAX_DECIMAL_PLACES,
     },
     json_tools::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
@@ -61,7 +61,7 @@ use super::{
     },
     timestamp::{absolute_timestamp, timestamp_clock_difference, timestamp_zone_converter},
     url_encoding::url_parameter_values,
-    vector::euclidean_distance,
+    vector::squared_euclidean_distance,
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
@@ -198,6 +198,8 @@ pub(super) enum CsvError {
     PairMatrixRows,
     DistanceMatrixArguments,
     DistanceMatrixRows,
+    NearestPointArguments,
+    NearestPointReference,
     StatisticsOutputTooLarge,
     AggregateColumn,
     GroupingColumns,
@@ -427,6 +429,10 @@ impl CsvError {
                 "填写标签列和 1 至 16 个不同的坐标列，例如 [\"编号\",[\"x\",\"y\"]]"
             }
             Self::DistanceMatrixRows => "支持 1 至 32 行坐标完整的数据",
+            Self::NearestPointArguments => {
+                "填写标签列、坐标列、基准点的标签和 1 至 31 个结果，例如 [\"编号\",[\"x\",\"y\"],\"A\",3]"
+            }
+            Self::NearestPointReference => "找不到基准点，请填写一个坐标完整的数据行的标签",
             Self::StatisticsOutputTooLarge => "统计结果超过 1 MiB，请缩小表格范围",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
@@ -801,6 +807,12 @@ enum Operation {
     DistanceMatrix {
         labels: ColumnReference,
         coordinates: Vec<ColumnReference>,
+    },
+    NearestPoints {
+        labels: ColumnReference,
+        coordinates: Vec<ColumnReference>,
+        target: String,
+        limit: usize,
     },
     SortByColumns {
         columns: Vec<ColumnReference>,
@@ -2187,6 +2199,26 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 coordinates,
             }
         }
+        "最近点" | "nearest-points" => {
+            let invalid = CsvError::NearestPointArguments;
+            let ((labels, coordinates, target, limit), data) =
+                json_argument_and_data::<(ColumnReference, Vec<ColumnReference>, String, usize)>(
+                    input, invalid,
+                )?;
+            if !(1..=16).contains(&coordinates.len())
+                || !(1..=31).contains(&limit)
+                || target.trim().is_empty()
+            {
+                return Err(invalid);
+            }
+            input = data;
+            Operation::NearestPoints {
+                labels,
+                coordinates,
+                target,
+                limit,
+            }
+        }
         "透视合计" | "pivot-sum" | "透视计数" | "pivot-count" | "透视原值" | "pivot-values" =>
         {
             let kind = match operation.as_str() {
@@ -2682,6 +2714,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             labels,
             coordinates,
         } => row_distance_matrix(&rows, labels, &coordinates),
+        Operation::NearestPoints {
+            labels,
+            coordinates,
+            target,
+            limit,
+        } => nearest_point_rows(&rows, labels, &coordinates, &target, limit),
         Operation::SortByColumns {
             columns,
             descending,
@@ -5718,11 +5756,17 @@ enum PairMatrixStatistic {
     Covariance { sample: bool },
 }
 
-fn row_distance_matrix(
-    rows: &[Vec<String>],
+struct CsvPoint<'a> {
+    row: usize,
+    label: &'a str,
+    coordinates: Vec<BigRational>,
+}
+
+fn csv_point_records<'a>(
+    rows: &'a [Vec<String>],
     labels: ColumnReference,
     coordinates: &[ColumnReference],
-) -> Result<String, CsvError> {
+) -> Result<(&'a str, Vec<CsvPoint<'a>>), CsvError> {
     const MAX_ROWS: usize = 32;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let invalid = CsvError::DistanceMatrixArguments;
@@ -5749,7 +5793,7 @@ fn row_distance_matrix(
         if label.trim().is_empty() || !seen_labels.insert(label) {
             return Err(CsvError::DataRowValue {
                 row,
-                cause: "距离矩阵的标签须非空且互不重复",
+                cause: "坐标点的标签须非空且互不重复",
             });
         }
         let values = coordinates
@@ -5763,18 +5807,40 @@ fn row_distance_matrix(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        points.push((row, label, values));
+        points.push(CsvPoint {
+            row,
+            label,
+            coordinates: values,
+        });
     }
     if points.is_empty() {
         return Err(CsvError::DistanceMatrixRows);
     }
+    Ok((header[labels].as_str(), points))
+}
+
+fn csv_point_distance_squared(
+    left: &CsvPoint<'_>,
+    right: &CsvPoint<'_>,
+) -> Result<BigRational, CsvError> {
+    squared_euclidean_distance(&left.coordinates, &right.coordinates).map_err(|error| {
+        CsvError::DataRowValue {
+            row: right.row,
+            cause: error.message(),
+        }
+    })
+}
+
+fn row_distance_matrix(
+    rows: &[Vec<String>],
+    labels: ColumnReference,
+    coordinates: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (heading, points) = csv_point_records(rows, labels, coordinates)?;
     let mut matrix = vec![vec!["0".to_owned(); points.len()]; points.len()];
-    for (left, (_, _, a)) in points.iter().enumerate() {
-        for (right, (row, _, b)) in points.iter().enumerate().skip(left + 1) {
-            let distance = euclidean_distance(a, b).map_err(|error| CsvError::DataRowValue {
-                row: *row,
-                cause: error.message(),
-            })?;
+    for (left, a) in points.iter().enumerate() {
+        for (right, b) in points.iter().enumerate().skip(left + 1) {
+            let distance = format_square_root(&csv_point_distance_squared(a, b)?);
             matrix[left][right] = distance.clone();
             matrix[right][left] = distance;
         }
@@ -5783,14 +5849,46 @@ fn row_distance_matrix(
     let limit = CsvError::StatisticsOutputTooLarge;
     append_bounded_csv_row(
         &mut output,
-        std::iter::once(header[labels].as_str()).chain(points.iter().map(|(_, label, _)| *label)),
+        std::iter::once(heading).chain(points.iter().map(|point| point.label)),
         limit,
     )?;
-    for ((_, label, _), distances) in points.iter().zip(matrix) {
+    for (point, distances) in points.iter().zip(matrix) {
         append_bounded_csv_row(
             &mut output,
-            std::iter::once(*label).chain(distances.iter().map(String::as_str)),
+            std::iter::once(point.label).chain(distances.iter().map(String::as_str)),
             limit,
+        )?;
+    }
+    Ok(output)
+}
+
+fn nearest_point_rows(
+    rows: &[Vec<String>],
+    labels: ColumnReference,
+    coordinates: &[ColumnReference],
+    target: &str,
+    limit: usize,
+) -> Result<String, CsvError> {
+    let (_, points) = csv_point_records(rows, labels, coordinates)?;
+    let reference = points
+        .iter()
+        .find(|point| point.label == target)
+        .ok_or(CsvError::NearestPointReference)?;
+    let mut candidates = points
+        .iter()
+        .filter(|point| point.row != reference.row)
+        .map(|point| Ok((point, csv_point_distance_squared(reference, point)?)))
+        .collect::<Result<Vec<_>, CsvError>>()?;
+    candidates
+        .sort_unstable_by(|(a, left), (b, right)| left.cmp(right).then_with(|| a.row.cmp(&b.row)));
+    let mut output = "数据行,标签,距离".to_owned();
+    for (point, distance_squared) in candidates.into_iter().take(limit) {
+        let row = point.row.to_string();
+        let distance = format_square_root(&distance_squared);
+        append_bounded_csv_row(
+            &mut output,
+            [row.as_str(), point.label, distance.as_str()].into_iter(),
+            CsvError::StatisticsOutputTooLarge,
         )?;
     }
     Ok(output)
@@ -6507,7 +6605,7 @@ mod tests {
             transform_csv("距离矩阵 [1,[2]] 编号,x\nA,0\nA,1"),
             Err(CsvError::DataRowValue {
                 row: 2,
-                cause: "距离矩阵的标签须非空且互不重复"
+                cause: "坐标点的标签须非空且互不重复"
             })
         );
         assert_eq!(
@@ -6527,6 +6625,27 @@ mod tests {
             too_many.push_str(&format!("\n{index},0"));
         }
         assert_eq!(transform_csv(&too_many), Err(CsvError::DistanceMatrixRows));
+    }
+
+    #[test]
+    fn finds_nearest_complete_csv_points_in_exact_distance_then_source_order() {
+        let input = "最近点 [1,[2,3],\"001\",4] 编号,x,y\n001,0,0\n远,2,2\n等距甲,1,0\n略过,1,\n等距乙,0,-1\n分数,1/3,0";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("数据行,标签,距离\r\n6,分数,1/3\r\n3,等距甲,1\r\n5,等距乙,1\r\n2,远,√8")
+        );
+        assert_eq!(
+            transform_csv("nearest-points [1,[2],\"A\",1] 编号,x\nA,1/3").as_deref(),
+            Ok("数据行,标签,距离")
+        );
+        assert_eq!(
+            transform_csv("最近点 [1,[2],\"A\",1] 编号,x\nA,\nB,0"),
+            Err(CsvError::NearestPointReference)
+        );
+        assert_eq!(
+            transform_csv("最近点 [1,[2],\"A\",0] 编号,x\nA,0"),
+            Err(CsvError::NearestPointArguments)
+        );
     }
 
     #[test]

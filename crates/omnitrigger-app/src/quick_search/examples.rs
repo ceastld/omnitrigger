@@ -4693,6 +4693,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按精确欧氏距离列出距离基准点最近的行",
+        query: "CSV: 最近点 [\"编号\",[\"x\",\"y\"],\"001\",3] 编号,x,y\n001,0,0\n002,2,2\n003,1,0\n004,0,-1\n005,1/3,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算所选 CSV 列的精确样本协方差矩阵",
         query: "CSV: 协方差矩阵 [\"x\",\"y\",\"固定\"] x,y,固定\n-1,2,5\n0,0,5\n1,-2,5",
     },
