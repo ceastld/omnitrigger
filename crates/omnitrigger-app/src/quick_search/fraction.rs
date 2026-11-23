@@ -1057,6 +1057,19 @@ pub(super) fn format_square_root(value: &BigRational) -> String {
     }
 }
 
+pub(super) fn format_exact_multiple(value: &BigRational, symbol: &str) -> String {
+    if value.numer().sign() == Sign::NoSign {
+        return "0".to_owned();
+    }
+    let numerator = value.numer().to_string();
+    let numerator = if numerator == "1" { "" } else { &numerator };
+    if value.is_integer() {
+        format!("{numerator}{symbol}")
+    } else {
+        format!("{numerator}{symbol}/{}", value.denom())
+    }
+}
+
 pub(super) fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
     if value.numer().bits().max(value.denom().bits()) > MAX_EXACT_BITS {
         return Err(FractionError::ExactRange);

@@ -5,7 +5,8 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::fraction::{
-    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root, FractionError,
+    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
+    format_square_root, FractionError,
 };
 use super::plane::{parse_point, Point2, PointError};
 
@@ -342,16 +343,7 @@ fn circle_point(input: &str) -> Result<Point2, CircleError> {
 }
 
 pub(super) fn multiple_of_pi(value: &BigRational) -> String {
-    if value.numer().sign() == Sign::NoSign {
-        return "0".to_owned();
-    }
-    let numerator = value.numer().to_string();
-    let numerator = if numerator == "1" { "" } else { &numerator };
-    if value.is_integer() {
-        format!("{numerator}π")
-    } else {
-        format!("{numerator}π/{}", value.denom())
-    }
+    format_exact_multiple(value, "π")
 }
 
 #[cfg(test)]

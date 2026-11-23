@@ -1560,6 +1560,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按棱长计算正四面体表面积和体积",
+        query: "立体: 正四面体 3",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按半径求球的表面积与体积",
         query: "立体: 球 1/2",
     },
@@ -4760,6 +4765,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "圆管",
             "球",
             "球冠",
+            "正四面体",
             "立方体",
             "长方体",
         ],

@@ -4,7 +4,8 @@ use num_rational::BigRational;
 use super::calculator::normalize;
 use super::circle::multiple_of_pi;
 use super::fraction::{
-    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root, FractionError,
+    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
+    format_square_root, FractionError,
 };
 use super::operators::split_top_level_commas;
 
@@ -80,6 +81,19 @@ pub(super) fn calculate_solid(query: &str) -> Result<String, SolidError> {
                 let volume =
                     &height * &height * (radius * BigInt::from(3) - height) / BigInt::from(3);
                 (curved + base, volume, true)
+            }
+            ("正四面体" | "regular-tetrahedron", [side]) => {
+                let side = positive_dimension(side)?;
+                let surface = &side * &side;
+                let volume = &surface * side / BigInt::from(12);
+                for value in [&surface, &volume] {
+                    ensure_exact_size(value).map_err(SolidError::Evaluation)?;
+                }
+                return Ok(format!(
+                    "表面积 {} · 体积 {}",
+                    format_exact_multiple(&surface, "√3"),
+                    format_exact_multiple(&volume, "√2"),
+                ));
             }
             ("立方体" | "cube", [side]) => {
                 let side = positive_dimension(side)?;
@@ -183,6 +197,8 @@ mod tests {
             ("球缺 3,3", "表面积 27π · 体积 18π"),
             ("SPHERICAL-CAP 3/2,1/2", "表面积 11π/4 · 体积 π/3"),
             ("球冠 3,6", "表面积 36π · 体积 36π"),
+            ("正四面体 3", "表面积 9√3 · 体积 9√2/4"),
+            ("REGULAR-TETRAHEDRON 1/2", "表面积 √3/4 · 体积 √2/96"),
             ("cube 1/2", "表面积 3/2 · 体积 1/8"),
             ("长方体 2,3,4", "表面积 52 · 体积 24"),
             ("长方体 1+1,3,(2+2)", "表面积 52 · 体积 24"),
@@ -214,6 +230,10 @@ mod tests {
         );
         assert_eq!(
             calculate_solid("球冠 3,0"),
+            Err(SolidError::NonPositiveDimension)
+        );
+        assert_eq!(
+            calculate_solid("正四面体 -1"),
             Err(SolidError::NonPositiveDimension)
         );
         assert_eq!(calculate_solid("长方体 1,2"), Err(SolidError::Arguments));
