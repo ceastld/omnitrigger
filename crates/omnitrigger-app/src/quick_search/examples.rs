@@ -3023,6 +3023,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "导出正则捕获组及其在原文中的起始位置",
+        query: "文本: 正则定位取表 \"ID=(?<id>[0-9]+)\" INFO ID=001\n跳过\nID=007",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用正则表达式替换文本",
         query: r#"文本: 正则替换 "([0-9]{4})/([0-9]{2})/([0-9]{2})" "$1-$2-$3" 2026/11/21"#,
     },

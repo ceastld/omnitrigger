@@ -281,7 +281,10 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
                 .join("\n"));
         }
         "正则取组" | "regex-capture" => return extract_regex_group(text),
-        "正则取表" | "regex-to-csv" => return regex_captures_to_csv(text),
+        "正则取表" | "regex-to-csv" => return regex_captures_to_csv(text, false),
+        "正则定位取表" | "regex-positions-to-csv" => {
+            return regex_captures_to_csv(text, true)
+        }
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -1439,20 +1442,45 @@ pub(super) fn regex_group_index(pattern: &Regex, group: &str) -> Result<usize, T
         .ok_or(TextError::UnknownRegexGroup)
 }
 
-fn regex_captures_to_csv(input: &str) -> Result<String, TextError> {
+fn regex_captures_to_csv(input: &str, include_position: bool) -> Result<String, TextError> {
     let (pattern, text) = regex_text_argument(input)?;
     if pattern.captures_len() <= 1 {
         return Err(TextError::MissingRegexCaptures);
     }
-    let mut result = pattern
+    let capture_headers = pattern
         .capture_names()
         .enumerate()
         .skip(1)
-        .map(|(index, name)| name.map_or_else(|| index.to_string(), str::to_owned))
+        .map(|(index, name)| match name {
+            Some(name @ ("原文行号" | "原文列号")) if include_position => {
+                format!("{name}（捕获组）")
+            }
+            Some(name) => name.to_owned(),
+            None => index.to_string(),
+        })
         .collect::<Vec<_>>()
         .join(",");
+    let mut result = if include_position {
+        String::from("原文行号,原文列号,")
+    } else {
+        String::new()
+    };
+    result.push_str(&capture_headers);
+    let (mut last_start, mut line, mut column) = (0, 1, 1);
     for captures in pattern.captures_iter(text) {
         result.push_str("\r\n");
+        if include_position {
+            let start = captures.get(0).expect("组 0 包含整项匹配").start();
+            let between = &text[last_start..start];
+            if let Some((before, after)) = between.rsplit_once('\n') {
+                line += before.bytes().filter(|&byte| byte == b'\n').count() + 1;
+                column = after.chars().count() + 1;
+            } else {
+                column += between.chars().count();
+            }
+            last_start = start;
+            result.push_str(&format!("{line},{column},"));
+        }
         for (column, matched) in captures.iter().skip(1).enumerate() {
             if column > 0 {
                 result.push(',');
@@ -1920,6 +1948,14 @@ mod tests {
                 "1,2\r\n007,A\r\n08,\"\"",
             ),
             (r#"正则取表 "(?<id>[0-9]+)" 无编号"#, "id"),
+            (
+                "正则定位取表 \"ID=(?<id>[0-9]+)\" 前缀 ID=001 ID=002\r\n略过\n\nID=007",
+                "原文行号,原文列号,id\r\n1,4,001\r\n1,11,002\r\n4,1,007",
+            ),
+            (
+                r#"正则定位取表 "(?<原文行号>[0-9]+)" 无编号"#,
+                "原文行号,原文列号,原文行号（捕获组）",
+            ),
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
