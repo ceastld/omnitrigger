@@ -192,6 +192,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求精确的多项式导函数",
+        query: "方程: 求导 y = x²/2 - x + 3/4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求含积分常数的多项式原函数",
+        query: "方程: 原函数 y = x²/2 - x + 3/4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求二次函数在闭区间上的最小值和最大值",
         query: "方程: 区间极值 1/2,-1,3/4 @ 0 到 2",
     },
@@ -5021,6 +5031,8 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
     match scope {
         Scope::Equation => &[
+            "求导",
+            "原函数",
             "摘要",
             "因式分解",
             "不等式",

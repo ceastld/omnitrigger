@@ -87,6 +87,10 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "由顶点" | "from-vertex" => return quadratic_from_vertex(arguments.trim_start()),
             "切线" | "tangent" => return polynomial_tangent(arguments.trim_start()),
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
+            "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
+            "原函数" | "antiderivative" => {
+                return polynomial_antiderivative(arguments.trim_start())
+            }
             "区间极值" | "interval-extrema" => {
                 return polynomial_interval_extrema(arguments.trim_start())
             }
@@ -641,8 +645,38 @@ fn integer_linear_factor(root: &BigRational) -> String {
 
 fn polynomial_standard_form(input: &str) -> Result<String, EquationError> {
     let coefficients = function_coefficients(input)?;
+    let expression = format_polynomial_terms(coefficients, ["x²", "x", ""])?;
+    Ok(format!("y = {expression}"))
+}
+
+fn polynomial_derivative(input: &str) -> Result<String, EquationError> {
+    let [a, b, _] = function_coefficients(input)?;
+    format_polynomial_terms(
+        [BigRational::default(), a * BigInt::from(2u8), b],
+        ["x²", "x", ""],
+    )
+}
+
+fn polynomial_antiderivative(input: &str) -> Result<String, EquationError> {
+    let [a, b, c] = function_coefficients(input)?;
+    let expression = format_polynomial_terms(
+        [a / BigInt::from(3u8), b / BigInt::from(2u8), c],
+        ["x³", "x²", "x"],
+    )?;
+    Ok(if expression == "0" {
+        "C".to_owned()
+    } else {
+        format!("{expression} + C")
+    })
+}
+
+fn format_polynomial_terms(
+    coefficients: [BigRational; 3],
+    variables: [&str; 3],
+) -> Result<String, EquationError> {
     let mut expression = String::new();
-    for (coefficient, variable) in coefficients.into_iter().zip(["x²", "x", ""]) {
+    for (coefficient, variable) in coefficients.into_iter().zip(variables) {
+        ensure_exact_size(&coefficient).map_err(EquationError::Evaluation)?;
         let sign = coefficient.numer().sign();
         if sign == Sign::NoSign {
             continue;
@@ -666,7 +700,7 @@ fn polynomial_standard_form(input: &str) -> Result<String, EquationError> {
     if expression.is_empty() {
         expression.push('0');
     }
-    Ok(format!("y = {expression}"))
+    Ok(expression)
 }
 
 fn quadratic_summary(input: &str) -> Result<String, EquationError> {
@@ -1041,6 +1075,21 @@ mod tests {
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn formats_exact_derivatives_and_antiderivatives() {
+        for (input, expected) in [
+            ("求导 y = x²/2 - x + 3/4", "x - 1"),
+            ("differentiate 0,0,3", "0"),
+            ("原函数 y = x²/2 - x + 3/4", "x³/6 - x²/2 + 3x/4 + C"),
+            ("antiderivative 0,0,-1/2", "-x/2 + C"),
+            ("原函数 0,0,0", "C"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        let first = solve_equation("求导 x² - 2x + 1").unwrap();
+        assert_eq!(solve_equation(&format!("求导 {first}")).as_deref(), Ok("2"));
     }
 
     #[test]
