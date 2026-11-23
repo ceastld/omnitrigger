@@ -147,6 +147,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把二次式分解为整数一次因式",
+        query: "方程: 因式分解 2x² - 5x + 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用函数展开式直接求积分",
         query: "方程: 定积分 y = x**2 @ 0 到 2",
     },
@@ -5001,6 +5006,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
     match scope {
         Scope::Equation => &[
+            "因式分解",
             "不等式",
             "顶点",
             "配方",

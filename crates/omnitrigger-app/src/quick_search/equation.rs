@@ -67,6 +67,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "顶点" | "vertex" => return describe_quadratic(arguments.trim_start(), false),
             "判别式" | "discriminant" => return quadratic_discriminant(arguments.trim_start()),
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
+            "因式分解" | "factor" => return factor_polynomial(arguments.trim_start()),
             "取系数" | "coefficients" => {
                 let [a, b, c] = expanded_equation_coefficients(arguments)?;
                 return format_quadratic_coefficients(a, b, c);
@@ -169,7 +170,7 @@ fn expanded_polynomial(
             '+' | '-'
                 if depth == 0
                     && index > start
-                    && !matches!(previous, '+' | '-' | '*' | '/' | '^' | 'e' | 'E') =>
+                    && !matches!(previous, '+' | '-' | '*' | '×' | '/' | '^' | 'e' | 'E') =>
             {
                 add_term(&input[start..index])?;
                 start = index;
@@ -196,13 +197,13 @@ fn expanded_polynomial_term(
         .rmatch_indices(['x', 'X', 'y', 'Y'])
         .find(|(index, _)| {
             let tail = term[index + 1..].trim_start();
-            tail.is_empty() || tail.starts_with(['*', '/', '^', '²'])
+            tail.is_empty() || tail.starts_with(['*', '×', '/', '^', '²'])
         });
     let Some((index, variable)) = variable else {
         return equation_value(term, invalid).map(|constant| (2, constant));
     };
     let prefix = term[..index].trim_end();
-    let coefficient = if let Some(coefficient) = prefix.strip_suffix('*') {
+    let coefficient = if let Some(coefficient) = prefix.strip_suffix(['*', '×']) {
         let coefficient = coefficient.trim();
         if matches!(coefficient, "" | "+" | "-") {
             return Err(invalid);
@@ -245,11 +246,14 @@ fn expanded_polynomial_term(
     if tail.starts_with("**") {
         return Err(invalid);
     }
-    let (operator, scalar) = tail.split_at_checked(1).ok_or(invalid)?;
-    let scalar = scalar.trim();
-    let scalar = if scalar.starts_with('(') && scalar.ends_with(')') {
+    let mut suffix = tail.chars();
+    let operator = suffix.next().ok_or(invalid)?;
+    let scalar = suffix.as_str().trim();
+    let scalar = if let Some(inner) = scalar
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
         // The outer parentheses must span the entire operand.
-        let inner = &scalar[1..scalar.len() - 1];
         let mut depth = 0i32;
         for character in inner.chars() {
             match character {
@@ -272,9 +276,9 @@ fn expanded_polynomial_term(
         })?
     };
     match operator {
-        "*" => Ok((index, value * scalar)),
-        "/" if scalar.numer().sign() != Sign::NoSign => Ok((index, value / scalar)),
-        "/" => Err(EquationError::Evaluation(FractionError::ZeroDenominator)),
+        '*' | '×' => Ok((index, value * scalar)),
+        '/' if scalar.numer().sign() != Sign::NoSign => Ok((index, value / scalar)),
+        '/' => Err(EquationError::Evaluation(FractionError::ZeroDenominator)),
         _ => Err(invalid),
     }
 }
@@ -580,6 +584,60 @@ fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
     Ok(format!("({left_x}, {left_y})\n({right_x}, {right_y})"))
 }
 
+fn factor_polynomial(input: &str) -> Result<String, EquationError> {
+    let [a, b, c] = function_coefficients(input)?;
+    let (leading, factors) = if a.numer().sign() == Sign::NoSign {
+        if b.numer().sign() == Sign::NoSign {
+            return Ok(c.to_string());
+        }
+        let root = -c / &b;
+        ensure_exact_size(&root).map_err(EquationError::Evaluation)?;
+        (b / root.denom(), integer_linear_factor(&root))
+    } else {
+        let (center, squared) = quadratic_center(&a, b, c);
+        ensure_exact_size(&squared).map_err(EquationError::Evaluation)?;
+        let Some(distance) =
+            exact_abs_square_root(&squared).filter(|_| squared.numer().sign() != Sign::Minus)
+        else {
+            return Ok("在有理数范围内无一次因式".to_owned());
+        };
+        let [first, second] =
+            exact_real_roots(&center, &distance).map_err(EquationError::Evaluation)?;
+        let leading = a / (first.denom() * second.denom());
+        let left = integer_linear_factor(&first);
+        let factors = if first == second {
+            format!("{left}²")
+        } else {
+            format!("{left}{}", integer_linear_factor(&second))
+        };
+        (leading, factors)
+    };
+    ensure_exact_size(&leading).map_err(EquationError::Evaluation)?;
+    Ok(if leading.is_integer() {
+        match leading.numer().to_string().as_str() {
+            "1" => factors,
+            "-1" => format!("-{factors}"),
+            integer => format!("{integer}{factors}"),
+        }
+    } else {
+        format!("({leading}){factors}")
+    })
+}
+
+fn integer_linear_factor(root: &BigRational) -> String {
+    if root.numer().sign() == Sign::NoSign {
+        return "x".to_owned();
+    }
+    let term = format_exact_multiple(&BigRational::from_integer(root.denom().clone()), "x");
+    let sign = if root.numer().sign() == Sign::Minus {
+        '+'
+    } else {
+        '-'
+    };
+    let constant = root.numer().magnitude();
+    format!("({term} {sign} {constant})")
+}
+
 fn polynomial_standard_form(input: &str) -> Result<String, EquationError> {
     let coefficients = function_coefficients(input)?;
     let mut expression = String::new();
@@ -727,7 +785,7 @@ fn shifted_real_roots(
     squared: &BigRational,
 ) -> Result<[String; 2], FractionError> {
     if let Some(distance) = exact_abs_square_root(squared) {
-        return exact_real_roots(center, &distance);
+        return exact_real_roots(center, &distance).map(|roots| roots.map(|root| root.to_string()));
     }
     let distance = format_square_root(squared);
     Ok(if center.numer().sign() == Sign::NoSign {
@@ -743,13 +801,13 @@ fn shifted_real_roots(
 fn exact_real_roots(
     center: &BigRational,
     distance: &BigRational,
-) -> Result<[String; 2], FractionError> {
+) -> Result<[BigRational; 2], FractionError> {
     let left = center - distance;
     let right = center + distance;
     for root in [&left, &right] {
         ensure_exact_size(root)?;
     }
-    Ok([left.to_string(), right.to_string()])
+    Ok([left, right])
 }
 
 pub(super) fn format_centered_roots(
@@ -928,6 +986,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn factors_polynomials_with_rational_coefficients_and_repeated_roots() {
+        for (input, expected) in [
+            ("因式分解 2,-5,2", "(2x - 1)(x - 2)"),
+            ("factor 1/2*x² - x + 1/2", "(1/2)(x - 1)²"),
+            ("因式分解 -x²", "-x²"),
+            ("因式分解 y = x² + 2x", "(x + 2)x"),
+            ("因式分解 3x/2 + 1", "(1/2)(3x + 2)"),
+            ("因式分解 3/4", "3/4"),
+            ("因式分解 x² - 2", "在有理数范围内无一次因式"),
+            ("因式分解 x² + 1", "在有理数范围内无一次因式"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+    }
+
+    #[test]
     fn uses_function_expressions_in_the_exact_polynomial_tools() {
         for (input, expected) in [
             ("切线 x²/2 - x + 3/4 @ 2", "0,1,-5/4"),
@@ -1082,6 +1156,9 @@ mod tests {
         for (input, expected) in [
             ("x ** 2 - 3*x + 2 = 0", "x₁ = 1 · x₂ = 2"),
             ("x² = 3*x - 2", "x₁ = 1 · x₂ = 2"),
+            ("x² = 3×x - 2", "x₁ = 1 · x₂ = 2"),
+            ("x² = x×-3 - 2", "x₁ = -2 · x₂ = -1"),
+            ("x²×(1/2) = 2", "x₁ = -2 · x₂ = 2"),
             ("X/2 + 1 = X", "x = 2"),
             ("x/(2*3) = 1", "x = 6"),
             ("取系数 (1/3+1/6)*x^2 - x + 3/4", "1/2,-1,3/4"),
