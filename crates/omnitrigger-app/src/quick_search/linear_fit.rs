@@ -684,11 +684,9 @@ fn format_power_expression(coefficients: Vec<BigRational>) -> String {
 }
 
 pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
-    let sums = paired_sums(points.trim(), false)?;
-    let degrees_of_freedom = &sums.count - BigInt::from(u8::from(sample));
-    let covariance = sums.centered_cross_product() / (&sums.count * degrees_of_freedom);
-    check_size([&covariance])?;
-    Ok(covariance.to_string())
+    paired_sums(points.trim(), false)?
+        .covariance(sample)
+        .map(|value| value.to_string())
 }
 
 pub(super) fn calculate_correlation(points: &str) -> Result<String, LinearFitError> {
@@ -769,6 +767,13 @@ pub(super) struct PairedSums {
 }
 
 impl PairedSums {
+    pub(super) fn covariance(&self, sample: bool) -> Result<BigRational, LinearFitError> {
+        let degrees_of_freedom = &self.count - BigInt::from(u8::from(sample));
+        let covariance = self.centered_cross_product() / (&self.count * degrees_of_freedom);
+        check_size([&covariance])?;
+        Ok(covariance)
+    }
+
     pub(super) fn correlation(&self) -> Result<String, LinearFitError> {
         format_correlation(self.centered_products()?)
     }

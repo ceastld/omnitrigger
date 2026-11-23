@@ -189,8 +189,8 @@ pub(super) enum CsvError {
     SignificantColumnsTooLarge,
     StatisticsColumn,
     ColumnBinsArguments,
-    CorrelationColumns,
-    CorrelationRows,
+    PairMatrixColumns,
+    PairMatrixRows,
     StatisticsOutputTooLarge,
     AggregateColumn,
     GroupingColumns,
@@ -412,8 +412,8 @@ impl CsvError {
             Self::SignificantColumnsTooLarge => "有效数字列结果超过 1 MiB，请缩小表格范围",
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
             Self::ColumnBinsArguments => "填写列名或列号和边界，例如 [\"金额\",\"0,1/2,2\"]",
-            Self::CorrelationColumns => "填写 2 至 8 个不同的列名或列号，例如 [\"温度\",2]",
-            Self::CorrelationRows => "所选列至少需要两行坐标完整的数值",
+            Self::PairMatrixColumns => "填写 2 至 8 个不同的列名或列号，例如 [\"温度\",2]",
+            Self::PairMatrixRows => "所选列至少需要两行坐标完整的数值",
             Self::StatisticsOutputTooLarge => "统计结果超过 1 MiB，请缩小表格范围",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
@@ -750,7 +750,10 @@ enum Operation {
     },
     ColumnBins(ColumnReference, Vec<BigRational>),
     NumericProfile(Vec<ColumnReference>),
-    CorrelationMatrix(Vec<ColumnReference>),
+    PairMatrix {
+        columns: Vec<ColumnReference>,
+        statistic: PairMatrixStatistic,
+    },
     SortByColumns {
         columns: Vec<ColumnReference>,
         descending: bool,
@@ -2065,13 +2068,27 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::NumericProfile(columns)
         }
-        "相关矩阵" | "correlation-matrix" => {
-            let (columns, data) = column_reference_arguments(input, CsvError::CorrelationColumns)?;
+        "相关矩阵"
+        | "correlation-matrix"
+        | "协方差矩阵"
+        | "covariance-matrix"
+        | "总体协方差矩阵"
+        | "population-covariance-matrix" => {
+            let (columns, data) = column_reference_arguments(input, CsvError::PairMatrixColumns)?;
             if !(2..=8).contains(&columns.len()) {
-                return Err(CsvError::CorrelationColumns);
+                return Err(CsvError::PairMatrixColumns);
             }
             input = data;
-            Operation::CorrelationMatrix(columns)
+            let statistic = match operation.as_str() {
+                "协方差矩阵" | "covariance-matrix" => {
+                    PairMatrixStatistic::Covariance { sample: true }
+                }
+                "总体协方差矩阵" | "population-covariance-matrix" => {
+                    PairMatrixStatistic::Covariance { sample: false }
+                }
+                _ => PairMatrixStatistic::Correlation,
+            };
+            Operation::PairMatrix { columns, statistic }
         }
         "透视合计" | "pivot-sum" | "透视计数" | "pivot-count" => {
             let (column_count, invalid) =
@@ -2544,7 +2561,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 .map_err(csv_column_statistics_error)
         }
         Operation::NumericProfile(columns) => numeric_column_profile(&rows, &columns),
-        Operation::CorrelationMatrix(columns) => column_correlation_matrix(&rows, &columns),
+        Operation::PairMatrix { columns, statistic } => {
+            column_pair_matrix(&rows, &columns, statistic)
+        }
         Operation::SortByColumns {
             columns,
             descending,
@@ -5335,12 +5354,19 @@ fn numeric_column_profile(
     Ok(output)
 }
 
-fn column_correlation_matrix(
+#[derive(Clone, Copy)]
+enum PairMatrixStatistic {
+    Correlation,
+    Covariance { sample: bool },
+}
+
+fn column_pair_matrix(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
+    statistic: PairMatrixStatistic,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_distinct_columns(header, columns, CsvError::CorrelationColumns)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::PairMatrixColumns)?;
     let width = columns.len();
     let mut sums: Vec<Vec<_>> = (0..width)
         .map(|left| (left..width).map(|_| PairedSums::default()).collect())
@@ -5371,13 +5397,19 @@ fn column_correlation_matrix(
         }
     }
     if complete_rows < 2 {
-        return Err(CsvError::CorrelationRows);
+        return Err(CsvError::PairMatrixRows);
     }
     let mut matrix = vec![vec![String::new(); width]; width];
     for (left, pairs) in sums.into_iter().enumerate() {
         for (offset, pair) in pairs.into_iter().enumerate() {
             let right = left + offset;
-            let coefficient = match pair.correlation() {
+            let value = match statistic {
+                PairMatrixStatistic::Correlation => pair.correlation(),
+                PairMatrixStatistic::Covariance { sample } => pair
+                    .covariance(sample)
+                    .map(|covariance| covariance.to_string()),
+            };
+            let coefficient = match value {
                 Ok(value) => value,
                 Err(LinearFitError::ConstantCoordinate) => continue,
                 Err(error) => return Err(CsvError::LinearFit(error)),
@@ -7701,6 +7733,19 @@ mod tests {
     }
 
     #[test]
+    fn calculates_exact_sample_and_population_covariance_matrices() {
+        let data = "x,y,固定\n-1,2,5\n0,0,5\n1,-2,5\n8,,6";
+        assert_eq!(
+            transform_csv(&format!(r#"协方差矩阵 ["x",2,"固定"] {data}"#)).as_deref(),
+            Ok("列,x,y,固定\r\nx,1,-2,0\r\ny,-2,4,0\r\n固定,0,0,0")
+        );
+        assert_eq!(
+            transform_csv(&format!("population-covariance-matrix [1,2] {data}")).as_deref(),
+            Ok("列,x,y\r\nx,2/3,-4/3\r\ny,-4/3,8/3")
+        );
+    }
+
+    #[test]
     fn calculates_a_symmetric_exact_correlation_matrix_from_complete_csv_rows() {
         let data = "编号,x,y,z,固定\nA,-1,2,1,5\nB,0,0,-2,5\nC,1,-2,1,5\nD,8,,9,6";
         assert_eq!(
@@ -7709,11 +7754,11 @@ mod tests {
         );
         assert_eq!(
             transform_csv("correlation-matrix [1,2] x,y\n1,2\n3,"),
-            Err(CsvError::CorrelationRows)
+            Err(CsvError::PairMatrixRows)
         );
         assert_eq!(
             transform_csv("相关矩阵 [1,\"x\"] x,y\n1,2\n3,4"),
-            Err(CsvError::CorrelationColumns)
+            Err(CsvError::PairMatrixColumns)
         );
         assert!(matches!(
             transform_csv("相关矩阵 [1,2] x,y\n1,2\n待定,4"),

@@ -4574,6 +4574,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算所选 CSV 列的精确样本协方差矩阵",
+        query: "CSV: 协方差矩阵 [\"x\",\"y\",\"固定\"] x,y,固定\n-1,2,5\n0,0,5\n1,-2,5",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算所选 CSV 列的精确总体协方差矩阵",
+        query: "CSV: 总体协方差矩阵 [1,2] x,y\n-1,2\n0,0\n1,-2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按总体方差统计 CSV 数值列",
         query: "CSV: 列总体 \"数值\" 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",
     },
