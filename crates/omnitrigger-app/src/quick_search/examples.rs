@@ -4589,6 +4589,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用热图看正负相关，查看常数列与零相关",
+        query: "CSV: 相关图 [\"x\",\"y\",\"z\",\"固定\"] x,y,z,固定\n-1,2,1,5\n0,0,-2,5\n1,-2,1,5\n8,,9,6",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "筛选记录后查看秩相关热图",
+        query: "处理: [\"CSV: 数值筛选 1 >= 0\",\"CSV: 秩相关图 [1,2,3]\"] 次序,评分,反向\n-1,20,2\n0,0,2\n1,1.0,1\n2,1/1,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按总体方差统计 CSV 数值列",
         query: "CSV: 列总体 \"数值\" 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",
     },

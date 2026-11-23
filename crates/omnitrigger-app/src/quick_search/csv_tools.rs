@@ -32,6 +32,7 @@ use super::{
         workday_exceptions_from_dates, SpreadsheetDateSystem,
     },
     conversion::{exact_data_converter, ConversionError},
+    correlation_plot::{CorrelationCell, CorrelationPlot},
     duration::{elapsed_clock_interval, format_clock_duration},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, format_significant_digits,
@@ -2075,14 +2076,17 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "总体协方差矩阵"
         | "population-covariance-matrix"
         | "秩相关矩阵"
-        | "spearman-matrix" => {
-            let (columns, data) = column_reference_arguments(input, CsvError::PairMatrixColumns)?;
-            if !(2..=8).contains(&columns.len()) {
-                return Err(CsvError::PairMatrixColumns);
-            }
+        | "spearman-matrix"
+        | "相关图"
+        | "correlation-plot"
+        | "秩相关图"
+        | "spearman-plot" => {
+            let (columns, data) = pair_matrix_arguments(input)?;
             input = data;
             let statistic = match operation.as_str() {
-                "秩相关矩阵" | "spearman-matrix" => PairMatrixStatistic::Spearman,
+                "秩相关矩阵" | "spearman-matrix" | "秩相关图" | "spearman-plot" => {
+                    PairMatrixStatistic::Spearman
+                }
                 "协方差矩阵" | "covariance-matrix" => {
                     PairMatrixStatistic::Covariance { sample: true }
                 }
@@ -2565,7 +2569,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         Operation::NumericProfile(columns) => numeric_column_profile(&rows, &columns),
         Operation::PairMatrix { columns, statistic } => {
-            column_pair_matrix(&rows, &columns, statistic)
+            column_pair_matrix(&rows, &columns, statistic, false).map(|(csv, _)| csv)
         }
         Operation::SortByColumns {
             columns,
@@ -5364,11 +5368,48 @@ enum PairMatrixStatistic {
     Covariance { sample: bool },
 }
 
+fn pair_matrix_arguments(input: &str) -> Result<(Vec<ColumnReference>, &str), CsvError> {
+    let (columns, data) = column_reference_arguments(input, CsvError::PairMatrixColumns)?;
+    if !(2..=8).contains(&columns.len()) {
+        return Err(CsvError::PairMatrixColumns);
+    }
+    Ok((columns, data))
+}
+
+pub(super) fn correlation_plot_arguments(query: &str) -> Option<(&str, bool)> {
+    let (operation, rest) = split_argument(query)?;
+    match operation.to_ascii_lowercase().as_str() {
+        "相关图" | "correlation-plot" => Some((rest, false)),
+        "秩相关图" | "spearman-plot" => Some((rest, true)),
+        _ => None,
+    }
+}
+
+pub(super) fn build_correlation_plot(
+    input: &str,
+    rank: bool,
+) -> Result<(String, CorrelationPlot), CsvError> {
+    let (columns, data) = pair_matrix_arguments(input)?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let rows = read_rows(data, ',')?;
+    let statistic = if rank {
+        PairMatrixStatistic::Spearman
+    } else {
+        PairMatrixStatistic::Correlation
+    };
+    let (csv, plot) = column_pair_matrix(&rows, &columns, statistic, true)?;
+    Ok((csv, plot.expect("相关图保留图表数据")))
+}
+
 fn column_pair_matrix(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
     statistic: PairMatrixStatistic,
-) -> Result<String, CsvError> {
+    show_plot: bool,
+) -> Result<(String, Option<CorrelationPlot>), CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::PairMatrixColumns)?;
     let width = columns.len();
@@ -5399,7 +5440,7 @@ fn column_pair_matrix(
             *values = doubled_midranks(values);
         }
     }
-    let mut matrix = vec![vec![String::new(); width]; width];
+    let mut matrix = vec![vec![CorrelationCell::default(); width]; width];
     for (left, x) in values_by_column.iter().enumerate() {
         for (right, y) in values_by_column.iter().enumerate().skip(left) {
             let mut pair = PairedSums::default();
@@ -5411,11 +5452,17 @@ fn column_pair_matrix(
             }
             let value = match statistic {
                 PairMatrixStatistic::Correlation | PairMatrixStatistic::Spearman => {
-                    pair.correlation()
+                    pair.correlation().map(|value| CorrelationCell {
+                        exact: value.exact(),
+                        hundredths: show_plot.then(|| value.hundredths()),
+                    })
                 }
-                PairMatrixStatistic::Covariance { sample } => pair
-                    .covariance(sample)
-                    .map(|covariance| covariance.to_string()),
+                PairMatrixStatistic::Covariance { sample } => {
+                    pair.covariance(sample).map(|covariance| CorrelationCell {
+                        exact: covariance.to_string(),
+                        hundredths: None,
+                    })
+                }
             };
             let coefficient = match value {
                 Ok(value) => value,
@@ -5438,11 +5485,33 @@ fn column_pair_matrix(
         std::iter::once("列").chain(names.iter().copied()),
         limit,
     )?;
-    for (name, coefficients) in names.into_iter().zip(&matrix) {
-        let fields = std::iter::once(name).chain(coefficients.iter().map(String::as_str));
+    for (&name, coefficients) in names.iter().zip(&matrix) {
+        let fields =
+            std::iter::once(name).chain(coefficients.iter().map(|cell| cell.exact.as_str()));
         append_bounded_csv_row(&mut output, fields, limit)?;
     }
-    Ok(output)
+    let plot = show_plot.then(|| {
+        let axis_names = columns
+            .iter()
+            .zip(&names)
+            .map(|(&index, &name)| {
+                if name.trim().is_empty() {
+                    format!("第 {} 列", index + 1)
+                } else if names.iter().filter(|&&other| other == name).count() > 1 {
+                    format!("{name}（第 {} 列）", index + 1)
+                } else {
+                    name.to_owned()
+                }
+            })
+            .collect();
+        CorrelationPlot::new(
+            axis_names,
+            matrix,
+            complete_rows.len(),
+            matches!(statistic, PairMatrixStatistic::Spearman),
+        )
+    });
+    Ok((output, plot))
 }
 
 fn csv_column_statistics_error(error: StatisticsError) -> CsvError {

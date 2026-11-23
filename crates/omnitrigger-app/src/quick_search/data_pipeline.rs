@@ -8,10 +8,11 @@ use super::{
     box_plot::BoxPlot,
     calendar::calculate_date,
     conversion::{calculate_circuit, convert_wave},
+    correlation_plot::CorrelationPlot,
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, build_column_bin_plot,
-        build_scatter_plot, column_bin_plot_arguments, scatter_arguments, transform_csv,
-        ColumnReference, CsvError,
+        build_correlation_plot, build_scatter_plot, column_bin_plot_arguments,
+        correlation_plot_arguments, scatter_arguments, transform_csv, ColumnReference, CsvError,
     },
     decibel::convert_decibels,
     duration::convert_duration,
@@ -144,6 +145,7 @@ pub(super) enum PipelineChart {
     Scatter(ScatterPlot),
     BoxPlot(BoxPlot),
     Bins(BinPlot),
+    Correlation(CorrelationPlot),
 }
 
 enum PipelineView<'a> {
@@ -491,6 +493,13 @@ fn prepare_pipeline_chart(
                 column_bin_plot_arguments(query).map(|input| {
                     build_column_bin_plot(input)
                         .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
+                        .map_err(|error| error.message())
+                })
+            })
+            .or_else(|| {
+                correlation_plot_arguments(query).map(|(input, rank)| {
+                    build_correlation_plot(input, rank)
+                        .map(|(text, plot)| (text, PipelineChart::Correlation(plot)))
                         .map_err(|error| error.message())
                 })
             }),

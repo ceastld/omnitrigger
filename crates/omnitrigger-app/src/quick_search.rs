@@ -11,6 +11,7 @@ mod circle;
 mod color;
 mod complex;
 mod conversion;
+mod correlation_plot;
 mod csv_tools;
 mod data_pipeline;
 mod decibel;
@@ -213,7 +214,10 @@ impl ResultValue {
     fn is_chart(&self) -> bool {
         matches!(
             &self.kind,
-            ValueKind::Scatter(_) | ValueKind::BoxPlot(_) | ValueKind::BinPlot(_)
+            ValueKind::Scatter(_)
+                | ValueKind::BoxPlot(_)
+                | ValueKind::BinPlot(_)
+                | ValueKind::CorrelationPlot(_)
         )
     }
 
@@ -246,6 +250,7 @@ enum ValueKind {
     Scatter(scatter_plot::ScatterPlot),
     BoxPlot(box_plot::BoxPlot),
     BinPlot(bin_plot::BinPlot),
+    CorrelationPlot(correlation_plot::CorrelationPlot),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1053,6 +1058,17 @@ impl Results {
                                 })
                                 .map_err(ValueError::Csv),
                         )
+                    } else if let Some((arguments, rank)) =
+                        csv_tools::correlation_plot_arguments(term)
+                    {
+                        Self::Value(
+                            csv_tools::build_correlation_plot(arguments, rank)
+                                .map(|(text, plot)| ResultValue {
+                                    text,
+                                    kind: ValueKind::CorrelationPlot(plot),
+                                })
+                                .map_err(ValueError::Csv),
+                        )
                     } else {
                         Self::text_value(transform_csv(term).map_err(ValueError::Csv))
                     }
@@ -1066,6 +1082,9 @@ impl Results {
                                 Some(PipelineChart::Scatter(plot)) => ValueKind::Scatter(plot),
                                 Some(PipelineChart::BoxPlot(plot)) => ValueKind::BoxPlot(plot),
                                 Some(PipelineChart::Bins(plot)) => ValueKind::BinPlot(plot),
+                                Some(PipelineChart::Correlation(plot)) => {
+                                    ValueKind::CorrelationPlot(plot)
+                                }
                                 None => ValueKind::Text,
                             },
                         }),
@@ -1398,7 +1417,11 @@ impl Results {
             }
             Self::Value(Ok(value)) => {
                 if value.is_chart() && value_line_limit == MAX_VALUE_LINES {
-                    return 158. + scatter_plot::PREVIEW_HEIGHT + 52.;
+                    let preview = match &value.kind {
+                        ValueKind::CorrelationPlot(plot) => plot.preview_height(),
+                        _ => scatter_plot::PREVIEW_HEIGHT,
+                    };
+                    return 158. + preview + 52.;
                 }
                 let hints = usize::from(value.continuation_hint().is_some())
                     + usize::from(self.value_preview_expandable());
@@ -2810,6 +2833,16 @@ impl QuickSearch {
                 "F2 查看数据",
                 cx,
             ),
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::CorrelationPlot(plot),
+                ..
+            })) if self.expanded_value_pages.is_none() => Self::render_chart(
+                plot.legend(),
+                plot.render(),
+                "复制 CSV  Enter",
+                "F2 查看数据",
+                cx,
+            ),
             Results::Value(Ok(output)) => {
                 let result = &output.text;
                 let line_limit = self.value_line_limit();
@@ -3966,6 +3999,43 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn correlation_charts_keep_precise_csv_and_render_only_for_the_final_step() {
+        let data = "x,y,z,固定\n0,0,2,5\n1,1.0,1,5\n2,1/1,0,5\n-2,,8,6";
+        let expected = transform_csv(&format!("秩相关矩阵 [1,2,3,4] {data}")).unwrap();
+        for command in [
+            "CSV: 秩相关图 [1,2,3,4]",
+            r#"处理: ["CSV: 数值筛选 1 >= 0","CSV: 秩相关图 [1,2,3,4]"]"#,
+        ] {
+            let results = for_query(&format!("{command} {data}"), &[]);
+            assert!(matches!(
+                &results,
+                Results::Value(Ok(ResultValue {
+                    kind: ValueKind::CorrelationPlot(_),
+                    ..
+                }))
+            ));
+            assert_eq!(results.refillable_text(), Some(expected.as_str()));
+            assert!(results.value_preview_expandable());
+        }
+        let intermediate = for_query(
+            &format!(r#"处理: ["CSV: 秩相关图 [1,2,3,4]","CSV: 选列 2"] {data}"#),
+            &[],
+        );
+        let expected_column = transform_csv(&format!("选列 2 {expected}")).unwrap();
+        assert_eq!(
+            intermediate.refillable_text(),
+            Some(expected_column.as_str())
+        );
+        assert!(matches!(
+            &intermediate,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Text,
+                ..
+            }))
+        ));
     }
 
     #[test]

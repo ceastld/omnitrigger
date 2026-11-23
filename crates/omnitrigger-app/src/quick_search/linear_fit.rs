@@ -690,7 +690,7 @@ pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String,
 }
 
 pub(super) fn calculate_correlation(points: &str) -> Result<String, LinearFitError> {
-    paired_sums(points.trim(), false)?.correlation()
+    Ok(paired_sums(points.trim(), false)?.correlation()?.exact())
 }
 
 pub(super) fn calculate_rank_correlation(points: &str) -> Result<String, LinearFitError> {
@@ -700,7 +700,7 @@ pub(super) fn calculate_rank_correlation(points: &str) -> Result<String, LinearF
         .into_iter()
         .zip(doubled_midranks(&y))
         .map(Ok);
-    summarize_pairs(ranks, false)?.correlation()
+    Ok(summarize_pairs(ranks, false)?.correlation()?.exact())
 }
 
 pub(super) fn calculate_kendall_correlation(points: &str) -> Result<String, LinearFitError> {
@@ -743,16 +743,39 @@ pub(super) fn doubled_midranks(values: &[BigRational]) -> Vec<BigRational> {
     ranks
 }
 
-fn format_correlation(products: CenteredProducts) -> Result<String, LinearFitError> {
-    if products.square_x.numer().sign() == Sign::NoSign
-        || products.square_y.numer().sign() == Sign::NoSign
-    {
-        return Err(LinearFitError::ConstantCoordinate);
+pub(super) struct Correlation {
+    squared: BigRational,
+    sign: Sign,
+}
+
+impl Correlation {
+    pub(super) fn exact(&self) -> String {
+        format_signed_square_root(&self.squared, self.sign)
     }
-    Ok(format_signed_square_root(
-        &products.squared_correlation()?,
-        products.cross.numer().sign(),
-    ))
+
+    pub(super) fn hundredths(&self) -> i16 {
+        // 先求 200 倍绝对值的整数部分，据此精确执行两位小数的四舍五入。
+        let scaled = (self.squared.numer() * 40_000u32) / self.squared.denom();
+        let twice = i16::try_from(scaled.sqrt()).expect("相关系数绝对值至多为 1");
+        let magnitude = (twice + 1) / 2;
+        if self.sign == Sign::Minus {
+            -magnitude
+        } else {
+            magnitude
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn rounds_signed_correlation_hundredths_without_rounding_the_exact_value() {
+    for (squared, sign, rounded) in [
+        (BigRational::new(3.into(), 4.into()), Sign::Plus, 87),
+        (BigRational::new(1.into(), 64.into()), Sign::Minus, -13),
+        (BigRational::new(1.into(), 40001.into()), Sign::Minus, 0),
+    ] {
+        assert_eq!(Correlation { squared, sign }.hundredths(), rounded);
+    }
 }
 
 #[derive(Default)]
@@ -774,8 +797,17 @@ impl PairedSums {
         Ok(covariance)
     }
 
-    pub(super) fn correlation(&self) -> Result<String, LinearFitError> {
-        format_correlation(self.centered_products()?)
+    pub(super) fn correlation(&self) -> Result<Correlation, LinearFitError> {
+        let products = self.centered_products()?;
+        if products.square_x.numer().sign() == Sign::NoSign
+            || products.square_y.numer().sign() == Sign::NoSign
+        {
+            return Err(LinearFitError::ConstantCoordinate);
+        }
+        Ok(Correlation {
+            squared: products.squared_correlation()?,
+            sign: products.cross.numer().sign(),
+        })
     }
 
     pub(super) fn count(&self) -> &BigInt {
