@@ -32,6 +32,7 @@ pub(super) enum DateError {
     InvalidWeekdayOccurrence,
     MissingWeekdayOccurrence,
     InvalidWorkdayOrdinal,
+    InvalidWorkdayPosition,
     MissingWorkdayOrdinal,
     InvalidWorkdaySeries,
     InvalidOperation,
@@ -71,6 +72,7 @@ impl DateError {
             Self::InvalidWorkdayOrdinal => {
                 "填写月份和工作日序号，例如 2026-11 @ 3。用 -1 表示最后一个工作日"
             }
+            Self::InvalidWorkdayPosition => "填写单个日期，例如 2026-11-04 或 今天",
             Self::MissingWorkdayOrdinal => "该月的工作日不足指定序号",
             Self::InvalidWorkdaySeries => {
                 "填写起始月份、1 至 366 个月和工作日序号，例如 2026-11,3 @ -1"
@@ -1081,6 +1083,29 @@ fn workday_by_ordinal(input: &str, today: NaiveDate) -> Result<String, DateError
     month_workday(start, ordinal, &exceptions).map(|date| date.to_string())
 }
 
+fn workday_position(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let (query, exceptions) = split_workday_exceptions(input.trim());
+    if query.trim().is_empty() {
+        return Err(DateError::InvalidWorkdayPosition);
+    }
+    let (date, rest) = date_operand(query.trim(), today)?;
+    if !rest.trim().is_empty() {
+        return Err(DateError::InvalidWorkdayPosition);
+    }
+    let exceptions = parse_workday_exceptions(exceptions)?;
+    if !is_workday(&date, &exceptions) {
+        return Ok(format!("{date} · 休息日"));
+    }
+    let first = in_range(date.with_day(1))?;
+    let last = month_end(first, 1)?;
+    let from_start =
+        inclusive_workdays(first, date) + workday_adjustment(&exceptions, first..=date);
+    let from_end = inclusive_workdays(date, last) + workday_adjustment(&exceptions, date..=last);
+    Ok(format!(
+        "{date} · 当月第 {from_start} 个工作日\n倒数第 {from_end} 个工作日"
+    ))
+}
+
 fn workday_series(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let (query, exceptions) = split_workday_exceptions(input.trim());
     let (range, ordinal) = query
@@ -1381,6 +1406,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         }
         "季末序列" | "quarter-end-series" => return date_boundary_series(rest, today, 3, true),
         "工作日序号" | "nth-workday" => return workday_by_ordinal(rest, today),
+        "工作日位置" | "workday-position" => return workday_position(rest, today),
         "工作日序列" | "workday-series" => return workday_series(rest, today),
         "合并区间" | "merge-ranges" => {
             return combine_date_ranges(rest, today, DateRangeOperation::Merge);
@@ -2222,6 +2248,40 @@ mod tests {
         assert_eq!(
             calculate_date("明年", NaiveDate::from_ymd_opt(9999, 12, 1).unwrap()),
             Err(DateError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn finds_the_workday_position_from_both_ends_of_the_month() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 4).unwrap();
+        for (input, expected) in [
+            (
+                "工作日位置 今天",
+                "2026-11-04 · 当月第 3 个工作日\n倒数第 19 个工作日",
+            ),
+            ("WORKDAY-POSITION 2026-11-07", "2026-11-07 · 休息日"),
+            (
+                r#"工作日位置 2026-11-07 例外 [["2026-11-02"],["2026-11-07"]]"#,
+                "2026-11-07 · 当月第 5 个工作日\n倒数第 17 个工作日",
+            ),
+            (
+                r#"工作日位置 2026-11-04 例外 [["2026-11-04"],[]]"#,
+                "2026-11-04 · 休息日",
+            ),
+            (
+                "工作日位置 2026-11-30",
+                "2026-11-30 · 当月第 21 个工作日\n倒数第 1 个工作日",
+            ),
+        ] {
+            assert_eq!(
+                calculate_date(input, today).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_date("工作日位置 今天 + 1天", today),
+            Err(DateError::InvalidWorkdayPosition),
         );
     }
 

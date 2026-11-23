@@ -1533,6 +1533,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查看某日期是月初或月末数来的第几个工作日",
+        query: "日期: 工作日位置 2026-11-04",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "列出连续几个月的最后一个工作日",
         query: "日期: 工作日序列 2026-11,3 @ -1",
     },
@@ -4285,6 +4290,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "解析",
                     "月历",
                     "工作日序号",
+                    "工作日位置",
                     "工作日序列",
                     "合并区间",
                     "区间交集",
