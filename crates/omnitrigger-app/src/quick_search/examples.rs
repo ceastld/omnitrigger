@@ -925,6 +925,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "先求并联电阻的等效值，再计算分压",
+        query: r#"处理: ["电路: 并联","电路: 分压 12 V @ 1 kΩ,"] 2 kΩ,2 kΩ"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把节拍时长换成时分秒格式",
         query: r#"处理: ["节拍: 时长","时长:"] 120 BPM @ 3/2"#,
     },

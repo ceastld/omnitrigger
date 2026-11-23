@@ -5,7 +5,7 @@ use serde_json::value::RawValue;
 
 use super::{
     calendar::calculate_date,
-    conversion::convert_wave,
+    conversion::{calculate_circuit, convert_wave},
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, transform_csv, ColumnReference,
         CsvError,
@@ -30,7 +30,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、节拍、分贝、立体、波长、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、节拍、分贝、立体、波长、电路、分数或统计命令";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -319,6 +319,7 @@ fn run_pipeline_steps(
                     | Scope::Radix
                     | Scope::Pitch
                     | Scope::Wave
+                    | Scope::Circuit
                     | Scope::Fraction
                     | Scope::Statistics
             )
@@ -348,6 +349,7 @@ fn run_pipeline_steps(
             Scope::Decibel => convert_decibels(&query).map_err(|cause| cause.message()),
             Scope::Solid => calculate_solid(&query).map_err(|cause| cause.message()),
             Scope::Wave => convert_wave(&query).map_err(|cause| cause.message()),
+            Scope::Circuit => calculate_circuit(&query).map_err(|cause| cause.message()),
             Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
             Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
@@ -430,10 +432,15 @@ mod tests {
     }
 
     #[test]
-    fn passes_values_between_math_tempo_decibel_and_solid_tools() {
+    fn passes_values_between_calculation_tools() {
         for (input, expected) in [
             (r#"["分数: 计算","节拍: 速度 4秒 @"] 2*4"#, "120 BPM"),
             (r#"["分贝: 转功率比","分数: 计算"] 20 dB"#, "100"),
+            (
+                r#"["电路: 并联","电路: 分压 12 V @ 1 kΩ,"] 2 kΩ,2 kΩ"#,
+                "6 V",
+            ),
+            (r#"["电路:"] 5 V,20 Ω"#, "250 mA · 1.25 W"),
             (
                 r#"["分数: 计算","立体: 球"] 1/4+1/4"#,
                 "表面积 π · 体积 π/6",
