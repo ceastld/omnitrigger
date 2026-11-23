@@ -959,6 +959,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把十进制整数转换为罗马数字",
+        query: "进制: 罗马数字 2026",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把罗马数字转换为十进制整数",
+        query: "进制: 罗马数字 CDXCIX",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -4419,6 +4429,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "位倒序",
                     "字节倒序",
                     "表格列号",
+                    "罗马数字",
                 ]
                 .iter()
                 .any(|operation| operation.starts_with(term)) => {}

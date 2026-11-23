@@ -7,6 +7,22 @@ use super::conversion::ConversionError;
 
 const MAX_INTEGER_BITS: u64 = 8192;
 const MAX_SHEET_COLUMN: u32 = 16_384;
+const MAX_ROMAN_VALUE: u16 = 3999;
+const ROMAN_DIGITS: [(u16, &str); 13] = [
+    (1000, "M"),
+    (900, "CM"),
+    (500, "D"),
+    (400, "CD"),
+    (100, "C"),
+    (90, "XC"),
+    (50, "L"),
+    (40, "XL"),
+    (10, "X"),
+    (9, "IX"),
+    (5, "V"),
+    (4, "IV"),
+    (1, "I"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RadixError {
@@ -30,6 +46,8 @@ pub(super) enum RadixError {
     ReverseBytesArguments,
     ReverseWidthExceeded,
     SheetColumnArguments,
+    RomanArguments,
+    RomanRange,
 }
 
 impl RadixError {
@@ -63,6 +81,8 @@ impl RadixError {
                 "填写 8 至 8192 的 8 倍数位宽和非负整数，例如 字节倒序 32 @ 0x12345678"
             }
             Self::SheetColumnArguments => "填写 A 至 XFD 的列字母，或 1 至 16384 的整数列号",
+            Self::RomanArguments => "填写常用写法的罗马数字，例如 IV、CDXCIX 或 MMXXVI",
+            Self::RomanRange => "填写 1 至 3999 的十进制整数，例如 2026",
         }
     }
 }
@@ -180,6 +200,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
         return convert_sheet_column(arguments);
     }
+    if operation == "罗马数字" || operation.eq_ignore_ascii_case("roman") {
+        return convert_roman(arguments);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -192,6 +215,46 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     let source = arbitrary_base(source).ok_or(RadixError::Base)?;
     let target = arbitrary_base(target).ok_or(RadixError::Base)?;
     convert_radix_integer(integer, source, target)
+}
+
+fn convert_roman(input: &str) -> Result<String, RadixError> {
+    let input = input.trim();
+    let decimal_digits = input.strip_prefix(['+', '-']).unwrap_or(input);
+    if !decimal_digits.is_empty() && decimal_digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        let value = input
+            .parse::<u16>()
+            .ok()
+            .filter(|value| (1..=MAX_ROMAN_VALUE).contains(value))
+            .ok_or(RadixError::RomanRange)?;
+        return Ok(format_roman(value));
+    }
+    if input.is_empty() || input.len() > 15 {
+        return Err(RadixError::RomanArguments);
+    }
+    let roman = input.to_ascii_uppercase();
+    let mut rest = roman.as_str();
+    let mut value = 0;
+    for (digit, symbol) in ROMAN_DIGITS {
+        while let Some(suffix) = rest.strip_prefix(symbol) {
+            value += digit;
+            rest = suffix;
+        }
+    }
+    if rest.is_empty() && value <= MAX_ROMAN_VALUE && format_roman(value) == roman {
+        return Ok(value.to_string());
+    }
+    Err(RadixError::RomanArguments)
+}
+
+fn format_roman(mut value: u16) -> String {
+    let mut roman = String::new();
+    for (digit, symbol) in ROMAN_DIGITS {
+        while value >= digit {
+            roman.push_str(symbol);
+            value -= digit;
+        }
+    }
+    roman
 }
 
 fn convert_sheet_column(input: &str) -> Result<String, RadixError> {
@@ -609,6 +672,29 @@ mod tests {
                 convert_arbitrary_radix(query),
                 Err(RadixError::BitRangeArguments)
             );
+        }
+    }
+
+    #[test]
+    fn converts_classic_roman_numerals_in_both_directions() {
+        for (query, expected) in [
+            ("罗马数字 1", "I"),
+            ("罗马数字 2026", "MMXXVI"),
+            ("ROMAN cdxCix", "499"),
+            ("roman 3999", "MMMCMXCIX"),
+            ("roman MMMDCCCLXXXVIII", "3888"),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query).unwrap(), expected);
+        }
+        for value in 1..=MAX_ROMAN_VALUE {
+            let roman = format_roman(value);
+            assert_eq!(convert_roman(&roman).unwrap(), value.to_string());
+        }
+        for invalid in ["", "IIII", "IC", "VIV", "MMMM", "IV IV", "VX", "Ⅱ"] {
+            assert_eq!(convert_roman(invalid), Err(RadixError::RomanArguments));
+        }
+        for invalid in ["0", "-1", "4000", "70000"] {
+            assert_eq!(convert_roman(invalid), Err(RadixError::RomanRange));
         }
     }
 
