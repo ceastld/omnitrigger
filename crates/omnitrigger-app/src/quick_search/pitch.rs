@@ -12,8 +12,10 @@ pub(super) enum PitchError {
     InvalidNote,
     MidiRange,
     FrequencyRange,
+    InvalidFrequency,
     TransposeArguments,
     IntervalArguments,
+    CentsArguments,
 }
 
 impl PitchError {
@@ -22,8 +24,10 @@ impl PitchError {
             Self::InvalidNote => "填写音名、MIDI 编号或频率，例如 A4、MIDI 69 或 442 Hz",
             Self::MidiRange => "音高须在 MIDI 0 至 127 的范围内",
             Self::FrequencyRange => "填写正频率，最接近的音高须在 MIDI 0 至 127 内",
+            Self::InvalidFrequency => "频率须为有限正数，例如 442 Hz",
             Self::TransposeArguments => "用 @ 分隔音高和半音数，例如 Bb3 @ 2",
             Self::IntervalArguments => "用 @ 分隔两个音高，例如 C4 @ G4",
+            Self::CentsArguments => "用 @ 分隔参考音高和待比较的音高，例如 A4 @ 442 Hz",
         }
     }
 }
@@ -36,27 +40,37 @@ pub(super) fn convert_pitch(query: &str) -> Result<String, PitchError> {
         "midi" => return format_pitch(parse_midi(arguments)?),
         "转调" | "transpose" => return transpose_pitch(arguments),
         "音程" | "interval" => return pitch_interval(arguments),
+        "音分差" | "cents" => return compare_cents(arguments),
         _ => {}
     }
-    let folded = input.to_ascii_lowercase();
-    for (unit, multiplier) in [
+    if let Some(frequency) = parse_frequency(input).map_err(|_| PitchError::FrequencyRange)? {
+        return nearest_pitch(frequency);
+    }
+    format_pitch(parse_note(input)?)
+}
+
+fn parse_frequency(input: &str) -> Result<Option<f64>, PitchError> {
+    let lower = input.trim().to_ascii_lowercase();
+    let units = [
         ("khz", 1000.0),
         ("千赫兹", 1000.0),
         ("hz", 1.0),
         ("赫兹", 1.0),
-    ] {
-        if let Some(value) = folded.strip_suffix(unit) {
-            let frequency = value
-                .trim()
-                .parse::<f64>()
-                .ok()
-                .map(|value| value * multiplier)
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .ok_or(PitchError::FrequencyRange)?;
-            return nearest_pitch(frequency);
-        }
-    }
-    format_pitch(parse_note(input)?)
+    ];
+    let Some((number, multiplier)) = units
+        .into_iter()
+        .find_map(|(unit, multiplier)| lower.strip_suffix(unit).map(|number| (number, multiplier)))
+    else {
+        return Ok(None);
+    };
+    number
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|number| number * multiplier)
+        .filter(|frequency| frequency.is_finite() && *frequency > 0.0)
+        .map(Some)
+        .ok_or(PitchError::InvalidFrequency)
 }
 
 fn parse_midi(input: &str) -> Result<u8, PitchError> {
@@ -101,6 +115,26 @@ fn pitch_interval(input: &str) -> Result<String, PitchError> {
     Ok(format!("{distance} 半音 · {} 音分", distance * 100))
 }
 
+fn compare_cents(input: &str) -> Result<String, PitchError> {
+    let (reference, target) = input
+        .split_once('@')
+        .filter(|(reference, target)| !reference.trim().is_empty() && !target.trim().is_empty())
+        .ok_or(PitchError::CentsArguments)?;
+    let frequency = |input| {
+        parse_frequency(input)?.map_or_else(|| parse_written_pitch(input).map(note_frequency), Ok)
+    };
+    let reference = frequency(reference)?;
+    let target = frequency(target)?;
+    let ratio = target / reference;
+    let octaves = if ratio.is_normal() {
+        ratio.log2()
+    } else {
+        target.log2() - reference.log2()
+    };
+    let cents = (120_000.0 * octaves).round() / 100.0;
+    Ok(format!("{} 音分", signed_cents(cents)))
+}
+
 fn parse_note(input: &str) -> Result<u8, PitchError> {
     let Some(letter) = input.chars().next() else {
         return Err(PitchError::InvalidNote);
@@ -140,10 +174,13 @@ fn note_name(midi: u8) -> String {
     format!("{letter}{octave}")
 }
 
-fn format_pitch(midi: u8) -> Result<String, PitchError> {
+fn note_frequency(midi: u8) -> f64 {
     let semitones = f64::from(midi) - f64::from(REFERENCE_NOTE);
-    let frequency = REFERENCE_FREQUENCY * 2.0_f64.powf(semitones / 12.0);
-    let frequency = format_result(frequency).map_err(|_| PitchError::FrequencyRange)?;
+    REFERENCE_FREQUENCY * 2.0_f64.powf(semitones / 12.0)
+}
+
+fn format_pitch(midi: u8) -> Result<String, PitchError> {
+    let frequency = format_result(note_frequency(midi)).map_err(|_| PitchError::FrequencyRange)?;
     Ok(format!(
         "{} · MIDI {midi} · {frequency} Hz",
         note_name(midi)
@@ -158,12 +195,16 @@ fn nearest_pitch(frequency: f64) -> Result<String, PitchError> {
     }
     let midi = nearest as u8;
     let cents = ((pitch - nearest) * 10_000.0).round() / 100.0;
-    let cents = if cents == 0.0 {
+    let cents = signed_cents(cents);
+    Ok(format!("{} · MIDI {midi} · {cents} 音分", note_name(midi)))
+}
+
+fn signed_cents(cents: f64) -> String {
+    if cents == 0.0 {
         "0".to_owned()
     } else {
         format!("{cents:+.2}")
-    };
-    Ok(format!("{} · MIDI {midi} · {cents} 音分", note_name(midi)))
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +232,28 @@ mod tests {
             Err(PitchError::TransposeArguments)
         );
         assert_eq!(convert_pitch("音程 A4"), Err(PitchError::IntervalArguments));
+    }
+
+    #[test]
+    fn compares_frequencies_and_written_notes_against_a_reference() {
+        for (query, expected) in [
+            ("音分差 A4 @ 442 Hz", "+7.85 音分"),
+            ("CENTS 442 Hz @ MIDI 69", "-7.85 音分"),
+            ("音分差 0.44 kHz @ 880赫兹", "+1200.00 音分"),
+            ("音分差 20000 Hz @ 40000 Hz", "+1200.00 音分"),
+            ("音分差 1e-300 Hz @ 1e300 Hz", "+2391788.23 音分"),
+            ("音分差 MIDI 69 @ 440 Hz", "0 音分"),
+        ] {
+            assert_eq!(convert_pitch(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_pitch("音分差 A4 @"),
+            Err(PitchError::CentsArguments)
+        );
+        assert_eq!(
+            convert_pitch("音分差 A4 @ 0 Hz"),
+            Err(PitchError::InvalidFrequency)
+        );
     }
 
     #[test]
