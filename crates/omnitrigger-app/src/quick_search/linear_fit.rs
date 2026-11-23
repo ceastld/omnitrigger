@@ -18,6 +18,7 @@ pub(super) enum LinearFitError {
     TooManyPoints,
     TooManyPredictions,
     ConstantX,
+    ZeroX,
     ConstantCoordinate,
     Evaluation(FractionError),
 }
@@ -30,6 +31,7 @@ impl LinearFitError {
             Self::TooManyPoints => "最多可输入 64 对数值",
             Self::TooManyPredictions => "每次最多可预测 64 个 x 值",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
+            Self::ZeroX => "过原点拟合至少需要一个非零 x",
             Self::ConstantCoordinate => "x 和 y 各自至少需要两个不同的值才能计算相关系数",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "坐标和预测值须为整数、有限小数、分数或精确算式"
@@ -50,6 +52,11 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
     let normalized = normalize(input);
     let input = normalized.trim();
     let (points, output) = match input.split_once(char::is_whitespace) {
+        Some((operation, rest))
+            if operation == "过原点" || operation.eq_ignore_ascii_case("through-origin") =>
+        {
+            return fit_through_origin(rest.trim());
+        }
         Some((operation, rest))
             if operation == "预测" || operation.eq_ignore_ascii_case("predict") =>
         {
@@ -133,6 +140,26 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         products.squared_correlation()?.to_string()
     };
     Ok(format!("斜率 {slope} · 截距 {intercept}\nR² {r_squared}"))
+}
+
+fn fit_through_origin(points: &str) -> Result<String, LinearFitError> {
+    let sums = paired_sums(points, false)?;
+    if sums.xx.numer().sign() == Sign::NoSign {
+        return Err(LinearFitError::ZeroX);
+    }
+    let slope = &sums.xy / &sums.xx;
+    let residual_sum = &sums.yy - &sums.xy * &slope;
+    check_size([&slope, &residual_sum])?;
+    let r_squared = if sums.yy.numer().sign() == Sign::NoSign {
+        "未定义".to_owned()
+    } else {
+        let r_squared = (&sums.yy - &residual_sum) / &sums.yy;
+        check_size([&r_squared])?;
+        r_squared.to_string()
+    };
+    Ok(format!(
+        "斜率 {slope} · 截距 0\n残差平方和 {residual_sum}\n未中心化 R² {r_squared}"
+    ))
 }
 
 pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
@@ -368,6 +395,34 @@ mod tests {
         assert_eq!(
             calculate_linear_fit(&format!("预测 {xs} @ 0,1; 1,3")),
             Err(LinearFitError::TooManyPredictions)
+        );
+    }
+
+    #[test]
+    fn fits_exact_no_intercept_models_and_uses_zero_as_the_r_squared_baseline() {
+        for (query, expected) in [
+            (
+                "过原点 1,2; 2,5; 3,7",
+                "斜率 33/14 · 截距 0\n残差平方和 3/14\n未中心化 R² 363/364",
+            ),
+            (
+                "through-origin 1/2,-1; 1/2,-3",
+                "斜率 -4 · 截距 0\n残差平方和 2\n未中心化 R² 4/5",
+            ),
+            (
+                "过原点 1,0; 2,0",
+                "斜率 0 · 截距 0\n残差平方和 0\n未中心化 R² 未定义",
+            ),
+        ] {
+            assert_eq!(
+                calculate_linear_fit(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_linear_fit("过原点 0,2; 0,3"),
+            Err(LinearFitError::ZeroX)
         );
     }
 
