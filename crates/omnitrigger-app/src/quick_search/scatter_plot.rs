@@ -10,6 +10,17 @@ const MAX_AXIS_LABEL_WIDTH: f32 = 167.;
 const AXIS_GAP: f32 = 8.;
 pub(super) const POSITION_STEPS: u16 = 4096;
 const PLOT_PADDING: f32 = 9.;
+const SAMPLE_SERIES_COLORS: [u32; 4] = [
+    theme::ACCENT,
+    theme::ACCENT_2,
+    theme::DANGER,
+    theme::TEXT_MUTED,
+];
+
+pub(super) struct SampledSeries {
+    pub(super) label: String,
+    pub(super) points: Vec<(BigRational, BigRational)>,
+}
 
 #[derive(PartialEq, Eq)]
 pub(super) struct ScatterPlot {
@@ -20,6 +31,7 @@ pub(super) struct ScatterPlot {
     axis_names: [String; 2],
     zero_axes: [Option<u16>; 2],
     kind: ScatterKind,
+    sample_series: Vec<(String, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,6 +102,26 @@ impl ScatterPlot {
         )
     }
 
+    pub(super) fn from_sampled_series(
+        series: Vec<SampledSeries>,
+        x_bounds: [&BigRational; 2],
+        requested: usize,
+    ) -> Self {
+        let mut points = Vec::new();
+        let mut labels = Vec::with_capacity(series.len());
+        for SampledSeries {
+            label,
+            points: series_points,
+        } in series
+        {
+            labels.push((label, series_points.len()));
+            points.extend(series_points);
+        }
+        let mut plot = Self::from_sampled_function(&points, x_bounds, requested);
+        plot.sample_series = labels;
+        plot
+    }
+
     fn prepare(
         points: &[(BigRational, BigRational)],
         curve: &[(BigRational, BigRational)],
@@ -142,6 +174,7 @@ impl ScatterPlot {
             .map(str::to_owned),
             zero_axes,
             kind,
+            sample_series: Vec::new(),
         }
     }
 
@@ -169,6 +202,23 @@ impl ScatterPlot {
     }
 
     pub(super) fn legend(&self) -> Div {
+        if !self.sample_series.is_empty() {
+            let mut legend = div().flex().min_w_0().items_center().gap(px(11.));
+            for (index, (label, _)) in self.sample_series.iter().enumerate() {
+                let color = rgb(SAMPLE_SERIES_COLORS[index % SAMPLE_SERIES_COLORS.len()]);
+                legend = legend.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(div().flex_none().size(px(6.)).rounded(px(3.)).bg(color))
+                        .child(div().min_w_0().truncate().child(label.clone())),
+                );
+            }
+            return legend;
+        }
         let points = self.point_count();
         let (count, line_label) = match self.kind {
             ScatterKind::Observations => (format!("{points} 个观测点"), "拟合曲线"),
@@ -204,12 +254,24 @@ impl ScatterPlot {
     }
 
     pub(super) fn render(&self) -> Div {
-        let points = self.locations.clone();
+        let colors = self
+            .sample_series
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (_, count))| {
+                let color = rgb(SAMPLE_SERIES_COLORS[index % SAMPLE_SERIES_COLORS.len()]);
+                std::iter::repeat_n(color, *count)
+            });
+        let points: Vec<_> = self
+            .locations
+            .iter()
+            .copied()
+            .zip(colors.chain(std::iter::repeat(rgb(theme::ACCENT))))
+            .collect();
         let curve = self.curve.clone();
         let grid = rgb(theme::BORDER_MID);
         let [zero_x, zero_y] = self.zero_axes;
         let axis = rgb(theme::BORDER_HI);
-        let dot = rgb(theme::ACCENT);
         let line = rgb(theme::ACCENT_2);
         let plot = canvas(
             |_, _, _| {},
@@ -271,11 +333,12 @@ impl ScatterPlot {
                         }
                     }
                 }
-                for center in points.iter().map(place) {
+                for (position, color) in &points {
+                    let center = place(position);
                     window.paint_quad(
                         fill(
                             Bounds::new(center - point(px(3.), px(3.)), size(px(6.), px(6.))),
-                            dot,
+                            *color,
                         )
                         .corner_radii(px(3.)),
                     );

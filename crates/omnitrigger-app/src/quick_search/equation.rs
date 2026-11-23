@@ -16,7 +16,7 @@ use super::operators::{
     json_value_and_tail, split_top_level_commas, visit_additive_terms, NumberComparison,
 };
 use super::plane::{parse_point, PointError};
-use super::scatter_plot::ScatterPlot;
+use super::scatter_plot::{SampledSeries, ScatterPlot};
 use super::scientific::{interpolate_between, named_value, split_name};
 
 const MAX_ROOT_CANDIDATES: usize = 64;
@@ -46,6 +46,7 @@ pub(super) enum EquationError {
     FunctionSampleHasNoValues,
     FunctionValuesArguments,
     FunctionComparisonArguments,
+    FunctionComparisonPlotArguments,
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
@@ -96,6 +97,9 @@ impl EquationError {
             }
             Self::FunctionComparisonArguments => {
                 "填写 2 至 4 个算式的 JSON 数组，@ 后接横坐标，例如 [\"sin(x)\",\"cos(x)\"] @ 0,pi/2"
+            }
+            Self::FunctionComparisonPlotArguments => {
+                "填写 2 至 4 个算式的 JSON 数组，@ 后接范围，例如 [\"sin(x)\",\"cos(x)\"] @ 0..2*pi; 33"
             }
             Self::BisectionArguments => {
                 "填写要求零点的算式或等式和两个不同的端点，例如 cos(x)=x @ 0 到 1"
@@ -164,6 +168,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
             "函数对照" | "compare-functions" => return compare_function_values(arguments),
+            "函数对照图" | "compare-function-plot" => {
+                return sample_function_comparison(arguments)?.csv();
+            }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
@@ -564,6 +571,7 @@ pub(super) fn equation_chart(input: &str) -> Option<Result<(String, ScatterPlot)
     match command.to_ascii_lowercase().as_str() {
         "函数图" | "function-plot" => Some(plot_quadratic_function(arguments)),
         "采样图" | "sample-plot" => Some(plot_sampled_function(arguments)),
+        "函数对照图" | "compare-function-plot" => Some(plot_function_comparison(arguments)),
         _ => None,
     }
 }
@@ -622,17 +630,13 @@ fn plot_sampled_function(input: &str) -> Result<(String, ScatterPlot), EquationE
     if valid.is_empty() {
         return Err(EquationError::FunctionSampleHasNoValues);
     }
-    let to_rational = |value| {
-        BigRational::from_float(value)
-            .ok_or(EquationError::Approximation(CalculationError::OutOfRange))
-    };
     let points = valid
         .iter()
-        .map(|&(x, y)| Ok((to_rational(x)?, to_rational(y)?)))
+        .map(|&(x, y)| Ok((sample_rational(x)?, sample_rational(y)?)))
         .collect::<Result<Vec<_>, EquationError>>()?;
     let first = samples.first().expect("至少有两个采样点").0;
     let last = samples.last().expect("至少有两个采样点").0;
-    let x = [to_rational(first)?, to_rational(last)?];
+    let x = [sample_rational(first)?, sample_rational(last)?];
     let ys = valid.iter().map(|&(_, y)| y);
     let y_min = ys
         .clone()
@@ -646,6 +650,16 @@ fn plot_sampled_function(input: &str) -> Result<(String, ScatterPlot), EquationE
             [display(y_min)?, display(y_max)?],
         );
     Ok((format_function_samples(&samples)?, plot))
+}
+
+fn plot_function_comparison(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let comparison = sample_function_comparison(&input)?;
+    Ok((comparison.csv()?, comparison.plot()?))
+}
+
+fn sample_rational(value: f64) -> Result<BigRational, EquationError> {
+    BigRational::from_float(value).ok_or(EquationError::Approximation(CalculationError::OutOfRange))
 }
 
 fn split_function_arguments(
@@ -681,6 +695,15 @@ fn has_x_function_label(label: &str) -> bool {
 fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
     let invalid = EquationError::FunctionSampleArguments;
     let (expression, bounds) = split_function_arguments(input, invalid)?;
+    sampled_coordinates(bounds, invalid)?
+        .map(|x| Ok((x, function_sample_value(expression, x)?)))
+        .collect()
+}
+
+fn sampled_coordinates(
+    bounds: &str,
+    invalid: EquationError,
+) -> Result<impl Iterator<Item = f64>, EquationError> {
     let (bounds, count) = match bounds.split_once(';') {
         Some((bounds, count)) => {
             let count = count
@@ -695,13 +718,8 @@ fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, Equati
     };
     let [start, end] = function_interval(bounds, invalid)?;
     let last = count - 1;
-    let mut samples = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let fraction = f64::from(index) / f64::from(last);
-        let x = interpolate_between(start, end, fraction);
-        samples.push((x, function_sample_value(expression, x)?));
-    }
-    Ok(samples)
+    Ok((0..count)
+        .map(move |index| interpolate_between(start, end, f64::from(index) / f64::from(last))))
 }
 
 fn function_samples_for_inputs(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
@@ -731,6 +749,20 @@ fn function_input_coordinates(
 
 fn compare_function_values(input: &str) -> Result<String, EquationError> {
     let invalid = EquationError::FunctionComparisonArguments;
+    let (expressions, inputs) = function_comparison_arguments(input, invalid)?;
+    FunctionComparison::evaluate(expressions, function_input_coordinates(inputs, invalid))?.csv()
+}
+
+fn sample_function_comparison(input: &str) -> Result<FunctionComparison, EquationError> {
+    let invalid = EquationError::FunctionComparisonPlotArguments;
+    let (expressions, bounds) = function_comparison_arguments(input, invalid)?;
+    FunctionComparison::evaluate(expressions, sampled_coordinates(bounds, invalid)?.map(Ok))
+}
+
+fn function_comparison_arguments(
+    input: &str,
+    invalid: EquationError,
+) -> Result<(Vec<String>, &str), EquationError> {
     let (expressions, tail) = json_value_and_tail::<Vec<String>>(input).ok_or(invalid)?;
     let inputs = tail.trim_start().strip_prefix('@').ok_or(invalid)?;
     if !(2..=MAX_COMPARED_FUNCTIONS).contains(&expressions.len())
@@ -740,22 +772,89 @@ fn compare_function_values(input: &str) -> Result<String, EquationError> {
     {
         return Err(invalid);
     }
-    let display = |value| format_result(value).map_err(EquationError::Approximation);
-    let mut csv = String::new();
-    let labels = std::iter::once("x").chain(expressions.iter().map(|expression| expression.trim()));
-    append_bounded_csv_row(&mut csv, labels, invalid)?;
-    for x in function_input_coordinates(inputs, invalid) {
-        let x = x?;
-        let mut row = vec![display(x)?];
-        for expression in &expressions {
-            let y = function_sample_value(expression, x)?
-                .map(display)
-                .transpose()?;
-            row.push(y.unwrap_or_default());
+    Ok((expressions, inputs))
+}
+
+struct FunctionComparison {
+    expressions: Vec<String>,
+    rows: Vec<(f64, Vec<Option<f64>>)>,
+}
+
+impl FunctionComparison {
+    fn evaluate(
+        expressions: Vec<String>,
+        coordinates: impl Iterator<Item = Result<f64, EquationError>>,
+    ) -> Result<Self, EquationError> {
+        let mut rows = Vec::new();
+        for x in coordinates {
+            let x = x?;
+            let ys = expressions
+                .iter()
+                .map(|expression| function_sample_value(expression, x))
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.push((x, ys));
         }
-        append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), invalid)?;
+        Ok(Self { expressions, rows })
     }
-    Ok(csv)
+
+    fn csv(&self) -> Result<String, EquationError> {
+        let invalid = EquationError::FunctionComparisonArguments;
+        let display = |value| format_result(value).map_err(EquationError::Approximation);
+        let mut csv = String::new();
+        let labels =
+            std::iter::once("x").chain(self.expressions.iter().map(|expression| expression.trim()));
+        append_bounded_csv_row(&mut csv, labels, invalid)?;
+        for (x, ys) in &self.rows {
+            let mut row = vec![display(*x)?];
+            for y in ys {
+                row.push(y.map(display).transpose()?.unwrap_or_default());
+            }
+            append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), invalid)?;
+        }
+        Ok(csv)
+    }
+
+    fn plot(&self) -> Result<ScatterPlot, EquationError> {
+        let ys = self
+            .rows
+            .iter()
+            .flat_map(|(_, ys)| ys.iter().copied().flatten());
+        let y_min = ys
+            .clone()
+            .min_by(f64::total_cmp)
+            .ok_or(EquationError::FunctionSampleHasNoValues)?;
+        let y_max = ys.max_by(f64::total_cmp).expect("至少有一个有效函数值");
+        let first = self.rows.first().expect("至少有两个采样点").0;
+        let last = self.rows.last().expect("至少有两个采样点").0;
+        let x = [sample_rational(first)?, sample_rational(last)?];
+        let series = self
+            .expressions
+            .iter()
+            .enumerate()
+            .map(|(index, expression)| {
+                let points = self
+                    .rows
+                    .iter()
+                    .filter_map(|(x, ys)| ys[index].map(|y| (*x, y)))
+                    .map(|(x, y)| Ok((sample_rational(x)?, sample_rational(y)?)))
+                    .collect::<Result<Vec<_>, EquationError>>()?;
+                Ok(SampledSeries {
+                    label: expression.trim().to_owned(),
+                    points,
+                })
+            })
+            .collect::<Result<Vec<_>, EquationError>>()?;
+        let display = |value| format_result(value).map_err(EquationError::Approximation);
+        Ok(ScatterPlot::from_sampled_series(
+            series,
+            [&x[0], &x[1]],
+            self.rows.len() * self.expressions.len(),
+        )
+        .with_range_labels(
+            [display(first)?, display(last)?],
+            [display(y_min)?, display(y_max)?],
+        ))
+    }
 }
 
 fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
@@ -2164,6 +2263,20 @@ mod tests {
                 CalculationError::DivisionByZero
             ))
         );
+    }
+
+    #[test]
+    fn plots_multiple_functions_and_keeps_every_sampling_row_in_the_csv() {
+        let query = r#"函数对照图 ["sqrt(x)","sqrt(-x)"] @ -1..1; 3"#;
+        let (csv, plot) = equation_chart(query).unwrap().unwrap();
+        assert_eq!(csv, "x,sqrt(x),sqrt(-x)\r\n-1,\"\",1\r\n0,0,0\r\n1,1,\"\"");
+        assert_eq!(solve_equation(query).as_deref(), Ok(csv.as_str()));
+        assert_eq!(plot.point_count(), 4);
+        assert!(!plot.has_curve());
+        assert!(matches!(
+            equation_chart(r#"compare-function-plot ["sqrt(x)","ln(x)"] @ -3..-1; 3"#),
+            Some(Err(EquationError::FunctionSampleHasNoValues))
+        ));
     }
 
     #[test]
