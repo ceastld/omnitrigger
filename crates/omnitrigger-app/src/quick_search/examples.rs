@@ -341,6 +341,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算函数在整个区间上的近似平均值",
+        query: "方程: 数值平均 x² @ 0..3; 8",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "估算两条曲线在区间内围成的面积",
         query: "方程: 数值面积 [\"x\",\"0\"] @ -1..1; 8",
     },
@@ -5612,6 +5617,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "二分求根",
             "数值积分",
             "积分对照",
+            "数值平均",
             "数值面积",
             "数值弧长",
             "数值导数",

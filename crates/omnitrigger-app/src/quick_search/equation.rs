@@ -63,6 +63,7 @@ pub(super) enum EquationError {
     TooManySampledBrackets,
     NumericIntegralArguments,
     NumericIntegralComparisonArguments,
+    NumericIntervalMeanArguments,
     NumericIntegralIntervals,
     IntegralSampleArguments,
     NumericAreaArguments,
@@ -143,6 +144,9 @@ impl EquationError {
             }
             Self::NumericIntegralComparisonArguments => {
                 "填写被积算式和两个不同的端点，分号后可填 4 至 128 之间的 4 的倍数"
+            }
+            Self::NumericIntervalMeanArguments => {
+                "填写要取区间平均值的算式、两个不同的端点和可选偶数子区间数"
             }
             Self::NumericIntegralIntervals => "当前精度无法区分积分采样点，请减少子区间数",
             Self::IntegralSampleArguments => {
@@ -285,6 +289,7 @@ fn solve_equation_text(
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
             "积分对照" | "compare-integrals" => return compare_numeric_integrals(arguments),
+            "数值平均" | "numeric-mean" => return numeric_function_interval_mean(arguments),
             "数值面积" | "numeric-area" => return numeric_function_area(arguments),
             "数值弧长" | "numeric-arc-length" => return numeric_function_arc_length(arguments),
             "极坐标面积" | "polar-area" => return numeric_polar_area(arguments),
@@ -1679,6 +1684,17 @@ fn numeric_integral(input: &str) -> Result<String, EquationError> {
     display_integral("积分", value, intervals)
 }
 
+fn numeric_function_interval_mean(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericIntervalMeanArguments;
+    let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let ([left, right], intervals) = numeric_integral_range(arguments, invalid)?;
+    let values = collect_integral_values([left.min(right), left.max(right)], intervals, |x| {
+        evaluate_at_x(expression, x).map_err(EquationError::Approximation)
+    })?;
+    let (mean, scale) = scaled_simpson_mean(&values);
+    display_integral("区间平均值", mean * scale, intervals)
+}
+
 fn compare_numeric_integrals(input: &str) -> Result<String, EquationError> {
     let invalid = EquationError::NumericIntegralComparisonArguments;
     let (expression, arguments) = split_function_arguments(input, invalid)?;
@@ -1804,26 +1820,10 @@ fn display_integral(label: &str, value: f64, intervals: u32) -> Result<String, E
 }
 
 fn simpson_integral(values: &[f64], start: f64, end: f64) -> f64 {
-    let intervals = values.len() - 1;
-    let scale = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let (mean, scale) = scaled_simpson_mean(values);
     if scale == 0.0 {
         return 0.0;
     }
-    let weighted_sum: f64 = values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let weight = if index == 0 || index == intervals {
-                1.0
-            } else if index.is_multiple_of(2) {
-                2.0
-            } else {
-                4.0
-            };
-            weight * (value / scale)
-        })
-        .sum();
-    let mean = (weighted_sum / (3.0 * intervals as f64)).clamp(-1.0, 1.0);
     let span = end - start;
     let (width, width_scale) = if span.is_finite() {
         (span, 1.0)
@@ -1839,6 +1839,32 @@ fn simpson_integral(values: &[f64], start: f64, end: f64) -> f64 {
         (mean * scale) * width
     };
     integral * width_scale
+}
+
+fn scaled_simpson_mean(values: &[f64]) -> (f64, f64) {
+    let intervals = values.len() - 1;
+    let scale = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return (0.0, 0.0);
+    }
+    let weighted_sum: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let weight = if index == 0 || index == intervals {
+                1.0
+            } else if index.is_multiple_of(2) {
+                2.0
+            } else {
+                4.0
+            };
+            weight * (value / scale)
+        })
+        .sum();
+    (
+        (weighted_sum / (3.0 * intervals as f64)).clamp(-1.0, 1.0),
+        scale,
+    )
 }
 
 fn polynomial_integral(input: &str) -> Result<String, EquationError> {
@@ -3082,6 +3108,28 @@ mod tests {
         assert_eq!(
             solve_equation("数值弧长 x @ 0..2; 3"),
             Err(EquationError::NumericArcLengthArguments)
+        );
+    }
+
+    #[test]
+    fn takes_the_simpson_average_without_forming_an_overflowing_integral() {
+        assert_eq!(
+            solve_equation("数值平均 x @ 2..0; 4").as_deref(),
+            Ok("区间平均值 ≈ 1\r\n复合辛普森法 · 4 个子区间")
+        );
+        assert_eq!(
+            solve_equation("numeric-mean 1e308 @ -1e308..1e308; 4").as_deref(),
+            Ok("区间平均值 ≈ 1e308\r\n复合辛普森法 · 4 个子区间")
+        );
+        assert_eq!(
+            solve_equation("数值平均 0 @ -1..1").as_deref(),
+            Ok("区间平均值 ≈ 0\r\n复合辛普森法 · 64 个子区间")
+        );
+        assert_eq!(
+            solve_equation("数值平均 1/x @ -1..1; 4"),
+            Err(EquationError::Approximation(
+                CalculationError::DivisionByZero
+            ))
         );
     }
 
