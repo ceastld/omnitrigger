@@ -56,6 +56,10 @@ impl Example {
                 | Scope::Uuid
                 | Scope::Ulid
                 | Scope::Circuit
+                | Scope::Complex
+                | Scope::Circle
+                | Scope::Vector
+                | Scope::Matrix
         ) && !named_operation
         {
             return None;
@@ -5336,7 +5340,6 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "误差",
             "过原点",
         ],
-        Scope::Matrix => &["通解"],
         Scope::Date => &[
             "列出",
             "格式化",
@@ -5895,6 +5898,26 @@ mod tests {
         ] {
             assert!(tool_operation_examples(scope, prefix).is_some());
             assert_eq!(tool_operation_examples(scope, with_argument), None);
+        }
+    }
+
+    #[test]
+    fn selects_parameters_in_geometry_vector_matrix_and_complex_examples() {
+        for (scope, operation, prefix, parameters) in [
+            (Scope::Circle, "切点", "圆: 切点 ", "0,0 @ 1; 2,0"),
+            (Scope::Complex, "极坐标", "复数: 极坐标 ", "3+4i"),
+            (
+                Scope::Vector,
+                "直线距离",
+                "向量: 直线距离 ",
+                "3,4 @ 0,0; 2,0",
+            ),
+            (Scope::Matrix, "乘方", "矩阵: 乘方 ", "1,1; 1,0 @ 5"),
+        ] {
+            let items = tool_operation_examples(scope, operation).unwrap();
+            let example = &EXAMPLES[items[0]];
+            let (retained, selected) = example.query.split_at(example.argument_start().unwrap());
+            assert_eq!((retained, selected), (prefix, parameters));
         }
     }
 
