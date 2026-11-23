@@ -64,7 +64,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(EquationError::Evaluation(FractionError::TooLong));
     }
-    let input = normalize(query);
+    let input = normalize(query).replace('·', "*");
     if let Some((operation, arguments)) = input.trim().split_once(char::is_whitespace) {
         match operation.to_ascii_lowercase().as_str() {
             "不等式" | "inequality" => return solve_inequality(arguments.trim_start()),
@@ -173,28 +173,37 @@ fn polynomial_expression(
     input: &str,
     form: PolynomialForm,
 ) -> Result<[BigRational; 3], EquationError> {
-    match expanded_polynomial(input, form) {
-        Err(EquationError::ExpressionArguments) if matches!(form, PolynomialForm::Quadratic) => {
-            factored_polynomial(input).map_err(|error| match error {
-                EquationError::ProductArguments => EquationError::ExpressionArguments,
-                _ => error,
-            })
-        }
-        result => result,
-    }
+    parse_polynomial(input, form, matches!(form, PolynomialForm::Quadratic))
 }
 
-fn expanded_polynomial(
+fn parse_polynomial(
     input: &str,
     form: PolynomialForm,
+    allow_product_terms: bool,
 ) -> Result<[BigRational; 3], EquationError> {
     let input = input.trim();
     let mut coefficients = std::array::from_fn::<_, 3, _>(|_| BigRational::default());
     let mut add_term = |term: &str| -> Result<(), EquationError> {
-        let (index, coefficient) = expanded_polynomial_term(term.trim(), form)?;
-        let value = &mut coefficients[index];
-        *value += coefficient;
-        ensure_exact_size(value).map_err(EquationError::Evaluation)
+        let term = term.trim();
+        match expanded_polynomial_term(term, form) {
+            Ok((index, coefficient)) => {
+                let value = &mut coefficients[index];
+                *value += coefficient;
+                ensure_exact_size(value).map_err(EquationError::Evaluation)
+            }
+            Err(EquationError::ExpressionArguments) if allow_product_terms => {
+                let product = factored_polynomial(term).map_err(|error| match error {
+                    EquationError::ProductArguments => EquationError::ExpressionArguments,
+                    _ => error,
+                })?;
+                for (value, coefficient) in coefficients.iter_mut().zip(product) {
+                    *value += coefficient;
+                    ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     };
     let mut depth = 0usize;
     let mut start = 0;
@@ -705,7 +714,7 @@ fn product_factor(input: &str) -> Result<([BigRational; 3], &str), EquationError
         })
         .ok_or(invalid)?;
     let factor =
-        expanded_polynomial(&body[..close], PolynomialForm::Quadratic).map_err(|error| {
+        parse_polynomial(&body[..close], PolynomialForm::Quadratic, false).map_err(|error| {
             if error == EquationError::ExpressionArguments {
                 invalid
             } else {
@@ -1085,7 +1094,7 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(EquationError::Evaluation(FractionError::TooLong));
     }
-    let input = normalize(query);
+    let input = normalize(query).replace('·', "*");
     let (parametric, input) = input
         .trim_start()
         .split_once(char::is_whitespace)
@@ -1216,6 +1225,24 @@ mod tests {
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn combines_factor_products_and_ordinary_terms_in_one_polynomial() {
+        for (input, expected) in [
+            ("展开 2·(x - 3/4)² - 1/8", "y = 2x² - 3x + 1"),
+            ("求根 (x - 1)**2 - 4", "x₁ = -1 · x₂ = 3"),
+            ("1 - (x+1)^2 = 0", "x₁ = -2 · x₂ = 0"),
+            ("定积分 (x-1)**2 + 1 @ 0 到 2", "8/3"),
+            ("取系数 2*(x-1)^2 + 3*(x+1) - 1", "2,-1,4"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        let completed_square = solve_equation("配方 2,-3,1").unwrap();
+        assert_eq!(
+            solve_equation(&format!("求根 {completed_square}")).as_deref(),
+            Ok("x₁ = 1/2 · x₂ = 1"),
+        );
     }
 
     #[test]

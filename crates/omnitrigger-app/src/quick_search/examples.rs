@@ -172,6 +172,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接求配方后的二次式的根",
+        query: "方程: 求根 (x - 1)**2 - 4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用函数展开式直接求积分",
         query: "方程: 定积分 y = x**2 @ 0 到 2",
     },
