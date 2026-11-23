@@ -934,6 +934,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "窗口:",
     },
     Example {
+        icon: Icon::Search,
+        title: "筛选已启用的全局键盘触发器",
+        query: "触发器: 状态=已启用 范围=全局 输入=键盘",
+    },
+    Example {
         icon: Icon::Grid,
         title: "把指定程序的窗口列表导出为 JSON",
         query: "窗口: 输出=JSON 进程=notepad.exe",

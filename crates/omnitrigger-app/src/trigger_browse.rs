@@ -253,6 +253,15 @@ impl Facet {
 }
 
 impl FacetValue {
+    pub(super) fn facet(self) -> Facet {
+        match self {
+            Self::Input(_) => Facet::Input,
+            Self::Action(_) => Facet::Action,
+            Self::Scope(_) => Facet::Scope,
+            Self::Status(_) => Facet::Status,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Input(value) => value.label(),
@@ -321,7 +330,7 @@ impl Filter {
         *self == Self::default()
     }
 
-    fn accepts(&self, row: &Row, skip: Option<Facet>) -> bool {
+    pub(super) fn accepts(&self, row: &Row, skip: Option<Facet>) -> bool {
         Facet::ALL.into_iter().all(|facet| {
             Some(facet) == skip || self.get(facet).is_none_or(|value| value.matches(row))
         })

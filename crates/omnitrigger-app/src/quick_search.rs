@@ -137,7 +137,7 @@ use timecode::{convert_timecode, TimecodeError};
 use timestamp::{convert_timestamp, is_offset_timestamp, TimestampError};
 use toml_tools::{transform_toml, TomlError};
 use triangle::{calculate_triangle, TriangleError};
-use triggers::{matching_triggers, SearchTrigger};
+use triggers::{matching_triggers, trigger_search_filters, SearchTrigger, TriggerFilterError};
 use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
 use value_history::RecentValues;
@@ -387,6 +387,7 @@ fn value_extra_height(value: &str, line_limit: usize) -> f32 {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ValueError {
     InputTooLong,
+    TriggerFilter(TriggerFilterError),
     Calculation(CalculationError),
     BatchCalculation(BatchError<CalculationError>),
     BatchFraction(BatchError<FractionError>),
@@ -444,6 +445,7 @@ impl ValueError {
     fn message(self) -> gpui::SharedString {
         let message = match self {
             Self::InputTooLong => "输入最多支持 4096 个字符",
+            Self::TriggerFilter(error) => error.message(),
             Self::Calculation(error) => error.message(),
             Self::BatchCalculation(error) => {
                 return batch_error_message(
@@ -719,12 +721,15 @@ impl Results {
                     || Self::Bookmarks(recent.bookmarks.matching(term)),
                     Self::BookmarksUnavailable,
                 ),
-                Scope::Triggers(filter) => Self::Destinations(
-                    matching_triggers(triggers, term, filter)
-                        .into_iter()
-                        .map(Destination::Trigger)
-                        .collect(),
-                ),
+                Scope::Triggers(filter) => match trigger_search_filters(term, filter) {
+                    Ok((filter, query)) => Self::Destinations(
+                        matching_triggers(triggers, query, &filter)
+                            .into_iter()
+                            .map(Destination::Trigger)
+                            .collect(),
+                    ),
+                    Err(error) => Self::Value(Err(ValueError::TriggerFilter(error))),
+                },
                 Scope::Wheels => Self::Destinations(
                     matching_wheels(wheels, term)
                         .into_iter()
@@ -1131,7 +1136,7 @@ impl Results {
             .map(|(_, page)| Destination::Page(page))
             .collect();
         destinations.extend(
-            matching_triggers(triggers, &query, None)
+            matching_triggers(triggers, &query, &Default::default())
                 .into_iter()
                 .map(Destination::Trigger),
         );
@@ -5438,14 +5443,31 @@ mod tests {
             ("已停用触发器：", vec![app.clone()]),
             ("已停用触发器", vec![app.clone()]),
             ("DISABLED TRIGGERS: editor", vec![app.clone()]),
-            ("全局触发器: 发送正文", vec![global]),
-            ("指定应用触发器: editor", vec![app]),
+            ("全局触发器: 发送正文", vec![global.clone()]),
+            ("指定应用触发器: editor", vec![app.clone()]),
             ("已启用触发器: editor", vec![]),
+            ("触发器: 状态＝已启用 范围=全局 发送正文", vec![global]),
+            ("已停用触发器: scope=app editor", vec![app]),
+            ("触发器: 状态=已停用 范围=所有应用 发送正文", vec![]),
         ] {
             let Results::Destinations(items) = for_query(query, &triggers) else {
                 panic!("没有按触发器筛选：{query}");
             };
             assert_eq!(items, expected, "{query}");
+        }
+        for query in [
+            "触发器: 状态=未就绪",
+            "触发器: 输入=未知",
+            "已启用触发器: 状态=已停用",
+            "指定应用触发器: 范围=全局",
+        ] {
+            assert!(
+                matches!(
+                    for_query(query, &triggers),
+                    Results::Value(Err(ValueError::TriggerFilter(_)))
+                ),
+                "{query}"
+            );
         }
     }
 

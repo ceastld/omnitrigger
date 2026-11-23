@@ -101,6 +101,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         _ => {}
     }
     match parse_scope(query)? {
+        Scope::Triggers(_) => Some("触发器:"),
         Scope::CalculationHistory => Some("算式历史:"),
         Scope::BatchCalculation => Some("批量计算:"),
         Scope::ConversionHistory => Some("换算历史:"),
