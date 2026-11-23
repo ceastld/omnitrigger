@@ -44,6 +44,8 @@ pub(super) enum ConversionError {
     InvalidWave,
     InvalidWaveSpeed,
     InvalidWaveTarget,
+    InvalidWaveOperands,
+    InvalidWaveSpeedTarget,
     OutOfRange,
     TooLong,
 }
@@ -89,6 +91,8 @@ impl ConversionError {
             Self::InvalidWave => "输入大于零的频率或波长，例如 2.4 GHz to mm 或 500 nm to THz",
             Self::InvalidWaveSpeed => "在 @ 后填写大于零的传播速度，例如 343 m/s",
             Self::InvalidWaveTarget => "频率请选择长度单位，波长请选择频率单位",
+            Self::InvalidWaveOperands => "各填写一个大于零的频率和波长，例如 波速 1 kHz @ 34.3 cm",
+            Self::InvalidWaveSpeedTarget => "传播速度请选择 m/s、km/h 等速度单位",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -1223,6 +1227,12 @@ pub(super) fn convert_wave(query: &str) -> Result<String, ConversionError> {
     let (source, target) = split_conversion(input).map_or((input, None), |(source, target)| {
         (source, Some(target.trim()))
     });
+    let (operation, arguments) = source
+        .split_once(char::is_whitespace)
+        .unwrap_or((source, ""));
+    if matches!(operation, "波速" | "速度") || operation.eq_ignore_ascii_case("speed") {
+        return calculate_wave_speed(arguments, target);
+    }
     let (source, speed) = if let Some((source, speed)) = source.split_once(['@', '＠']) {
         let (amount, unit) =
             parse_quantity(speed.trim()).map_err(|_| ConversionError::InvalidWaveSpeed)?;
@@ -1263,8 +1273,37 @@ pub(super) fn convert_wave(query: &str) -> Result<String, ConversionError> {
     if target.dimension != dimension {
         return Err(ConversionError::InvalidWaveTarget);
     }
+    format_wave_result(value, &target)
+}
+
+fn calculate_wave_speed(input: &str, target: Option<&str>) -> Result<String, ConversionError> {
+    let (left, right) = input
+        .split_once(['@', '＠'])
+        .ok_or(ConversionError::InvalidWaveOperands)?;
+    let (left_amount, left_unit) =
+        parse_quantity(left.trim()).map_err(|_| ConversionError::InvalidWaveOperands)?;
+    let (right_amount, right_unit) =
+        parse_quantity(right.trim()).map_err(|_| ConversionError::InvalidWaveOperands)?;
+    if left_amount <= 0.
+        || right_amount <= 0.
+        || !matches!(
+            (&left_unit.dimension, &right_unit.dimension),
+            (Dimension::Length, Dimension::Frequency) | (Dimension::Frequency, Dimension::Length)
+        )
+    {
+        return Err(ConversionError::InvalidWaveOperands);
+    }
+    let target = Unit::parse(target.unwrap_or("m/s"))?;
+    if target.dimension != Dimension::Speed {
+        return Err(ConversionError::InvalidWaveSpeedTarget);
+    }
+    let speed = (left_amount * left_unit.scale) * (right_amount * right_unit.scale);
+    format_wave_result(speed, &target)
+}
+
+fn format_wave_result(value: f64, target: &Unit) -> Result<String, ConversionError> {
     let result = value / target.scale;
-    if result == 0. {
+    if result <= 0. {
         return Err(ConversionError::OutOfRange);
     }
     let result = format_result(result).map_err(|_| ConversionError::OutOfRange)?;
@@ -1945,6 +1984,29 @@ mod tests {
             ("1 Hz to MHz", ConversionError::InvalidWaveTarget),
             ("1 m to cm", ConversionError::InvalidWaveTarget),
             ("2e-308 nm", ConversionError::OutOfRange),
+        ] {
+            assert_eq!(convert_wave(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn calculates_wave_speed_from_frequency_and_wavelength_in_either_order() {
+        for (query, expected) in [
+            ("波速 1 kHz @ 34.3 cm", "343 m/s"),
+            ("速度 34.3 cm ＠ 1 kHz to km/h", "1234.8 km/h"),
+            ("SPEED 600 THz @ 500 nm to m/s", "300000000 m/s"),
+        ] {
+            assert_eq!(convert_wave(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("波速 1 kHz", ConversionError::InvalidWaveOperands),
+            ("波速 1 kHz @ 2 Hz", ConversionError::InvalidWaveOperands),
+            ("波速 0 cm @ 1 kHz", ConversionError::InvalidWaveOperands),
+            (
+                "波速 1 kHz @ 34.3 cm to kHz",
+                ConversionError::InvalidWaveSpeedTarget,
+            ),
+            ("波速 1e308 Hz @ 1e308 m", ConversionError::OutOfRange),
         ] {
             assert_eq!(convert_wave(query), Err(error), "{query}");
         }

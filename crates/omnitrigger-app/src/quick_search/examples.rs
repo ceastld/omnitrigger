@@ -1409,6 +1409,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "波长: 34.3 cm @ 343 m/s to kHz",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用频率与波长求传播速度",
+        query: "波长: 波速 1 kHz @ 34.3 cm",
+    },
+    Example {
         icon: Icon::Layers,
         title: "化简宽高比",
         query: "宽高比: 1920×1080",
@@ -4903,6 +4908,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if ["月初序列", "月末序列", "季初序列", "季末序列"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
+        Scope::Wave if "波速".starts_with(term) => {}
         Scope::DataPipeline
             if ["步骤csv", "逐行", "逐行csv", "csv列"]
                 .into_iter()
