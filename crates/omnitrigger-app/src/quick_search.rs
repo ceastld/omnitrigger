@@ -187,6 +187,7 @@ enum Results {
     Conversions(Vec<InputSuggestion>),
     ConversionTargets(Vec<InputSuggestion>),
     FileOptions(Vec<InputSuggestion>),
+    WindowOptions(Vec<InputSuggestion>),
     Bookmarks(Vec<InputSuggestion>),
     BookmarksUnavailable(String),
     BookmarkNameInput(Option<String>),
@@ -1228,6 +1229,7 @@ impl Results {
             | Self::Conversions(items)
             | Self::ConversionTargets(items)
             | Self::FileOptions(items)
+            | Self::WindowOptions(items)
             | Self::Bookmarks(items) => Some(&items.get(selected)?.expression),
             _ => None,
         }
@@ -1313,6 +1315,7 @@ impl Results {
                 132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
             Self::FileOptions(items)
+            | Self::WindowOptions(items)
             | Self::Bookmarks(items)
             | Self::Calculations(items)
             | Self::Conversions(items)
@@ -1955,6 +1958,7 @@ impl QuickSearch {
             && !matches!(
                 self.results,
                 Results::FileOptions(_)
+                    | Results::WindowOptions(_)
                     | Results::BookmarksUnavailable(_)
                     | Results::Value(Err(ValueError::InputTooLong))
             ))
@@ -2350,6 +2354,7 @@ impl QuickSearch {
                     | Results::Conversions(items)
                     | Results::ConversionTargets(items)
                     | Results::FileOptions(items)
+                    | Results::WindowOptions(items)
                     | Results::Bookmarks(items) => items.len(),
                     Results::Value(_)
                     | Results::RefilledInput
@@ -2384,6 +2389,7 @@ impl QuickSearch {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
             Results::FileOptions(items)
+            | Results::WindowOptions(items)
             | Results::Bookmarks(items)
             | Results::Calculations(items)
             | Results::Conversions(items) => (items.len(), EXAMPLE_PAGE_SIZE),
@@ -2803,7 +2809,7 @@ impl QuickSearch {
             Results::FileOptions(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("没有可追加的选项"),
-            Results::FileOptions(items) => {
+            Results::FileOptions(items) | Results::WindowOptions(items) => {
                 self.render_input_suggestions(items, Icon::Layers, EXAMPLE_PAGE_SIZE, cx)
             }
             Results::Bookmarks(items) if items.is_empty() => {

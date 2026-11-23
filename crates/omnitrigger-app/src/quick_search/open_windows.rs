@@ -8,7 +8,7 @@ use super::{
     csv_tools::csv_cell,
     examples::search_key,
     text_tools::{compare_natural, compile_regex},
-    title_rank, Destination, Results,
+    title_rank, Destination, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
 };
 
 const MAX_WINDOW_EXPORT_BYTES: usize = 1024 * 1024;
@@ -30,6 +30,7 @@ enum WindowQueryError {
     Filters,
     TitleRegex,
     Order,
+    Selection { kind: WindowSelection, start: usize },
 }
 
 impl WindowQueryError {
@@ -38,7 +39,51 @@ impl WindowQueryError {
             Self::Filters => "状态可用 已最小化 或 未最小化。进程和排除进程各填一个程序文件名，文件名含空格时加双引号。",
             Self::TitleRegex => "填写一个有效的标题正则表达式，含空格时用双引号包住。",
             Self::Order => "排序可用 标题 或 进程，每次查询可指定一种排序。",
+            Self::Selection { kind, .. } => match kind {
+                WindowSelection::State => Self::Filters.message(),
+                WindowSelection::Order => Self::Order.message(),
+            },
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WindowSelection {
+    State,
+    Order,
+}
+
+impl WindowSelection {
+    fn suggestions(self, query_prefix: &str, value_prefix: &str) -> Vec<InputSuggestion> {
+        let choices = match self {
+            Self::State => [
+                ("已最小化", "minimized", "只列出已最小化的窗口"),
+                ("未最小化", "not-minimized", "列出普通和最大化的窗口"),
+            ],
+            Self::Order => [
+                ("标题", "title", "按标题排列，编号按数值比较"),
+                ("进程", "process", "先按程序文件名排列，再按标题排列"),
+            ],
+        };
+        let prefix = search_key(value_prefix);
+        choices
+            .into_iter()
+            .filter_map(|(name, alias, detail)| {
+                let value = if name.starts_with(&prefix) {
+                    name
+                } else if alias.starts_with(&prefix) {
+                    alias
+                } else {
+                    return None;
+                };
+                let expression = format!("窗口: {query_prefix}{value}");
+                (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then(|| InputSuggestion {
+                    expression,
+                    label: Some(value),
+                    result: detail.to_owned(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -149,6 +194,15 @@ impl OpenWindowsIndex {
         };
         let filter = match window_query(filter) {
             Ok(filter) => filter,
+            Err(error @ WindowQueryError::Selection { kind, start }) => {
+                let (prefix, value) = query.split_at(query.len() - filter.len() + start);
+                let suggestions = kind.suggestions(prefix, value);
+                return if suggestions.is_empty() {
+                    Results::OpenWindowsUnavailable(error.message().into())
+                } else {
+                    Results::WindowOptions(suggestions)
+                };
+            }
             Err(error) => return Results::OpenWindowsUnavailable(error.message().into()),
         };
         let query = filter.terms.as_str();
@@ -258,6 +312,7 @@ fn export_windows<'a>(
 fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
     use WindowQueryError::{Filters, Order, TitleRegex};
 
+    let query_length = query.len();
     let mut process = None;
     let mut excluded_process = None;
     let mut minimized = None;
@@ -275,6 +330,12 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
                 minimized = Some(match search_key(state).as_str() {
                     "已最小化" | "minimized" => true,
                     "未最小化" | "not-minimized" => false,
+                    _ if rest.is_empty() => {
+                        return Err(WindowQueryError::Selection {
+                            kind: WindowSelection::State,
+                            start: query_length - input.len(),
+                        });
+                    }
                     _ => return Err(Filters),
                 });
                 query = rest.trim_start();
@@ -298,6 +359,12 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
                 order = Some(match search_key(value).as_str() {
                     "标题" | "title" => WindowOrder::Title,
                     "进程" | "process" => WindowOrder::Process,
+                    _ if rest.is_empty() => {
+                        return Err(WindowQueryError::Selection {
+                            kind: WindowSelection::Order,
+                            start: query_length - input.len(),
+                        });
+                    }
                     _ => return Err(Order),
                 });
                 query = rest.trim_start();
@@ -519,7 +586,7 @@ mod tests {
             index.results("输出=CSV 状态=已最小化 进程=notes.exe"),
             Results::Value(Ok(result)) if result.text == "标题,程序文件名"
         ));
-        for query in ["状态=", "状态=最大化", "状态=已最小化 state=not-minimized"] {
+        for query in ["状态=最大化", "状态=已最小化 state=not-minimized"] {
             assert!(matches!(
                 index.results(query),
                 Results::OpenWindowsUnavailable(_)
@@ -595,7 +662,7 @@ mod tests {
             index.results("输出=CSV 排序=标题 标题正则=^项目"),
             Results::Value(Ok(result)) if result.text == "标题,程序文件名"
         ));
-        for query in ["排序=", "排序=创建时间", "排序=标题 sort=process"] {
+        for query in ["排序=创建时间", "排序=标题 sort=process"] {
             assert!(
                 matches!(
                     index.results(query),
@@ -604,6 +671,39 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn suggests_window_filter_values_and_preserves_earlier_conditions_verbatim() {
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        let Results::WindowOptions(choices) =
+            index.results(r#"输出=CSV 进程="Example Tool.exe" 标题正则="^Budget Ａ" 排序＝"#)
+        else {
+            panic!("缺少窗口排序选项");
+        };
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0].expression,
+            r#"窗口: 输出=CSV 进程="Example Tool.exe" 标题正则="^Budget Ａ" 排序＝标题"#
+        );
+        assert_eq!(choices[1].label, Some("进程"));
+        let Results::WindowOptions(choices) = index.results("输出=JSON 状态=未") else {
+            panic!("缺少窗口状态选项");
+        };
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].expression, "窗口: 输出=JSON 状态=未最小化");
+        let Results::WindowOptions(choices) = index.results("output=csv SORT=pr") else {
+            panic!("缺少英文排序选项");
+        };
+        assert_eq!(choices[0].expression, "窗口: output=csv SORT=process");
+        assert!(matches!(
+            index.results(r#"标题正则="(^A 排序="#),
+            Results::OpenWindowsUnavailable(message) if message.contains("标题正则")
+        ));
+        assert!(matches!(
+            index.results("输出=CSV 状态=未最小化"),
+            Results::Value(Ok(value)) if value.text == "标题,程序文件名"
+        ));
     }
 
     #[test]
