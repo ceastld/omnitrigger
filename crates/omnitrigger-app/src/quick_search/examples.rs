@@ -865,6 +865,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把节拍时长换成时分秒格式",
+        query: r#"处理: ["节拍: 时长","时长:"] 120 BPM @ 3/2"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把逐行输入的值相加并输出精确分数",
         query: "处理: [\"文本: 按行拼接 \\\"+\\\"\",\"分数: 计算\"] 1/3\n1/6",
     },

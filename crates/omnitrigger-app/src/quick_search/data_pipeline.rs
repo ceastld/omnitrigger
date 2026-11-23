@@ -61,14 +61,28 @@ pub(super) fn transform_data_pipeline(
             return Err(error(STEP_SYNTAX));
         }
         let (scope, operation) = scoped_query(step.trim()).ok_or_else(|| error(STEP_SYNTAX))?;
-        let command = operation
-            .split_whitespace()
-            .next()
-            .ok_or_else(|| error(STEP_SYNTAX))?;
+        let command = operation.split_whitespace().next().unwrap_or_default();
+        if command.is_empty()
+            && !matches!(
+                scope,
+                Scope::Date
+                    | Scope::Duration
+                    | Scope::Radix
+                    | Scope::Pitch
+                    | Scope::Fraction
+                    | Scope::Statistics
+            )
+        {
+            return Err(error(STEP_SYNTAX));
+        }
         if command == "依次处理" || command.eq_ignore_ascii_case("pipeline") {
             return Err(error("请把子步骤直接写在同一个列表中"));
         }
-        let query = format!("{operation}\n{current}");
+        let query = if operation.is_empty() {
+            Cow::Borrowed(current.as_ref())
+        } else {
+            Cow::Owned(format!("{operation}\n{current}"))
+        };
         let output = match scope {
             Scope::TextTools => transform_text(&query).map_err(|cause| cause.message()),
             Scope::Csv => transform_csv(&query).map_err(|cause| cause.message()),
@@ -246,6 +260,18 @@ mod tests {
             run_pipeline(r#"["文本: 大写","分数: 计算"] tea"#),
             Err(DataPipelineError::Step { index: 2, .. })
         ));
+    }
+
+    #[test]
+    fn uses_the_default_operation_for_a_bare_numeric_scope() {
+        for (input, expected) in [
+            (r#"["节拍: 时长","时长:"] 120 BPM @ 3/2"#, "00:00:00.75"),
+            (r#"["JSON: 取值 /值","分数:"] {"值":0.250}"#, "1/4"),
+            (r#"["音高："] A4"#, "A4 · MIDI 69 · 440 Hz"),
+            (r#"["进制:"] ff 从 16 到 10"#, "255"),
+        ] {
+            assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
+        }
     }
 
     #[test]
