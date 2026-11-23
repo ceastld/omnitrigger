@@ -2476,6 +2476,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把 sRGB 颜色换算为 OKLab",
+        query: "颜色: #f00 to oklab",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算两个颜色的对比度",
         query: "对比度: #fff vs #000",
     },

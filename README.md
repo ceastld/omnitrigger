@@ -380,6 +380,7 @@
 - 输入 `颜色: #FF800080 to hsl` 得到 `hsl(30.118 100% 50% / 0.502)`。用 `to hex`、`to rgb` 或 `to hsl` 可指定输出格式。
 - 输入 `颜色: hwb(210 10% 20%)` 得到 `#1A73CC`，也可用 `to hwb` 输出色相、白度和黑度。白度和黑度各可输入 0 至 100 的数值或百分数。参见 [CSS Color 4 的 HWB 语法](https://www.w3.org/TR/css-color-4/#the-hwb-notation)。
 - 输入 `颜色: oklch(70% 25% 180 / 50%)` 得到带透明度的 `#4BB3A180`。用 `颜色: #f00 to oklch` 可反向换算。OKLCH 色度的 `100%` 对应 `0.4`，超出 sRGB 色域时会显示提示。 [CSS Color 4 的 OKLCH 语法](https://www.w3.org/TR/css-color-4/#the-oklch-notation)
+- 输入 `颜色: #f00 to oklab` 得到 `oklab(0.627955 0.224863 0.125846)`。也可输入 OKLab 色值换算为 HEX，支持带符号的 a、b 分量和透明度，a、b 的 `100%` 对应 `0.4`。超出 sRGB 色域时会显示提示。 [CSS Color 4 的 OKLab 语法](https://www.w3.org/TR/css-color-4/#the-oklab-notation)
 - 输入 `对比度: #fff vs #000` 会预览两个不透明颜色，并显示 `21:1`。计算采用 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)。
 - 输入 `颜色: #0080FF80 叠加 #fff` 得到 `#7FBFFF`。前一种颜色覆盖在后一种颜色上，也可用 `over`，按 sRGB 通道计算 [透明度叠加](https://www.w3.org/TR/compositing-1/#simplealphacompositing)。
 - 输入 `颜色: color-mix(in srgb, #fff 25%, #000)` 得到 `#404040`。搜索框按 8 位 sRGB 通道混合两个颜色，支持在色值前后指定百分比。两个比例都省略时各占 50%，都指定且总和低于 100% 时会保留相应的透明度。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
