@@ -214,8 +214,18 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
-        "匹配上下文" | "context-lines" => return match_line_context(text, false),
-        "正则上下文" | "regex-context-lines" => return match_line_context(text, true),
+        "匹配上下文" | "context-lines" => {
+            return match_line_context(text, false, LineContextOutput::Text)
+        }
+        "正则上下文" | "regex-context-lines" => {
+            return match_line_context(text, true, LineContextOutput::Text)
+        }
+        "匹配上下文csv" | "context-lines-csv" => {
+            return match_line_context(text, false, LineContextOutput::Csv)
+        }
+        "正则上下文csv" | "regex-context-lines-csv" => {
+            return match_line_context(text, true, LineContextOutput::Csv)
+        }
         "共有行" | "行交集" | "intersect-lines" => {
             return compare_line_sets(text, LineSetOperation::Intersection);
         }
@@ -1099,7 +1109,16 @@ fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextErr
     }))
 }
 
-fn match_line_context(input: &str, use_regex: bool) -> Result<String, TextError> {
+enum LineContextOutput {
+    Text,
+    Csv,
+}
+
+fn match_line_context(
+    input: &str,
+    use_regex: bool,
+    format: LineContextOutput,
+) -> Result<String, TextError> {
     let ((pattern, before, after), text) = json_argument_and_tail::<(String, usize, usize)>(input)
         .ok_or(TextError::LineContextArguments)?;
     if pattern.is_empty() {
@@ -1113,13 +1132,9 @@ fn match_line_context(input: &str, use_regex: bool) -> Result<String, TextError>
     }
     if use_regex {
         let regex = compile_regex(&pattern)?;
-        Ok(lines_around_matches(text, before, after, |line| {
-            regex.is_match(line)
-        }))
+        lines_around_matches(text, before, after, format, |line| regex.is_match(line))
     } else {
-        Ok(lines_around_matches(text, before, after, |line| {
-            line.contains(&pattern)
-        }))
+        lines_around_matches(text, before, after, format, |line| line.contains(&pattern))
     }
 }
 
@@ -1127,11 +1142,15 @@ fn lines_around_matches(
     text: &str,
     before: usize,
     after: usize,
+    format: LineContextOutput,
     matches: impl Fn(&str) -> bool,
-) -> String {
+) -> Result<String, TextError> {
     // 两个迭代器都只向前扫描，重叠的上下文只输出一次。
     let mut remaining = text.lines().enumerate().peekable();
-    let mut output = String::new();
+    let mut output = match format {
+        LineContextOutput::Text => String::new(),
+        LineContextOutput::Csv => "行号,命中,原文".to_owned(),
+    };
     let mut wrote_line = false;
     for (index, line) in text.lines().enumerate() {
         if !matches(line) {
@@ -1141,15 +1160,28 @@ fn lines_around_matches(
         let end = index.saturating_add(after);
         while let Some((row, line)) = remaining.next_if(|&(row, _)| row <= end) {
             if row >= start {
-                if wrote_line {
-                    output.push('\n');
+                match format {
+                    LineContextOutput::Text => {
+                        if wrote_line {
+                            output.push('\n');
+                        }
+                        output.push_str(line);
+                        wrote_line = true;
+                    }
+                    LineContextOutput::Csv => {
+                        let row_number = (row + 1).to_string();
+                        let hit = if matches(line) { "1" } else { "0" };
+                        append_bounded_csv_row(
+                            &mut output,
+                            [row_number.as_str(), hit, line].into_iter(),
+                            TextError::ResultTooLarge,
+                        )?;
+                    }
                 }
-                output.push_str(line);
-                wrote_line = true;
             }
         }
     }
-    output
+    Ok(output)
 }
 
 fn select_text_column(input: &str) -> Result<String, TextError> {
@@ -2609,6 +2641,25 @@ mod tests {
         assert_eq!(
             transform_text(r#"保留行 "" 内容"#),
             Err(TextError::EmptySearchText)
+        );
+    }
+
+    #[test]
+    fn exports_context_with_original_line_numbers_and_match_flags() {
+        assert_eq!(
+            transform_text(
+                "匹配上下文CSV [\"错误\",1,1] 起始\r\n请求\r\n错误,重试\r\n\r\n错误结束\r\n恢复\r\n完成",
+            )
+            .as_deref(),
+            Ok("行号,命中,原文\r\n2,0,请求\r\n3,1,\"错误,重试\"\r\n4,0,\"\"\r\n5,1,错误结束\r\n6,0,恢复"),
+        );
+        assert_eq!(
+            transform_text("正则上下文CSV [\"^WARN\",0,1] INFO 开始\nWARN 重试\n恢复").as_deref(),
+            Ok("行号,命中,原文\r\n2,1,WARN 重试\r\n3,0,恢复"),
+        );
+        assert_eq!(
+            transform_text("context-lines-csv [\"missing\",1,1] 无结果").as_deref(),
+            Ok("行号,命中,原文"),
         );
     }
 

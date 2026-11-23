@@ -2363,6 +2363,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "导出匹配行及上下文的原行号",
+        query: "文本: 匹配上下文CSV [\"错误\",1,1] 准备\n请求\n错误,重试\n恢复\n结束",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "排除含关键词的行",
         query: "文本: 排除行 \"错误\" 成功 A\n错误 B\n成功 C",
     },
@@ -2460,6 +2465,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按正则提取匹配行及前后的文本",
         query: "文本: 正则上下文 [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将正则命中和邻近行导出为 CSV",
+        query: "文本: 正则上下文CSV [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
     },
     Example {
         icon: Icon::Terminal,
