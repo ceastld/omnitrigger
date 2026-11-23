@@ -128,6 +128,7 @@ pub(super) enum CsvError {
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
+    ShiftedColumnArguments,
     MovingColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
@@ -290,6 +291,9 @@ impl CsvError {
             }
             Self::GroupCountColumnArguments => {
                 "填写新列名和分组列数组，例如 [\"记录数\",[\"部门\"]]"
+            }
+            Self::ShiftedColumnArguments => {
+                "填写新列名、来源列、正整数行距和分组列，例如 [\"上期编号\",\"编号\",1,[\"部门\"]]"
             }
             Self::MovingColumnArguments => {
                 "填写新列名、数值列、分组列和窗口大小，例如 [\"近两笔\",\"金额\",[\"部门\"],2]。窗口为 1 至 128"
@@ -463,6 +467,13 @@ enum Operation {
         name: String,
         source: ColumnReference,
         groups: Vec<ColumnReference>,
+    },
+    ShiftedColumn {
+        name: String,
+        source: ColumnReference,
+        distance: usize,
+        groups: Vec<ColumnReference>,
+        following: bool,
     },
     GroupCountColumn {
         name: String,
@@ -1254,6 +1265,24 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 }
             }
         }
+        kind @ ("前值列" | "lag-column" | "后值列" | "lead-column") => {
+            let ((name, source, distance, groups), data) =
+                json_argument_and_data::<(String, ColumnReference, usize, Vec<ColumnReference>)>(
+                    input,
+                    CsvError::ShiftedColumnArguments,
+                )?;
+            if distance == 0 {
+                return Err(CsvError::ShiftedColumnArguments);
+            }
+            input = data;
+            Operation::ShiftedColumn {
+                name,
+                source,
+                distance,
+                groups,
+                following: matches!(kind, "后值列" | "lead-column"),
+            }
+        }
         kind @ ("组内计数列" | "group-count-column" | "组内序号列" | "group-row-number-column") =>
         {
             let ((name, groups), data) = json_argument_and_data::<(String, Vec<ColumnReference>)>(
@@ -1789,6 +1818,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             source,
             groups,
         } => share_column(&rows, &name, source, &groups),
+        Operation::ShiftedColumn {
+            name,
+            source,
+            distance,
+            groups,
+            following,
+        } => shifted_csv_column(&rows, &name, source, distance, &groups, following),
         Operation::GroupCountColumn {
             name,
             groups,
@@ -3198,6 +3234,47 @@ fn share_column(
             cause: error.message(),
         })?;
         Ok(share.to_string())
+    })
+}
+
+fn shifted_csv_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    distance: usize,
+    groups: &[ColumnReference],
+    following: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::ShiftedColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, groups, CsvError::ShiftedColumnArguments)?;
+    let mut positions_by_group = HashMap::<_, Vec<usize>>::new();
+    for (index, record) in records.iter().enumerate() {
+        positions_by_group
+            .entry(column_key(record, &groups))
+            .or_default()
+            .push(index);
+    }
+    let mut shifted = vec![""; records.len()];
+    for positions in positions_by_group.values() {
+        for (position, &record_index) in positions.iter().enumerate() {
+            let target = if following {
+                position.checked_add(distance)
+            } else {
+                position.checked_sub(distance)
+            };
+            if let Some(&target) = target.and_then(|position| positions.get(position)) {
+                shifted[record_index] = &records[target][source];
+            }
+        }
+    }
+    let mut shifted = shifted.into_iter();
+    write_appended_column(header, records, name, |_| {
+        Ok(shifted.next().unwrap_or_default())
     })
 }
 
@@ -5335,6 +5412,32 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn appends_previous_or_following_csv_values_within_each_group() {
+        let data = "部门,编号\n研发,001\n销售,101\n研发,002\n销售,\n研发,003";
+        assert_eq!(
+            transform_csv(&format!(r#"前值列 ["上期",2,1,["部门"]] {data}"#)).as_deref(),
+            Ok("部门,编号,上期\r\n研发,001,\"\"\r\n销售,101,\"\"\r\n研发,002,001\r\n销售,\"\",101\r\n研发,003,002")
+        );
+        assert_eq!(
+            transform_csv(&format!(r#"lead-column ["下期","编号",1,[1]] {data}"#)).as_deref(),
+            Ok("部门,编号,下期\r\n研发,001,002\r\n销售,101,\"\"\r\n研发,002,003\r\n销售,\"\",\"\"\r\n研发,003,\"\"")
+        );
+        assert_eq!(
+            transform_csv("前值列 [\"之前\",1,2,[]] 编号\n001\n\"\"\n003\n004").as_deref(),
+            Ok("编号,之前\r\n001,\"\"\r\n\"\",\"\"\r\n003,001\r\n004,\"\"")
+        );
+        assert_eq!(
+            transform_csv("后值列 [\"之后\",1,0,[]] 编号"),
+            Err(CsvError::ShiftedColumnArguments)
+        );
+        let distant = format!("后值列 [\"之后\",1,{},[]] 编号\n001\n002", usize::MAX);
+        assert_eq!(
+            transform_csv(&distant).as_deref(),
+            Ok("编号,之后\r\n001,\"\"\r\n002,\"\"")
+        );
     }
 
     #[test]

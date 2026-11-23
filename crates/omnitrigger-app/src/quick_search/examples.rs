@@ -3224,6 +3224,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从同组前一行取值并追加到 CSV",
+        query: "CSV: 前值列 [\"上期\",2,1,[\"部门\"]] 部门,编号\n研发,001\n销售,101\n研发,002\n销售,\n研发,003",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "从同组后一行取值并追加到 CSV",
+        query: "CSV: 后值列 [\"下期\",2,1,[\"部门\"]] 部门,编号\n研发,001\n销售,101\n研发,002\n销售,\n研发,003",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按组逐行求 CSV 的累计平均值",
         query: "CSV: 累计平均列 [\"累计平均\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },
