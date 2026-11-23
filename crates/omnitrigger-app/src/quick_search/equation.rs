@@ -26,6 +26,7 @@ const MAX_FUNCTION_INPUTS: usize = 64;
 const MAX_COMPARED_FUNCTIONS: usize = 4;
 const BISECTION_ITERATIONS: usize = 128;
 const BISECTION_RESIDUAL_RATIO: f64 = 1e-8;
+const MAX_SAMPLED_BISECTIONS: usize = 8;
 const MAX_INTEGRAL_INTERVALS: u32 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +51,7 @@ pub(super) enum EquationError {
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
+    TooManySampledBrackets,
     NumericIntegralArguments,
     NumericIntegralIntervals,
     NumericDerivativeArguments,
@@ -106,6 +108,7 @@ impl EquationError {
             }
             Self::BisectionSameSign => "两端的函数值须异号，或者一端的函数值等于零",
             Self::BisectionResidual => "区间已缩小，函数值仍未接近零。请检查函数是否连续或缩小区间",
+            Self::TooManySampledBrackets => "异号区间超过 8 个，请缩小范围或先用找异号区间",
             Self::NumericIntegralArguments => {
                 "填写被积算式和两个不同的端点，分号后可填 2 至 128 之间的偶数"
             }
@@ -166,6 +169,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "采样极值" | "sample-extrema" => return sampled_function_extrema(arguments),
             "找异号区间" | "sign-change-intervals" => return sampled_sign_changes(arguments),
+            "搜索零点" | "search-roots" => return refine_sampled_roots(arguments),
             "函数值" | "function-values" => {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
@@ -697,6 +701,14 @@ fn has_x_function_label(label: &str) -> bool {
 fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
     let invalid = EquationError::FunctionSampleArguments;
     let (expression, bounds) = split_function_arguments(input, invalid)?;
+    collect_function_samples(expression, bounds, invalid)
+}
+
+fn collect_function_samples(
+    expression: &str,
+    bounds: &str,
+    invalid: EquationError,
+) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
     sampled_coordinates(bounds, invalid)?
         .map(|x| Ok((x, function_sample_value(expression, x)?)))
         .collect()
@@ -863,13 +875,21 @@ fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, Equati
     sample_at_x(expression, x).map_err(EquationError::Approximation)
 }
 
-fn sampled_sign_changes(input: &str) -> Result<String, EquationError> {
-    let samples = function_sample_points(input)?;
+enum SampledRootCandidate {
+    Zero(f64),
+    Bracket([(f64, f64); 2]),
+}
+
+const NO_SAMPLED_ROOT_CANDIDATES: &str = "采样点中未发现零值或相邻异号值";
+
+fn sampled_root_candidates(
+    samples: Vec<(f64, Option<f64>)>,
+) -> Result<Vec<SampledRootCandidate>, EquationError> {
     if samples.iter().all(|(_, y)| y.is_none()) {
         return Err(EquationError::FunctionSampleHasNoValues);
     }
     let mut previous: Option<(f64, f64)> = None;
-    let mut rows = vec!["类型,左端点,右端点".to_owned()];
+    let mut candidates = Vec::new();
     for (x, y) in samples {
         let Some(y) = y else {
             previous = None;
@@ -879,24 +899,91 @@ fn sampled_sign_changes(input: &str) -> Result<String, EquationError> {
             continue;
         }
         if y == 0.0 {
-            let zero = format_coordinate(x);
-            rows.push(format!("采样值为零,{zero},{zero}"));
-        } else if let Some((left, _)) = previous.filter(|&(_, previous_y)| {
+            candidates.push(SampledRootCandidate::Zero(x));
+        } else if let Some(left) = previous.filter(|&(_, previous_y)| {
             previous_y != 0.0 && previous_y.is_sign_negative() != y.is_sign_negative()
         }) {
-            rows.push(format!(
-                "相邻样值异号,{},{}",
-                format_coordinate(left),
-                format_coordinate(x)
-            ));
+            candidates.push(SampledRootCandidate::Bracket([left, (x, y)]));
         }
         previous = Some((x, y));
     }
-    Ok(if rows.len() == 1 {
-        "采样点中未发现零值或相邻异号值".to_owned()
-    } else {
-        rows.join("\r\n")
-    })
+    Ok(candidates)
+}
+
+fn sampled_sign_changes(input: &str) -> Result<String, EquationError> {
+    let candidates = sampled_root_candidates(function_sample_points(input)?)?;
+    if candidates.is_empty() {
+        return Ok(NO_SAMPLED_ROOT_CANDIDATES.to_owned());
+    }
+    let mut rows = vec!["类型,左端点,右端点".to_owned()];
+    for candidate in candidates {
+        rows.push(match candidate {
+            SampledRootCandidate::Zero(x) => {
+                let zero = format_coordinate(x);
+                format!("采样值为零,{zero},{zero}")
+            }
+            SampledRootCandidate::Bracket([(left, _), (right, _)]) => {
+                format!(
+                    "相邻样值异号,{},{}",
+                    format_coordinate(left),
+                    format_coordinate(right)
+                )
+            }
+        });
+    }
+    Ok(rows.join("\r\n"))
+}
+
+fn refine_sampled_roots(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::FunctionSampleArguments;
+    let (expression, bounds) = split_function_arguments(input, invalid)?;
+    let candidates =
+        sampled_root_candidates(collect_function_samples(expression, bounds, invalid)?)?;
+    if candidates.is_empty() {
+        return Ok(NO_SAMPLED_ROOT_CANDIDATES.to_owned());
+    }
+    let brackets = candidates
+        .iter()
+        .filter(|candidate| matches!(candidate, SampledRootCandidate::Bracket(_)))
+        .count();
+    if brackets > MAX_SAMPLED_BISECTIONS {
+        return Err(EquationError::TooManySampledBrackets);
+    }
+    let value_at = |x| evaluate_at_x(expression, x).map_err(EquationError::Approximation);
+    let mut csv = String::from("横坐标,残差,左端点,右端点,状态");
+    for candidate in candidates {
+        let ([left, right], root, status) = match candidate {
+            SampledRootCandidate::Zero(x) => ([x, x], Some((x, 0.0)), "采样值为零"),
+            SampledRootCandidate::Bracket(bounds) => {
+                let range = [bounds[0].0, bounds[1].0];
+                match bisect_root(bounds, value_at) {
+                    Ok(root) => (range, Some(root), "近似根"),
+                    Err(EquationError::BisectionResidual) => (range, None, "残差未收敛"),
+                    Err(EquationError::Approximation(
+                        error @ (CalculationError::DivisionByZero
+                        | CalculationError::FunctionDomain
+                        | CalculationError::OutOfRange),
+                    )) => (range, None, error.message()),
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        let (x, residual) = match root {
+            Some((x, residual)) => (
+                format_coordinate(x),
+                format_result(residual).map_err(EquationError::Approximation)?,
+            ),
+            None => (String::new(), String::new()),
+        };
+        let left = format_coordinate(left);
+        let right = format_coordinate(right);
+        append_bounded_csv_row(
+            &mut csv,
+            [x.as_str(), residual.as_str(), &left, &right, status].into_iter(),
+            invalid,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn sampled_function_extrema(input: &str) -> Result<String, EquationError> {
@@ -975,7 +1062,7 @@ fn split_equation_interval(input: &str) -> Option<(&str, &str)> {
 fn bisect_function_root(input: &str) -> Result<String, EquationError> {
     let invalid = EquationError::BisectionArguments;
     let (expression, interval) = split_function_arguments(input, invalid)?;
-    let [mut left, mut right] = function_interval(interval, invalid)?;
+    let [left, right] = function_interval(interval, invalid)?;
     let expression = expression
         .strip_prefix('=')
         .unwrap_or(expression)
@@ -1010,13 +1097,21 @@ fn bisect_function_root(input: &str) -> Result<String, EquationError> {
         }
         Ok(residual)
     };
-    let mut left_value = value_at(left)?;
-    let mut right_value = value_at(right)?;
+    let bounds = [(left, value_at(left)?), (right, value_at(right)?)];
+    let (x, residual) = bisect_root(bounds, value_at)?;
+    format_bisection_result(x, residual, residual_name)
+}
+
+fn bisect_root(
+    bounds: [(f64, f64); 2],
+    value_at: impl Fn(f64) -> Result<f64, EquationError>,
+) -> Result<(f64, f64), EquationError> {
+    let [(mut left, mut left_value), (mut right, mut right_value)] = bounds;
     if left_value == 0.0 {
-        return format_bisection_result(left, 0.0, residual_name);
+        return Ok((left, 0.0));
     }
     if right_value == 0.0 {
-        return format_bisection_result(right, 0.0, residual_name);
+        return Ok((right, 0.0));
     }
     if left_value.is_sign_negative() == right_value.is_sign_negative() {
         return Err(EquationError::BisectionSameSign);
@@ -1029,7 +1124,7 @@ fn bisect_function_root(input: &str) -> Result<String, EquationError> {
         }
         let value = value_at(middle)?;
         if value == 0.0 {
-            return format_bisection_result(middle, 0.0, residual_name);
+            return Ok((middle, 0.0));
         }
         if value.is_sign_negative() == left_value.is_sign_negative() {
             (left, left_value) = (middle, value);
@@ -1045,7 +1140,7 @@ fn bisect_function_root(input: &str) -> Result<String, EquationError> {
     if residual / initial_residual > BISECTION_RESIDUAL_RATIO {
         return Err(EquationError::BisectionResidual);
     }
-    format_bisection_result(x, residual, residual_name)
+    Ok((x, residual))
 }
 
 fn format_bisection_result(
@@ -2388,6 +2483,34 @@ mod tests {
         assert_eq!(
             solve_equation(&over_limit),
             Err(EquationError::FunctionValuesArguments)
+        );
+    }
+
+    #[test]
+    fn refines_several_sampled_root_intervals_and_reports_unresolved_jumps() {
+        let text = solve_equation("搜索零点 x²-2 @ -2..2; 5").unwrap();
+        let roots: Vec<_> = text
+            .lines()
+            .skip(1)
+            .map(|line| {
+                assert!(line.ends_with(",近似根"));
+                line.split_once(',').unwrap().0.parse::<f64>().unwrap()
+            })
+            .collect();
+        assert_eq!(roots.len(), 2);
+        assert!((roots[0] + 2.0_f64.sqrt()).abs() < 1e-14);
+        assert!((roots[1] - 2.0_f64.sqrt()).abs() < 1e-14);
+        assert_eq!(
+            solve_equation("search-roots x @ -1..1; 3").as_deref(),
+            Ok("横坐标,残差,左端点,右端点,状态\r\n0,0,0,0,采样值为零")
+        );
+        assert_eq!(
+            solve_equation("搜索零点 floor(x)-0.5 @ 0..2; 5").as_deref(),
+            Ok("横坐标,残差,左端点,右端点,状态\r\n\"\",\"\",0.5,1,残差未收敛")
+        );
+        assert_eq!(
+            solve_equation("搜索零点 cosd(180*x) @ 0..9; 10"),
+            Err(EquationError::TooManySampledBrackets)
         );
     }
 

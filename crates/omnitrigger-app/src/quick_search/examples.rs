@@ -246,6 +246,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "先采样再二分求出多个近似零点",
+        query: "方程: 搜索零点 x²-2 @ -2..2; 5",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "绘制计算器函数在指定区间的近似采样图",
         query: "方程: 采样图 cosd(x) @ 0 到 360; 33",
     },
@@ -5451,6 +5456,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "函数采样",
             "采样极值",
             "找异号区间",
+            "搜索零点",
             "采样图",
             "函数值",
             "函数对照",
