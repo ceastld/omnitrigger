@@ -175,6 +175,7 @@ pub(super) enum CsvError {
     FunctionBinEmpty,
     FunctionRankArguments,
     FunctionSummaryArguments,
+    FunctionGroupSummaryArguments,
     FunctionSummaryRange,
     FunctionColumnLimit,
     ComputedDivisionByZero,
@@ -418,6 +419,9 @@ impl CsvError {
             }
             Self::FunctionSummaryArguments => {
                 "填写一至两列和算式，例如 [[1,2],\"cosd(x)*y\"]"
+            }
+            Self::FunctionGroupSummaryArguments => {
+                "填写分组列、一至两列来源和算式，例如 [[\"部门\"],[2,3],\"x*y\"]"
             }
             Self::FunctionSummaryRange => "函数统计结果超出计算范围",
             Self::FunctionColumnLimit => "CSV 函数运算每次最多处理 128 条数据",
@@ -1040,6 +1044,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         "函数排名列" | "rank-function-column" => return rank_function_rows(input),
         "函数摘要" | "summary-function" => return summarize_function_rows(input),
+        "函数分组摘要" | "group-function-summary" => {
+            return summarize_grouped_function_rows(input)
+        }
         operation if is_scatter_operation(operation) => {
             return parse_scatter_table(input)?.to_csv();
         }
@@ -4178,6 +4185,16 @@ fn rank_function_rows(input: &str) -> Result<String, CsvError> {
     write_csv_ranks(&rows[0], &rows[1..], &name, ranks)
 }
 
+const FUNCTION_SUMMARY_COLUMNS: [&str; 7] = [
+    "数据行",
+    "有效",
+    "空值",
+    "最小值",
+    "最大值",
+    "平均值",
+    "中位数",
+];
+
 fn summarize_function_rows(input: &str) -> Result<String, CsvError> {
     let invalid = CsvError::FunctionSummaryArguments;
     let ((columns, expression), data) =
@@ -4185,12 +4202,64 @@ fn summarize_function_rows(input: &str) -> Result<String, CsvError> {
     let FunctionRows { values, .. } = read_function_rows(data, &columns, &expression, invalid)?;
     let total = values.len();
     let values: Vec<_> = values.into_iter().flatten().collect();
+    let fields = function_summary_fields(total, &values)?;
+    let mut csv = FUNCTION_SUMMARY_COLUMNS.join(",");
+    append_bounded_csv_row(
+        &mut csv,
+        fields.iter().map(String::as_str),
+        CsvError::StatisticsOutputTooLarge,
+    )?;
+    Ok(csv)
+}
+
+fn summarize_grouped_function_rows(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::FunctionGroupSummaryArguments;
+    let ((groups, columns, expression), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, Vec<ColumnReference>, String)>(
+            input, invalid,
+        )?;
+    if groups.is_empty() {
+        return Err(invalid);
+    }
+    let FunctionRows { rows, values } = read_function_rows(data, &columns, &expression, invalid)?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let groups = resolve_distinct_columns(header, &groups, invalid)?;
+    let mut csv = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(
+        &mut csv,
+        groups
+            .iter()
+            .map(|&index| header[index].as_str())
+            .chain(FUNCTION_SUMMARY_COLUMNS),
+        limit,
+    )?;
+    for positions in grouped_row_positions(records, &groups) {
+        let key = &records[positions[0]];
+        let finite: Vec<_> = positions
+            .iter()
+            .filter_map(|&index| values[index])
+            .collect();
+        let fields = function_summary_fields(positions.len(), &finite)?;
+        append_bounded_csv_row(
+            &mut csv,
+            groups
+                .iter()
+                .map(|&index| key[index].as_str())
+                .chain(fields.iter().map(String::as_str)),
+            limit,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn function_summary_fields(total: usize, values: &[f64]) -> Result<Vec<String>, CsvError> {
     let count = values.len();
     let stats = [
         values.iter().copied().min_by(f64::total_cmp),
         values.iter().copied().max_by(f64::total_cmp),
-        (count > 0).then(|| average(&values)),
-        (count > 0).then(|| median(&values)),
+        (count > 0).then(|| average(values)),
+        (count > 0).then(|| median(values)),
     ];
     let mut row = vec![
         total.to_string(),
@@ -4206,13 +4275,7 @@ fn summarize_function_rows(input: &str) -> Result<String, CsvError> {
                 .unwrap_or_default(),
         );
     }
-    let mut csv = String::from("数据行,有效,空值,最小值,最大值,平均值,中位数");
-    append_bounded_csv_row(
-        &mut csv,
-        row.iter().map(String::as_str),
-        CsvError::FunctionSummaryRange,
-    )?;
-    Ok(csv)
+    Ok(row)
 }
 
 struct FunctionRows {
@@ -9773,6 +9836,23 @@ null"#
         assert_eq!(
             transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
             Err(CsvError::NumericComparisonColumnArguments)
+        );
+    }
+
+    #[test]
+    fn summarizes_function_values_by_existing_group_keys_in_source_order() {
+        let input = "函数分组摘要 [[1,\"月份\"],[3,4],\"x*y\"] 部门,月份,x,y\n\"西,区\",11,2,3\n东,11,-1,1\n\"西,区\",11,4,2\n\"西,区\",12,,\n东,11,,";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("部门,月份,数据行,有效,空值,最小值,最大值,平均值,中位数\r\n\"西,区\",11,2,2,0,6,8,7,7\r\n东,11,2,1,1,-1,-1,-1,-1\r\n\"西,区\",12,1,0,1,\"\",\"\",\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("group-function-summary [[1],[2],\"sqrt(x)\"] 组,数值").as_deref(),
+            Ok("组,数据行,有效,空值,最小值,最大值,平均值,中位数")
+        );
+        assert_eq!(
+            transform_csv("函数分组摘要 [[1,\"组\"],[2],\"x\"] 组,数值\n甲,1"),
+            Err(CsvError::FunctionGroupSummaryArguments)
         );
     }
 

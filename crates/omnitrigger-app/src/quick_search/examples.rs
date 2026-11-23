@@ -4273,6 +4273,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "先按部门分组，再汇总每组的函数值",
+        query: "CSV: 函数分组摘要 [[\"部门\"],[\"数量\",\"单价\"],\"x*y\"]\n部门,数量,单价\n甲,1,5\n乙,2,3\n甲,4,5\n乙,,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计 CSV 函数值落入各区间的次数和频率",
         query: "CSV: 函数分箱 [[1,2],\"x*y\",\"0,1/2,2\"]\n量,系数\n-1,2\n0,1\n1/2,1\n2,1",
     },
