@@ -18,7 +18,9 @@ pub(super) enum SolidError {
 impl SolidError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Arguments => "填写圆柱或圆锥 半径,高、球 半径、立方体 边长或长方体 长,宽,高",
+            Self::Arguments => {
+                "填写圆柱或圆锥 半径,高、圆台 半径,半径,高、球 半径、立方体 边长或长方体 长,宽,高"
+            }
             Self::NonPositiveDimension => "每项尺寸须大于零",
             Self::Evaluation(error) => error.message(),
         }
@@ -42,6 +44,9 @@ pub(super) fn calculate_solid(query: &str) -> Result<String, SolidError> {
                 (surface, volume, true)
             }
             ("圆锥" | "cone", [radius, height]) => return cone(radius, height),
+            ("圆台" | "圆锥台" | "frustum", [first, second, height]) => {
+                return conical_frustum(first, second, height);
+            }
             ("球" | "球体" | "sphere", [radius]) => {
                 let radius = positive_dimension(radius)?;
                 let surface = &radius * &radius * BigInt::from(4);
@@ -81,6 +86,27 @@ fn cone(radius: &str, height: &str) -> Result<String, SolidError> {
     let base = &radius * &radius;
     let lateral_square = &base * (&base + &height * &height);
     let volume = &base * height / BigInt::from(3);
+    format_circular_solid(base, lateral_square, volume)
+}
+
+fn conical_frustum(first: &str, second: &str, height: &str) -> Result<String, SolidError> {
+    let first = positive_dimension(first)?;
+    let second = positive_dimension(second)?;
+    let height = positive_dimension(height)?;
+    let base = &first * &first + &second * &second;
+    let radius_sum = &first + &second;
+    let radius_difference = &first - &second;
+    let slant_square = &radius_difference * &radius_difference + &height * &height;
+    let lateral_square = &radius_sum * &radius_sum * slant_square;
+    let volume = (&base + first * second) * height / BigInt::from(3);
+    format_circular_solid(base, lateral_square, volume)
+}
+
+fn format_circular_solid(
+    base: BigRational,
+    lateral_square: BigRational,
+    volume: BigRational,
+) -> Result<String, SolidError> {
     for value in [&base, &lateral_square, &volume] {
         ensure_exact_size(value).map_err(SolidError::Evaluation)?;
     }
@@ -116,6 +142,10 @@ mod tests {
             ("圆锥 3,4", "表面积 24π · 体积 12π"),
             ("圆锥 1,1", "表面积 π(1 + √2) · 体积 π/3"),
             ("CONE 3/2,2", "表面积 6π · 体积 3π/2"),
+            ("圆台 2,5,4", "表面积 64π · 体积 52π"),
+            ("FRUSTUM 5,2,4", "表面积 64π · 体积 52π"),
+            ("圆台 2,1,1", "表面积 π(5 + √18) · 体积 7π/3"),
+            ("圆台 2,2,3", "表面积 20π · 体积 12π"),
             ("ＣＹＬＩＮＤＥＲ １／２，３", "表面积 7π/2 · 体积 3π/4"),
             ("球 1/2", "表面积 π · 体积 π/6"),
             ("sphere 3", "表面积 36π · 体积 36π"),
@@ -135,6 +165,10 @@ mod tests {
         );
         assert_eq!(
             calculate_solid("圆锥 0,4"),
+            Err(SolidError::NonPositiveDimension)
+        );
+        assert_eq!(
+            calculate_solid("圆台 2,-1,4"),
             Err(SolidError::NonPositiveDimension)
         );
         assert_eq!(calculate_solid("长方体 1,2"), Err(SolidError::Arguments));
