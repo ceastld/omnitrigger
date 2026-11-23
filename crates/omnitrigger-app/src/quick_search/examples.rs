@@ -1502,6 +1502,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算一阶 RC 低通增益和相位",
+        query: "电路: RC低通 1 kΩ,1 μF @ (1/(2*pi*0.001)) Hz",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算一阶 RC 高通增益和相位",
+        query: "电路: RC高通 1 kΩ,1 μF @ 1 kHz",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "导出一阶 RC 低通在多个频率的响应",
+        query: "电路: RC低通表 1 kΩ,1 μF @ [\"0 Hz\",\"100 Hz\",\"1 kHz\"]",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "导出一阶 RC 高通在多个频率的响应",
+        query: "电路: RC高通表 1 kΩ,1 μF @ [\"0 Hz\",\"100 Hz\",\"1 kHz\"]",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按功率和用时计算耗电量",
         query: "电路: 耗电 1.5 kW @ 2h",
     },
@@ -4932,6 +4952,10 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "RC放电",
             "RC电容",
             "RC电阻",
+            "RC低通",
+            "RC高通",
+            "RC低通表",
+            "RC高通表",
             "耗电",
             "电池能量",
         ],

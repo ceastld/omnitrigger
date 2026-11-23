@@ -378,6 +378,8 @@
 - 输入 `电路: RC 1 kΩ,1 μF` 可求一阶 RC 电路的时间常数 `1 ms` 和截止频率约 `159.15 Hz`。先填电阻，再填法拉、毫法、微法、纳法或皮法的电容值。 [科罗拉多大学博尔德分校的 RC 滤波实验](https://physicslabs.colorado.edu/courses/phys-3330/lab-guides/lab3/)
 - 输入 `电路: RC充电 50% @ 1 kΩ,1 μF` 得到约 `693.15 μs`，即从零充到稳态电压的一半所需的时间。用 `电路: RC放电 25% @ 1 kΩ,1 μF` 得到约 `1.386 ms`，即放电至初始电压四分之一的时间。比例可写成分数，充电比例须小于 100%，放电剩余比例须大于零。 [OpenStax RC 电路](https://openstax.org/books/university-physics-volume-2/pages/10-5-rc-circuits)
 - 输入 `电路: RC电容 1 kΩ @ 1 kHz` 得到约 `159.15 nF`，用 `电路: RC电阻 100 nF @ 1 kHz` 得到约 `1.592 kΩ`。在 `@` 前填已知的元件值，可按一阶 RC 模型和截止频率求出另一个元件的理论值。 [科罗拉多大学博尔德分校的截止频率公式](https://physicslabs.colorado.edu/courses/phys-3330/lab-guides/lab3/)
+- 用 `电路: RC低通 1 kΩ,1 μF @ 1 kHz` 或 `RC高通` 可求一阶 RC 电路在指定频率下的电压幅值比、分贝增益和相位角。低通取电容两端输出，高通取电阻两端输出。截止频率处的幅值比约为 `0.7071`，低通相位为 `−45°`，高通为 `45°`。 [科罗拉多大学博尔德分校的 RC 滤波实验](https://physicslabs.colorado.edu/courses/phys-3330/lab-guides/lab3/)
+- 用 `电路: RC低通表 1 kΩ,1 μF @ ["0 Hz","100 Hz","1 kHz"]` 或 `RC高通表` 可按输入顺序导出多频点响应。频率列表可写 1 至 32 项，结果包括幅值比、分贝增益和相位角。高通在零频率处的相位留空。
 - 输入 `电路: 耗电 1.5 kW @ 2h` 得到 `3 kWh`。用功率乘以时长，适用于恒定功率。时长也可写成 `30min` 或 `01:30:00`。结果满 1000 Wh 时用 kWh 表示。
 - 输入 `电路: 电池能量 2500 mAh @ 3.7 V` 得到 `9.25 Wh`。计算按安时容量乘以标称电压，容量可填 `Ah` 或 `mAh`。结果满 1000 Wh 时用 kWh 显示。 [FAA 电池能量换算公式](https://www.faa.gov/sites/faa.gov/files/2024-Interactive%20Guide%20to%20Shipping%20Litihum%20Batteries.pdf)
 - 单位可紧跟括号内的算式。例如 `(2**10)B to KiB` 得到 `1 KiB`，`((2 + 1/2) * 2)km to m` 得到 `5000 m`。只输入带单位的算式，也可选择换算目标。

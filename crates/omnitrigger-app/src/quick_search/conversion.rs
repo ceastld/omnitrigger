@@ -1,4 +1,4 @@
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{LN_10, PI, TAU};
 
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -6,6 +6,7 @@ use num_rational::BigRational;
 use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
 use super::batch::{map_batch_csv, map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
+use super::csv_tools::csv_cell;
 use super::duration::{convert_duration, elapsed_duration, DurationError};
 use super::fraction::{
     calculate_fraction, ensure_exact_size, format_significant_digits, parse_fraction_literal,
@@ -47,6 +48,8 @@ pub(super) enum ConversionError {
     InvalidRcCharge,
     InvalidRcDischarge,
     InvalidRcDesign,
+    InvalidRcResponse,
+    InvalidRcResponseTable,
     InvalidEnergyUse,
     InvalidBatteryEnergy,
     InvalidPeriod,
@@ -103,6 +106,12 @@ impl ConversionError {
             Self::InvalidRcCharge => "输入低于 100% 的目标充电比例，例如 RC充电 50% @ 1 kΩ,1 μF",
             Self::InvalidRcDischarge => "输入大于零的剩余比例，例如 RC放电 25% @ 1 kΩ,1 μF",
             Self::InvalidRcDesign => "输入已知元件和截止频率，例如 RC电容 1 kΩ @ 1 kHz",
+            Self::InvalidRcResponse => {
+                "填写正电阻、正电容和非负频率，例如 RC低通 1 kΩ,1 μF @ 1 kHz"
+            }
+            Self::InvalidRcResponseTable => {
+                "填写电阻、电容和 1 至 32 个频率，例如 1 kΩ,1 μF @ [\"10 Hz\",\"1 kHz\"]"
+            }
             Self::InvalidEnergyUse => "填写非负功率和用时，例如 耗电 1.5 kW @ 2h",
             Self::InvalidBatteryEnergy => "填写容量和标称电压，例如 电池能量 2500 mAh @ 3.7 V",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
@@ -1043,6 +1052,10 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
             "rc放电" | "rc-discharge" => return calculate_rc_transition(values, false),
             "rc电容" | "rc-capacitance" => return calculate_rc_component(values, false),
             "rc电阻" | "rc-resistance" => return calculate_rc_component(values, true),
+            "rc低通" | "rc-low-pass" => return calculate_rc_response(values, false),
+            "rc高通" | "rc-high-pass" => return calculate_rc_response(values, true),
+            "rc低通表" | "rc-low-pass-table" => return rc_response_table(values, false),
+            "rc高通表" | "rc-high-pass-table" => return rc_response_table(values, true),
             "耗电" | "energy-use" => return calculate_energy_use(values),
             "电池能量" | "battery-energy" => return calculate_battery_energy(values),
             _ => {}
@@ -1211,6 +1224,73 @@ fn calculate_rc_filter(input: &str) -> Result<String, ConversionError> {
     let frequency =
         format_positive_quantity(frequency, &Unit::parse(default_frequency_unit(frequency))?)?;
     Ok(format!("{time} · {frequency}"))
+}
+
+fn calculate_rc_response(input: &str, high_pass: bool) -> Result<String, ConversionError> {
+    let (tau, frequency) = rc_response_arguments(input)?;
+    let [amplitude, decibels, phase] = rc_response_at(tau, frequency, high_pass)?;
+    let phase = if phase.is_empty() {
+        "相位未定义".to_owned()
+    } else {
+        format!("{phase}°")
+    };
+    Ok(format!("{amplitude} · {decibels} dB · {phase}"))
+}
+
+fn rc_response_table(input: &str, high_pass: bool) -> Result<String, ConversionError> {
+    let (tau, frequencies) = rc_response_arguments(input)?;
+    let frequencies = serde_json::from_str::<Vec<String>>(frequencies)
+        .map_err(|_| ConversionError::InvalidRcResponseTable)?;
+    if !(1..=32).contains(&frequencies.len()) {
+        return Err(ConversionError::InvalidRcResponseTable);
+    }
+    let mut output = String::from("频率,幅值比,增益dB,相位°");
+    for frequency in frequencies {
+        let [amplitude, decibels, phase] = rc_response_at(tau, &frequency, high_pass)?;
+        let frequency = csv_cell(&frequency);
+        let phase = csv_cell(&phase);
+        output.push_str(&format!("\r\n{frequency},{amplitude},{decibels},{phase}"));
+    }
+    Ok(output)
+}
+
+fn rc_response_arguments(input: &str) -> Result<(f64, &str), ConversionError> {
+    let invalid = ConversionError::InvalidRcResponse;
+    let (components, frequency) = input.split_once('@').ok_or(invalid)?;
+    let tau = rc_time_constant(components).map_err(|error| match error {
+        ConversionError::InvalidRcFilter => invalid,
+        _ => error,
+    })?;
+    Ok((tau, frequency))
+}
+
+fn rc_response_at(tau: f64, input: &str, high_pass: bool) -> Result<[String; 3], ConversionError> {
+    let invalid = ConversionError::InvalidRcResponse;
+    let (frequency, unit) = parse_quantity(input.trim()).map_err(|_| invalid)?;
+    if frequency < 0.0 || unit.dimension != Dimension::Frequency {
+        return Err(invalid);
+    }
+    if frequency == 0.0 {
+        let parts = if high_pass {
+            ["0", "−∞", ""]
+        } else {
+            ["1", "0", "0"]
+        };
+        return Ok(parts.map(str::to_owned));
+    }
+    let log_omega_tau = TAU.ln() + tau.ln() + frequency.ln() + unit.scale.ln();
+    let (log_ratio, phase_sign) = if high_pass {
+        (-log_omega_tau, 1.0)
+    } else {
+        (log_omega_tau, -1.0)
+    };
+    // 对数形式避免极端频率下溢出，并保留通带内的小衰减。
+    let loss = log_ratio.max(0.0) + (-2.0 * log_ratio.abs()).exp().ln_1p() / 2.0;
+    let display = |number| format_result(number).map_err(|_| ConversionError::OutOfRange);
+    let amplitude = display((-loss).exp())?;
+    let decibels = display(-20.0 * loss / LN_10)?;
+    let phase = display(phase_sign * log_ratio.exp().atan().to_degrees())?;
+    Ok([amplitude, decibels, phase])
 }
 
 fn calculate_rc_transition(input: &str, charging: bool) -> Result<String, ConversionError> {
@@ -2897,6 +2977,58 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn exports_rc_responses_in_frequency_order_with_a_blank_phase_at_dc() {
+        let input = r#"RC高通表 1 kΩ,1 μF @ ["0 Hz","(1/(2*pi*0.001)) Hz","0 kHz"]"#;
+        let result = calculate_circuit(input).unwrap();
+        let rows: Vec<_> = result.split("\r\n").collect();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], "频率,幅值比,增益dB,相位°");
+        assert_eq!(rows[1], "0 Hz,0,−∞,\"\"");
+        assert!(rows[2].starts_with("(1/(2*pi*0.001)) Hz,0.7071"));
+        assert_eq!(rows[3], "0 kHz,0,−∞,\"\"");
+        assert_eq!(
+            calculate_circuit("RC低通表 1 kΩ,1 μF @ []"),
+            Err(ConversionError::InvalidRcResponseTable),
+        );
+    }
+
+    #[test]
+    fn calculates_rc_filter_magnitude_gain_and_phase_at_cutoff_and_dc() {
+        for (filter, phase) in [("RC低通", -45.0), ("RC高通", 45.0)] {
+            let query = format!("{filter} 1 kΩ,1 μF @ (1/(2*pi*0.001)) Hz");
+            let output = calculate_circuit(&query).unwrap();
+            let parts: Vec<_> = output.split(" · ").collect();
+            let amplitude = parts[0].parse::<f64>().unwrap();
+            let gain = parts[1]
+                .strip_suffix(" dB")
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+            let angle = parts[2].strip_suffix('°').unwrap().parse::<f64>().unwrap();
+            assert!((amplitude - 2.0_f64.sqrt().recip()).abs() < 1e-12);
+            assert!((gain + 3.01029995664).abs() < 1e-11);
+            assert!((angle - phase).abs() < 1e-10);
+        }
+        assert_eq!(
+            calculate_circuit("RC低通 1 kΩ,1 μF @ 0 Hz").as_deref(),
+            Ok("1 · 0 dB · 0°"),
+        );
+        assert_eq!(
+            calculate_circuit("rc-high-pass 1 kΩ,1 μF @ 0 Hz").as_deref(),
+            Ok("0 · −∞ dB · 相位未定义"),
+        );
+        let extreme = calculate_circuit("rc-low-pass 1 kΩ,1 μF @ 1e308 GHz").unwrap();
+        let (ratio, rest) = extreme.split_once(" · ").unwrap();
+        let ratio = ratio.parse::<f64>().unwrap();
+        assert!(ratio > 0.0 && ratio < 1e-300);
+        assert!(rest.starts_with('-') && rest.ends_with(" · -90°"));
+        assert_eq!(
+            calculate_circuit("RC高通 1 kΩ,1 μF @ -1 Hz"),
+            Err(ConversionError::InvalidRcResponse),
+        );
     }
 
     #[test]
