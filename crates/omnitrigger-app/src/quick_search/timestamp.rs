@@ -4,11 +4,12 @@ use chrono::{
 };
 use jiff::{
     civil::DateTime as CivilDateTime,
-    tz::{AmbiguousOffset, TimeZone},
+    tz::{AmbiguousOffset, Offset, TimeZone},
     Timestamp,
 };
 
 use super::calculator::normalize;
+use super::calendar::parse_complete_date;
 use super::conversion::split_conversion;
 use super::csv_tools::csv_cell;
 use super::duration::{
@@ -26,6 +27,8 @@ pub(super) enum TimestampError {
     TooManyTargetZones,
     ZoneTableArguments,
     ZoneCandidateArguments,
+    CivilDayArguments,
+    OffsetChangesArguments,
     InvalidSourceZone,
     SourceClockGap,
     SourceClockFold,
@@ -51,6 +54,8 @@ impl TimestampError {
             Self::ZoneCandidateArguments => {
                 "填写当地日期、时间和地区时区，例如 2026-11-01 01:30 America/New_York"
             }
+            Self::CivilDayArguments => "填写完整日期和明确时区，例如 2026-03-08 America/New_York",
+            Self::OffsetChangesArguments => "填写四位年份和明确时区，例如 2026 America/New_York",
             Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
             Self::SourceClockGap => "该地区跳过了这一时刻，请检查输入的钟表时间",
             Self::SourceClockFold => "该地区的钟表时间出现两次，可用“时区候选”查看两次的 UTC 偏移",
@@ -166,6 +171,12 @@ fn convert_timestamp_with_local(
     }
     if operation == "时区候选" || operation.eq_ignore_ascii_case("zone-candidates") {
         return timestamp_candidates(argument, &to_local);
+    }
+    if operation == "日区间" || operation.eq_ignore_ascii_case("day-intervals") {
+        return civil_day_intervals(argument);
+    }
+    if operation == "偏移变更" || operation.eq_ignore_ascii_case("offset-changes") {
+        return timezone_offset_changes(argument);
     }
     let table =
         operation.eq_ignore_ascii_case("时区csv") || operation.eq_ignore_ascii_case("zone-csv");
@@ -336,6 +347,115 @@ fn named_time_source(input: &str) -> Option<(&str, &str)> {
     input
         .rsplit_once(char::is_whitespace)
         .filter(|(_, zone)| zone.contains('/') || zone.eq_ignore_ascii_case("utc"))
+}
+
+fn civil_day_intervals(input: &str) -> Result<String, TimestampError> {
+    let invalid = TimestampError::CivilDayArguments;
+    let (day, zone) = input
+        .trim()
+        .rsplit_once(char::is_whitespace)
+        .ok_or(invalid)?;
+    let day = parse_complete_date(day).map_err(|_| invalid)?;
+    let zone = explicit_timezone(zone, invalid)?;
+    let next_day = day.succ_opt().ok_or(TimestampError::OutOfRange)?;
+    let seconds = |date: NaiveDate| date.and_time(NaiveTime::MIN).and_utc().timestamp();
+    let day_start = seconds(day);
+    let day_end = seconds(next_day);
+    let first = Timestamp::new(day_start - i64::from(Offset::MAX.seconds()), 0)
+        .map_err(|_| TimestampError::OutOfRange)?;
+    let last = Timestamp::new(day_end - i64::from(Offset::MIN.seconds()), 0)
+        .map_err(|_| TimestampError::OutOfRange)?;
+    let mut range_start = first;
+    let mut intervals = Vec::<(i64, i64)>::new();
+    // 每段的 UTC 偏移恒定，可以直接把当地日期的边界映射到 UTC。
+    for range_end in zone
+        .following(first)
+        .map(|transition| transition.timestamp())
+        .take_while(|transition| *transition < last)
+        .chain(std::iter::once(last))
+    {
+        let offset = i64::from(zone.to_offset(range_start).seconds());
+        let start = (day_start - offset).max(range_start.as_second());
+        let end = (day_end - offset).min(range_end.as_second());
+        if start < end {
+            if let Some(previous) = intervals.last_mut().filter(|previous| previous.1 == start) {
+                previous.1 = end;
+            } else {
+                intervals.push((start, end));
+            }
+        }
+        range_start = range_end;
+    }
+    let mut output = String::from("开始UTC,结束UTC,时长");
+    for (start, end) in intervals {
+        let duration = format_clock_duration(
+            i128::from(end - start).unsigned_abs() * NANOS_PER_SECOND,
+            "",
+        );
+        output.push_str(&format!(
+            "\r\n{},{},{}",
+            utc_second(start)?,
+            utc_second(end)?,
+            duration
+        ));
+    }
+    Ok(output)
+}
+
+fn timezone_offset_changes(input: &str) -> Result<String, TimestampError> {
+    let invalid = TimestampError::OffsetChangesArguments;
+    let (year, zone) = input
+        .trim()
+        .split_once(char::is_whitespace)
+        .ok_or(invalid)?;
+    if year.len() != 4 || !year.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid);
+    }
+    let year = year.parse::<i32>().map_err(|_| invalid)?;
+    let zone = explicit_timezone(zone, invalid)?;
+    let new_year = |year| {
+        NaiveDate::from_ymd_opt(year, 1, 1)
+            .ok_or(TimestampError::OutOfRange)
+            .map(|date| date.and_time(NaiveTime::MIN).and_utc().timestamp())
+    };
+    let begin = Timestamp::new(new_year(year)? - 1, 0).map_err(|_| TimestampError::OutOfRange)?;
+    let end = Timestamp::new(new_year(year + 1)? - 1, 0).map_err(|_| TimestampError::OutOfRange)?;
+    let mut previous = zone.to_offset(begin);
+    let mut output = String::from("生效UTC,变更前偏移,变更后偏移,钟表变化");
+    for transition in zone
+        .following(begin)
+        .take_while(|transition| transition.timestamp() <= end)
+    {
+        let next = transition.offset();
+        if previous == next {
+            continue;
+        }
+        let delta = next.seconds() - previous.seconds();
+        let sign = if delta < 0 { "-" } else { "+" };
+        let adjustment =
+            format_clock_duration(u128::from(delta.unsigned_abs()) * NANOS_PER_SECOND, sign);
+        let effective = utc_second(transition.timestamp().as_second())?;
+        output.push_str(&format!("\r\n{effective},{previous},{next},{adjustment}"));
+        previous = next;
+    }
+    Ok(output)
+}
+
+fn explicit_timezone(zone: &str, invalid: TimestampError) -> Result<TimeZone, TimestampError> {
+    match parse_display_zone(zone)? {
+        DisplayZone::Utc => Ok(TimeZone::UTC),
+        DisplayZone::Offset(offset) => Offset::from_seconds(offset.local_minus_utc())
+            .map(|offset| offset.to_time_zone())
+            .map_err(|_| TimestampError::InvalidOffset),
+        DisplayZone::Named(zone) => Ok(zone),
+        DisplayZone::Local => Err(invalid),
+    }
+}
+
+fn utc_second(seconds: i64) -> Result<String, TimestampError> {
+    let time = DateTime::from_timestamp(seconds, 0).ok_or(TimestampError::OutOfRange)?;
+    ensure_four_digit_year(time.year())?;
+    Ok(time.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 fn timestamp_candidates(
@@ -687,6 +807,44 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_utc_offset_changes_in_the_requested_utc_year() {
+        let now = DateTime::UNIX_EPOCH;
+        assert_eq!(
+            convert_timestamp("偏移变更 2026 America/New_York", now).as_deref(),
+            Ok("生效UTC,变更前偏移,变更后偏移,钟表变化\r\n2026-03-08T07:00:00Z,-05,-04,+01:00:00\r\n2026-11-01T06:00:00Z,-04,-05,-01:00:00"),
+        );
+        assert_eq!(
+            convert_timestamp("offset-changes 2026 Asia/Shanghai", now).as_deref(),
+            Ok("生效UTC,变更前偏移,变更后偏移,钟表变化"),
+        );
+        assert_eq!(
+            convert_timestamp("偏移变更 26 UTC", now),
+            Err(TimestampError::OffsetChangesArguments),
+        );
+    }
+
+    #[test]
+    fn partitions_a_local_date_into_all_of_its_utc_intervals() {
+        for (query, expected) in [
+            ("2026-03-08 America/New_York", "\r\n2026-03-08T05:00:00Z,2026-03-09T04:00:00Z,23:00:00"),
+            ("2026-11-01 America/New_York", "\r\n2026-11-01T04:00:00Z,2026-11-02T05:00:00Z,25:00:00"),
+            ("2024-02-29 UTC+8", "\r\n2024-02-28T16:00:00Z,2024-02-29T16:00:00Z,24:00:00"),
+            ("1987-10-25 America/St_Johns", "\r\n1987-10-25T02:30:00Z,1987-10-25T02:31:00Z,00:01:00\r\n1987-10-25T03:30:00Z,1987-10-26T03:30:00Z,24:00:00"),
+            ("2011-12-30 Pacific/Apia", ""),
+        ] {
+            assert_eq!(
+                convert_timestamp(&format!("日区间 {query}"), DateTime::UNIX_EPOCH).as_deref(),
+                Ok(format!("开始UTC,结束UTC,时长{expected}").as_str()),
+                "{query}",
+            );
+        }
+        assert_eq!(
+            convert_timestamp("日区间 2023-02-29 UTC", DateTime::UNIX_EPOCH),
+            Err(TimestampError::CivilDayArguments),
+        );
+    }
 
     #[test]
     fn generates_timestamps_at_equal_elapsed_steps_with_consistent_precision() {

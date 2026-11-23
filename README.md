@@ -807,6 +807,8 @@
 - 时间戳结果为单个带偏移的日期时间时可按 `Tab` 填回输入框。待上例显示 `1970-01-01T00:30:00Z`，按 `Tab` 并追加 `to +08:00`，可得到 `1970-01-01T08:30:00+08:00`。
 - 可直接输入当地的日期和时间，再写原时区和目标时区。 `时间戳: 2026-07-01 09:00 America/New_York to Asia/Shanghai` 得到 `2026-07-01T21:00:00+08:00`。夏令时跳过或重复的钟表时刻会有对应提示。
 - 输入 `时间戳: 时区候选 2026-11-01 01:30 America/New_York` 可按实际时间先后查看回拨时的两个时刻，偏移分别为 `-04:00` 和 `-05:00`。每行都可用作带偏移的时间戳输入。只有一次的钟表时刻输出一行，跳过的钟表时刻会显示提示。 [Jiff 的重复时刻处理](https://docs.rs/jiff/latest/jiff/tz/struct.AmbiguousTimestamp.html)
+- 用 `时间戳: 日区间 2026-03-08 America/New_York` 可查该日期对应的 UTC 范围与实际时长，示例为 `05:00Z` 至次日 `04:00Z`，共 23 小时。起点计入区间、终点排除。接受地区时区、`UTC` 或固定偏移。区间分开时各占一行，整个日期被跳过时只返回表头。 [Jiff 时区偏移转换](https://docs.rs/jiff/latest/jiff/tz/struct.TimeZone.html#method.following)
+- 输入 `时间戳: 偏移变更 2026 America/New_York` 可列出指定 UTC 年份的时区偏移变化，包含生效的 UTC 时刻、变更前后的偏移和当地钟表移动的时长。固定偏移或当年全年使用同一偏移时只返回表头。 [Jiff 的时区过渡数据](https://docs.rs/jiff/latest/jiff/tz/struct.TimeZone.html#method.following)
 - 时区偏移可精确到秒。把历史查询的结果作为输入，例如 `时间戳: 1900-01-01T00:09:21.123+00:09:21 to UTC`，可还原为 `1900-01-01T00:00:00.123Z`。结果中的毫秒一并保留。
 - 输入 `时间戳: 间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York` 得到 `01:00:00`。间隔按两端对应的 UTC 时间计算，支持地区时区和明确的 UTC 偏移，结果可精确到纳秒。交换两端会反转正负号。 [NIST 夏令时规则](https://www.nist.gov/pml/time-and-frequency-division/popular-links/daylight-saving-time-dst)
 - 日期时间间隔可加 `to s`、`to ms` 或其他时长单位。加 `to iso` 可生成 ISO 日时长，例如 `P1DT2.5S`。

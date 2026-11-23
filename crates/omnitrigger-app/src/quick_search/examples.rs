@@ -1908,6 +1908,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查当地日期在 UTC 中的起止时刻",
+        query: "时间戳: 日区间 2026-03-08 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "查看某年时区偏移变更",
+        query: "时间戳: 偏移变更 2026 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "输入当地时间和时区",
         query: "时间戳: 1970-01-01 08:00 Asia/Shanghai",
     },
@@ -5030,6 +5040,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "就近对齐",
                     "时区CSV",
                     "时区候选",
+                    "日区间",
+                    "偏移变更",
                     "序列",
                 ]
                 .into_iter()
