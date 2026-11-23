@@ -27,7 +27,7 @@ use super::statistics::{
 use super::{
     bin_plot::BinPlot,
     box_plot::BoxPlot,
-    calculator::{evaluate, format_result, normalize, sample_at_x, QUERY_LIMIT},
+    calculator::{evaluate, format_result, normalize, sample_at_coordinates, QUERY_LIMIT},
     calendar::{
         parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
         workday_exceptions_from_dates, SpreadsheetDateSystem,
@@ -396,7 +396,7 @@ impl CsvError {
             Self::FormulaColumnLimit => "公式列每次最多处理 32 条数据",
             Self::FormulaEvaluation(error) => error.message(),
             Self::FunctionColumnArguments => {
-                "填写新列名、来源列和含 x 的算式，例如 [\"余弦\",2,\"cosd(x)\"]"
+                "填写新列名、一至两列和算式，例如 [\"余弦\",1,\"cosd(x)\"] 或 [\"加权\",1,2,\"cosd(x)*y\"]"
             }
             Self::FunctionColumnLimit => "函数列每次最多处理 128 条数据",
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
@@ -692,7 +692,12 @@ enum Operation {
         right: Option<ColumnReference>,
         arithmetic: ColumnArithmetic,
     },
-    FunctionColumn(String, ColumnReference, String),
+    FunctionColumn {
+        name: String,
+        left: ColumnReference,
+        right: Option<ColumnReference>,
+        expression: String,
+    },
     ConvertDataColumn(String, ColumnReference, String),
     RadixColumn {
         name: String,
@@ -904,6 +909,15 @@ enum RunningColumnState<'a> {
 enum FormulaColumnArguments {
     Single((String, ColumnReference, String)),
     Pair((String, ColumnReference, ColumnReference, String)),
+}
+
+impl FormulaColumnArguments {
+    fn into_parts(self) -> (String, ColumnReference, Option<ColumnReference>, String) {
+        match self {
+            Self::Single((name, left, expression)) => (name, left, None, expression),
+            Self::Pair((name, left, right, expression)) => (name, left, Some(right), expression),
+        }
+    }
 }
 
 impl ColumnArithmetic {
@@ -1949,14 +1963,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 input,
                 CsvError::FormulaColumnArguments,
             )?;
-            let (name, left, right, expression) = match arguments {
-                FormulaColumnArguments::Single((name, left, expression)) => {
-                    (name, left, None, expression)
-                }
-                FormulaColumnArguments::Pair((name, left, right, expression)) => {
-                    (name, left, Some(right), expression)
-                }
-            };
+            let (name, left, right, expression) = arguments.into_parts();
             if name.trim().is_empty() || name.contains('\0') || expression.trim().is_empty() {
                 return Err(CsvError::FormulaColumnArguments);
             }
@@ -1969,11 +1976,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             }
         }
         "函数列" | "function-column" => {
-            let ((name, source, expression), data) =
-                json_argument_and_data::<(String, ColumnReference, String)>(
-                    input,
-                    CsvError::FunctionColumnArguments,
-                )?;
+            let (arguments, data) = json_argument_and_data::<FormulaColumnArguments>(
+                input,
+                CsvError::FunctionColumnArguments,
+            )?;
+            let (name, left, right, expression) = arguments.into_parts();
             if name.trim().is_empty()
                 || name.contains('\0')
                 || expression.trim().is_empty()
@@ -1982,7 +1989,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 return Err(CsvError::FunctionColumnArguments);
             }
             input = data;
-            Operation::FunctionColumn(name, source, expression)
+            Operation::FunctionColumn {
+                name,
+                left,
+                right,
+                expression,
+            }
         }
         "按列去重" | "deduplicate-columns" | "数值去重" | "deduplicate-numeric" => {
             let (columns, data) =
@@ -2438,17 +2450,36 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             right,
             arithmetic,
         } => compute_column(rows, name, left, right, arithmetic),
-        Operation::FunctionColumn(name, source, expression) => {
+        Operation::FunctionColumn {
+            name,
+            left,
+            right,
+            expression,
+        } => {
             if rows.len().saturating_sub(1) > MAX_FUNCTION_RECORDS {
                 return Err(CsvError::FunctionColumnLimit);
             }
-            append_from_one_column(&rows, &name, source, |value| {
-                let x = evaluate(value).map_err(|_| CsvError::InvalidNumber.message())?;
-                sample_at_x(&expression, x)
+            let sample = |x: &str, y: Option<&str>| {
+                let parse =
+                    |value: &str| evaluate(value).map_err(|_| CsvError::InvalidNumber.message());
+                let x = parse(x)?;
+                let y = y.map(parse).transpose()?;
+                sample_at_coordinates(&expression, x, y)
                     .and_then(|y| y.map(format_result).transpose())
                     .map(Option::unwrap_or_default)
                     .map_err(|error| error.message())
-            })
+            };
+            match right {
+                Some(right) => append_from_two_columns(
+                    &rows,
+                    &name,
+                    left,
+                    right,
+                    CsvError::FunctionColumnArguments,
+                    |x, y| sample(x, Some(y)),
+                ),
+                None => append_from_one_column(&rows, &name, left, |x| sample(x, None)),
+            }
         }
         Operation::ConvertDataColumn(name, source, target) => {
             convert_data_column(&rows, &name, source, &target)
@@ -9508,6 +9539,32 @@ null"#
             transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
             Err(CsvError::NumericComparisonColumnArguments)
         );
+    }
+
+    #[test]
+    fn appends_calculator_functions_of_two_columns_and_keeps_original_cells() {
+        assert_eq!(
+            transform_csv(
+                "函数列 [\"加权\",\"角度\",2,\"cosd(X)*Y\"] 角度,权重\n0,2\n180,3\n90,\n,4"
+            )
+            .as_deref(),
+            Ok("角度,权重,加权\r\n0,2,2\r\n180,3,-3\r\n90,\"\",\"\"\r\n\"\",4,\"\"")
+        );
+        assert_eq!(
+            transform_csv("function-column [\"结果\",1,2,\"sqrt(x-y)\"] A,B\n1,2\n4,3").as_deref(),
+            Ok("A,B,结果\r\n1,2,\"\"\r\n4,3,1")
+        );
+        assert_eq!(
+            transform_csv("函数列 [\"结果\",1,2,\"x+y\"] A,B\n0,2\n1,坏"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: CsvError::InvalidNumber.message()
+            })
+        );
+        assert!(matches!(
+            transform_csv("函数列 [\"结果\",1,\"y\"] A\n1"),
+            Err(CsvError::DataRowValue { row: 1, .. })
+        ));
     }
 
     #[test]
