@@ -703,6 +703,7 @@
 - 输入 `时间戳: 1700000000` 或 `时间戳: 1700000000123ms` 可转为 UTC 时间，也可输入 `时间戳: 1970-01-01T08:00:00+08:00` 反查 Unix 时间戳。
 - 输入 `权限: 4755` 得到 `rwsr-xr-x`，输入 `权限: -rw-r-----` 得到 `0640`。用 `权限: 0666 umask 0022` 可按给定掩码计算权限位，得到 `0644 · rw-r--r--`。 [Unix 权限位](https://man7.org/linux/man-pages/man7/inode.7.html) [umask 计算](https://man7.org/linux/man-pages/man2/umask.2.html)
 - 输入 `UUID: 格式 {550E8400-E29B-41D4-A716-446655440000}` 可得到带连字符的小写 UUID。用 `UUID: 紧凑` 或 `UUID: URN` 切换格式，用 `UUID: 时间` 可读取 v1、v6 和 v7 的 UTC 时间。 [RFC 9562](https://www.rfc-editor.org/rfc/rfc9562.html)
+- 输入 `UUID: v5 DNS www.example.com` 得到 `2ed6657d-e927-568b-95e1-2665a8aea6a2`。同一命名空间和名称产生同一结果，可选 `DNS`、`URL`、`OID`、`X500` 或任意 UUID。名称以 UTF-8 原文计算，区分大小写，可以用 JSON 双引号保留首尾空格。 [RFC 9562 的 UUIDv5 示例](https://www.rfc-editor.org/rfc/rfc9562.html#appendix-A.4)
 - 输入 `ULID: 时间 01ARZ3NDEKTSV4RRFFQ69G5FAV` 得到 `2016-07-30T23:54:10.259Z`。直接在 `ULID:` 后粘贴标识符，可校验并规范为大写。 [ULID 格式说明](https://github.com/ulid/spec)
 - 时间戳也接受微秒（`us`、`µs`）和纳秒（`ns`）。例如 `时间戳: 1700000000123456us` 得到 `2023-11-14T22:13:20.123456Z`。反查带小数秒的时间会选择能精确表示结果的单位。参见 [RFC 3339 的时间格式](https://www.rfc-editor.org/rfc/rfc3339.html#section-5.6)。
 - 输入 `时间戳: 现在` 可显示系统当前的 Unix 秒数，输入 `时间戳: 现在毫秒` 可获取毫秒值。

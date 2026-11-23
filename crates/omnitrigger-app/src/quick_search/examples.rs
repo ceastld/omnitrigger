@@ -1394,6 +1394,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用命名空间和名称生成可重复的 UUIDv5",
+        query: "UUID: v5 DNS www.example.com",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "去掉 UUID 的连字符",
         query: "UUID: 紧凑 550e8400-e29b-41d4-a716-446655440000",
     },

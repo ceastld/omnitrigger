@@ -30,10 +30,12 @@
 | zip | 写入配置备份并逐项读回 ZIP | MIT |
 | chrono | 保留备份文件的本地修改时间 | MIT OR Apache-2.0 |
 | jiff | 从内置的 IANA 时区数据读取指定地区的时区偏移 | Unlicense OR MIT |
-| uuid | 解析和格式化 UUID，读取带时间字段的版本，复用锁定的 1.28.0 | Apache-2.0 OR MIT |
+| uuid | 解析、格式化和读取 UUID 的时间字段，启用 v5 名称生成，复用锁定的 1.28.0 | Apache-2.0 OR MIT |
 | tempfile | 暂存并发布已校验的配置备份 | MIT OR Apache-2.0 |
 
 原生亮度提示通过现有 `windows` 绑定调用系统自带的 USER32、GDI 与 GDI+，没有增加第三方 Rust 包或捆绑系统 DLL。文字使用本机系统字体渲染，不分发字体文件。
+
+UUIDv5 通过 `uuid` 的传递依赖 `sha1_smol` 1.0.1 计算，发行包保留该依赖的 BSD-3-Clause 许可。
 
 浏览器动作通过 `omnitrigger-browser` 的 Rust 客户端直接复用本机持久连接，依赖固定于公开仓库修订 `a5adc50022120cc4e6b0596bb56e14ed0ec2d02e`，不随应用分发独立浏览器程序。该客户端与其传递依赖的许可由同一发行收集脚本保留；浏览器扩展和可选连接器的独立发行包另行保留其许可通知。
 

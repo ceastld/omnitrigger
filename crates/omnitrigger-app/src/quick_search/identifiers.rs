@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use uuid::{Uuid, Variant};
 
@@ -11,6 +13,9 @@ const ULID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub(super) enum IdentifierError {
     Incomplete,
     InvalidUuid,
+    UuidV5Arguments,
+    InvalidUuidNamespace,
+    InvalidUuidName,
     InvalidUlid,
     InvalidOperation,
     MissingUuidTime,
@@ -22,8 +27,11 @@ impl IdentifierError {
         match self {
             Self::Incomplete => "粘贴标识符，或输入操作名查看示例",
             Self::InvalidUuid => "输入有效的 UUID，可用连字符、紧凑、花括号或 URN 格式",
+            Self::UuidV5Arguments => "输入命名空间和名称，例如 UUID: v5 DNS www.example.com",
+            Self::InvalidUuidNamespace => "命名空间可用 DNS、URL、OID、X500 或 UUID",
+            Self::InvalidUuidName => "用有效的 JSON 字符串引用名称，例如 \" 名称 \"",
             Self::InvalidUlid => "ULID 须为 26 位 Crockford Base32，首位为 0 至 7",
-            Self::InvalidOperation => "可用 格式 或 时间，UUID 还支持 紧凑 和 URN",
+            Self::InvalidOperation => "可用 格式 或 时间，UUID 还支持 紧凑、URN 和 v5",
             Self::MissingUuidTime => "请输入带时间字段的 UUIDv1、UUIDv6 或 UUIDv7",
             Self::TimeRange => "标识符的时间超出可显示范围",
         }
@@ -31,16 +39,48 @@ impl IdentifierError {
 }
 
 pub(super) fn transform_uuid(query: &str) -> Result<String, IdentifierError> {
-    let input = normalize(query).to_ascii_lowercase();
-    let (operation, value) = identifier_input(&input)?;
-    let uuid = Uuid::try_parse(value).map_err(|_| IdentifierError::InvalidUuid)?;
-    match operation {
+    let (operation, value) = identifier_input(query)?;
+    let operation = normalize(operation).to_ascii_lowercase();
+    if matches!(operation.as_str(), "v5" | "名称生成") {
+        return generate_uuid_v5(value);
+    }
+    let value = normalize(value).to_ascii_lowercase();
+    let uuid = Uuid::try_parse(&value).map_err(|_| IdentifierError::InvalidUuid)?;
+    match operation.as_str() {
         "" | "格式" | "normalize" => Ok(uuid.hyphenated().to_string()),
         "紧凑" | "compact" => Ok(uuid.simple().to_string()),
         "urn" => Ok(uuid.urn().to_string()),
         "时间" | "time" => uuid_time(uuid),
         _ => Err(IdentifierError::InvalidOperation),
     }
+}
+
+fn generate_uuid_v5(input: &str) -> Result<String, IdentifierError> {
+    let (namespace, name) = input
+        .split_once(char::is_whitespace)
+        .ok_or(IdentifierError::UuidV5Arguments)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(IdentifierError::UuidV5Arguments);
+    }
+    let namespace = normalize(namespace).to_ascii_lowercase();
+    let namespace = match namespace.as_str() {
+        "dns" => Uuid::NAMESPACE_DNS,
+        "url" => Uuid::NAMESPACE_URL,
+        "oid" => Uuid::NAMESPACE_OID,
+        "x500" => Uuid::NAMESPACE_X500,
+        _ => Uuid::try_parse(&namespace).map_err(|_| IdentifierError::InvalidUuidNamespace)?,
+    };
+    let name = if name.starts_with('"') {
+        Cow::Owned(
+            serde_json::from_str::<String>(name).map_err(|_| IdentifierError::InvalidUuidName)?,
+        )
+    } else {
+        Cow::Borrowed(name)
+    };
+    Ok(Uuid::new_v5(&namespace, name.as_bytes())
+        .hyphenated()
+        .to_string())
 }
 
 fn uuid_time(uuid: Uuid) -> Result<String, IdentifierError> {
@@ -113,6 +153,47 @@ fn format_time(time: Option<DateTime<Utc>>) -> Result<String, IdentifierError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generates_rfc_uuid_v5_values_and_preserves_quoted_utf8_names() {
+        for (query, expected) in [
+            (
+                "v5 DNS www.example.com",
+                "2ed6657d-e927-568b-95e1-2665a8aea6a2",
+            ),
+            (
+                "Ｖ５ 6ba7b810-9dad-11d1-80b4-00c04fd430c8 www.example.com",
+                "2ed6657d-e927-568b-95e1-2665a8aea6a2",
+            ),
+            (
+                "名称生成 URL https://example.invalid/a",
+                "c43494ec-b689-5a23-84de-5af91d379181",
+            ),
+            (
+                r#"v5 OID " 茶 Ａ ""#,
+                "b876fcb8-a9b5-5ab0-99da-0bc6a5cd6334",
+            ),
+            (r#"v5 X500 """#, "b4bdf874-8c03-5bd8-8fd7-5e409dfd82c0"),
+        ] {
+            assert_eq!(transform_uuid(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_ne!(
+            transform_uuid("v5 DNS www.example.com"),
+            transform_uuid("v5 DNS www.EXAMPLE.com")
+        );
+        assert_eq!(
+            transform_uuid("v5 DNS"),
+            Err(IdentifierError::UuidV5Arguments)
+        );
+        assert_eq!(
+            transform_uuid("v5 custom 茶"),
+            Err(IdentifierError::InvalidUuidNamespace)
+        );
+        assert_eq!(
+            transform_uuid("v5 DNS \"茶"),
+            Err(IdentifierError::InvalidUuidName)
+        );
+    }
 
     #[test]
     fn normalizes_uuid_forms_and_reads_rfc_timestamps() {
