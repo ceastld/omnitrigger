@@ -1,8 +1,8 @@
-use num_bigint::{BigInt, Sign};
+use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
 
 use super::{
-    calculator::normalize,
+    calculator::{format_result, normalize},
     fraction::{
         calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root,
         FractionError,
@@ -26,7 +26,7 @@ impl ComplexError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "填写复数，两组复数用 @ 隔开",
-            Self::Operation => "可用加法、减法、乘法、除法、模、共轭、乘方和平方根",
+            Self::Operation => "可用加法、减法、乘法、除法、模、共轭、乘方、平方根和极坐标",
             Self::Components => "填写 a,b 或 a+bi 形式的复数，例如 3,4 或 3+4i",
             Self::Exponent => "在 @ 后填写 −1024 至 1024 的整数指数",
             Self::ZeroDivisor => "复数的除数不能为零",
@@ -54,10 +54,9 @@ pub(super) fn calculate_complex(query: &str) -> Result<String, ComplexError> {
         "乘法" | "multiply" => BinaryOperation::Multiply,
         "除法" | "divide" => BinaryOperation::Divide,
         "模" | "modulus" | "abs" => {
-            let squared = squared_modulus(&components(input)?);
-            ensure_exact_size(&squared).map_err(ComplexError::Evaluation)?;
-            return Ok(format_square_root(&squared));
+            return complex_modulus(&components(input)?);
         }
+        "极坐标" | "polar" => return complex_polar(components(input)?),
         "共轭" | "conjugate" => {
             let [real, imaginary] = components(input)?;
             return format_complex([real, -imaginary]);
@@ -133,6 +132,70 @@ fn integer_power(base: [BigRational; 2], exponent: i32) -> Result<[BigRational; 
 
 fn squared_modulus([real, imaginary]: &[BigRational; 2]) -> BigRational {
     real * real + imaginary * imaginary
+}
+
+fn complex_modulus(value: &[BigRational; 2]) -> Result<String, ComplexError> {
+    let squared = squared_modulus(value);
+    ensure_exact_size(&squared).map_err(ComplexError::Evaluation)?;
+    Ok(format_square_root(&squared))
+}
+
+fn complex_polar(value: [BigRational; 2]) -> Result<String, ComplexError> {
+    let [real, imaginary] = &value;
+    let real_sign = real.numer().sign();
+    let imaginary_sign = imaginary.numer().sign();
+    if real_sign == Sign::NoSign && imaginary_sign == Sign::NoSign {
+        return Ok("模 0 · 辐角未定义".to_owned());
+    }
+    let modulus = complex_modulus(&value)?;
+    let [real_size, imaginary_size] = [real, imaginary].map(|coordinate| {
+        if coordinate.numer().sign() == Sign::Minus {
+            -coordinate
+        } else {
+            (*coordinate).clone()
+        }
+    });
+    let direction = if imaginary_sign == Sign::Minus { -1 } else { 1 };
+    let angle = if imaginary_sign == Sign::NoSign {
+        if real_sign == Sign::Minus { "180" } else { "0" }.to_owned()
+    } else if real_sign == Sign::NoSign {
+        (90 * direction).to_string()
+    } else if real_size == imaginary_size {
+        let angle = if real_sign == Sign::Minus { 135 } else { 45 };
+        (angle * direction).to_string()
+    } else {
+        let scale = real_size.max(imaginary_size);
+        let x = relative_coordinate(real, &scale);
+        let y = relative_coordinate(imaginary, &scale);
+        let degrees = format_result(y.atan2(x).to_degrees())
+            .map_err(|_| ComplexError::Evaluation(FractionError::ExactRange))?;
+        format!("≈ {degrees}")
+    };
+    Ok(format!("模 {modulus} · 辐角 {angle}°"))
+}
+
+fn relative_coordinate(value: &BigRational, scale: &BigRational) -> f64 {
+    // 先在有理数内归一化，再分别取分子和分母的高位进入浮点计算。
+    let ratio = value / scale;
+    let leading_bits = |value: &BigUint| {
+        let shift = value.bits().saturating_sub(53);
+        let bits = u64::try_from(value >> shift as usize).expect("尾数至多为 53 位");
+        (bits as f64, shift as i32)
+    };
+    let (numerator, numerator_shift) = leading_bits(ratio.numer().magnitude());
+    let (denominator, denominator_shift) = leading_bits(ratio.denom().magnitude());
+    let exponent = numerator_shift - denominator_shift;
+    let mantissa = numerator / denominator;
+    let magnitude = if exponent < f64::MIN_EXP - 1 {
+        (mantissa * 2f64.powi(exponent - (f64::MIN_EXP - 1))) * f64::MIN_POSITIVE
+    } else {
+        mantissa * 2f64.powi(exponent)
+    };
+    if value.numer().sign() == Sign::Minus {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 fn square_roots(value: [BigRational; 2]) -> Result<String, ComplexError> {
@@ -294,6 +357,32 @@ mod tests {
         ] {
             assert_eq!(calculate_complex(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn reports_exact_polar_axes_and_approximates_other_arguments_after_scaling() {
+        for (query, expected) in [
+            ("极坐标 1+i", "模 √2 · 辐角 45°"),
+            ("极坐标 -1-i", "模 √2 · 辐角 -135°"),
+            ("极坐标 -9", "模 9 · 辐角 180°"),
+            ("polar 0,-1/2", "模 1/2 · 辐角 -90°"),
+            ("极坐标 0", "模 0 · 辐角未定义"),
+        ] {
+            assert_eq!(calculate_complex(query).as_deref(), Ok(expected), "{query}");
+        }
+        let usual = calculate_complex("极坐标 3+4i").unwrap();
+        assert!(usual.starts_with("模 5 · 辐角 ≈ 53.1301023"), "{usual}");
+        let huge = calculate_complex("极坐标 3e1000,4e1000").unwrap();
+        assert_eq!(
+            huge.split_once(" · 辐角 ").map(|(_, angle)| angle),
+            usual.split_once(" · 辐角 ").map(|(_, angle)| angle),
+        );
+        let near_axis = calculate_complex("极坐标 1,1e-100").unwrap();
+        assert!(near_axis.contains("辐角 ≈ 5.729577") && near_axis.ends_with("e-99°"));
+        let subnormal = calculate_complex("极坐标 1,1e-320").unwrap();
+        assert!(subnormal.ends_with("e-319°"), "{subnormal}");
+        let near_cut = calculate_complex("极坐标 -1,-1e-100").unwrap();
+        assert!(near_cut.ends_with("辐角 ≈ -180°"), "{near_cut}");
     }
 
     #[test]

@@ -921,6 +921,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "复数: 乘方 3+4i @ 2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "查看复数的精确模和以度表示的辐角",
+        query: "复数: 极坐标 3+4i",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用同一个分数乘矩阵中的每个元素",
         query: "矩阵: 数乘 -3/2 @ 1/3,2; -1,0",
