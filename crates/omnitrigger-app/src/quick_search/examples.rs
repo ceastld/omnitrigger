@@ -1753,6 +1753,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "把日期换成电子表格日期序号",
+        query: "日期: 表格序号 2024-02-29",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把 1904 日期系统的序号换回日期",
+        query: "日期: 从表格序号 1904 @ 43889",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
     },
@@ -4399,6 +4409,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "按年拆分CSV",
             "逐日CSV",
             "星期统计",
+            "表格序号",
+            "从表格序号",
         ],
         Scope::Radix => &[
             "字节序",

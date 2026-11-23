@@ -41,6 +41,9 @@ pub(super) enum DateError {
     InvalidDateRanges,
     RangeSplitArguments,
     WeekdayCountArguments,
+    SpreadsheetSerialArguments,
+    SpreadsheetSerialRange,
+    SpreadsheetLeapPlaceholder,
     InvalidDateInterval,
     WorkdayExceptions,
     PatternArguments,
@@ -97,6 +100,13 @@ impl DateError {
             Self::InvalidDatePattern => "请使用日期格式符，例如 %Y、%m、%d 或 %F",
             Self::DatePatternMismatch => "日期文本与格式不符，或日期无效",
             Self::WeekdayCountArguments => "输入起止日期，例如 2024-02-29 至 2024-03-03",
+            Self::SpreadsheetSerialArguments => {
+                "填写日期或整数序号，可用 1900 @ 或 1904 @ 选择日期系统"
+            }
+            Self::SpreadsheetSerialRange => "日期须在所选系统的起始日与 9999-12-31 之间",
+            Self::SpreadsheetLeapPlaceholder => {
+                "1900 系统的序号 60 是兼容占位，对应无效日期 1900-02-29"
+            }
             Self::ReversedDateRange => "开始日期须早于或等于结束日期",
             Self::NoMatchingDates => "区间内没有符合条件的日期",
             Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
@@ -626,6 +636,49 @@ fn date_range_operands(
         .ok_or(separator_error)?;
     let (end, remaining) = date_operand(rest.trim_start(), today)?;
     Ok((start, end, remaining))
+}
+
+fn spreadsheet_serial(
+    input: &str,
+    today: NaiveDate,
+    from_serial: bool,
+) -> Result<String, DateError> {
+    let (system, argument) = input.split_once('@').unwrap_or(("1900", input));
+    let (epoch, excel_leap_day) = match system.trim() {
+        "1900" => (NaiveDate::from_ymd_opt(1899, 12, 31), true),
+        "1904" => (NaiveDate::from_ymd_opt(1904, 1, 1), false),
+        _ => return Err(DateError::SpreadsheetSerialArguments),
+    };
+    let epoch = epoch.expect("表格日期系统的起点有效");
+    let argument = argument.trim();
+    if argument.is_empty() {
+        return Err(DateError::SpreadsheetSerialArguments);
+    }
+    if from_serial {
+        let serial = argument
+            .parse::<i64>()
+            .map_err(|_| DateError::SpreadsheetSerialArguments)?;
+        if excel_leap_day && serial == 60 {
+            return Err(DateError::SpreadsheetLeapPlaceholder);
+        }
+        let days = serial - i64::from(excel_leap_day && serial > 60);
+        if days < i64::from(excel_leap_day) {
+            return Err(DateError::SpreadsheetSerialRange);
+        }
+        let date = in_range(epoch.checked_add_days(Days::new(days as u64)))
+            .map_err(|_| DateError::SpreadsheetSerialRange)?;
+        return Ok(date.to_string());
+    }
+    let (date, rest) = date_operand(argument, today)?;
+    if !rest.is_empty() {
+        return Err(DateError::SpreadsheetSerialArguments);
+    }
+    let days = date.signed_duration_since(epoch).num_days();
+    if days < i64::from(excel_leap_day) {
+        return Err(DateError::SpreadsheetSerialRange);
+    }
+    let serial = days + i64::from(excel_leap_day && days >= 60);
+    Ok(serial.to_string())
 }
 
 fn count_weekdays_csv(input: &str, today: NaiveDate) -> Result<String, DateError> {
@@ -1467,6 +1520,8 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         }
         "逐日csv" | "days-csv" => return split_date_range(rest, today, DateRangeSplit::DaysCsv),
         "星期统计" | "weekday-counts" => return count_weekdays_csv(rest, today),
+        "表格序号" | "excel-serial" => return spreadsheet_serial(rest, today, false),
+        "从表格序号" | "from-excel-serial" => return spreadsheet_serial(rest, today, true),
         _ => {}
     }
     if let Some((year, day)) = year_day_parts(input) {
@@ -1656,6 +1711,43 @@ mod tests {
             calculate_date("按周拆分CSV 2020-01-01 至 2030-01-01", today),
             Err(DateError::TooManyWeekRanges)
         );
+    }
+
+    #[test]
+    fn converts_real_calendar_dates_in_both_spreadsheet_date_systems() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (query, expected) in [
+            ("表格序号 今天", "45351"),
+            ("表格序号 1904 @ 今天", "43889"),
+            ("表格序号 1900 @ 2011-07-05", "40729"),
+            ("表格序号 1904 @ 2011-07-05", "39267"),
+            ("从表格序号 45351", "2024-02-29"),
+            ("从表格序号 1904 @ 0", "1904-01-01"),
+            ("从表格序号 1", "1900-01-01"),
+            ("从表格序号 59", "1900-02-28"),
+            ("从表格序号 61", "1900-03-01"),
+            ("EXCEL-SERIAL 9999-12-31", "2958465"),
+            ("FROM-EXCEL-SERIAL 2958465", "9999-12-31"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("从表格序号 60", DateError::SpreadsheetLeapPlaceholder),
+            ("从表格序号 0", DateError::SpreadsheetSerialRange),
+            ("从表格序号 2958466", DateError::SpreadsheetSerialRange),
+            (
+                "表格序号 1904 @ 1903-12-31",
+                DateError::SpreadsheetSerialRange,
+            ),
+            ("从表格序号 2000 @ 1", DateError::SpreadsheetSerialArguments),
+            ("从表格序号 1.5", DateError::SpreadsheetSerialArguments),
+        ] {
+            assert_eq!(calculate_date(query, today), Err(error), "{query}");
+        }
     }
 
     #[test]
