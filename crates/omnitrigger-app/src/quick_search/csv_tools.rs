@@ -245,7 +245,7 @@ pub(super) enum CsvError {
     CoordinateDifferenceArguments,
     CoordinateDifferencePointCount,
     CoordinateDifferenceNoOverlap,
-    CoordinateCurveCrossingArguments,
+    CoordinateCurveArguments,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -543,7 +543,7 @@ impl CsvError {
             }
             Self::CoordinateDifferencePointCount => "每条曲线都需要 2 至 64 个完整样点",
             Self::CoordinateDifferenceNoOverlap => "两条曲线的横坐标范围没有交集",
-            Self::CoordinateCurveCrossingArguments => {
+            Self::CoordinateCurveArguments => {
                 "填写横坐标列和两条曲线的值列，例如 [\"时间\",\"实测\",\"基准\"]"
             }
             Self::GroupSelectionArguments => {
@@ -1144,6 +1144,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return curves.to_csv(&name);
         }
         "曲线交点" | "curve-crossings" => return coordinate_curve_crossings(input),
+        "曲线间面积" | "area-between-curves" => return coordinate_curve_integral(input, true),
+        "曲线差积分" | "curve-difference-integral" => {
+            return coordinate_curve_integral(input, false)
+        }
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -5770,9 +5774,19 @@ fn align_coordinate_curves(
 }
 
 fn coordinate_curve_crossings(input: &str) -> Result<String, CsvError> {
-    let invalid = CsvError::CoordinateCurveCrossingArguments;
+    horizontal_crossings_csv(&aligned_curve_differences(input)?, &BigRational::default())
+}
+
+fn coordinate_curve_integral(input: &str, absolute_area: bool) -> Result<String, CsvError> {
+    let mut samples = aligned_curve_differences(input)?;
+    let total = integrate_trapezoid_samples(&mut samples, absolute_area, |_, _| {})?;
+    Ok(total.to_string())
+}
+
+fn aligned_curve_differences(input: &str) -> Result<Vec<CoordinateSample>, CsvError> {
+    let invalid = CsvError::CoordinateCurveArguments;
     let (columns, data) = json_argument_and_data::<[ColumnReference; 3]>(input, invalid)?;
-    let difference_samples = align_coordinate_curves(data, &columns, invalid)?
+    Ok(align_coordinate_curves(data, &columns, invalid)?
         .samples
         .into_iter()
         .enumerate()
@@ -5780,8 +5794,7 @@ fn coordinate_curve_crossings(input: &str) -> Result<String, CsvError> {
             row_index,
             point: (x, difference),
         })
-        .collect::<Vec<_>>();
-    horizontal_crossings_csv(&difference_samples, &BigRational::default())
+        .collect())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7559,6 +7572,26 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn integrates_exact_signed_and_unsigned_areas_between_aligned_curves() {
+        let data = "[1,2,3] 时间,实测,基准\n3,0,3\n0,0,0\n1,2,";
+        for (operation, expected) in [("曲线间面积", "3"), ("curve-difference-integral", "-3/2")]
+        {
+            assert_eq!(
+                transform_csv(&format!("{operation} {data}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            transform_csv("area-between-curves [1,2,3] x,a,b\n0,0,\n1,2,3\n2,,4").as_deref(),
+            Ok("0")
+        );
+        assert_eq!(
+            transform_csv("曲线差积分 [1,2,3] x,a,b\n0,0,\n1,2,\n2,,3\n3,,4"),
+            Err(CsvError::CoordinateDifferenceNoOverlap)
+        );
     }
 
     #[test]
