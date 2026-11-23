@@ -644,20 +644,59 @@ fn spreadsheet_serial(
     from_serial: bool,
 ) -> Result<String, DateError> {
     let (system, argument) = input.split_once('@').unwrap_or(("1900", input));
-    let (epoch, excel_leap_day) = match system.trim() {
-        "1900" => (NaiveDate::from_ymd_opt(1899, 12, 31), true),
-        "1904" => (NaiveDate::from_ymd_opt(1904, 1, 1), false),
-        _ => return Err(DateError::SpreadsheetSerialArguments),
-    };
-    let epoch = epoch.expect("表格日期系统的起点有效");
+    let system = system
+        .trim()
+        .parse()
+        .ok()
+        .and_then(SpreadsheetDateSystem::from_year)
+        .ok_or(DateError::SpreadsheetSerialArguments)?;
     let argument = argument.trim();
     if argument.is_empty() {
         return Err(DateError::SpreadsheetSerialArguments);
     }
     if from_serial {
-        let serial = argument
+        return system
+            .date_from_serial(argument)
+            .map(|date| date.to_string());
+    }
+    let (date, rest) = date_operand(argument, today)?;
+    if !rest.is_empty() {
+        return Err(DateError::SpreadsheetSerialArguments);
+    }
+    system
+        .serial_from_date(date)
+        .map(|serial| serial.to_string())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SpreadsheetDateSystem {
+    Excel1900,
+    Excel1904,
+}
+
+impl SpreadsheetDateSystem {
+    pub(super) fn from_year(year: u16) -> Option<Self> {
+        match year {
+            1900 => Some(Self::Excel1900),
+            1904 => Some(Self::Excel1904),
+            _ => None,
+        }
+    }
+
+    fn epoch(self) -> NaiveDate {
+        let epoch = match self {
+            Self::Excel1900 => NaiveDate::from_ymd_opt(1899, 12, 31),
+            Self::Excel1904 => NaiveDate::from_ymd_opt(1904, 1, 1),
+        };
+        epoch.expect("表格日期系统的起点有效")
+    }
+
+    pub(super) fn date_from_serial(self, input: &str) -> Result<NaiveDate, DateError> {
+        let serial = input
+            .trim()
             .parse::<i64>()
             .map_err(|_| DateError::SpreadsheetSerialArguments)?;
+        let excel_leap_day = self == Self::Excel1900;
         if excel_leap_day && serial == 60 {
             return Err(DateError::SpreadsheetLeapPlaceholder);
         }
@@ -665,20 +704,18 @@ fn spreadsheet_serial(
         if days < i64::from(excel_leap_day) {
             return Err(DateError::SpreadsheetSerialRange);
         }
-        let date = in_range(epoch.checked_add_days(Days::new(days as u64)))
-            .map_err(|_| DateError::SpreadsheetSerialRange)?;
-        return Ok(date.to_string());
+        in_range(self.epoch().checked_add_days(Days::new(days as u64)))
+            .map_err(|_| DateError::SpreadsheetSerialRange)
     }
-    let (date, rest) = date_operand(argument, today)?;
-    if !rest.is_empty() {
-        return Err(DateError::SpreadsheetSerialArguments);
+
+    pub(super) fn serial_from_date(self, date: NaiveDate) -> Result<i64, DateError> {
+        let excel_leap_day = self == Self::Excel1900;
+        let days = date.signed_duration_since(self.epoch()).num_days();
+        if date.year() > 9999 || days < i64::from(excel_leap_day) {
+            return Err(DateError::SpreadsheetSerialRange);
+        }
+        Ok(days + i64::from(excel_leap_day && days >= 60))
     }
-    let days = date.signed_duration_since(epoch).num_days();
-    if days < i64::from(excel_leap_day) {
-        return Err(DateError::SpreadsheetSerialRange);
-    }
-    let serial = days + i64::from(excel_leap_day && days >= 60);
-    Ok(serial.to_string())
 }
 
 fn count_weekdays_csv(input: &str, today: NaiveDate) -> Result<String, DateError> {

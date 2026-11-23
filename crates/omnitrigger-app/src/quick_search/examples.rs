@@ -3409,6 +3409,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把一列日期换成表格日期序号",
+        query: "CSV: 表格序号列 [\"序号\",\"日期\",1900]\n日期,编号\n2024-02-29,001\n,002\n2024-W09-5,003",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把一列表格日期序号换回日期",
+        query: "CSV: 序号转日期列 [\"日期\",1,1904]\n序号\n0\n39267",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "以自定休息日和补班日推算 CSV 到期日期",
         query: "CSV: 日期加工作日列 [\"到期日期\",\"日期\",\"工作日数\",[[\"2024-03-04\"],[\"2024-03-02\"]]]\n日期,工作日数\n2024-03-01,1\n2024-03-01,2\n2024-03-05,-1",
     },

@@ -28,7 +28,7 @@ use super::{
     calculator::normalize,
     calendar::{
         parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
-        workday_exceptions_from_dates,
+        workday_exceptions_from_dates, SpreadsheetDateSystem,
     },
     conversion::{exact_data_converter, ConversionError},
     duration::{elapsed_clock_interval, format_clock_duration},
@@ -122,6 +122,7 @@ pub(super) enum CsvError {
     WorkdayOffsetExceptions,
     DateFormatColumnArguments,
     DateFormatColumnPattern,
+    SpreadsheetDateColumnArguments,
     TextLengthColumnArguments,
     TextSliceColumnArguments,
     TextPadColumnArguments,
@@ -270,6 +271,9 @@ impl CsvError {
             Self::WorkdayOffsetExceptions => "例外日期须用 YYYY-MM-DD，每个日期只能出现一次",
             Self::DateFormatColumnArguments => {
                 "填写新列名、日期源列和日期格式，例如 [\"标准日期\",\"日期\",\"%Y-%m-%d\"]"
+            }
+            Self::SpreadsheetDateColumnArguments => {
+                "填写新列名、源列和日期系统，例如 [\"序号\",\"日期\",1900]，可选择 1900 或 1904"
             }
             Self::DateFormatColumnPattern => "填写有效的日期格式，例如 %Y-%m-%d 或 %d/%m/%Y",
             Self::TextLengthColumnArguments => {
@@ -470,6 +474,7 @@ enum Operation {
     JsonPointerColumn(String, ColumnReference, Vec<String>, JsonCellContent),
     UrlParameterColumn(String, ColumnReference, String),
     JsonExpandRows(String, ColumnReference, Vec<String>),
+    SpreadsheetDateColumn(String, ColumnReference, SpreadsheetDateSystem, bool),
     DatePatternColumn {
         name: String,
         source: ColumnReference,
@@ -1169,6 +1174,21 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     Operation::JsonPointerColumn(name, source, keys, content)
                 }
             }
+        }
+        kind @ ("表格序号列"
+        | "spreadsheet-serial-column"
+        | "序号转日期列"
+        | "serial-date-column") => {
+            let invalid = CsvError::SpreadsheetDateColumnArguments;
+            let ((name, source, year), data) =
+                json_argument_and_data::<(String, ColumnReference, u16)>(input, invalid)?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(invalid);
+            }
+            let system = SpreadsheetDateSystem::from_year(year).ok_or(invalid)?;
+            let from_serial = matches!(kind, "序号转日期列" | "serial-date-column");
+            input = data;
+            Operation::SpreadsheetDateColumn(name, source, system, from_serial)
         }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
@@ -1932,6 +1952,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                         }
                     }
                 })
+            })
+        }
+        Operation::SpreadsheetDateColumn(name, source, system, from_serial) => {
+            append_from_one_column(&rows, &name, source, |value| {
+                let value = normalize(value);
+                if from_serial {
+                    system.date_from_serial(&value).map(|date| date.to_string())
+                } else {
+                    parse_complete_date(&value)
+                        .and_then(|date| system.serial_from_date(date))
+                        .map(|serial| serial.to_string())
+                }
+                .map_err(|error| error.message())
             })
         }
         Operation::DatePatternColumn {
@@ -6233,6 +6266,29 @@ mod tests {
         assert_eq!(
             transform_csv("日期解析列 [\"日\",1,\"%Q\"]\n日期"),
             Err(CsvError::DateFormatColumnPattern)
+        );
+    }
+
+    #[test]
+    fn appends_spreadsheet_dates_or_serials_without_rewriting_input_cells() {
+        assert_eq!(
+            transform_csv("表格序号列 [\"序号\",\"日期\",1900]\n日期,编号\n2024-02-29,001\n,002\n2024-W09-5,003").as_deref(),
+            Ok("日期,编号,序号\r\n2024-02-29,001,45351\r\n\"\",002,\"\"\r\n2024-W09-5,003,45352")
+        );
+        assert_eq!(
+            transform_csv("序号转日期列 [\"日期\",1,1904]\n序号\n0\n39267\n\"\"").as_deref(),
+            Ok("序号,日期\r\n0,1904-01-01\r\n39267,2011-07-05\r\n\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("序号转日期列 [\"日期\",1,1900]\n序号\n59\n60"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: "1900 系统的序号 60 是兼容占位，对应无效日期 1900-02-29",
+            })
+        );
+        assert_eq!(
+            transform_csv("表格序号列 [\"序号\",1,2000]\n日期\n2024-02-29"),
+            Err(CsvError::SpreadsheetDateColumnArguments)
         );
     }
 
