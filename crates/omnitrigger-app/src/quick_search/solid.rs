@@ -3,7 +3,9 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::circle::multiple_of_pi;
-use super::fraction::{calculate_fraction, ensure_exact_size, FractionError};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root, FractionError,
+};
 use super::operators::split_top_level_commas;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,7 +18,7 @@ pub(super) enum SolidError {
 impl SolidError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Arguments => "填写圆柱 半径,高、球 半径、立方体 边长或长方体 长,宽,高",
+            Self::Arguments => "填写圆柱或圆锥 半径,高、球 半径、立方体 边长或长方体 长,宽,高",
             Self::NonPositiveDimension => "每项尺寸须大于零",
             Self::Evaluation(error) => error.message(),
         }
@@ -39,6 +41,7 @@ pub(super) fn calculate_solid(query: &str) -> Result<String, SolidError> {
                 let volume = &radius * &radius * height;
                 (surface, volume, true)
             }
+            ("圆锥" | "cone", [radius, height]) => return cone(radius, height),
             ("球" | "球体" | "sphere", [radius]) => {
                 let radius = positive_dimension(radius)?;
                 let surface = &radius * &radius * BigInt::from(4);
@@ -72,6 +75,28 @@ pub(super) fn calculate_solid(query: &str) -> Result<String, SolidError> {
     Ok(format!("表面积 {surface} · 体积 {volume}"))
 }
 
+fn cone(radius: &str, height: &str) -> Result<String, SolidError> {
+    let radius = positive_dimension(radius)?;
+    let height = positive_dimension(height)?;
+    let base = &radius * &radius;
+    let lateral_square = &base * (&base + &height * &height);
+    let volume = &base * height / BigInt::from(3);
+    for value in [&base, &lateral_square, &volume] {
+        ensure_exact_size(value).map_err(SolidError::Evaluation)?;
+    }
+    let surface = if let Some(lateral) = exact_abs_square_root(&lateral_square) {
+        let coefficient = base + lateral;
+        ensure_exact_size(&coefficient).map_err(SolidError::Evaluation)?;
+        multiple_of_pi(&coefficient)
+    } else {
+        format!("π({base} + {})", format_square_root(&lateral_square))
+    };
+    Ok(format!(
+        "表面积 {surface} · 体积 {}",
+        multiple_of_pi(&volume)
+    ))
+}
+
 fn positive_dimension(query: &str) -> Result<BigRational, SolidError> {
     let dimension = calculate_fraction(query.trim()).map_err(SolidError::Evaluation)?;
     if dimension.numer().sign() != Sign::Plus {
@@ -88,6 +113,9 @@ mod tests {
     fn calculates_exact_surfaces_and_volumes() {
         for (query, expected) in [
             ("圆柱 3,5", "表面积 48π · 体积 45π"),
+            ("圆锥 3,4", "表面积 24π · 体积 12π"),
+            ("圆锥 1,1", "表面积 π(1 + √2) · 体积 π/3"),
+            ("CONE 3/2,2", "表面积 6π · 体积 3π/2"),
             ("ＣＹＬＩＮＤＥＲ １／２，３", "表面积 7π/2 · 体积 3π/4"),
             ("球 1/2", "表面积 π · 体积 π/6"),
             ("sphere 3", "表面积 36π · 体积 36π"),
@@ -103,6 +131,10 @@ mod tests {
         );
         assert_eq!(
             calculate_solid("圆柱 1,0"),
+            Err(SolidError::NonPositiveDimension)
+        );
+        assert_eq!(
+            calculate_solid("圆锥 0,4"),
             Err(SolidError::NonPositiveDimension)
         );
         assert_eq!(calculate_solid("长方体 1,2"), Err(SolidError::Arguments));
