@@ -17,7 +17,14 @@ pub(super) struct ScatterPlot {
     x: [String; 2],
     y: [String; 2],
     axis_names: [String; 2],
-    residuals: bool,
+    kind: ScatterKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScatterKind {
+    Observations,
+    Residuals,
+    Cumulative { observations: u64 },
 }
 
 impl ScatterPlot {
@@ -29,7 +36,7 @@ impl ScatterPlot {
         points: &[(BigRational, BigRational)],
         curve: &[(BigRational, BigRational)],
     ) -> Self {
-        Self::prepare(points, curve, false)
+        Self::prepare(points, curve, ScatterKind::Observations)
     }
 
     pub(super) fn from_residuals(points: &[(BigRational, BigRational)]) -> Self {
@@ -40,20 +47,34 @@ impl ScatterPlot {
         if min != max {
             baseline.push((max.clone(), BigRational::default()));
         }
-        Self::prepare(points, &baseline, true)
+        Self::prepare(points, &baseline, ScatterKind::Residuals)
+    }
+
+    pub(super) fn from_cumulative_distribution(
+        points: &[(BigRational, BigRational)],
+        observations: u64,
+    ) -> Self {
+        let mut curve = Vec::with_capacity(points.len() * 2);
+        let mut previous = BigRational::default();
+        for (value, frequency) in points {
+            curve.push((value.clone(), previous));
+            curve.push((value.clone(), frequency.clone()));
+            previous = frequency.clone();
+        }
+        Self::prepare(points, &curve, ScatterKind::Cumulative { observations })
     }
 
     fn prepare(
         points: &[(BigRational, BigRational)],
         curve: &[(BigRational, BigRational)],
-        residuals: bool,
+        kind: ScatterKind,
     ) -> Self {
         let x = points.iter().chain(curve).map(|(x, _)| x);
         let y = points.iter().chain(curve).map(|(_, y)| y);
-        let min_x = x.clone().min().expect("散点图至少有两个数据点");
-        let max_x = x.max().expect("散点图至少有两个数据点");
-        let min_y = y.clone().min().expect("散点图至少有两个数据点");
-        let max_y = y.max().expect("散点图至少有两个数据点");
+        let min_x = x.clone().min().expect("图形至少有一个数据点");
+        let max_x = x.max().expect("图形至少有一个数据点");
+        let min_y = y.clone().min().expect("图形至少有一个数据点");
+        let max_y = y.max().expect("图形至少有一个数据点");
         let range_x = max_x - min_x;
         let range_y = max_y - min_y;
         let place = |(x, y): &(BigRational, BigRational)| {
@@ -67,11 +88,13 @@ impl ScatterPlot {
             curve: curve.iter().map(place).collect(),
             x: [min_x.to_string(), max_x.to_string()],
             y: [min_y.to_string(), max_y.to_string()],
-            axis_names: [
-                "x".to_owned(),
-                if residuals { "残差" } else { "y" }.to_owned(),
-            ],
-            residuals,
+            axis_names: match kind {
+                ScatterKind::Observations => ["x", "y"],
+                ScatterKind::Residuals => ["x", "残差"],
+                ScatterKind::Cumulative { .. } => ["观测值", "累计频率"],
+            }
+            .map(str::to_owned),
+            kind,
         }
     }
 
@@ -93,17 +116,15 @@ impl ScatterPlot {
     }
 
     pub(super) fn legend(&self) -> Div {
-        let point_label = if self.residuals {
-            "残差点"
-        } else {
-            "观测点"
+        let points = self.point_count();
+        let (count, line_label) = match self.kind {
+            ScatterKind::Observations => (format!("{points} 个观测点"), "拟合曲线"),
+            ScatterKind::Residuals => (format!("{points} 个残差点"), "零残差"),
+            ScatterKind::Cumulative { observations } => (
+                format!("{observations} 个观测 · {points} 个不同值"),
+                "累计频率",
+            ),
         };
-        let line_label = if self.residuals {
-            "零残差"
-        } else {
-            "拟合曲线"
-        };
-        let count = format!("{} 个{point_label}", self.point_count());
         div()
             .flex()
             .items_center()
@@ -272,6 +293,24 @@ pub(super) fn normalized_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cumulative_plot_draws_each_jump_vertically_with_a_closed_point_at_the_top() {
+        let points = [
+            (BigRational::default(), BigRational::new(1.into(), 2.into())),
+            (
+                BigRational::from_integer(2.into()),
+                BigRational::from_integer(1.into()),
+            ),
+        ];
+        let plot = ScatterPlot::from_cumulative_distribution(&points, 4);
+        assert_eq!(plot.curve, [(0, 0), (0, 2048), (4096, 2048), (4096, 4096)]);
+        assert_eq!(plot.locations, [(0, 2048), (4096, 4096)]);
+        assert_eq!(plot.y, ["0", "1"]);
+        let single = ScatterPlot::from_cumulative_distribution(&points[1..], 3);
+        assert_eq!(single.curve, [(2048, 0), (2048, 4096)]);
+        assert_eq!(single.locations, [(2048, 4096)]);
+    }
 
     #[test]
     fn residual_plot_includes_a_zero_baseline_and_keeps_the_signs() {

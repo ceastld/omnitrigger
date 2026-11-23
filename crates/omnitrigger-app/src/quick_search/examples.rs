@@ -517,6 +517,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用阶梯图查看每个值及以下的累计频率",
+        query: "统计: 累计分布图 3,1/2,0.5,3,5",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查询小于或等于指定值的次数",
         query: "统计: 累计次数 2 @ 1,2,2,3",
     },
@@ -5499,6 +5504,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "箱线摘要",
                     "箱线图",
                     "分箱图",
+                    "累计分布图",
                     "截尾平均",
                     "缩尾平均",
                     "基尼系数",

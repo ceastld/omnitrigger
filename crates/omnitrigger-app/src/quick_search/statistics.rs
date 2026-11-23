@@ -16,6 +16,7 @@ use super::linear_fit::{
 };
 use super::matrix::{format_matrix, parse_matrix, MatrixError};
 use super::operators::split_top_level_commas;
+use super::scatter_plot::ScatterPlot;
 
 pub(super) const MAX_VALUES: usize = 128;
 const MAX_BIN_EDGES: usize = 16;
@@ -155,7 +156,12 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             StatisticsOperation::Frequencies(FrequencyReport::Table),
             values.trim(),
         ),
-        "累计分布" | "cumulative-distribution" | "ecdf" => (
+        "累计分布"
+        | "cumulative-distribution"
+        | "ecdf"
+        | "累计分布图"
+        | "cumulative-distribution-plot"
+        | "ecdf-plot" => (
             StatisticsOperation::Frequencies(FrequencyReport::Cumulative),
             values.trim(),
         ),
@@ -621,11 +627,7 @@ fn report_frequencies(
     count: u64,
     report: FrequencyReport,
 ) -> String {
-    let mut frequencies = BTreeMap::<_, u64>::new();
-    for (value, repetitions) in values {
-        // 频数合计已在调用前检查，任一分组都不会超过合计。
-        *frequencies.entry(value).or_default() += repetitions;
-    }
+    let frequencies = frequency_groups(values);
     if matches!(report, FrequencyReport::Mode) {
         let highest = *frequencies.values().max().expect("至少有一个观测值");
         if highest == 1 {
@@ -639,22 +641,72 @@ fn report_frequencies(
             .join("、");
         return format!("众数 {modes} · 各出现 {highest} 次");
     }
-    let cumulative = matches!(report, FrequencyReport::Cumulative);
-    let (header, separator, newline) = if cumulative {
-        ("值,累计次数,累计频率", ',', "\r\n")
-    } else {
-        ("值\t次数\t频率", '\t', "\n")
-    };
-    let mut total = 0;
-    std::iter::once(header.to_owned())
+    if matches!(report, FrequencyReport::Cumulative) {
+        return cumulative_csv(&frequencies, count);
+    }
+    std::iter::once("值\t次数\t频率".to_owned())
         .chain(frequencies.into_iter().map(|(value, repetitions)| {
-            total += repetitions;
-            let occurrences = if cumulative { total } else { repetitions };
-            let share = BigRational::new(occurrences.into(), count.into());
-            format!("{value}{separator}{occurrences}{separator}{share}")
+            let share = BigRational::new(repetitions.into(), count.into());
+            format!("{value}\t{repetitions}\t{share}")
         }))
         .collect::<Vec<_>>()
-        .join(newline)
+        .join("\n")
+}
+
+fn frequency_groups(values: Vec<(BigRational, u64)>) -> BTreeMap<BigRational, u64> {
+    let mut frequencies = BTreeMap::<_, u64>::new();
+    for (value, repetitions) in values {
+        // 频数合计已在调用前检查，任一分组都不会超过合计。
+        *frequencies.entry(value).or_default() += repetitions;
+    }
+    frequencies
+}
+
+fn cumulative_rows(
+    frequencies: &BTreeMap<BigRational, u64>,
+    count: u64,
+) -> impl Iterator<Item = (&BigRational, u64, BigRational)> {
+    frequencies
+        .iter()
+        .scan(0u64, move |total, (value, count_at_value)| {
+            *total += *count_at_value;
+            Some((
+                value,
+                *total,
+                BigRational::new((*total).into(), count.into()),
+            ))
+        })
+}
+
+fn cumulative_csv(frequencies: &BTreeMap<BigRational, u64>, count: u64) -> String {
+    std::iter::once("值,累计次数,累计频率".to_owned())
+        .chain(
+            cumulative_rows(frequencies, count)
+                .map(|(value, total, share)| format!("{value},{total},{share}")),
+        )
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+pub(super) fn cumulative_plot_arguments(input: &str) -> Option<&str> {
+    let (operation, values) = operation_and_arguments(input.trim());
+    (operation == "累计分布图"
+        || operation.eq_ignore_ascii_case("cumulative-distribution-plot")
+        || operation.eq_ignore_ascii_case("ecdf-plot"))
+    .then_some(values.trim())
+}
+
+pub(super) fn plot_cumulative_distribution(
+    input: &str,
+) -> Result<(String, ScatterPlot), StatisticsError> {
+    let input = normalize(input);
+    let (values, count) = read_observations(input.trim())?;
+    let frequencies = frequency_groups(values);
+    let points = cumulative_rows(&frequencies, count)
+        .map(|(value, _, share)| (value.clone(), share))
+        .collect::<Vec<_>>();
+    let plot = ScatterPlot::from_cumulative_distribution(&points, count);
+    Ok((cumulative_csv(&frequencies, count), plot))
 }
 
 pub(super) fn parse_bin_edges(input: &str) -> Result<Vec<BigRational>, StatisticsError> {

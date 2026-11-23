@@ -31,7 +31,7 @@ use super::{
     solid::calculate_solid,
     statistics::{
         bin_plot_arguments, box_plot_arguments, calculate_bin_plot, calculate_box_plot,
-        calculate_statistics,
+        calculate_statistics, cumulative_plot_arguments, plot_cumulative_distribution,
     },
     tempo::calculate_tempo,
     text_tools::transform_text,
@@ -526,6 +526,13 @@ fn prepare_pipeline_chart(
                 bin_plot_arguments(query).map(|input| {
                     calculate_bin_plot(input)
                         .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
+                        .map_err(|error| error.message())
+                })
+            })
+            .or_else(|| {
+                cumulative_plot_arguments(query).map(|input| {
+                    plot_cumulative_distribution(input)
+                        .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
                         .map_err(|error| error.message())
                 })
             }),

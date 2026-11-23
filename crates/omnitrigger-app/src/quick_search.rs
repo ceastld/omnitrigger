@@ -1126,7 +1126,12 @@ impl Results {
                     }
                 }
                 Scope::Statistics => {
-                    if let Some(values) = statistics::box_plot_arguments(term) {
+                    if let Some(values) = statistics::cumulative_plot_arguments(term) {
+                        Self::plot_value(
+                            statistics::plot_cumulative_distribution(values)
+                                .map_err(ValueError::Statistics),
+                        )
+                    } else if let Some(values) = statistics::box_plot_arguments(term) {
                         Self::Value(
                             statistics::calculate_box_plot(values)
                                 .map(|(text, plot)| ResultValue {
@@ -4083,6 +4088,23 @@ mod tests {
         ));
         let expected = transform_csv(&format!("列分箱 {input}")).unwrap();
         assert_eq!(results.refillable_text(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn cumulative_chart_uses_unique_values_and_preserves_large_exact_counts() {
+        let arguments = "频数 -1@1,0.50@2,1/2@18446744073709551612";
+        let result = for_query(&format!("统计: 累计分布图 {arguments}"), &[]);
+        assert!(matches!(
+            &result,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.point_count() == 2 && plot.has_curve()
+        ));
+        assert_eq!(
+            result.refillable_text(),
+            Some(
+                "值,累计次数,累计频率\r\n-1,1,1/18446744073709551615\r\n1/2,18446744073709551615,1"
+            )
+        );
     }
 
     #[test]
