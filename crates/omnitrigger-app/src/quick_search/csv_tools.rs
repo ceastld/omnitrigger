@@ -40,6 +40,7 @@ use super::{
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
+    radix::convert_radix_integer,
     statistics::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
@@ -103,6 +104,7 @@ pub(super) enum CsvError {
     RegexCaptureColumnArguments,
     SplitColumnArguments,
     DataConversionColumnArguments,
+    RadixColumnArguments,
     NumericComparisonColumnArguments,
     DateDifferenceColumnArguments,
     ClockDifferenceColumnArguments,
@@ -226,6 +228,9 @@ impl CsvError {
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
             Self::DataConversionColumnArguments => {
                 "填写新列名、来源列和目标单位，例如 [\"速率(MiB/s)\",\"速率\",\"MiB/s\"]"
+            }
+            Self::RadixColumnArguments => {
+                "填写新列名、来源列及 2 至 36 的两个进制，例如 [\"十进制\",\"编号\",16,10]"
             }
             Self::NumericComparisonColumnArguments => {
                 "填写新列名、左列、右列和比较符，例如 [\"达标\",\"实测\",\"门槛\",\">=\"]"
@@ -405,6 +410,7 @@ enum Operation {
         arithmetic: ColumnArithmetic,
     },
     ConvertDataColumn(String, ColumnReference, String),
+    RadixColumn(String, ColumnReference, u32, u32),
     NumericComparisonColumn(String, ColumnReference, ColumnReference, NumberComparison),
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
     ClockDifferenceColumn(String, ColumnReference, ColumnReference),
@@ -1094,6 +1100,21 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ClockDifferenceColumn(name, start, end)
         }
+        "进制列" | "radix-column" => {
+            let ((name, source, from, to), data) =
+                json_argument_and_data::<(String, ColumnReference, u32, u32)>(
+                    input,
+                    CsvError::RadixColumnArguments,
+                )?;
+            if name.trim().is_empty()
+                || name.contains('\0')
+                || [from, to].iter().any(|base| !(2..=36).contains(base))
+            {
+                return Err(CsvError::RadixColumnArguments);
+            }
+            input = data;
+            Operation::RadixColumn(name, source, from, to)
+        }
         "数据换算列" | "convert-data-column" => {
             let ((name, source, target), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
@@ -1592,21 +1613,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amounts,
             unit,
         } => date_offset_column(&rows, &name, source, amounts, unit),
+        Operation::RadixColumn(name, source, from, to) => {
+            append_from_one_column(&rows, &name, source, |value| {
+                convert_radix_integer(value, from, to).map_err(|error| error.message())
+            })
+        }
         Operation::UrlParameterColumn(name, source, key) => {
-            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-            let source = source.resolve(header)?;
-            validate_column_width(&[source], header.len())?;
-            let mut row_number = 0;
-            write_appended_column(header, records, &name, |row| {
-                row_number += 1;
-                let address = row[source].trim_start();
-                if address.is_empty() {
-                    return Ok(String::new());
-                }
-                url_parameter_values(address, &key).map_err(|error| CsvError::DataRowValue {
-                    row: row_number,
-                    cause: error.message(),
-                })
+            append_from_one_column(&rows, &name, source, |address| {
+                url_parameter_values(address, &key).map_err(|error| error.message())
             })
         }
         Operation::JsonPointerColumn(name, source, keys, content) => {
@@ -2776,6 +2790,29 @@ fn date_offset_column(
         }
         .map(|date| date.to_string())
         .map_err(|error| at_row(error.message()))
+    })
+}
+
+fn append_from_one_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    compute: impl Fn(&str) -> Result<String, &'static str>,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let mut row_number = 0;
+    write_appended_column(header, records, name, |row| {
+        row_number += 1;
+        let value = row[source].trim_start();
+        if value.is_empty() {
+            return Ok(String::new());
+        }
+        compute(value).map_err(|cause| CsvError::DataRowValue {
+            row: row_number,
+            cause,
+        })
     })
 }
 
@@ -5779,6 +5816,26 @@ null"#
             )
             .as_deref(),
             Ok("原列,类型\r\ntrue,boolean\r\nnull,null")
+        );
+    }
+
+    #[test]
+    fn converts_csv_integer_cells_across_radices_without_rounding() {
+        let query = concat!(
+            "进制列 [\"十进制\",\"编号\",16,10] 项目,编号\n",
+            "甲,ff\n乙,-a_b\n丙,20_0000_0000_0001\n丁,",
+        );
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("项目,编号,十进制\r\n甲,ff,255\r\n乙,-a_b,-171\r\n丙,20_0000_0000_0001,9007199254740993\r\n丁,\"\",\"\"")
+        );
+        assert!(matches!(
+            transform_csv("radix-column [\"结果\",1,2,10] 编号\n101\n2"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+        assert_eq!(
+            transform_csv("进制列 [\"结果\",1,1,10] 编号"),
+            Err(CsvError::RadixColumnArguments)
         );
     }
 

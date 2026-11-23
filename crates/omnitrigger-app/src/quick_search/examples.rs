@@ -3007,6 +3007,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 数据换算列 [\"容量(KiB)\",\"容量\",\"KiB\"]\n文件,容量\n甲,9007199254740993 B\n乙,1/3 KiB\n丙,",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "逐行把整数换算成指定进制",
+        query: "CSV: 进制列 [\"十进制\",\"编号\",16,10] 项目,编号\n甲,ff\n乙,-a_b\n丙,20_0000_0000_0001\n丁,",
+    },
+    Example {
         icon: Icon::Clock,
         title: "给 CSV 追加两列日期相差的天数",
         query: "CSV: 日期差列 [\"间隔天数\",\"开始\",\"结束\"]\n开始,结束\n2024-02-28,2024-03-01\n2024-03-03,2024-03-01",

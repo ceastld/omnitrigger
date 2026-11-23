@@ -185,6 +185,18 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     }
     let source = arbitrary_base(source).ok_or(RadixError::Base)?;
     let target = arbitrary_base(target).ok_or(RadixError::Base)?;
+    convert_radix_integer(integer, source, target)
+}
+
+pub(super) fn convert_radix_integer(
+    integer: &str,
+    source: u32,
+    target: u32,
+) -> Result<String, RadixError> {
+    if [source, target].iter().any(|base| !(2..=36).contains(base)) {
+        return Err(RadixError::Base);
+    }
+    let integer = integer.trim();
     let negative = integer.starts_with('-');
     let digits = integer.strip_prefix(['+', '-']).unwrap_or(integer);
     let value = bounded_magnitude(digits, source)?;
