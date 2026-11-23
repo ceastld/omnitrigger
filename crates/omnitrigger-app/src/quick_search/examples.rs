@@ -97,6 +97,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接解两边都是算式的不等式",
+        query: "方程: 不等式 x² < 3x - 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求二次函数的顶点和极值",
         query: "方程: 顶点 2,-4,3",
     },

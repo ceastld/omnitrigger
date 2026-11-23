@@ -37,7 +37,9 @@ impl EquationError {
             Self::ExpressionArguments => {
                 "输入由常数、x 和 x² 项组成的式子，例如 x**2 - 3*x + 2 = 0"
             }
-            Self::InequalityArguments => "先填写 >、>=、< 或 <=，再填写 a, b, c",
+            Self::InequalityArguments => {
+                "输入 x² < 3x - 2，或先填写 >、>=、<、<= 中的一个，再填写 a, b, c"
+            }
             Self::RootArguments => "填写两个有理数根，可再填非零的二次项系数",
             Self::CurvePairArguments => "分别填写两条曲线的 a, b, c 三个系数，两组用分号或换行隔开",
             Self::ThreePointArguments => {
@@ -118,6 +120,10 @@ fn expanded_equation_coefficients(input: &str) -> Result<[BigRational; 3], Equat
     let Some((left, right)) = input.split_once('=') else {
         return expanded_polynomial(input);
     };
+    move_polynomial_terms(left, right)
+}
+
+fn move_polynomial_terms(left: &str, right: &str) -> Result<[BigRational; 3], EquationError> {
     let [a, b, c] = expanded_polynomial(left)?;
     let [right_a, right_b, right_c] = expanded_polynomial(right)?;
     let coefficients = [a - right_a, b - right_b, c - right_c];
@@ -617,23 +623,33 @@ fn signed_offset(value: &BigRational) -> String {
     }
 }
 
-fn solve_inequality(input: &str) -> Result<String, EquationError> {
-    let (operator, coefficients) = input
-        .split_once(char::is_whitespace)
-        .ok_or(EquationError::InequalityArguments)?;
-    let comparison = match NumberComparison::parse(operator) {
-        Some(
-            comparison @ (NumberComparison::Less
-            | NumberComparison::LessOrEqual
-            | NumberComparison::Greater
-            | NumberComparison::GreaterOrEqual),
-        ) => comparison,
-        _ => return Err(EquationError::InequalityArguments),
+fn inequality_arguments(
+    input: &str,
+) -> Result<(NumberComparison, [BigRational; 3]), EquationError> {
+    let invalid = EquationError::InequalityArguments;
+    let (index, symbol) = input
+        .char_indices()
+        .find(|(_, symbol)| matches!(symbol, '<' | '>' | '≤' | '≥'))
+        .ok_or(invalid)?;
+    let mut end = index + symbol.len_utf8();
+    if matches!(symbol, '<' | '>') && input[end..].starts_with('=') {
+        end += 1;
+    }
+    let comparison = NumberComparison::parse(&input[index..end]).ok_or(invalid)?;
+    let right = &input[end..];
+    let coefficients = if index == 0 {
+        coefficient_row(right).map_err(|error| match error {
+            EquationError::Coefficients => invalid,
+            _ => error,
+        })?
+    } else {
+        move_polynomial_terms(&input[..index], right)?
     };
-    let [a, b, c] = coefficient_row(coefficients).map_err(|error| match error {
-        EquationError::Coefficients => EquationError::InequalityArguments,
-        _ => error,
-    })?;
+    Ok((comparison, coefficients))
+}
+
+fn solve_inequality(input: &str) -> Result<String, EquationError> {
+    let (comparison, [a, b, c]) = inequality_arguments(input)?;
     let zero = BigRational::default();
     let inclusive = comparison.accepts(Ordering::Equal);
     let (opening, closing) = if inclusive { ('[', ']') } else { ('(', ')') };
@@ -1137,6 +1153,10 @@ mod tests {
     fn solves_exact_quadratic_linear_and_constant_inequalities() {
         for (query, expected) in [
             ("不等式 >= 1,-3,2", "(-∞, 1] ∪ [2, ∞)"),
+            ("不等式 x² < 3x - 2", "(1, 2)"),
+            ("不等式 x**2 ≥ 2", "(-∞, -√2] ∪ [√2, ∞)"),
+            ("不等式 X/2 >= 3/4", "[3/2, ∞)"),
+            ("不等式 x² - 1 > x² + 2", "∅"),
             ("inequality < 1,-3,2", "(1, 2)"),
             ("不等式 ≤ -1,3,-2", "(-∞, 1] ∪ [2, ∞)"),
             ("不等式 ≥ 1,0,-2", "(-∞, -√2] ∪ [√2, ∞)"),
@@ -1158,6 +1178,12 @@ mod tests {
             solve_equation("不等式 = 1,-3,2"),
             Err(EquationError::InequalityArguments)
         );
+        for query in ["不等式 x² < x < 3", "不等式 x² <= ", "不等式 x² << 2"] {
+            assert_eq!(
+                solve_equation(query),
+                Err(EquationError::ExpressionArguments)
+            );
+        }
     }
 
     #[test]
