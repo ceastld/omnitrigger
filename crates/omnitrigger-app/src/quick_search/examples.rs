@@ -1371,6 +1371,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "分贝: 转幅度比 20 dB",
     },
     Example {
+        icon: Icon::Clock,
+        title: "按每分钟拍数计算一拍时长",
+        query: "节拍: 120 BPM",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "用分数表示拍数并计算时长",
+        query: "节拍: 时长 120 BPM @ 3/2",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "按一段时长和拍数反推速度",
+        query: "节拍: 速度 1.5秒 @ 3",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按整数半音移动音高",
         query: "音高: 转调 Bb3 @ 2",
@@ -4723,6 +4738,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Period
         | Scope::Pitch
         | Scope::Decibel
+        | Scope::Tempo
         | Scope::AspectRatio
         | Scope::MapScale
         | Scope::PixelDensity
@@ -4746,6 +4762,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Polygon
             if ["重心", "包含", "周长", "边界框", "凸性"]
                 .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
+        Scope::Tempo
+            if ["时长", "速度"]
+                .iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Decibel
             if ["功率比", "幅度比", "转功率比", "转幅度比"]
@@ -4858,6 +4878,7 @@ mod tests {
             Scope::Period,
             Scope::Pitch,
             Scope::Decibel,
+            Scope::Tempo,
             Scope::AspectRatio,
             Scope::MapScale,
             Scope::PixelDensity,

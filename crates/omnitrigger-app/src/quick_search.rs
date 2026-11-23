@@ -42,6 +42,7 @@ mod scientific;
 mod scope;
 mod settings_sections;
 mod statistics;
+mod tempo;
 mod text_tools;
 mod timecode;
 mod timestamp;
@@ -127,6 +128,7 @@ use renminbi::{uppercase_renminbi, RenminbiError};
 use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
 use statistics::{calculate_statistics, StatisticsError};
+use tempo::{calculate_tempo, TempoError};
 use text_tools::{count_text, transform_text, TextError};
 use timecode::{convert_timecode, TimecodeError};
 use timestamp::{convert_timestamp, is_offset_timestamp, TimestampError};
@@ -400,6 +402,7 @@ enum ValueError {
     Paper(PaperError),
     Pitch(PitchError),
     Decibel(DecibelError),
+    Tempo(TempoError),
     Rectangle(RectangleError),
     Cidr(CidrError),
     FileMode(FileModeError),
@@ -514,6 +517,7 @@ impl ValueError {
             Self::Paper(error) => error.message(),
             Self::Pitch(error) => error.message(),
             Self::Decibel(error) => error.message(),
+            Self::Tempo(error) => error.message(),
             Self::Rectangle(error) => error.message(),
             Self::Cidr(error) => error.message(),
             Self::FileMode(error) => error.message(),
@@ -909,6 +913,7 @@ impl Results {
                 }
                 Scope::Paper => Self::text_value(calculate_paper(term).map_err(ValueError::Paper)),
                 Scope::Pitch => Self::text_value(convert_pitch(term).map_err(ValueError::Pitch)),
+                Scope::Tempo => Self::text_value(calculate_tempo(term).map_err(ValueError::Tempo)),
                 Scope::Decibel => {
                     Self::text_value(convert_decibels(term).map_err(ValueError::Decibel))
                 }
@@ -4848,9 +4853,12 @@ mod tests {
                     "时长: 降序 02:40,PT2M,00:55,02:00",
                     "批量换算: 时长 01:30 to s\nPT1M30S to min\n1天2.5秒 to iso",
                     "批量换算: 时长对照 扣除休息 23:45 到 01:15 | 30分钟\n08:00 到 10:15 to min",
+                    "节拍: 时长 120 BPM @ 3/2",
                     "CSV: 时刻差列 [\"经过时长\",\"开始\",\"结束\"]\n开始,结束\n23:45,01:15\n09:00:00.25,09:00:01",
                     "帧数: 125 帧 @ 25 fps",
                     "帧数: 10秒 @ 30000/1001 fps",
+                    "节拍: 120 BPM",
+                    "节拍: 速度 1.5秒 @ 3",
                     "时间戳: 现在 + 90分钟 to UTC+8",
                     "时间戳: 向下对齐 15分钟 @ 1970-01-01T00:17:30Z",
                     "时间戳: 向上对齐 15分钟 @ 1970-01-01T00:17:30Z",
