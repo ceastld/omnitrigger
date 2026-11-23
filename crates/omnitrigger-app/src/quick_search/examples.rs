@@ -117,6 +117,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "由两个有理数根求二次方程的系数",
+        query: "方程: 由根 1/2,3/2,-2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求抛物线和直线的精确交点",
+        query: "方程: 交点 1,0,0 ; 0,-1,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "联立求解两个二元一次方程",
         query: "联立: 2,1,5; 1,-1,1",
     },

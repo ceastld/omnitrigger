@@ -12,6 +12,8 @@ use super::operators::{split_top_level_commas, NumberComparison};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
     Coefficients,
+    RootArguments,
+    IntersectionArguments,
     InequalityArguments,
     NonQuadratic,
     SystemRows,
@@ -25,6 +27,10 @@ impl EquationError {
                 "按 a, b, c 输入 ax² + bx + c = 0 的三个系数"
             }
             Self::InequalityArguments => "先填写 >、>=、< 或 <=，再填写 a, b, c",
+            Self::RootArguments => "填写两个有理数根，可再填非零的二次项系数",
+            Self::IntersectionArguments => {
+                "分别填写两条曲线的 a, b, c 三个系数，两组用分号或换行隔开"
+            }
             Self::NonQuadratic => "二次项系数 a 须非零",
             Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
             Self::Evaluation(error) => error.message(),
@@ -43,6 +49,8 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "顶点" | "vertex" => return describe_quadratic(arguments.trim_start(), false),
             "判别式" | "discriminant" => return quadratic_discriminant(arguments.trim_start()),
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
+            "由根" | "from-roots" => return quadratic_from_roots(arguments.trim_start()),
+            "交点" | "intersections" => return polynomial_intersections(arguments.trim_start()),
             "配方" | "complete-the-square" => {
                 return describe_quadratic(arguments.trim_start(), true);
             }
@@ -97,6 +105,88 @@ fn quadratic_root_sum_and_product(input: &str) -> Result<String, EquationError> 
         ensure_exact_size(value).map_err(EquationError::Evaluation)?;
     }
     Ok(format!("根和 {sum}\n根积 {product}"))
+}
+
+fn quadratic_from_roots(input: &str) -> Result<String, EquationError> {
+    let values: Vec<_> = split_top_level_commas(input).collect();
+    let (first, second, leading) = match values.as_slice() {
+        [first, second] => (*first, *second, "1"),
+        [first, second, leading] => (*first, *second, *leading),
+        _ => return Err(EquationError::RootArguments),
+    };
+    let parse = |value: &str| {
+        calculate_fraction(value).map_err(|error| match error {
+            FractionError::Invalid | FractionError::Incomplete => EquationError::RootArguments,
+            _ => EquationError::Evaluation(error),
+        })
+    };
+    let first = parse(first)?;
+    let second = parse(second)?;
+    let a = parse(leading)?;
+    if a.numer().sign() == Sign::NoSign {
+        return Err(EquationError::NonQuadratic);
+    }
+    let b = -&a * (&first + &second);
+    let c = &a * first * second;
+    for value in [&b, &c] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    Ok(format!("{a},{b},{c}"))
+}
+
+fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
+    let (first, second) = input
+        .split_once([';', '；', '\n'])
+        .ok_or(EquationError::IntersectionArguments)?;
+    let parse = |coefficients| match coefficient_row(coefficients) {
+        Err(
+            EquationError::Coefficients
+            | EquationError::Evaluation(FractionError::Invalid | FractionError::Incomplete),
+        ) => Err(EquationError::IntersectionArguments),
+        result => result,
+    };
+    let [a, b, c] = parse(first)?;
+    let [other_a, other_b, other_c] = parse(second)?;
+    let (diff_a, diff_b, diff_c) = (&a - other_a, &b - other_b, &c - other_c);
+    let point = |x: &BigRational| {
+        let y = (&a * x + &b) * x + &c;
+        for value in [x, &y] {
+            ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+        }
+        Ok(format!("({x}, {y})"))
+    };
+    if diff_a.numer().sign() == Sign::NoSign {
+        if diff_b.numer().sign() == Sign::NoSign {
+            return Ok(if diff_c.numer().sign() == Sign::NoSign {
+                "两条曲线重合"
+            } else {
+                "没有实数交点"
+            }
+            .to_owned());
+        }
+        return point(&(-diff_c / diff_b));
+    }
+    let (x, dx_squared) = quadratic_center(&diff_a, diff_b.clone(), diff_c.clone());
+    match dx_squared.numer().sign() {
+        Sign::Minus => return Ok("没有实数交点".to_owned()),
+        Sign::NoSign => return point(&x),
+        Sign::Plus => {}
+    }
+    // 在交点处用差式化去 x²，纵坐标可按 x 的一次式计算。
+    let slope = &b - &a * diff_b / &diff_a;
+    let y = &slope * &x + &c - &a * diff_c / &diff_a;
+    let dy_squared = &slope * &slope * &dx_squared;
+    for value in [&x, &dx_squared, &y, &dy_squared] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    let [left_x, right_x] =
+        shifted_real_roots(&x, &dx_squared).map_err(EquationError::Evaluation)?;
+    let mut ys = shifted_real_roots(&y, &dy_squared).map_err(EquationError::Evaluation)?;
+    if slope.numer().sign() == Sign::Minus {
+        ys.reverse();
+    }
+    let [left_y, right_y] = ys;
+    Ok(format!("({left_x}, {left_y})\n({right_x}, {right_y})"))
 }
 
 fn describe_quadratic(input: &str, complete_square: bool) -> Result<String, EquationError> {
@@ -185,19 +275,8 @@ fn solve_inequality(input: &str) -> Result<String, EquationError> {
             (false, false) => Ok(real_or_empty(false)),
         },
         Sign::Plus => {
-            let [left, right] = if let Some(distance) = exact_abs_square_root(&squared) {
-                exact_real_roots(&center, &distance).map_err(EquationError::Evaluation)?
-            } else {
-                let distance = format_square_root(&squared);
-                if center == zero {
-                    [format!("-{distance}"), distance]
-                } else {
-                    [
-                        format!("{center} - {distance}"),
-                        format!("{center} + {distance}"),
-                    ]
-                }
-            };
+            let [left, right] =
+                shifted_real_roots(&center, &squared).map_err(EquationError::Evaluation)?;
             Ok(if outside {
                 format!("(-∞, {left}{closing} ∪ {opening}{right}, ∞)")
             } else {
@@ -210,6 +289,24 @@ fn solve_inequality(input: &str) -> Result<String, EquationError> {
 fn real_or_empty(all: bool) -> String {
     let solution = if all { "ℝ" } else { "∅" };
     solution.to_owned()
+}
+
+fn shifted_real_roots(
+    center: &BigRational,
+    squared: &BigRational,
+) -> Result<[String; 2], FractionError> {
+    if let Some(distance) = exact_abs_square_root(squared) {
+        return exact_real_roots(center, &distance);
+    }
+    let distance = format_square_root(squared);
+    Ok(if center.numer().sign() == Sign::NoSign {
+        [format!("-{distance}"), distance]
+    } else {
+        [
+            format!("{center} - {distance}"),
+            format!("{center} + {distance}"),
+        ]
+    })
 }
 
 fn exact_real_roots(
@@ -329,6 +426,45 @@ pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intersects_quadratic_and_linear_graphs_with_exact_coordinates() {
+        for (input, expected) in [
+            ("交点 1,0,0 ; 0,-1,2", "(-2, 4)\n(1, 1)"),
+            ("交点 1,0,0 ; 0,0,2", "(-√2, 2)\n(√2, 2)"),
+            ("交点 0,2,1 ; 0,-1,2", "(1/3, 5/3)"),
+            ("交点 1,0,0 ; 0,0,0", "(0, 0)"),
+            ("交点 1,0,0 ; 0,0,-2", "没有实数交点"),
+            ("交点 1,0,0 ; 1,0,0", "两条曲线重合"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            solve_equation("交点 1,0,0 ; 0,1"),
+            Err(EquationError::IntersectionArguments)
+        );
+    }
+
+    #[test]
+    fn builds_exact_quadratic_coefficients_from_two_roots() {
+        assert_eq!(
+            solve_equation("由根 1/2,3/2,-2").as_deref(),
+            Ok("-2,4,-3/2")
+        );
+        assert_eq!(solve_equation("from-roots -2,-2").as_deref(), Ok("1,4,4"));
+        assert_eq!(
+            solve_equation("由根 1,2,0"),
+            Err(EquationError::NonQuadratic)
+        );
+        assert_eq!(
+            solve_equation("由根 1,2,3,4"),
+            Err(EquationError::RootArguments)
+        );
+        assert_eq!(
+            solve_equation("由根 1,无效"),
+            Err(EquationError::RootArguments)
+        );
+    }
 
     #[test]
     fn solves_exact_linear_systems_including_singular_cases() {
