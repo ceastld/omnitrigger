@@ -27,6 +27,7 @@ use super::{
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 512;
 const MAX_EDIT_GRAPHEMES: usize = 512;
+pub(super) const MAX_EDIT_DISTANCE_WORK: usize = 1024 * 1024;
 const MAX_PIPELINE_STEPS: usize = 8;
 
 #[derive(Clone, Copy)]
@@ -74,6 +75,7 @@ pub(super) enum TextError {
     InvalidLineComparison,
     TooManyDiffLines,
     TooManyEditGraphemes,
+    EditDistanceWorkLimit,
     EmptyDelimiter,
     InvalidColumn,
     CsvColumnCount,
@@ -124,6 +126,7 @@ impl TextError {
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
             Self::TooManyDiffLines => "逐行比较最多支持每组 512 行",
             Self::TooManyEditGraphemes => "编辑距离最多支持每段 512 个字素簇",
+            Self::EditDistanceWorkLimit => "编辑距离计算量过大，请缩小数据范围",
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
@@ -1519,6 +1522,15 @@ fn join_distinct_lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
 
 fn edit_distance(input: &str) -> Result<String, TextError> {
     let (first, second) = read_text_pair(input)?;
+    let mut remaining_work = MAX_EDIT_DISTANCE_WORK;
+    Ok(grapheme_edit_distance(&first, &second, &mut remaining_work)?.to_string())
+}
+
+pub(super) fn grapheme_edit_distance(
+    first: &str,
+    second: &str,
+    remaining_work: &mut usize,
+) -> Result<usize, TextError> {
     let first: Vec<_> = first.graphemes(true).take(MAX_EDIT_GRAPHEMES + 1).collect();
     let second: Vec<_> = second
         .graphemes(true)
@@ -1527,6 +1539,10 @@ fn edit_distance(input: &str) -> Result<String, TextError> {
     if first.len().max(second.len()) > MAX_EDIT_GRAPHEMES {
         return Err(TextError::TooManyEditGraphemes);
     }
+    let work = (first.len() + 1) * (second.len() + 1);
+    *remaining_work = remaining_work
+        .checked_sub(work)
+        .ok_or(TextError::EditDistanceWorkLimit)?;
 
     let mut distances: Vec<_> = (0..=second.len()).collect();
     for (row, grapheme) in first.iter().enumerate() {
@@ -1541,7 +1557,7 @@ fn edit_distance(input: &str) -> Result<String, TextError> {
             diagonal = above;
         }
     }
-    Ok(distances[second.len()].to_string())
+    Ok(distances[second.len()])
 }
 
 fn diff_lines(input: &str) -> Result<String, TextError> {

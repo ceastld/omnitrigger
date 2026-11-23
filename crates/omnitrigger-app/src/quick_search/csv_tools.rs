@@ -49,9 +49,9 @@ use super::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
     text_tools::{
-        compare_natural, compile_regex, newline_pattern, regex_group_index,
+        compare_natural, compile_regex, grapheme_edit_distance, newline_pattern, regex_group_index,
         replace_literal_matches, replace_regex_matches, GraphemeRange, TextError, TextLengthUnit,
-        UnicodeForm,
+        UnicodeForm, MAX_EDIT_DISTANCE_WORK,
     },
     url_encoding::url_parameter_values,
 };
@@ -139,6 +139,7 @@ pub(super) enum CsvError {
     ShiftedColumnArguments,
     MovingColumnArguments,
     UnicodeColumnArguments,
+    EditDistanceColumnArguments,
     MovingQuantileColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
@@ -314,6 +315,9 @@ impl CsvError {
             Self::UnicodeColumnArguments => {
                 "填写新列名、来源列和 NFC、NFD、NFKC 或 NFKD，例如 [\"标准名\",\"名称\",\"NFC\"]"
             }
+            Self::EditDistanceColumnArguments => {
+                "填写新列名和两个文本来源列，例如 [\"距离\",\"原文\",\"现文\"]"
+            }
             Self::MovingQuantileColumnArguments => {
                 "填写新列名、数值列、分组列、窗口大小和分位概率，例如 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]"
             }
@@ -398,6 +402,7 @@ enum Operation {
     DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
     UnicodeNormalizedColumn(String, ColumnReference, UnicodeForm),
+    EditDistanceColumn(String, ColumnReference, ColumnReference),
     FillEmptyCells(Vec<ColumnReference>, FillDirection),
     InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
@@ -803,6 +808,18 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             }
             input = data;
             Operation::UnicodeNormalizedColumn(name, source, form)
+        }
+        "编辑距离列" | "edit-distance-column" => {
+            let ((name, first, second), data) =
+                json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
+                    input,
+                    CsvError::EditDistanceColumnArguments,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(CsvError::EditDistanceColumnArguments);
+            }
+            input = data;
+            Operation::EditDistanceColumn(name, first, second)
         }
         kind @ ("向下填充" | "fill-down" | "向上填充" | "fill-up") => {
             let (columns, data) =
@@ -1686,6 +1703,24 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             validate_column_width(&[source], header.len())?;
             write_appended_column(header, records, &name, |row| {
                 Ok(form.normalize(&row[source]))
+            })
+        }
+        Operation::EditDistanceColumn(name, first, second) => {
+            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+            let first = first.resolve(header)?;
+            let second = second.resolve(header)?;
+            validate_column_width(&[first, second], header.len())?;
+            let mut remaining_work = MAX_EDIT_DISTANCE_WORK;
+            let mut row_number = 0;
+            write_appended_column(header, records, &name, |row| {
+                row_number += 1;
+                let distance =
+                    grapheme_edit_distance(&row[first], &row[second], &mut remaining_work)
+                        .map_err(|error| CsvError::DataRowValue {
+                            row: row_number,
+                            cause: error.message(),
+                        })?;
+                Ok(distance.to_string())
             })
         }
         Operation::FillEmptyCells(columns, direction) => {
@@ -5071,6 +5106,50 @@ mod tests {
         assert_eq!(
             transform_csv(r#"Unicode规范化列 ["名称",1,"NFC"] 名称"#),
             Err(CsvError::HeaderNameConflict),
+        );
+    }
+
+    #[test]
+    fn adds_grapheme_edit_distances_to_csv_without_rewriting_the_source_columns() {
+        assert_eq!(
+            transform_csv(concat!(
+                "编辑距离列 [\"距离\",\"原文\",3] 编号,原文,现文\n",
+                "001,kitten,sitting\n002,猫👩‍💻,猫🧑‍💻\n003, ,\n004,,"
+            ))
+            .as_deref(),
+            Ok(concat!(
+                "编号,原文,现文,距离\r\n",
+                "001,kitten,sitting,3\r\n002,猫👩‍💻,猫🧑‍💻,1\r\n",
+                "003, ,\"\",1\r\n004,\"\",\"\",0"
+            )),
+        );
+        assert_eq!(
+            transform_csv(r#"edit-distance-column ["距离",1,2] 前,后"#).as_deref(),
+            Ok("前,后,距离"),
+        );
+        assert_eq!(
+            transform_csv(r#"编辑距离列 ["距离",1,3] 前,后"#),
+            Err(CsvError::ColumnOutOfRange),
+        );
+        let too_long = format!(
+            "编辑距离列 [\"距离\",1,2] 前,后\n茶,茶\n{},茶",
+            "茶".repeat(513)
+        );
+        assert_eq!(
+            transform_csv(&too_long),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: TextError::TooManyEditGraphemes.message()
+            }),
+        );
+        let repeated = format!("\n{},{}", "a".repeat(512), "b".repeat(512));
+        let too_much = format!("编辑距离列 [\"距离\",1,2] 前,后{}", repeated.repeat(4));
+        assert_eq!(
+            transform_csv(&too_much),
+            Err(CsvError::DataRowValue {
+                row: 4,
+                cause: TextError::EditDistanceWorkLimit.message()
+            }),
         );
     }
 

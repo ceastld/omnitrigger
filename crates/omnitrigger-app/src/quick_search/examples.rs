@@ -3276,6 +3276,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行比较两个 CSV 文本列的编辑距离",
+        query: "CSV: 编辑距离列 [\"距离\",\"原文\",\"现文\"]\n编号,原文,现文\n001,kitten,sitting\n002,猫👩‍💻,猫🧑‍💻\n003,,茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按字素位置截取 CSV 单元格的内容",
         query: "CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]\n编号,文本\n1,A👩‍💻e\u{301}Z\n2,北\n3,",
     },
