@@ -248,14 +248,37 @@ fn convert_radix_fraction(number: &str, source: u32, target: u32) -> Result<Stri
     } else {
         bounded_magnitude(whole, source)?
     };
-    let fractional = ungroup_digits(fractional).ok_or(RadixError::Digits)?;
-    if fractional.len() > MAX_REPEATING_DECIMAL_PLACES {
+    let (fractional, repeating) = if let Some((fixed, repeating)) = fractional.split_once('(') {
+        let repeating = repeating.strip_suffix(')').ok_or(RadixError::Digits)?;
+        let repeating = ungroup_digits(repeating).ok_or(RadixError::Digits)?;
+        (fixed, Some(repeating))
+    } else {
+        (fractional, None)
+    };
+    let fractional = if fractional.is_empty() && repeating.is_some() {
+        String::new()
+    } else {
+        ungroup_digits(fractional).ok_or(RadixError::Digits)?
+    };
+    let places = fractional.len() + repeating.as_ref().map_or(0, String::len);
+    if places > MAX_REPEATING_DECIMAL_PLACES {
         return Err(RadixError::FractionalLength);
     }
     let divisor = BigUint::from(source).pow(fractional.len() as u32);
-    let remainder =
-        BigUint::parse_bytes(fractional.as_bytes(), source).ok_or(RadixError::Digits)?;
-    let numerator = BigInt::from_biguint(sign, whole * &divisor + remainder);
+    let remainder = if fractional.is_empty() {
+        BigUint::default()
+    } else {
+        BigUint::parse_bytes(fractional.as_bytes(), source).ok_or(RadixError::Digits)?
+    };
+    let whole = whole * &divisor + remainder;
+    let (numerator, divisor) = if let Some(repeating) = repeating {
+        let cycle_divisor = BigUint::from(source).pow(repeating.len() as u32) - 1_u8;
+        let cycle = BigUint::parse_bytes(repeating.as_bytes(), source).ok_or(RadixError::Digits)?;
+        (whole * &cycle_divisor + cycle, divisor * cycle_divisor)
+    } else {
+        (whole, divisor)
+    };
+    let numerator = BigInt::from_biguint(sign, numerator);
     let value = BigRational::new(numerator, divisor.into());
     repeating_radix(&value, target).map_err(|_| RadixError::FractionalLength)
 }
@@ -728,6 +751,11 @@ mod tests {
             ("小数 .01_1 从 2 到 10", "0.375"),
             ("小数 0.z 从 36 到 36", "0.z"),
             ("小数 -0.0 从 10 到 2", "0"),
+            ("小数 0.0(0011) 从 2 到 10", "0.1"),
+            ("小数 0.(3) 从 10 到 3", "0.1"),
+            ("小数 0.(9) 从 10 到 2", "1"),
+            ("小数 -A.(8) 从 16 到 10", "-10.5(3)"),
+            ("小数 .(01_01) 从 2 到 10", "0.(3)"),
         ] {
             assert_eq!(
                 convert_arbitrary_radix(query).as_deref(),
@@ -740,6 +768,9 @@ mod tests {
             ("小数 0.2 从 2 到 10", RadixError::Digits),
             ("小数 0..1 从 10 到 2", RadixError::Digits),
             ("小数 0.00001 从 10 到 2", RadixError::FractionalLength),
+            ("小数 0.1() 从 10 到 2", RadixError::Digits),
+            ("小数 0.(2) 从 2 到 10", RadixError::Digits),
+            ("小数 0.(01 从 2 到 10", RadixError::Digits),
         ] {
             assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
         }

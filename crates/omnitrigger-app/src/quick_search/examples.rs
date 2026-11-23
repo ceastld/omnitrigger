@@ -982,6 +982,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把带括号循环节的小数换回十进制",
+        query: "进制: 小数 0.0(0011) 从 2 到 10",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把罗马数字转换为十进制整数",
         query: "进制: 罗马数字 CDXCIX",
     },
