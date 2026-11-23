@@ -3088,6 +3088,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从 CSV 的网址列逐行提取查询参数",
+        query: "CSV: URL参数列 [\"标签\",\"网址\",\"tag\"] 编号,网址\n1,https://example.invalid/?tag=a+1&tag=b%2Bc\n2,https://example.invalid/?other=tea\n3,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "检查 CSV 单元格中 JSON 字段的类型",
         query: "CSV: JSON类型列 [\"类型\",\"数据\",\"/金额\"]\n编号,数据\n1,\"{\"\"金额\"\":1.50}\"\n2,\"{\"\"金额\"\":\"\"1.50\"\"}\"\n3,\"{\"\"金额\"\":null}\"\n4,{}",
     },

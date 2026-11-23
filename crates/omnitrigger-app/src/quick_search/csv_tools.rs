@@ -47,6 +47,7 @@ use super::{
         compare_natural, compile_regex, newline_pattern, regex_group_index,
         replace_literal_matches, replace_regex_matches, GraphemeRange, TextError, TextLengthUnit,
     },
+    url_encoding::url_parameter_values,
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
@@ -120,6 +121,7 @@ pub(super) enum CsvError {
     RegexReplaceColumnInputTooLarge,
     JsonPointerColumnArguments,
     JsonPointerColumn(JsonError),
+    UrlParameterColumnArguments,
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
@@ -269,6 +271,9 @@ impl CsvError {
                 "填写新列名、含 JSON 的来源列和指针，例如 [\"城市\",\"数据\",\"/城市\"]"
             }
             Self::JsonPointerColumn(error) => error.message(),
+            Self::UrlParameterColumnArguments => {
+                "填写新列名、网址或查询串的来源列和参数名，例如 [\"标签\",\"网址\",\"tag\"]"
+            }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
@@ -411,6 +416,7 @@ enum Operation {
     },
     TextColumn(String, ColumnReference, TextColumnComputation),
     JsonPointerColumn(String, ColumnReference, Vec<String>, JsonCellContent),
+    UrlParameterColumn(String, ColumnReference, String),
     JsonExpandRows(String, ColumnReference, Vec<String>),
     DatePatternColumn {
         name: String,
@@ -997,6 +1003,18 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 TextColumnComputation::RegexReplace(pattern, replacement),
             )
         }
+        "url参数列" | "url-parameter-column" => {
+            let ((name, source, key), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(
+                    input,
+                    CsvError::UrlParameterColumnArguments,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(CsvError::UrlParameterColumnArguments);
+            }
+            input = data;
+            Operation::UrlParameterColumn(name, source, key)
+        }
         kind @ ("json取值列"
         | "json-pointer-column"
         | "json类型列"
@@ -1574,6 +1592,23 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amounts,
             unit,
         } => date_offset_column(&rows, &name, source, amounts, unit),
+        Operation::UrlParameterColumn(name, source, key) => {
+            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+            let source = source.resolve(header)?;
+            validate_column_width(&[source], header.len())?;
+            let mut row_number = 0;
+            write_appended_column(header, records, &name, |row| {
+                row_number += 1;
+                let address = row[source].trim_start();
+                if address.is_empty() {
+                    return Ok(String::new());
+                }
+                url_parameter_values(address, &key).map_err(|error| CsvError::DataRowValue {
+                    row: row_number,
+                    cause: error.message(),
+                })
+            })
+        }
         Operation::JsonPointerColumn(name, source, keys, content) => {
             let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
             let source = source.resolve(header)?;
@@ -5745,6 +5780,28 @@ null"#
             .as_deref(),
             Ok("原列,类型\r\ntrue,boolean\r\nnull,null")
         );
+    }
+
+    #[test]
+    fn extracts_url_parameter_arrays_per_csv_row_and_shows_decode_error_locations() {
+        let csv = concat!(
+            "URL参数列 [\"标签\",\"网址\",\"tag\"] 编号,网址\n",
+            "1,https://example.invalid/?tag=a+1&t%61g=b%2Bc&Tag=ignored&tag=#fragment\n",
+            "2,https://example.invalid/?other=tea\n3,\n4,tag=%00",
+        );
+        let output = transform_csv(&csv).unwrap();
+        let rows = read_rows(&output, ',').unwrap();
+        assert_eq!(rows[0], ["编号", "网址", "标签"]);
+        assert_eq!(rows[1][2], r#"["a 1","b+c",""]"#);
+        assert_eq!(rows[2][2], "[]");
+        assert_eq!(rows[3][2], "");
+        assert_eq!(rows[4][2], r#"["\u0000"]"#);
+        assert!(matches!(
+            transform_csv(
+                "url-parameter-column [\"标签\",2,\"tag\"] 编号,网址\n1,tag=茶\n2,tag=%GG"
+            ),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]

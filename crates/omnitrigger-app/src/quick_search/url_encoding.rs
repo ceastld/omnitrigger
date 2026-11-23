@@ -540,6 +540,10 @@ fn decode_parameters(value: &str, json: bool) -> Result<String, UrlEncodingError
 fn lookup_parameter_values(input: &str) -> Result<String, UrlEncodingError> {
     let (name, source) =
         parameter_argument::<String>(input, UrlEncodingError::ParameterLookupArguments)?;
+    url_parameter_values(source, &name)
+}
+
+pub(super) fn url_parameter_values(source: &str, name: &str) -> Result<String, UrlEncodingError> {
     let values: Vec<_> = decode_query_pairs(source, decode_form_component)?
         .into_iter()
         .filter_map(|[key, value]| (key == name).then_some(value))
