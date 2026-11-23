@@ -4,7 +4,8 @@ use num_rational::BigRational;
 use crate::theme::{self, rgb};
 
 const BAR_SECTION: u32 = 96;
-const CATEGORY_CAPTION: u32 = 20;
+const BAR_CAPTION_HEIGHT: u32 = 20;
+const MAX_LABELED_INTERVALS: usize = 6;
 
 #[derive(PartialEq, Eq)]
 pub(super) struct BinPlot {
@@ -86,11 +87,13 @@ impl BinPlot {
             format!("≈{:.2e}", max as f64)
         };
         let categorical = matches!(&self.labels, BarLabels::Categories { .. });
-        let caption_space = if categorical { CATEGORY_CAPTION } else { 0 };
+        let show_captions = categorical || self.bins.len() <= MAX_LABELED_INTERVALS;
+        let caption_space = if show_captions { BAR_CAPTION_HEIGHT } else { 0 };
         let bars = self.bins.iter().enumerate().map(|(index, &count)| {
             let (description, caption) = match &self.labels {
                 BarLabels::Intervals(edges) => {
-                    (format!("{} ≤ x < {}", edges[index], edges[index + 1]), None)
+                    let interval = interval_text(&edges[index], &edges[index + 1]);
+                    (interval.clone(), show_captions.then_some(interval))
                 }
                 BarLabels::Categories { visible, .. } => {
                     let caption = &visible[index];
@@ -118,7 +121,12 @@ impl BinPlot {
                         .bg(rgb(theme::ACCENT)),
                 )
                 .when_some(caption, |bar, caption| {
-                    bar.child(label(caption).h(px(caption_space as f32)).pt(px(3.)))
+                    bar.child(
+                        label(caption)
+                            .h(px(caption_space as f32))
+                            .pt(px(3.))
+                            .when(!categorical, |label| label.w_full().text_center()),
+                    )
                 })
                 .tooltip(theme::text_tooltip(tooltip.into()))
         });
@@ -141,7 +149,7 @@ impl BinPlot {
                             .items_end()
                             .justify_between()
                             .py(px(4.))
-                            .when(categorical, |scale| {
+                            .when(show_captions, |scale| {
                                 scale.pb(px((4 + caption_space) as f32))
                             })
                             .child(label(max_label))
@@ -165,6 +173,8 @@ impl BinPlot {
                 div().ml(px(93.)).flex().justify_center().child(label(
                     if categorical {
                         "次数从高到低"
+                    } else if show_captions {
+                        "区间"
                     } else {
                         "区间从小到大"
                     }
@@ -172,6 +182,11 @@ impl BinPlot {
                 )),
             )
     }
+}
+
+fn interval_text(lower: &str, upper: &str) -> String {
+    let start = if lower == "-∞" { '(' } else { '[' };
+    format!("{start}{lower}, {upper})")
 }
 
 fn label(text: String) -> Div {
@@ -200,6 +215,9 @@ mod tests {
         assert_eq!(bar_height(0, u64::MAX, BAR_SECTION), 0);
         assert_eq!(bar_height(1, u64::MAX, BAR_SECTION), 1);
         assert_eq!(bar_height(u64::MAX, u64::MAX, BAR_SECTION), BAR_SECTION);
-        assert_eq!(bar_height(10, 10, BAR_SECTION - CATEGORY_CAPTION), 76);
+        assert_eq!(bar_height(10, 10, BAR_SECTION - BAR_CAPTION_HEIGHT), 76);
+        assert_eq!(interval_text("-∞", "0"), "(-∞, 0)");
+        assert_eq!(interval_text("0", "2"), "[0, 2)");
+        assert_eq!(interval_text("2", "+∞"), "[2, +∞)");
     }
 }
