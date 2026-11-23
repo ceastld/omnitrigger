@@ -17,6 +17,7 @@ use super::operators::split_top_level_commas;
 pub(super) const MAX_VALUES: usize = 128;
 const MAX_BIN_EDGES: usize = 16;
 const MAX_BINOMIAL_TRIALS: u32 = 128;
+const MAX_GEOMETRIC_TRIALS: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StatisticsError {
@@ -31,6 +32,7 @@ pub(super) enum StatisticsError {
     InvalidBinEdges,
     CumulativeThreshold,
     BinomialArguments,
+    GeometricArguments,
     HypergeometricArguments,
     InvalidWindowWidth,
     WindowQuantileArguments,
@@ -60,6 +62,9 @@ impl StatisticsError {
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
             Self::CumulativeThreshold => "用 @ 隔开阈值和观测值，例如 2 @ 1,2,2,3",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
+            Self::GeometricArguments => {
+                "用逗号填写试验次数和单次成功概率，例如 3,25%。次数为 1 至 1024，概率须大于零"
+            }
             Self::HypergeometricArguments => {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
             }
@@ -227,6 +232,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "二项至少" | "binomial-at-least" => {
             return binomial_probability(values, BinomialEvent::AtLeast)
         }
+        "几何概率" | "geometric" => return geometric_probability(values, false),
+        "几何累计" | "geometric-cdf" => return geometric_probability(values, true),
         "超几何概率" | "hypergeometric" => return hypergeometric_probability(values),
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
@@ -925,6 +932,36 @@ fn binomial_probability(input: &str, event: BinomialEvent) -> Result<String, Sta
     Ok(BigRational::new(numerator, no_success.denom().clone()).to_string())
 }
 
+fn geometric_probability(input: &str, cumulative: bool) -> Result<String, StatisticsError> {
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(trials), Some(probability), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(StatisticsError::GeometricArguments);
+    };
+    let trials = trials
+        .parse::<u32>()
+        .ok()
+        .filter(|trials| (1..=MAX_GEOMETRIC_TRIALS).contains(trials))
+        .ok_or(StatisticsError::GeometricArguments)?;
+    let probability = parse_probability(probability)?;
+    if probability.numer().sign() == Sign::NoSign {
+        return Err(StatisticsError::GeometricArguments);
+    }
+
+    let one = BigRational::from_integer(BigInt::from(1u8));
+    let failures = if cumulative { trials } else { trials - 1 };
+    let all_fail = rational_power(
+        &one - &probability,
+        BigRational::from_integer(BigInt::from(failures)),
+    )
+    .map_err(StatisticsError::Evaluation)?;
+    let result = if cumulative {
+        one - all_fail
+    } else {
+        all_fail * probability
+    };
+    Ok(bounded(result)?.to_string())
+}
+
 fn hypergeometric_probability(input: &str) -> Result<String, StatisticsError> {
     let values = input
         .split(',')
@@ -1170,6 +1207,40 @@ mod tests {
         assert_eq!(
             calculate_statistics("移动样本标准差 1 5,6"),
             Err(StatisticsError::SampleWindowWidth)
+        );
+    }
+
+    #[test]
+    fn computes_exact_first_success_and_cumulative_probabilities() {
+        for (input, expected) in [
+            ("几何概率 3,25%", "9/64"),
+            ("几何累计 3,1/4", "37/64"),
+            ("GEOMETRIC 1,1", "1"),
+            ("几何概率 2,1", "0"),
+            ("GEOMETRIC-CDF 1024,1", "1"),
+            ("几何累计 1,1/3", "1/3"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "几何概率 0,25%",
+            "几何概率 1025,1",
+            "几何累计 3,0",
+            "几何概率 2,1,1",
+        ] {
+            assert_eq!(
+                calculate_statistics(input),
+                Err(StatisticsError::GeometricArguments),
+                "{input}",
+            );
+        }
+        assert_eq!(
+            calculate_statistics("几何概率 1,2"),
+            Err(StatisticsError::InvalidProbability),
         );
     }
 
