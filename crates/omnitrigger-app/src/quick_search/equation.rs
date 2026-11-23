@@ -723,13 +723,31 @@ fn function_interval(input: &str, invalid: EquationError) -> Result<[f64; 2], Eq
 }
 
 fn function_endpoints(input: &str, invalid: EquationError) -> Result<[f64; 2], EquationError> {
-    let (start, end) = input.split_once(['到', '至']).ok_or(invalid)?;
+    let (start, end) = split_equation_interval(input).ok_or(invalid)?;
     let start = evaluate(start).map_err(EquationError::Approximation)?;
     let end = evaluate(end).map_err(EquationError::Approximation)?;
     if start == end {
         return Err(invalid);
     }
     Ok([start, end])
+}
+
+fn split_equation_interval(input: &str) -> Option<(&str, &str)> {
+    if let Some(bounds) = input
+        .split_once(['到', '至'])
+        .or_else(|| input.split_once(".."))
+    {
+        return Some(bounds);
+    }
+    input
+        .match_indices(char::is_whitespace)
+        .find_map(|(offset, separator)| {
+            let tail = input[offset + separator.len()..].trim_start();
+            let token_end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+            tail[..token_end]
+                .eq_ignore_ascii_case("to")
+                .then_some((&input[..offset], &tail[token_end..]))
+        })
 }
 
 fn bisect_function_root(input: &str) -> Result<String, EquationError> {
@@ -940,7 +958,7 @@ fn polynomial_bounds(
     invalid: EquationError,
 ) -> Result<([BigRational; 3], [BigRational; 2]), EquationError> {
     let (coefficients, bounds) = input.split_once('@').ok_or(invalid)?;
-    let (start, end) = bounds.split_once(['到', '至']).ok_or(invalid)?;
+    let (start, end) = split_equation_interval(bounds).ok_or(invalid)?;
     Ok((
         function_coefficients(coefficients)?,
         [
@@ -1870,6 +1888,24 @@ mod tests {
         assert_eq!(
             solve_equation("采样图 1/x @ -1 到 1; 3").as_deref(),
             Ok("x,近似值\r\n-1,-1\r\n0,\r\n1,1")
+        );
+    }
+
+    #[test]
+    fn accepts_dot_ranges_and_english_separators_in_equation_intervals() {
+        assert_eq!(
+            solve_equation("函数采样 x**2 @ -1.5..0.5; 3").as_deref(),
+            Ok("x,近似值\r\n-1.5,2.25\r\n-0.5,0.25\r\n0.5,0.25")
+        );
+        assert_eq!(solve_equation("定积分 x² @ 0..2").as_deref(), Ok("8/3"));
+        assert_eq!(solve_equation("integral x² @ 0 TO 2").as_deref(), Ok("8/3"));
+        assert_eq!(
+            solve_equation("numeric-integral x @ 2 to 0; 4").as_deref(),
+            Ok("积分 ≈ -2\r\n复合辛普森法 · 4 个子区间")
+        );
+        assert_eq!(
+            solve_equation("函数采样 x @ 0to1; 3"),
+            Err(EquationError::FunctionSampleArguments)
         );
     }
 

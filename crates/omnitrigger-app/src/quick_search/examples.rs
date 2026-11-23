@@ -241,6 +241,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用两个点分隔函数图的区间端点",
+        query: "方程: 采样图 f(x) = sin(x) @ 0..2*pi; 65",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算函数在指定横坐标的近似值",
         query: "方程: 函数值 sqrt(x) @ 9,-1,4",
     },
