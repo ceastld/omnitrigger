@@ -6,6 +6,7 @@ use crate::theme::{self, rgb};
 
 pub(super) const PREVIEW_HEIGHT: f32 = 134.;
 const AXIS_WIDTH: f32 = 81.;
+const MAX_AXIS_LABEL_WIDTH: f32 = 167.;
 const AXIS_GAP: f32 = 8.;
 pub(super) const POSITION_STEPS: u16 = 4096;
 const PLOT_PADDING: f32 = 9.;
@@ -284,7 +285,9 @@ impl ScatterPlot {
         .size_full();
 
         let vertical = div()
-            .w(px(AXIS_WIDTH))
+            .min_w(px(AXIS_WIDTH))
+            .max_w(px(MAX_AXIS_LABEL_WIDTH))
+            .h(px(PREVIEW_HEIGHT))
             .flex_none()
             .flex()
             .flex_col()
@@ -303,7 +306,6 @@ impl ScatterPlot {
                 .child(axis_label(self.y[0].clone()))
         };
         let horizontal = div()
-            .ml(px(AXIS_WIDTH + AXIS_GAP))
             .px(px(PLOT_PADDING))
             .h(px(19.))
             .flex()
@@ -315,36 +317,45 @@ impl ScatterPlot {
                 .child(axis_label(format!("{x_label} = {}", self.x[0])))
         } else {
             horizontal
-                .justify_between()
-                .child(axis_label(self.x[0].clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(axis_label(self.x[0].clone())),
+                )
                 .child(axis_label(x_label.clone()))
-                .child(axis_label(self.x[1].clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .justify_end()
+                        .child(axis_label(self.x[1].clone())),
+                )
         };
-        div()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(PREVIEW_HEIGHT))
-                    .flex()
-                    .gap(px(AXIS_GAP))
-                    .child(vertical)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .rounded(px(5.))
-                            .bg(rgb(theme::ROW))
-                            .child(plot),
-                    ),
-            )
-            .child(horizontal)
+        div().flex().gap(px(AXIS_GAP)).child(vertical).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(PREVIEW_HEIGHT))
+                        .min_w_0()
+                        .rounded(px(5.))
+                        .bg(rgb(theme::ROW))
+                        .child(plot),
+                )
+                .child(horizontal),
+        )
     }
 }
 
 fn axis_label(text: String) -> Div {
     div()
-        .max_w(px(AXIS_WIDTH))
+        .min_w_0()
+        .max_w(px(MAX_AXIS_LABEL_WIDTH))
         .text_size(px(11.))
         .font_family(theme::MONO_FONT)
         .text_color(rgb(theme::TEXT_MUTED))
