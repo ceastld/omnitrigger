@@ -3867,6 +3867,13 @@ mod tests {
                 if plot.has_curve() && plot.point_count() == 4
         ));
         assert_eq!(plot.refillable_text(), Some(expected.as_str()));
+        let residual_plot = for_query(&format!("拟合: 残差图 {source}"), &[]);
+        assert!(matches!(
+            &residual_plot,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.has_curve() && plot.point_count() == 4
+        ));
+        assert_eq!(residual_plot.refillable_text(), Some(expected.as_str()));
         assert_eq!(
             calculate_linear_fit(&format!("fit-plot {source}")).as_deref(),
             Ok(expected.as_str())

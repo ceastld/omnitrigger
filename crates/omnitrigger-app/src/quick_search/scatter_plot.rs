@@ -16,6 +16,7 @@ pub(super) struct ScatterPlot {
     curve: Vec<(u16, u16)>,
     x: [String; 2],
     y: [String; 2],
+    residuals: bool,
 }
 
 impl ScatterPlot {
@@ -26,6 +27,25 @@ impl ScatterPlot {
     pub(super) fn from_series(
         points: &[(BigRational, BigRational)],
         curve: &[(BigRational, BigRational)],
+    ) -> Self {
+        Self::prepare(points, curve, false)
+    }
+
+    pub(super) fn from_residuals(points: &[(BigRational, BigRational)]) -> Self {
+        let xs = points.iter().map(|(x, _)| x);
+        let min = xs.clone().min().expect("残差图至少有两个数据点");
+        let max = xs.max().expect("残差图至少有两个数据点");
+        let mut baseline = vec![(min.clone(), BigRational::default())];
+        if min != max {
+            baseline.push((max.clone(), BigRational::default()));
+        }
+        Self::prepare(points, &baseline, true)
+    }
+
+    fn prepare(
+        points: &[(BigRational, BigRational)],
+        curve: &[(BigRational, BigRational)],
+        residuals: bool,
     ) -> Self {
         let x = points.iter().chain(curve).map(|(x, _)| x);
         let y = points.iter().chain(curve).map(|(_, y)| y);
@@ -46,6 +66,7 @@ impl ScatterPlot {
             curve: curve.iter().map(place).collect(),
             x: [min_x.to_string(), max_x.to_string()],
             y: [min_y.to_string(), max_y.to_string()],
+            residuals,
         }
     }
 
@@ -58,7 +79,17 @@ impl ScatterPlot {
     }
 
     pub(super) fn legend(&self) -> Div {
-        let count = format!("{} 个观测点", self.point_count());
+        let point_label = if self.residuals {
+            "残差点"
+        } else {
+            "观测点"
+        };
+        let line_label = if self.residuals {
+            "零残差"
+        } else {
+            "拟合曲线"
+        };
+        let count = format!("{} 个{point_label}", self.point_count());
         div()
             .flex()
             .items_center()
@@ -74,7 +105,7 @@ impl ScatterPlot {
                             .h(px(2.))
                             .bg(rgb(theme::ACCENT_2)),
                     )
-                    .child("拟合曲线")
+                    .child(line_label)
             })
     }
 
@@ -150,15 +181,16 @@ impl ScatterPlot {
             .flex_col()
             .items_end()
             .py(px(3.));
+        let y_label = if self.residuals { "残差" } else { "y" };
         let vertical = if self.y[0] == self.y[1] {
             vertical
                 .justify_center()
-                .child(axis_label(format!("y = {}", self.y[0])))
+                .child(axis_label(format!("{y_label} = {}", self.y[0])))
         } else {
             vertical
                 .justify_between()
                 .child(axis_label(self.y[1].clone()))
-                .child(axis_label("y".to_owned()))
+                .child(axis_label(y_label.to_owned()))
                 .child(axis_label(self.y[0].clone()))
         };
         let horizontal = div()
@@ -222,6 +254,23 @@ fn normalized_position(value: &BigRational, min: &BigRational, range: &BigRation
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn residual_plot_includes_a_zero_baseline_and_keeps_the_signs() {
+        let points = [(-1, 0), (0, -1), (1, 0), (0, 1)].map(|(x, y)| {
+            (
+                BigRational::from_integer(x.into()),
+                BigRational::from_integer(y.into()),
+            )
+        });
+        let plot = ScatterPlot::from_residuals(&points);
+        assert_eq!(
+            plot.locations,
+            [(0, 2048), (2048, 0), (4096, 2048), (2048, 4096)]
+        );
+        assert_eq!(plot.curve, [(0, 2048), (4096, 2048)]);
+        assert_eq!(plot.y, ["-1", "1"]);
+    }
 
     #[test]
     fn scales_large_close_values_and_places_constant_axes_in_the_middle() {

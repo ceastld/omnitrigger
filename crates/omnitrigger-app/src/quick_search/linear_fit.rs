@@ -77,7 +77,7 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             FitPlotRequest::Scatter(points) => {
                 scatter_points(points).map(|points| scatter_csv(&points))
             }
-            FitPlotRequest::Polynomial(arguments) => polynomial_residuals(arguments),
+            FitPlotRequest::Polynomial(arguments, _) => polynomial_residuals(arguments),
         };
     }
     let (points, output) = match input.split_once(char::is_whitespace) {
@@ -203,7 +203,12 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
 
 pub(super) enum FitPlotRequest<'a> {
     Scatter(&'a str),
-    Polynomial(&'a str),
+    Polynomial(&'a str, FitPlotKind),
+}
+
+pub(super) enum FitPlotKind {
+    Curve,
+    Residuals,
 }
 
 pub(super) fn plot_request(input: &str) -> Option<FitPlotRequest<'_>> {
@@ -212,7 +217,9 @@ pub(super) fn plot_request(input: &str) -> Option<FitPlotRequest<'_>> {
     if operation == "散点图" || operation.eq_ignore_ascii_case("scatter") {
         Some(FitPlotRequest::Scatter(points))
     } else if operation == "曲线图" || operation.eq_ignore_ascii_case("fit-plot") {
-        Some(FitPlotRequest::Polynomial(points))
+        Some(FitPlotRequest::Polynomial(points, FitPlotKind::Curve))
+    } else if operation == "残差图" || operation.eq_ignore_ascii_case("residual-plot") {
+        Some(FitPlotRequest::Polynomial(points, FitPlotKind::Residuals))
     } else {
         None
     }
@@ -226,12 +233,24 @@ pub(super) fn calculate_plot(
             let points = scatter_points(input)?;
             Ok((scatter_csv(&points), ScatterPlot::from_points(&points)))
         }
-        FitPlotRequest::Polynomial(input) => {
+        FitPlotRequest::Polynomial(input, kind) => {
             let input = normalize(input);
             let fit = fit_polynomial(&input)?;
-            let curve = sample_polynomial_curve(&fit)?;
-            let plot = ScatterPlot::from_series(&fit.points, &curve);
-            Ok((polynomial_residual_csv(&fit)?, plot))
+            let rows = polynomial_residual_rows(&fit)?;
+            let plot = match kind {
+                FitPlotKind::Curve => {
+                    let curve = sample_polynomial_curve(&fit)?;
+                    ScatterPlot::from_series(&fit.points, &curve)
+                }
+                FitPlotKind::Residuals => {
+                    let points = rows
+                        .iter()
+                        .map(|row| (row.x.clone(), row.residual.clone()))
+                        .collect::<Vec<_>>();
+                    ScatterPlot::from_residuals(&points)
+                }
+            };
+            Ok((polynomial_residual_csv(&rows), plot))
         }
     }
 }
@@ -507,18 +526,44 @@ fn fit_polynomial_coefficients(
 
 fn polynomial_residuals(input: &str) -> Result<String, LinearFitError> {
     let fit = fit_polynomial(input)?;
-    polynomial_residual_csv(&fit)
+    polynomial_residual_rows(&fit).map(|rows| polynomial_residual_csv(&rows))
 }
 
-fn polynomial_residual_csv(fit: &PolynomialFit) -> Result<String, LinearFitError> {
-    let mut rows = vec!["x,实际值,拟合值,残差".to_owned()];
-    for (x, actual) in &fit.points {
-        let predicted = polynomial_fit_value(&fit.coefficients, x)?;
-        let residual = actual - &predicted;
-        check_size([&residual])?;
-        rows.push(format!("{x},{actual},{predicted},{residual}"));
-    }
-    Ok(rows.join("\r\n"))
+struct PolynomialResidual<'a> {
+    x: &'a BigRational,
+    actual: &'a BigRational,
+    predicted: BigRational,
+    residual: BigRational,
+}
+
+fn polynomial_residual_rows(
+    fit: &PolynomialFit,
+) -> Result<Vec<PolynomialResidual<'_>>, LinearFitError> {
+    fit.points
+        .iter()
+        .map(|(x, actual)| {
+            let predicted = polynomial_fit_value(&fit.coefficients, x)?;
+            let residual = actual - &predicted;
+            check_size([&residual])?;
+            Ok(PolynomialResidual {
+                x,
+                actual,
+                predicted,
+                residual,
+            })
+        })
+        .collect()
+}
+
+fn polynomial_residual_csv(rows: &[PolynomialResidual<'_>]) -> String {
+    let mut lines = vec!["x,实际值,拟合值,残差".to_owned()];
+    lines.extend(rows.iter().map(|row| {
+        format!(
+            "{},{},{},{}",
+            row.x, row.actual, row.predicted, row.residual
+        )
+    }));
+    lines.join("\r\n")
 }
 
 fn sample_polynomial_curve(fit: &PolynomialFit) -> Result<Vec<Point>, LinearFitError> {

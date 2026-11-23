@@ -322,6 +322,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看各观测点在零残差线上下的位置",
+        query: "拟合: 残差图 2 @ -1,2; 0,0; 1,2; 0,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用同一条拟合直线预测多个 x",
         query: "拟合: 预测 1/2,0,3 @ 0,1; 1,3; 2,5",
     },
@@ -5169,6 +5174,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "稳健直线",
             "散点图",
             "曲线图",
+            "残差图",
             "残差",
             "误差",
             "过原点",
