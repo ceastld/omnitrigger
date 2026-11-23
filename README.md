@@ -377,6 +377,7 @@
 - 输入 `URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]` 得到 `https://example.invalid/docs/guide?lang=zh#intro`。基准网址末尾的斜杠决定相对路径从哪个目录解析。 [Rust URL 相对链接解析](https://docs.rs/url/2.5.8/url/struct.Url.html#method.join)
 - 输入 `URL: 相对 ["https://example.invalid/docs/api/","https://example.invalid/docs/guide?lang=zh#intro"]` 得到 `../guide?lang=zh#intro`。两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息，生成的链接可以用原基准网址拼接还原。 [Rust URL 相对链接生成](https://docs.rs/url/2.5.8/url/struct.Url.html#method.make_relative)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)
+- 用 `URL: 同源 ["https://example.invalid:443/a","https://example.invalid/b"]` 可比较两个网址的规范化协议、主机与端口。示例得到 `同源 · https://example.invalid`，协议、主机或端口不同时会列出两个源。 [WHATWG 同源规则](https://html.spec.whatwg.org/multipage/browsers.html#same-origin)
 - 输入 `URL: 加参数 ["tag","茶"] https://example.invalid/doc?tag=first#part` 会在末尾追加一项。用 `URL: 设参数` 会替换第一个同名项并移除其余同名项。其他查询参数保留编码和顺序。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 设参数组 [["page","2"],["lang","zh"]] https://example.invalid/doc?page=1&q=a%20b&page=3#part` 可同时更新多个不同名称的参数，得到 `https://example.invalid/doc?page=2&q=a%20b&lang=zh#part`。新增项按填写顺序追加。用 `加参数组` 可追加包含同名项的一组参数。每次最多填写 16 项。
 - 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)

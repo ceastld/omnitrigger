@@ -3689,6 +3689,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "判断两个完整网址是否同源",
+        query: "URL: 同源 [\"HTTPS://EXAMPLE.invalid:443/a?x=1\",\"https://example.invalid/b#p\"]",
+    },
+    Example {
+        icon: Icon::Browser,
         title: "把 Windows 文件路径转为链接",
         query: r#"URL: 文件链接 "C:\Docs\计划 #1.txt""#,
     },

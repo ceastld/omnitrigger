@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::HashSet};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::de::DeserializeOwned;
-use url::{Position, Url};
+use url::{Origin, Position, Url};
 
 const URL_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -38,6 +38,7 @@ pub(super) enum UrlEncodingError {
     InvalidFilePath,
     InvalidFileUrl,
     OpaqueOrigin,
+    InvalidOriginPair,
     OpaquePath,
     InvalidPathSegments,
     InvalidFragmentArgument,
@@ -69,6 +70,7 @@ impl UrlEncodingError {
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
             Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
             Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
+            Self::InvalidOriginPair => "用 JSON 字符串数组填写两个具有网络源的完整网址",
             Self::OpaquePath => "请输入有层级路径的 URL，例如 https://example.invalid/",
             Self::InvalidPathSegments => {
                 "用 JSON 字符串数组填写路径段，再输入 URL。各段不能是 . 或 .."
@@ -103,15 +105,8 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "设路径" | "set-path" => set_path_segments(value),
         "拼接" | "resolve" => resolve_url(value),
         "相对" | "relative" => relative_url(value),
-        "源" | "源站" | "origin" => {
-            let url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
-            let origin = url.origin();
-            if origin.is_tuple() {
-                Ok(origin.ascii_serialization())
-            } else {
-                Err(UrlEncodingError::OpaqueOrigin)
-            }
-        }
+        "源" | "源站" | "origin" => Ok(network_origin(value)?.ascii_serialization()),
+        "同源" | "same-origin" => compare_url_origins(value),
         "去查询串" | "strip-query" => {
             let mut url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
             url.set_query(None);
@@ -150,6 +145,31 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "文件路径" | "file-path" => decode_file_path(value),
         _ => Err(UrlEncodingError::InvalidOperation),
     }
+}
+
+fn network_origin(input: &str) -> Result<Origin, UrlEncodingError> {
+    let url = Url::parse(input).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let origin = url.origin();
+    origin
+        .is_tuple()
+        .then_some(origin)
+        .ok_or(UrlEncodingError::OpaqueOrigin)
+}
+
+fn compare_url_origins(input: &str) -> Result<String, UrlEncodingError> {
+    let [first, second] = url_pair(input, UrlEncodingError::InvalidOriginPair)?;
+    let first = network_origin(&first)?;
+    let second = network_origin(&second)?;
+    let result = if first == second {
+        format!("同源 · {}", first.ascii_serialization())
+    } else {
+        format!(
+            "源不同\n第一个 {}\n第二个 {}",
+            first.ascii_serialization(),
+            second.ascii_serialization()
+        )
+    };
+    Ok(result)
 }
 
 fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
@@ -802,6 +822,42 @@ mod tests {
         assert_eq!(
             convert_url_component("去参数 source /relative?source=mail"),
             Err(UrlEncodingError::InvalidUrl)
+        );
+    }
+
+    #[test]
+    fn compares_normalized_url_origin_tuples() {
+        for (query, expected) in [
+            (
+                r#"同源 ["HTTPS://user:sample@Example.INVALID:443/a?x=1","https://example.invalid/b#p"]"#,
+                "同源 · https://example.invalid",
+            ),
+            (
+                r#"same-origin ["https://[2001:0db8::1]:443/a","https://[2001:db8::1]/b"]"#,
+                "同源 · https://[2001:db8::1]",
+            ),
+            (
+                r#"同源 ["https://example.invalid/a","https://example.invalid:8443/b"]"#,
+                "源不同\n第一个 https://example.invalid\n第二个 https://example.invalid:8443",
+            ),
+            (
+                r#"同源 ["http://example.invalid/a","https://example.invalid/b"]"#,
+                "源不同\n第一个 http://example.invalid\n第二个 https://example.invalid",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_url_component(r#"同源 ["file:///C:/a","file:///C:/a"]"#),
+            Err(UrlEncodingError::OpaqueOrigin)
+        );
+        assert_eq!(
+            convert_url_component(r#"同源 ["https://example.invalid"]"#),
+            Err(UrlEncodingError::InvalidOriginPair)
         );
     }
 
