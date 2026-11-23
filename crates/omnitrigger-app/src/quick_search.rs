@@ -1044,6 +1044,15 @@ impl Results {
                         Self::plot_value(
                             csv_tools::build_scatter_plot(arguments).map_err(ValueError::Csv),
                         )
+                    } else if let Some(arguments) = csv_tools::column_bin_plot_arguments(term) {
+                        Self::Value(
+                            csv_tools::build_column_bin_plot(arguments)
+                                .map(|(text, plot)| ResultValue {
+                                    text,
+                                    kind: ValueKind::BinPlot(plot),
+                                })
+                                .map_err(ValueError::Csv),
+                        )
                     } else {
                         Self::text_value(transform_csv(term).map_err(ValueError::Csv))
                     }
@@ -3957,6 +3966,24 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn csv_column_bin_chart_uses_a_named_column_and_retains_exact_bin_data() {
+        let input = r#"["金额","0,1/2,2"] 编号,金额
+001,-1
+002,0
+003,0.50
+004,1
+005,2"#;
+        let results = for_query(&format!("CSV: 列分箱图 {input}"), &[]);
+        assert!(matches!(
+            &results,
+            Results::Value(Ok(ResultValue { kind: ValueKind::BinPlot(plot), .. }))
+                if plot.bin_count() == 4
+        ));
+        let expected = transform_csv(&format!("列分箱 {input}")).unwrap();
+        assert_eq!(results.refillable_text(), Some(expected.as_str()));
     }
 
     #[test]

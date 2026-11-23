@@ -10,11 +10,22 @@ pub(super) struct BinPlot {
     edges: Vec<String>,
     bins: Vec<u64>,
     count: u64,
+    label: Option<String>,
 }
 
 impl BinPlot {
     pub(super) fn new(edges: Vec<String>, bins: Vec<u64>, count: u64) -> Self {
-        Self { edges, bins, count }
+        Self {
+            edges,
+            bins,
+            count,
+            label: None,
+        }
+    }
+
+    pub(super) fn with_label(mut self, label: String) -> Self {
+        self.label = (!label.trim().is_empty()).then_some(label);
+        self
     }
 
     pub(super) fn bin_count(&self) -> usize {
@@ -22,15 +33,21 @@ impl BinPlot {
     }
 
     pub(super) fn legend(&self) -> Div {
-        div().child(format!(
-            "{} 个观测 · {} 个区间",
-            self.count,
-            self.bin_count()
-        ))
+        let counts = format!("{} 个观测 · {} 个区间", self.count, self.bin_count());
+        let title = match &self.label {
+            Some(name) => format!("{name} · {counts}"),
+            None => counts,
+        };
+        div().min_w_0().truncate().child(title)
     }
 
     pub(super) fn render(&self) -> Div {
         let max = self.bins.iter().copied().max().expect("分箱至少有两个区间");
+        let max_label = if max < 1_000_000_000_000 {
+            max.to_string()
+        } else {
+            format!("≈{:.2e}", max as f64)
+        };
         let bars =
             self.edges
                 .windows(2)
@@ -78,7 +95,7 @@ impl BinPlot {
                             .items_end()
                             .justify_between()
                             .py(px(4.))
-                            .child(label(max.to_string()))
+                            .child(label(max_label))
                             .child(label("次数".to_owned()))
                             .child(label("0".to_owned())),
                     )

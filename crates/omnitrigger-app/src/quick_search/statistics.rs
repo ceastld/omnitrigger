@@ -693,10 +693,27 @@ pub(super) fn calculate_bin_plot(input: &str) -> Result<(String, BinPlot), Stati
     let input = normalize(input);
     let (edges, data) = bin_arguments(&input)?;
     let (values, count) = read_observations(data)?;
-    let bins = count_bins(values, &edges);
-    let labels = bin_labels(&edges);
+    Ok(plot_binned_frequencies(values, count, &edges))
+}
+
+pub(super) fn plot_binned_unweighted(
+    values: Vec<BigRational>,
+    edges: &[BigRational],
+) -> Result<(String, BinPlot), StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    Ok(plot_binned_frequencies(values, count, edges))
+}
+
+fn plot_binned_frequencies(
+    values: Vec<(BigRational, u64)>,
+    count: u64,
+    edges: &[BigRational],
+) -> (String, BinPlot) {
+    let bins = count_bins(values, edges);
+    let labels = bin_labels(edges);
     let csv = bin_csv(&labels, &bins, count);
-    Ok((csv, BinPlot::new(labels, bins, count)))
+    (csv, BinPlot::new(labels, bins, count))
 }
 
 fn report_binned_frequencies(

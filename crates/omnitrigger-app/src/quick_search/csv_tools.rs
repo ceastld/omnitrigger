@@ -21,10 +21,11 @@ use serde::{
 use serde_json::value::RawValue;
 
 use super::statistics::{
-    interpolate_ordered_quantile, parse_bin_edges, parse_probability, report_binned_unweighted,
-    unweighted_box_fences,
+    interpolate_ordered_quantile, parse_bin_edges, parse_probability, plot_binned_unweighted,
+    report_binned_unweighted, unweighted_box_fences,
 };
 use super::{
+    bin_plot::BinPlot,
     calculator::normalize,
     calendar::{
         parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
@@ -2045,12 +2046,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 sample: matches!(operation.as_str(), "列统计" | "column-stats"),
             }
         }
-        "列分箱" | "column-bins" => {
-            let ((column, edges), data) = json_argument_and_data::<(ColumnReference, String)>(
-                input,
-                CsvError::ColumnBinsArguments,
-            )?;
-            let edges = parse_bin_edges(&edges).map_err(CsvError::Statistics)?;
+        "列分箱" | "column-bins" | "列分箱图" | "column-bin-plot" => {
+            let (column, edges, data) = column_bin_arguments(input)?;
             input = data;
             Operation::ColumnBins(column, edges)
         }
@@ -5173,6 +5170,36 @@ fn order_records<'a>(
     Ok(ordered)
 }
 
+pub(super) fn column_bin_plot_arguments(query: &str) -> Option<&str> {
+    let (operation, rest) = split_argument(query)?;
+    (operation == "列分箱图" || operation.eq_ignore_ascii_case("column-bin-plot")).then_some(rest)
+}
+
+fn column_bin_arguments(
+    input: &str,
+) -> Result<(ColumnReference, Vec<BigRational>, &str), CsvError> {
+    let ((column, edges), data) =
+        json_argument_and_data::<(ColumnReference, String)>(input, CsvError::ColumnBinsArguments)?;
+    let edges = parse_bin_edges(&edges).map_err(CsvError::Statistics)?;
+    Ok((column, edges, data))
+}
+
+pub(super) fn build_column_bin_plot(input: &str) -> Result<(String, BinPlot), CsvError> {
+    let (column, edges, data) = column_bin_arguments(input)?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let rows = read_rows(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let column = column.resolve(header)?;
+    validate_column_width(&[column], header.len())?;
+    let values = numeric_column_values_at(records, column)?;
+    let (csv, plot) =
+        plot_binned_unweighted(values, &edges).map_err(csv_column_statistics_error)?;
+    Ok((csv, plot.with_label(header[column].clone())))
+}
+
 fn numeric_column_values(
     rows: &[Vec<String>],
     column: ColumnReference,
@@ -5180,6 +5207,13 @@ fn numeric_column_values(
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let column = column.resolve(header)?;
     validate_column_width(&[column], header.len())?;
+    numeric_column_values_at(records, column)
+}
+
+fn numeric_column_values_at(
+    records: &[Vec<String>],
+    column: usize,
+) -> Result<Vec<BigRational>, CsvError> {
     records
         .iter()
         .map(|row| parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber))

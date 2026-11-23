@@ -4558,6 +4558,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 列分箱 [\"金额\",\"0,1/2,2\"] 编号,金额\n001,-1\n002,0\n003,0.50\n004,1\n005,2",
     },
     Example {
+        icon: Icon::Layers,
+        title: "直接查看指定 CSV 数值列的区间次数图",
+        query: "CSV: 列分箱图 [\"金额\",\"0,1/2,2\"] 编号,金额\n001,-1\n002,0\n003,0.50\n004,1\n005,2",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按总体方差统计 CSV 数值列",
         query: "CSV: 列总体 \"数值\" 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",

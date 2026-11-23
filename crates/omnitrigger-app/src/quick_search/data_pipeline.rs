@@ -9,8 +9,9 @@ use super::{
     calendar::calculate_date,
     conversion::{calculate_circuit, convert_wave},
     csv_tools::{
-        append_bounded_csv_row, append_transformed_csv_column, build_scatter_plot,
-        scatter_arguments, transform_csv, ColumnReference, CsvError,
+        append_bounded_csv_row, append_transformed_csv_column, build_column_bin_plot,
+        build_scatter_plot, column_bin_plot_arguments, scatter_arguments, transform_csv,
+        ColumnReference, CsvError,
     },
     decibel::convert_decibels,
     duration::convert_duration,
@@ -480,11 +481,19 @@ fn prepare_pipeline_chart(
     query: &str,
 ) -> Option<Result<(String, PipelineChart), &'static str>> {
     match scope {
-        Scope::Csv => scatter_arguments(query).map(|input| {
-            build_scatter_plot(input)
-                .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
-                .map_err(|error| error.message())
-        }),
+        Scope::Csv => scatter_arguments(query)
+            .map(|input| {
+                build_scatter_plot(input)
+                    .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                    .map_err(|error| error.message())
+            })
+            .or_else(|| {
+                column_bin_plot_arguments(query).map(|input| {
+                    build_column_bin_plot(input)
+                        .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
+                        .map_err(|error| error.message())
+                })
+            }),
         Scope::LinearFit => plot_request(query).map(|request| {
             calculate_plot(request)
                 .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
