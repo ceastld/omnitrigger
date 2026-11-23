@@ -112,6 +112,12 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             return polynomial_errors(rest.trim());
         }
         Some((operation, rest))
+            if operation == "多项式预测"
+                || operation.eq_ignore_ascii_case("polynomial-predict") =>
+        {
+            return polynomial_prediction(rest.trim());
+        }
+        Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
         {
             (rest.trim(), FitOutput::Residuals)
@@ -299,13 +305,31 @@ struct PolynomialFit {
     points: Vec<Point>,
 }
 
-fn fit_polynomial(input: &str) -> Result<PolynomialFit, LinearFitError> {
+fn polynomial_fit_arguments(input: &str) -> Result<(usize, &str), LinearFitError> {
     let invalid = LinearFitError::PolynomialFitArguments;
     let (degree, points) = input.split_once('@').ok_or(invalid)?;
     let degree: usize = degree.trim().parse().map_err(|_| invalid)?;
     if degree > MAX_REGRESSION_DEGREE {
         return Err(invalid);
     }
+    Ok((degree, points.trim()))
+}
+
+fn fit_polynomial(input: &str) -> Result<PolynomialFit, LinearFitError> {
+    let (degree, points) = polynomial_fit_arguments(input)?;
+    fit_polynomial_points(degree, points)
+}
+
+fn polynomial_prediction(input: &str) -> Result<String, LinearFitError> {
+    let (degree, input) = polynomial_fit_arguments(input)?;
+    let (xs, points) = prediction_arguments(input)?;
+    let fit = fit_polynomial_points(degree, points)?;
+    format_prediction_values(&xs, "预测值", |x| {
+        polynomial_fit_value(&fit.coefficients, x)
+    })
+}
+
+fn fit_polynomial_points(degree: usize, points: &str) -> Result<PolynomialFit, LinearFitError> {
     let points = parse_paired_points(points.trim())?.collect::<Result<Vec<_>, _>>()?;
     let mut design = Vec::with_capacity(points.len());
     let mut observations = Vec::with_capacity(points.len());
@@ -322,7 +346,7 @@ fn fit_polynomial(input: &str) -> Result<PolynomialFit, LinearFitError> {
     let coefficients = least_squares(design, observations).map_err(|error| match error {
         MatrixError::LeastSquaresRank => LinearFitError::PolynomialFitRank,
         MatrixError::Evaluation(cause) => LinearFitError::Evaluation(cause),
-        _ => invalid,
+        _ => LinearFitError::PolynomialFitArguments,
     })?;
     let coefficients = coefficients
         .into_iter()
@@ -616,6 +640,26 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn predicts_with_one_polynomial_fit_and_preserves_query_order() {
+        assert_eq!(
+            calculate_linear_fit("多项式预测 2 @ 1/2,2,0 @ -1,2; 0,0; 1,2; 0,2").as_deref(),
+            Ok("x,预测值\r\n1/2,5/4\r\n2,5\r\n0,1")
+        );
+        assert_eq!(
+            calculate_linear_fit("polynomial-predict 0 @ 9 @ 0,1; 1,2").as_deref(),
+            Ok("3/2")
+        );
+        assert_eq!(
+            calculate_linear_fit("多项式预测 1 @ 1/2,2 @ 0,1; 1,3; 2,5"),
+            calculate_linear_fit("预测 1/2,2 @ 0,1; 1,3; 2,5"),
+        );
+        assert_eq!(
+            calculate_linear_fit("多项式预测 2 @ 1 @ 0,1; 0,2; 0,3"),
+            Err(LinearFitError::PolynomialFitRank)
+        );
+    }
 
     #[test]
     fn reports_exact_polynomial_fit_errors_with_the_same_denominator_as_linear_fit() {

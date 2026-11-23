@@ -292,6 +292,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用同一个多项式预测多个值",
+        query: "拟合: 多项式预测 2 @ 1/2,2,0 @ -1,2; 0,0; 1,2; 0,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用同一条拟合直线预测多个 x",
         query: "拟合: 预测 1/2,0,3 @ 0,1; 1,3; 2,5",
     },
@@ -5128,6 +5133,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "多项式",
             "多项式残差",
             "多项式误差",
+            "多项式预测",
             "残差",
             "误差",
             "过原点",
