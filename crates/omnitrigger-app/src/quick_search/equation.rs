@@ -46,6 +46,8 @@ pub(super) enum EquationError {
     BisectionResidual,
     NumericIntegralArguments,
     NumericIntegralIntervals,
+    NumericDerivativeArguments,
+    NumericDerivativeStep,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -96,6 +98,10 @@ impl EquationError {
                 "填写被积算式和两个不同的端点，分号后可填 2 至 128 之间的偶数"
             }
             Self::NumericIntegralIntervals => "当前精度无法区分积分采样点，请减少子区间数",
+            Self::NumericDerivativeArguments => {
+                "填写要估算导数的算式和横坐标，可在分号后填写正步长"
+            }
+            Self::NumericDerivativeStep => "该步长下无法取到两个不同的有限横坐标",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -151,6 +157,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
+            "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -841,6 +848,46 @@ fn format_bisection_result(
     };
     let residual = format_result(residual).map_err(EquationError::Approximation)?;
     Ok(format!("x ≈ {x}\r\n残差 {residual_name} ≈ {residual}"))
+}
+
+fn numeric_derivative(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericDerivativeArguments;
+    let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let (center, step) = arguments
+        .split_once(';')
+        .map_or((arguments, None), |(center, step)| (center, Some(step)));
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    let x = evaluate(center).map_err(EquationError::Approximation)?;
+    let step = match step {
+        Some(step) => evaluate(step).map_err(EquationError::Approximation)?,
+        None => f64::EPSILON.cbrt() * x.abs().max(1.0),
+    };
+    if step <= 0.0 {
+        return Err(invalid);
+    }
+    let lower = x - step;
+    let upper = x + step;
+    if lower == x || upper == x || !lower.is_finite() || !upper.is_finite() {
+        return Err(EquationError::NumericDerivativeStep);
+    }
+    let value_at =
+        |position| evaluate_at_x(expression, position).map_err(EquationError::Approximation);
+    value_at(x)?;
+    let left = value_at(lower)?;
+    let right = value_at(upper)?;
+    let delta_y = right - left;
+    let delta_x = upper - lower;
+    let derivative = if delta_y.is_finite() && delta_x.is_finite() {
+        delta_y / delta_x
+    } else {
+        (right * 0.5 - left * 0.5) / (upper * 0.5 - lower * 0.5)
+    };
+    Ok(format!(
+        "中心差分 ≈ {}\r\nx = {} · 步长 {}",
+        display(derivative)?,
+        display(x)?,
+        display(step)?
+    ))
 }
 
 fn numeric_integral(input: &str) -> Result<String, EquationError> {
@@ -1962,6 +2009,34 @@ mod tests {
                 Err(EquationError::Approximation(CalculationError::Invalid))
             );
         }
+    }
+
+    #[test]
+    fn estimates_derivatives_from_distinct_finite_samples() {
+        let result = solve_equation("数值导数 x³ @ 2").unwrap();
+        let derivative: f64 = result
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("中心差分 ≈ ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((derivative - 12.0).abs() < 1e-7);
+        assert_eq!(
+            solve_equation("numeric-derivative 1e308*x @ 0; 1").as_deref(),
+            Ok("中心差分 ≈ 1e308\r\nx = 0 · 步长 1")
+        );
+        assert_eq!(
+            solve_equation("数值导数 1/x @ 0; 0.01"),
+            Err(EquationError::Approximation(
+                CalculationError::DivisionByZero
+            ))
+        );
+        assert_eq!(
+            solve_equation("数值导数 x @ 1e30; 1"),
+            Err(EquationError::NumericDerivativeStep)
+        );
     }
 
     #[test]
