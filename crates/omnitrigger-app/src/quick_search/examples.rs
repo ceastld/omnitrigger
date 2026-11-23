@@ -26,7 +26,14 @@ impl Example {
         }
         if !matches!(
             scope,
-            Scope::Json | Scope::Toml | Scope::Csv | Scope::TextTools | Scope::UrlEncoding
+            Scope::Json
+                | Scope::Toml
+                | Scope::Csv
+                | Scope::TextTools
+                | Scope::UrlEncoding
+                | Scope::Path
+                | Scope::Uuid
+                | Scope::Ulid
         ) {
             return None;
         }

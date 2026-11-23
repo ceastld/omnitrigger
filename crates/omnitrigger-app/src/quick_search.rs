@@ -3816,6 +3816,21 @@ mod tests {
             ),
             ("文本: 大写 👩‍💻 x", "文本: 大写 ", "👩‍💻 x"),
             ("URL: 解码 %2B", "URL: 解码 ", "%2B"),
+            (
+                "路径: 文件名 C:\\工作\\报告.txt",
+                "路径: 文件名 ",
+                "C:\\工作\\报告.txt",
+            ),
+            (
+                "UUID: v5 DNS www.example.com",
+                "UUID: v5 ",
+                "DNS www.example.com",
+            ),
+            (
+                "ULID: 时间 01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "ULID: 时间 ",
+                "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            ),
         ] {
             let example = examples::Example {
                 icon: Icon::Terminal,
@@ -3830,6 +3845,8 @@ mod tests {
             "日期: 2024-01-01 + 1d",
             "JSON: 取值",
             "CSV: 转置  ",
+            "UUID: v4",
+            "ULID: 01ARZ3NDEKTSV4RRFFQ69G5FAV",
         ] {
             let example = examples::Example {
                 icon: Icon::Terminal,
@@ -4214,6 +4231,30 @@ mod tests {
                             });
                             let edited = search.input.read(cx).text();
                             [held, filled, edited]
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            for (prefix, replacement, expected) in [
+                                ("路径: 主名", "C:\\工作\\茶.txt", "路径: 主名 C:\\工作\\茶.txt"),
+                                ("UUID: v5", "URL https://example.invalid/a", "UUID: v5 URL https://example.invalid/a"),
+                                ("ULID: 格式", "01ARZ3NDEKTSV4RRFFQ69G5FAW", "ULID: 格式 01ARZ3NDEKTSV4RRFFQ69G5FAW"),
+                            ] {
+                                search.fill_query(prefix, window, cx);
+                                search.refresh_results(prefix, window, cx);
+                                search.key_down(
+                                    &KeyDownEvent {
+                                        keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
+                                        is_held: false,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                search.input.update(cx, |input, cx| {
+                                    input.replace_text_in_range(None, replacement, window, cx);
+                                });
+                                assert_eq!(search.input.read(cx).text(), expected);
+                            }
                         })
                         .unwrap();
                     let file_help = reopened
