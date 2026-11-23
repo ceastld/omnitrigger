@@ -15,6 +15,8 @@ use super::plane::{parse_point, PointError};
 pub(super) enum EquationError {
     Coefficients,
     ExpressionArguments,
+    ProductArguments,
+    ProductDegree,
     RootArguments,
     CurvePairArguments,
     ThreePointArguments,
@@ -34,6 +36,8 @@ impl EquationError {
             Self::Coefficients | Self::Evaluation(FractionError::Invalid) => {
                 "按 a, b, c 输入 ax² + bx + c = 0 的三个系数"
             }
+            Self::ProductArguments => "填写 x 的因式乘积，例如 (x - 1)(x - 2)",
+            Self::ProductDegree => "展开结果的次数须不超过二次",
             Self::ExpressionArguments => {
                 "输入由常数、x 和 x² 项组成的式子，例如 x**2 - 3*x + 2 = 0"
             }
@@ -69,6 +73,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "判别式" | "discriminant" => return quadratic_discriminant(arguments.trim_start()),
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
             "因式分解" | "factor" => return factor_polynomial(arguments.trim_start()),
+            "展开" | "expand" => return expand_polynomial(arguments.trim_start()),
             "取系数" | "coefficients" => {
                 let [a, b, c] = expanded_equation_coefficients(arguments)?;
                 return format_quadratic_coefficients(a, b, c);
@@ -223,20 +228,7 @@ fn expanded_polynomial_term(
         coefficient => equation_value(coefficient, invalid)?,
     };
     let tail = term[index + 1..].trim_start();
-    let (degree, tail) = if let Some(rest) = tail.strip_prefix('²') {
-        (2, rest)
-    } else if let Some(exponent) = tail.strip_prefix("**").or_else(|| tail.strip_prefix('^')) {
-        let (digit, rest) = exponent.trim_start().split_at_checked(1).ok_or(invalid)?;
-        let degree = match digit {
-            "0" => 0,
-            "1" => 1,
-            "2" => 2,
-            _ => return Err(invalid),
-        };
-        (degree, rest)
-    } else {
-        (1, tail)
-    };
+    let (degree, tail) = small_power_suffix(tail).ok_or(invalid)?;
     let index = match (form, variable, degree) {
         (PolynomialForm::Quadratic, "x" | "X", _) => 2 - degree,
         (PolynomialForm::TwoVariableLinear, _, 0) => 2,
@@ -286,6 +278,23 @@ fn expanded_polynomial_term(
         '/' => Err(EquationError::Evaluation(FractionError::ZeroDenominator)),
         _ => Err(invalid),
     }
+}
+
+fn small_power_suffix(input: &str) -> Option<(usize, &str)> {
+    if let Some(rest) = input.strip_prefix('²') {
+        return Some((2, rest));
+    }
+    let Some(exponent) = input.strip_prefix("**").or_else(|| input.strip_prefix('^')) else {
+        return Some((1, input));
+    };
+    let (digit, rest) = exponent.trim_start().split_at_checked(1)?;
+    let degree = match digit {
+        "0" => 0,
+        "1" => 1,
+        "2" => 2,
+        _ => return None,
+    };
+    Some((degree, rest))
 }
 
 fn quadratic_center(a: &BigRational, b: BigRational, c: BigRational) -> (BigRational, BigRational) {
@@ -587,6 +596,113 @@ fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
     }
     let [left_y, right_y] = ys;
     Ok(format!("({left_x}, {left_y})\n({right_x}, {right_y})"))
+}
+
+fn expand_polynomial(input: &str) -> Result<String, EquationError> {
+    let coefficients = match function_coefficients(input) {
+        Err(EquationError::ExpressionArguments) => factored_polynomial(input)?,
+        result => result?,
+    };
+    let expression = format_polynomial_terms(coefficients, ["x²", "x", ""])?;
+    Ok(format!("y = {expression}"))
+}
+
+fn factored_polynomial(input: &str) -> Result<[BigRational; 3], EquationError> {
+    let invalid = EquationError::ProductArguments;
+    let input = match input.split_once('=') {
+        Some((name, expression)) if name.trim().eq_ignore_ascii_case("y") => expression,
+        Some(_) => return Err(invalid),
+        None => input,
+    }
+    .trim();
+    let (negative, input) = if let Some(input) = input.strip_prefix('-') {
+        (true, input)
+    } else {
+        (false, input.strip_prefix('+').unwrap_or(input))
+    };
+    let input = input.trim_start();
+    let first_factor = input.find(['x', 'X', '(']).ok_or(invalid)?;
+    let (scale, mut rest) = input.split_at(first_factor);
+    let scale = if scale.is_empty() {
+        BigRational::from_integer(1.into())
+    } else {
+        let scale = scale.trim_end();
+        let scale = scale.strip_suffix(['*', '×']).unwrap_or(scale);
+        super::fraction::parse_fraction_literal(scale).map_err(|error| match error {
+            FractionError::Invalid | FractionError::Incomplete => invalid,
+            _ => EquationError::Evaluation(error),
+        })?
+    };
+    let mut coefficients = [
+        BigRational::default(),
+        BigRational::default(),
+        if negative { -scale } else { scale },
+    ];
+    loop {
+        let (factor, remainder) = product_factor(rest)?;
+        let (power, remainder) = small_power_suffix(remainder.trim_start()).ok_or(invalid)?;
+        for _ in 0..power {
+            coefficients = multiply_polynomial(&coefficients, &factor)?;
+        }
+        rest = remainder.trim_start();
+        if rest.is_empty() {
+            return Ok(coefficients);
+        }
+        if let Some(tail) = rest.strip_prefix(['*', '×']) {
+            rest = tail.trim_start();
+        }
+    }
+}
+
+fn product_factor(input: &str) -> Result<([BigRational; 3], &str), EquationError> {
+    let invalid = EquationError::ProductArguments;
+    if let Some(rest) = input.strip_prefix(['x', 'X']) {
+        let zero = BigRational::default();
+        return Ok((
+            [zero.clone(), BigRational::from_integer(1.into()), zero],
+            rest,
+        ));
+    }
+    let body = input.strip_prefix('(').ok_or(invalid)?;
+    let mut depth = 1usize;
+    let close = body
+        .char_indices()
+        .find_map(|(index, ch)| match ch {
+            '(' => {
+                depth += 1;
+                None
+            }
+            ')' => {
+                depth -= 1;
+                (depth == 0).then_some(index)
+            }
+            _ => None,
+        })
+        .ok_or(invalid)?;
+    let factor =
+        expanded_polynomial(&body[..close], PolynomialForm::Quadratic).map_err(|error| {
+            if error == EquationError::ExpressionArguments {
+                invalid
+            } else {
+                error
+            }
+        })?;
+    Ok((factor, &body[close + 1..]))
+}
+
+fn multiply_polynomial(
+    [a, b, c]: &[BigRational; 3],
+    [d, e, f]: &[BigRational; 3],
+) -> Result<[BigRational; 3], EquationError> {
+    let nonzero = |value: &BigRational| value.numer().sign() != Sign::NoSign;
+    if (nonzero(a) && nonzero(e)) || (nonzero(d) && (nonzero(a) || nonzero(b))) {
+        return Err(EquationError::ProductDegree);
+    }
+    let coefficients = [a * f + b * e + c * d, b * f + c * e, c * f];
+    for value in &coefficients {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    Ok(coefficients)
 }
 
 fn factor_polynomial(input: &str) -> Result<String, EquationError> {
@@ -1075,6 +1191,33 @@ mod tests {
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn expands_products_and_rational_factors_without_losing_exactness() {
+        for (input, expected) in [
+            ("展开 (x - 1)(x - 2)", "y = x² - 3x + 2"),
+            ("expand (1/2)(x - 1)²", "y = x²/2 - x + 1/2"),
+            ("展开 -x(x + 2)", "y = -x² - 2x"),
+            ("展开 (x+1)**2", "y = x² + 2x + 1"),
+            ("展开 y = 2 × (x - 1) × (x+1)", "y = 2x² - 2"),
+            ("展开 1/2, -1, 1/2", "y = x²/2 - x + 1/2"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            solve_equation("展开 (x²+1)(x+1)"),
+            Err(EquationError::ProductDegree)
+        );
+        assert_eq!(
+            solve_equation("展开 (x+1)*"),
+            Err(EquationError::ProductArguments)
+        );
+        let factors = solve_equation("因式分解 2,-5,2").unwrap();
+        assert_eq!(
+            solve_equation(&format!("展开 {factors}")).as_deref(),
+            Ok("y = 2x² - 5x + 2")
+        );
     }
 
     #[test]
