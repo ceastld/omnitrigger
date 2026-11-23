@@ -350,6 +350,7 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "utf16编码" | "utf16-hex" => Ok(encode_hex_units(text.encode_utf16(), 4)),
         "utf16解码" | "utf16-hex-decode" => decode_utf16_units(text),
         "码位" | "codepoints" => Ok(encode_code_points(text)),
+        "码位表" | "codepoint-table" => codepoint_table(text),
         "码位解码" | "codepoints-decode" => decode_code_points(text),
         "json转义" | "json-quote" => {
             Ok(serde_json::to_string(text).expect("字符串可以序列化为 JSON"))
@@ -739,6 +740,33 @@ fn encode_code_points(text: &str) -> String {
         write!(encoded, "U+{:04X}", u32::from(character)).expect("写入 String 不会出错");
     }
     encoded
+}
+
+fn codepoint_table(text: &str) -> Result<String, TextError> {
+    let mut result = "序号,字节位置,字符,码位,UTF-8,UTF-16".to_owned();
+    for (index, (offset, character)) in text.char_indices().enumerate() {
+        let mut bytes = [0; 4];
+        let scalar = character.encode_utf8(&mut bytes);
+        let display = if character.is_whitespace() {
+            show_whitespace(scalar)
+        } else {
+            character.escape_debug().to_string()
+        };
+        let fields = [
+            (index + 1).to_string(),
+            (offset + 1).to_string(),
+            display,
+            encode_code_points(scalar),
+            encode_hex_units(scalar.bytes(), 2),
+            encode_hex_units(scalar.encode_utf16(), 4),
+        ];
+        append_bounded_csv_row(
+            &mut result,
+            fields.iter().map(String::as_str),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(result)
 }
 
 fn decode_json_string(text: &str) -> Result<String, TextError> {
@@ -2367,6 +2395,34 @@ mod tests {
         assert_eq!(
             transform_text("码位解码 U+0061 U+0000"),
             Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn tabulates_unicode_scalars_and_their_original_utf8_offsets() {
+        assert_eq!(
+            transform_text("码位表 \"北\u{200b}😀\"").as_deref(),
+            Ok(concat!(
+                "序号,字节位置,字符,码位,UTF-8,UTF-16\r\n",
+                "1,1,北,U+5317,E5 8C 97,5317\r\n",
+                "2,4,\\u{200b},U+200B,E2 80 8B,200B\r\n",
+                "3,7,😀,U+1F600,F0 9F 98 80,D83D DE00",
+            )),
+        );
+        assert_eq!(
+            transform_text("codepoint-table \" \t,e\u{0301}\"").as_deref(),
+            Ok(concat!(
+                "序号,字节位置,字符,码位,UTF-8,UTF-16\r\n",
+                "1,1,␠,U+0020,20,0020\r\n",
+                "2,2,␉,U+0009,09,0009\r\n",
+                "3,3,\",\",U+002C,2C,002C\r\n",
+                "4,4,e,U+0065,65,0065\r\n",
+                "5,5,\\u{301},U+0301,CC 81,0301",
+            )),
+        );
+        assert_eq!(
+            transform_text("码位表 \"\"").as_deref(),
+            Ok("序号,字节位置,字符,码位,UTF-8,UTF-16"),
         );
     }
 

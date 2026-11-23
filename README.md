@@ -350,6 +350,7 @@
 - 用 `文本: 显示空白` 可把普通空格、制表符、回车和换行显示为 `␠`、`␉`、`␍` 和 `␊`。其他 Unicode 空白显示码位，例如不换行空格显示为 `<U+00A0>`。用引号可保留待转换文本首尾的空白。 [Unicode 控制字符图形](https://www.unicode.org/charts/PDF/U2400.pdf)
 - 用 `文本: 去ANSI样式` 可清理终端日志中的颜色、粗体和下划线控制序列，保留日志正文。输入命令后可按 Tab 填入一条含样式的示例。 [Microsoft 终端文字样式](https://learn.microsoft.com/windows/console/console-virtual-terminal-sequences#text-formatting)
 - 输入 `文本: 码位 北京` 得到 `U+5317 U+4EAC`，用 `文本: 码位解码 U+5317 U+4EAC` 转回文字。组合字符按各自的 Unicode 码位显示。
+- 用 `文本: 码位表` 可逐行查看原文的字符序号、UTF-8 字节位置、码位和两种编码的十六进制值。序号和位置均从 1 开始，零宽空格会显示为 `\u{200b}`。用引号可保留原文首尾的空白，结果为 CSV。 [Unicode 编码形式](https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-3/)
 - 输入 `文本: UTF8编码 北京` 可查看 UTF-8 字节 `E5 8C 97 E4 BA AC`。用 `文本: UTF8解码` 加上十六进制字节可还原文字，接受连续数字、空白分隔或带 `0x` 的字节组。
 - 输入 `文本: UTF16编码 北😀` 可查看 UTF-16 码元 `5317 D83D DE00`。用 `文本: UTF16解码` 可还原文字。每个码元为四位十六进制数字，可连续输入或用空白分隔，代理码元须按顺序成对出现。 [Unicode UTF-16 规则](https://www.unicode.org/faq/utf_bom.html#utf16)
 - 输入 `文本: JSON转义 他写下 "你好"` 可把文字转成 JSON 字符串。输入 `文本: JSON还原 "\u4F60\n好"` 会还原为两行文字。 [RFC 8259 的字符串语法](https://www.rfc-editor.org/rfc/rfc8259.html#section-7)

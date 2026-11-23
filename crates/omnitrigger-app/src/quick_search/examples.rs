@@ -2143,6 +2143,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看字符的码位、字节位置和编码",
+        query: "文本: 码位表 \"北\u{200b}😀\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除终端日志中的 ANSI 颜色和样式",
         query: "文本: 去ANSI样式 \x1b[31m错误\x1b[0m \x1b[1m完成\x1b[m",
     },
