@@ -2243,6 +2243,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "指定每段连续空行的保留上限",
+        query: "文本: 空行上限 2 标题\n\n\n\n正文\n附注",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按行编号",
         query: "文本: 按行编号 苹果\n梨",
     },

@@ -79,6 +79,7 @@ pub(super) enum TextError {
     InvalidLineRange,
     EdgeLineCount,
     InvalidLineStep,
+    EmptyLineLimit,
     InvalidGraphemeRange,
     MissingLine,
     InvalidNumberLine,
@@ -126,6 +127,7 @@ impl TextError {
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::EdgeLineCount => "填写正整数行数，例如 文本: 取末尾行 2",
             Self::InvalidLineStep => "填写起始行号和正整数步长，例如 文本: 间隔取行 2,3",
+            Self::EmptyLineLimit => "填写每段空行最多保留的行数，例如 文本: 空行上限 2",
             Self::LineContextArguments => "填写关键词、前置行数和后置行数，例如 [\"错误\",1,2]",
             Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
             Self::MissingLine => "指定行号超出了文本行数",
@@ -199,6 +201,16 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "取开头行" | "head-lines" => return take_edge_lines(text, false),
         "取末尾行" | "tail-lines" => return take_edge_lines(text, true),
         "间隔取行" | "stride-lines" => return take_spaced_lines(text),
+        "空行上限" | "limit-empty-lines" => {
+            let (limit, text) = text
+                .trim_start()
+                .split_once(char::is_whitespace)
+                .ok_or(TextError::EmptyLineLimit)?;
+            let limit = limit
+                .parse::<usize>()
+                .map_err(|_| TextError::EmptyLineLimit)?;
+            return Ok(limit_empty_lines(text_payload(text)?, limit));
+        }
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
@@ -319,7 +331,7 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
             .filter(|line| !line.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n")),
-        "合并空行" | "collapse-empty-lines" => Ok(collapse_empty_lines(text)),
+        "合并空行" | "collapse-empty-lines" => Ok(limit_empty_lines(text, 1)),
         "按行编号" | "number-lines" => Ok(text
             .lines()
             .enumerate()
@@ -510,20 +522,20 @@ pub(super) fn newline_pattern() -> &'static Regex {
     NEWLINES.get_or_init(|| Regex::new(r"\r\n|\n|\r").expect("固定的换行表达式有效"))
 }
 
-fn collapse_empty_lines(text: &str) -> String {
+fn limit_empty_lines(text: &str, limit: usize) -> String {
     let mut result = String::with_capacity(text.len());
     let mut start = 0;
-    let mut previous_was_blank = false;
+    let mut consecutive_blanks = 0;
     let line_ends = newline_pattern()
         .find_iter(text)
         .map(|newline| (newline.start(), newline.end()))
         .chain(std::iter::once((text.len(), text.len())));
     for (content_end, end) in line_ends {
         let blank = text[start..content_end].trim().is_empty();
-        if !blank || !previous_was_blank {
+        consecutive_blanks = if blank { consecutive_blanks + 1 } else { 0 };
+        if consecutive_blanks <= limit {
             result.push_str(&text[start..end]);
         }
-        previous_was_blank = blank;
         start = end;
     }
     result
@@ -1708,6 +1720,24 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn limits_each_empty_line_run_without_rewriting_retained_line_endings() {
+        assert_eq!(
+            transform_text("空行上限 2 \"甲\r\n\r\n \t\r\n\r乙\n\n\n\n丙\n\n\n\"").as_deref(),
+            Ok("甲\r\n\r\n \t\r\n乙\n\n\n丙\n\n\n")
+        );
+        assert_eq!(
+            transform_text("limit-empty-lines 0 \"甲\r\n\r\n\t\r乙 \n\"").as_deref(),
+            Ok("甲\r\n乙 \n")
+        );
+        assert_eq!(
+            transform_text("空行上限 -1 内容"),
+            Err(TextError::EmptyLineLimit)
+        );
+        let unlimited = format!("空行上限 {} \" 甲\n\n\n乙 \"", usize::MAX);
+        assert_eq!(transform_text(&unlimited).as_deref(), Ok(" 甲\n\n\n乙 "));
     }
 
     #[test]
