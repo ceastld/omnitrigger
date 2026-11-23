@@ -214,6 +214,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 缩尾平均 20% 0,2,3,30,100",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按非负观测值精确计算基尼系数",
+        query: "统计: 基尼系数 0,0,4,4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "按精确数值列出次数和频率",
         query: "统计: 频数表 3,1/2,0.5,3,5",
@@ -4709,6 +4714,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "箱线摘要",
                     "截尾平均",
                     "缩尾平均",
+                    "基尼系数",
                     "移动合计",
                     "移动样本方差",
                     "移动总体方差",

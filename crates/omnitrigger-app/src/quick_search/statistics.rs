@@ -44,6 +44,7 @@ pub(super) enum StatisticsError {
     AdjacentValueCount,
     ZeroPreviousValue,
     NonPositiveHarmonicValue,
+    InvalidGiniValues,
     StandardErrorCount,
     StandardScoresConstant,
     VariationSampleCount,
@@ -81,6 +82,7 @@ impl StatisticsError {
             Self::AdjacentValueCount => "计算相邻项的变化至少需要两个数值",
             Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
             Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
+            Self::InvalidGiniValues => "基尼系数需要非负观测值，且总和须大于零",
             Self::StandardErrorCount => "均值标准误至少需要两个观测值",
             Self::StandardScoresConstant => "标准分需要至少两个不同的观测值",
             Self::VariationSampleCount => "样本变异系数至少需要两个观测值",
@@ -106,6 +108,7 @@ enum StatisticsOperation {
     Bins(Vec<BigRational>),
     RootMeanSquare,
     HarmonicMean,
+    GiniCoefficient,
     StandardError,
     CoefficientOfVariation {
         sample: bool,
@@ -182,6 +185,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "调和平均" | "harmonic-mean" => (StatisticsOperation::HarmonicMean, values.trim()),
+        "基尼系数" | "gini" | "gini-coefficient" => {
+            (StatisticsOperation::GiniCoefficient, values.trim())
+        }
         "标准误" | "均值标准误" | "sem" | "standard-error" => {
             (StatisticsOperation::StandardError, values.trim())
         }
@@ -337,6 +343,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         StatisticsOperation::TailAdjustedMean { share, winsorized } => {
             tail_adjusted_mean(values, count, share, winsorized).map(|value| value.to_string())
+        }
+        StatisticsOperation::GiniCoefficient => {
+            gini_coefficient(values, count).map(|value| value.to_string())
         }
         StatisticsOperation::RootMeanSquare => {
             let squares = squared_deviation_sum(&values, &BigRational::default())?;
@@ -820,6 +829,34 @@ fn sorted_median(
         return bounded((previous + middle) / BigInt::from(2));
     }
     Ok(middle.clone())
+}
+
+fn gini_coefficient(
+    mut values: Vec<(BigRational, u64)>,
+    count: u64,
+) -> Result<BigRational, StatisticsError> {
+    if values
+        .iter()
+        .any(|(value, _)| value.numer().sign() == Sign::Minus)
+    {
+        return Err(StatisticsError::InvalidGiniValues);
+    }
+    values.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let mut seen = 0_u64;
+    let mut value_sum = BigRational::default();
+    let mut difference_sum = BigRational::default();
+    for (value, repetitions) in values {
+        let multiplicity = BigInt::from(repetitions);
+        // 只累计当前值与前面观测的差，组内所有差值都为零。
+        let group_difference = (&value * BigInt::from(seen) - &value_sum) * &multiplicity;
+        difference_sum = bounded(difference_sum + group_difference)?;
+        value_sum = bounded(value_sum + value * multiplicity)?;
+        seen += repetitions;
+    }
+    if value_sum.numer().sign() == Sign::NoSign {
+        return Err(StatisticsError::InvalidGiniValues);
+    }
+    bounded(difference_sum / (value_sum * BigInt::from(count)))
 }
 
 fn tail_adjusted_mean(
@@ -1401,6 +1438,35 @@ mod tests {
             calculate_statistics("二项累计 0,0,101%"),
             Err(StatisticsError::InvalidProbability)
         );
+    }
+
+    #[test]
+    fn calculates_exact_gini_coefficients_for_nonnegative_observations() {
+        for (query, expected) in [
+            ("基尼系数 0,0,4,4", "1/2"),
+            ("基尼系数 2,1,0", "4/9"),
+            ("基尼系数 2/3,2", "1/4"),
+            ("GINI 频数 1@2,4@2", "3/10"),
+            (
+                "gini-coefficient frequency 0@1000000000,1@1000000000",
+                "1/2",
+            ),
+            ("基尼系数 1,1,1", "0"),
+            ("基尼系数 2**80", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["基尼系数 -1,1,2", "基尼系数 0,0"] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::InvalidGiniValues),
+                "{query}"
+            );
+        }
     }
 
     #[test]
