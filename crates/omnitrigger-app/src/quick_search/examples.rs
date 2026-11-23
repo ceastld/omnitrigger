@@ -321,6 +321,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "对照不同采样密度下的数值积分",
+        query: "方程: 积分对照 x^4 @ 0..1; 4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "估算两条曲线在区间内围成的面积",
         query: "方程: 数值面积 [\"x\",\"0\"] @ -1..1; 8",
     },
@@ -5578,6 +5583,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "参数图",
             "二分求根",
             "数值积分",
+            "积分对照",
             "数值面积",
             "数值弧长",
             "数值导数",

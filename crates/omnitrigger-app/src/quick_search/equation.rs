@@ -60,6 +60,7 @@ pub(super) enum EquationError {
     BisectionResidual,
     TooManySampledBrackets,
     NumericIntegralArguments,
+    NumericIntegralComparisonArguments,
     NumericIntegralIntervals,
     IntegralSampleArguments,
     NumericAreaArguments,
@@ -131,6 +132,9 @@ impl EquationError {
             Self::TooManySampledBrackets => "异号区间超过 8 个，请缩小范围或先用找异号区间",
             Self::NumericIntegralArguments => {
                 "填写被积算式和两个不同的端点，分号后可填 2 至 128 之间的偶数"
+            }
+            Self::NumericIntegralComparisonArguments => {
+                "填写被积算式和两个不同的端点，分号后可填 4 至 128 之间的 4 的倍数"
             }
             Self::NumericIntegralIntervals => "当前精度无法区分积分采样点，请减少子区间数",
             Self::IntegralSampleArguments => {
@@ -222,6 +226,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
+            "积分对照" | "compare-integrals" => return compare_numeric_integrals(arguments),
             "数值面积" | "numeric-area" => return numeric_function_area(arguments),
             "数值弧长" | "numeric-arc-length" => return numeric_function_arc_length(arguments),
             "积分采样" | "sample-integral" | "积分采样图" | "integral-plot" => {
@@ -1541,6 +1546,29 @@ fn numeric_integral(input: &str) -> Result<String, EquationError> {
     display_integral("积分", value, intervals)
 }
 
+fn compare_numeric_integrals(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericIntegralComparisonArguments;
+    let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let ([start, end], fine_count) = numeric_integral_range(arguments, invalid)?;
+    if !fine_count.is_multiple_of(4) {
+        return Err(invalid);
+    }
+    let fine_values = collect_integral_values([start, end], fine_count, |x| {
+        evaluate_at_x(expression, x).map_err(EquationError::Approximation)
+    })?;
+    let coarse_values: Vec<_> = fine_values.iter().step_by(2).copied().collect();
+    let fine = simpson_integral(&fine_values, start, end);
+    let coarse = simpson_integral(&coarse_values, start, end);
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    Ok(format!(
+        "复合辛普森法\r\n{fine_count} 个子区间 ≈ {}\r\n{} 个子区间 ≈ {}\r\n两次结果差 ≈ {}",
+        display(fine)?,
+        fine_count / 2,
+        display(coarse)?,
+        display((fine - coarse).abs())?
+    ))
+}
+
 fn numeric_function_area(input: &str) -> Result<String, EquationError> {
     let invalid = EquationError::NumericAreaArguments;
     let (expressions, bounds) = function_comparison_arguments(input, invalid)?;
@@ -1593,10 +1621,19 @@ fn numeric_integral_range(
 }
 
 fn integrate_samples(
-    [start, end]: [f64; 2],
+    bounds: [f64; 2],
     intervals: u32,
     value_at: impl Fn(f64) -> Result<f64, EquationError>,
 ) -> Result<f64, EquationError> {
+    let values = collect_integral_values(bounds, intervals, value_at)?;
+    Ok(simpson_integral(&values, bounds[0], bounds[1]))
+}
+
+fn collect_integral_values(
+    [start, end]: [f64; 2],
+    intervals: u32,
+    value_at: impl Fn(f64) -> Result<f64, EquationError>,
+) -> Result<Vec<f64>, EquationError> {
     let mut values = Vec::with_capacity(intervals as usize + 1);
     let mut previous = None;
     for index in 0..=intervals {
@@ -1607,7 +1644,7 @@ fn integrate_samples(
         previous = Some(x);
         values.push(value_at(x)?);
     }
-    Ok(simpson_integral(&values, start, end))
+    Ok(values)
 }
 
 fn display_integral(label: &str, value: f64, intervals: u32) -> Result<String, EquationError> {
@@ -2857,6 +2894,37 @@ mod tests {
         assert_eq!(
             solve_equation("数值弧长 x @ 0..2; 3"),
             Err(EquationError::NumericArcLengthArguments)
+        );
+    }
+
+    #[test]
+    fn compares_simpson_estimates_at_two_nested_sampling_resolutions() {
+        let report = solve_equation("积分对照 x^4 @ 1..0; 4").unwrap();
+        let mut lines = report.lines();
+        assert_eq!(lines.next(), Some("复合辛普森法"));
+        assert_eq!(lines.next(), Some("4 个子区间 ≈ -0.200520833333333"));
+        assert_eq!(lines.next(), Some("2 个子区间 ≈ -0.208333333333333"));
+        let difference: f64 = lines
+            .next()
+            .unwrap()
+            .strip_prefix("两次结果差 ≈ ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((difference - 0.0078125).abs() < 1e-14);
+        assert_eq!(
+            solve_equation("compare-integrals 4 @ 0..1").as_deref(),
+            Ok("复合辛普森法\r\n64 个子区间 ≈ 4\r\n32 个子区间 ≈ 4\r\n两次结果差 ≈ 0")
+        );
+        assert_eq!(
+            solve_equation("积分对照 x @ 0..1; 6"),
+            Err(EquationError::NumericIntegralComparisonArguments)
+        );
+        assert_eq!(
+            solve_equation("积分对照 1/x @ -1..1; 4"),
+            Err(EquationError::Approximation(
+                CalculationError::DivisionByZero
+            ))
         );
     }
 
