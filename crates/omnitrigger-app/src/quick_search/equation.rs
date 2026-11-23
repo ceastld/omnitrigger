@@ -65,6 +65,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         match operation.to_ascii_lowercase().as_str() {
             "不等式" | "inequality" => return solve_inequality(arguments.trim_start()),
             "顶点" | "vertex" => return describe_quadratic(arguments.trim_start(), false),
+            "摘要" | "summary" => return quadratic_summary(arguments.trim_start()),
             "判别式" | "discriminant" => return quadratic_discriminant(arguments.trim_start()),
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
             "因式分解" | "factor" => return factor_polynomial(arguments.trim_start()),
@@ -668,6 +669,31 @@ fn polynomial_standard_form(input: &str) -> Result<String, EquationError> {
     Ok(format!("y = {expression}"))
 }
 
+fn quadratic_summary(input: &str) -> Result<String, EquationError> {
+    let [a, b, c] = quadratic_coefficients(input)?;
+    let (x, distance_squared) = quadratic_center(&a, b, c);
+    let y = -&a * &distance_squared;
+    for value in [&x, &y, &distance_squared] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    let left = format!("(-∞, {x}]");
+    let right = format!("[{x}, ∞)");
+    let (opening, range, increasing, decreasing) = if a.numer().sign() == Sign::Plus {
+        ("向上", format!("[{y}, ∞)"), right, left)
+    } else {
+        ("向下", format!("(-∞, {y}]"), left, right)
+    };
+    let roots = if distance_squared.numer().sign() == Sign::Minus {
+        "无实数零点".to_owned()
+    } else {
+        format_centered_roots(x.clone(), distance_squared, "x")
+            .map_err(EquationError::Evaluation)?
+    };
+    Ok(format!(
+        "顶点 ({x}, {y}) · 对称轴 x = {x}\n开口{opening} · 值域 {range}\n递增 {increasing}\n递减 {decreasing}\n{roots}"
+    ))
+}
+
 fn describe_quadratic(input: &str, complete_square: bool) -> Result<String, EquationError> {
     let [a, b, c] = quadratic_coefficients(input)?;
     let extremum = if a.numer().sign() == Sign::Plus {
@@ -984,6 +1010,22 @@ fn parameter_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarizes_the_vertex_range_monotonicity_and_real_roots() {
+        assert_eq!(
+            solve_equation("摘要 y = x² - 2x - 1").as_deref(),
+            Ok("顶点 (1, -2) · 对称轴 x = 1\n开口向上 · 值域 [-2, ∞)\n递增 [1, ∞)\n递减 (-∞, 1]\nx = 1 ± √2"),
+        );
+        assert_eq!(
+            solve_equation("summary -2,4,-3").as_deref(),
+            Ok("顶点 (1, -1) · 对称轴 x = 1\n开口向下 · 值域 (-∞, -1]\n递增 (-∞, 1]\n递减 [1, ∞)\n无实数零点"),
+        );
+        assert_eq!(
+            solve_equation("摘要 y = x"),
+            Err(EquationError::NonQuadratic)
+        );
+    }
 
     #[test]
     fn factors_polynomials_with_rational_coefficients_and_repeated_roots() {

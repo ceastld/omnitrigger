@@ -112,6 +112,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看二次函数的值域、单调区间和零点",
+        query: "方程: 摘要 y = x² - 2x - 1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把二次式改写为配方后的形式",
         query: "方程: 配方 2,-3,1",
     },
@@ -5006,6 +5011,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
     match scope {
         Scope::Equation => &[
+            "摘要",
             "因式分解",
             "不等式",
             "顶点",
