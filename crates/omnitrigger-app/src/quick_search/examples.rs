@@ -5551,35 +5551,55 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
             .map(|example| (search_key(example.title), search_key(example.query)))
             .collect()
     });
-    if let Some(prefix) = query
-        .strip_suffix(':')
-        .and_then(tool_example_keyword)
-        .filter(|prefix| prefix.ends_with(':'))
-    {
-        let prefix = search_key(prefix);
-        return search_text
-            .iter()
-            .enumerate()
-            .filter_map(|(index, (_, command))| command.starts_with(&prefix).then_some(index))
-            .collect();
-    }
+    let scope = query.split_once(':').and_then(|(name, terms)| {
+        let prefix = tool_example_keyword(name)?;
+        prefix
+            .ends_with(':')
+            .then(|| (search_key(prefix), terms.trim()))
+    });
+    let (prefix, query) = scope
+        .as_ref()
+        .map_or((None, query.as_str()), |(prefix, terms)| {
+            (Some(prefix.as_str()), *terms)
+        });
     let mut matches: Vec<_> = search_text
         .iter()
         .enumerate()
         .filter_map(|(index, (title, example_query))| {
+            let example_query = match prefix {
+                Some(prefix) => example_query.strip_prefix(prefix)?.trim_start(),
+                None => example_query.as_str(),
+            };
+            if query.is_empty() {
+                return Some((0, 0, index));
+            }
             if !query
                 .split_whitespace()
                 .all(|word| title.contains(word) || example_query.contains(word))
             {
                 return None;
             }
-            let command_rank = title_rank(example_query, &query);
-            let rank = title_rank(title, &query).min(command_rank);
+            let command_rank = title_rank(example_query, query);
+            let rank = title_rank(title, query).min(command_rank);
             Some((rank, command_rank, index))
         })
         .collect();
     matches.sort_unstable();
     matches.into_iter().map(|(_, _, index)| index).collect()
+}
+
+pub(super) fn example_help_query(query: &str) -> Option<String> {
+    let query = query.trim();
+    let (name, _) = query.split_once([':', '：'])?;
+    let keyword = tool_example_keyword(name)?;
+    let operation = scoped_query(query).and_then(|(scope, term)| {
+        let operation = term.split_whitespace().next()?;
+        tool_operation_examples(scope, operation).map(|_| operation)
+    });
+    Some(match operation {
+        Some(operation) => format!("? {keyword} {operation}"),
+        None => format!("? {keyword}"),
+    })
 }
 
 pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
@@ -6281,6 +6301,28 @@ mod tests {
             assert!(tool_operation_examples(scope, prefix).is_some());
             assert_eq!(tool_operation_examples(scope, with_argument), None);
         }
+    }
+
+    #[test]
+    fn help_filters_by_tool_and_operation_without_including_query_arguments() {
+        assert_eq!(
+            example_help_query("ＪＳＯＮ：取值 /金额 {\"金额\":2}").as_deref(),
+            Some("? JSON: 取值")
+        );
+        assert_eq!(
+            example_help_query("CSV: 未知命令 [1,2] 表格").as_deref(),
+            Some("? CSV:")
+        );
+        assert_eq!(example_help_query("2**10"), None);
+
+        let items = matching_examples("ｊｓｏｎ：　取值");
+        assert!(EXAMPLES[items[0]].query.starts_with("JSON: 取值 "));
+        assert!(items
+            .iter()
+            .all(|&index| EXAMPLES[index].query.starts_with("JSON:")));
+        assert!(matching_examples("取值")
+            .iter()
+            .any(|&index| EXAMPLES[index].query.starts_with("处理:")));
     }
 
     #[test]

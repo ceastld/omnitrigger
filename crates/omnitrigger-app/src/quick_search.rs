@@ -106,8 +106,8 @@ use decibel::{convert_decibels, DecibelError};
 use duration::{convert_duration, is_clock_duration, DurationError};
 use equation::{solve_equation_output, solve_linear_system, EquationError, EquationOutput};
 use examples::{
-    function_examples, matching_examples, tool_index_examples, tool_operation_examples, Example,
-    EXAMPLES,
+    example_help_query, function_examples, matching_examples, tool_index_examples,
+    tool_operation_examples, Example, EXAMPLES,
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
@@ -2368,10 +2368,7 @@ impl QuickSearch {
             },
             _ => None,
         }
-        .or_else(|| {
-            let (prefix, _) = query.trim().split_once([':', '：'])?;
-            tool_example_keyword(prefix).map(|keyword| format!("? {keyword}"))
-        });
+        .or_else(|| example_help_query(&query));
         self.input_before_help = Some(query);
         self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
     }
