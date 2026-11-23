@@ -11,6 +11,7 @@ mod complex;
 mod conversion;
 mod csv_tools;
 mod data_pipeline;
+mod decibel;
 mod duration;
 mod equation;
 mod examples;
@@ -94,6 +95,7 @@ use conversion::{
 };
 use csv_tools::{transform_csv, CsvError};
 use data_pipeline::{transform_data_pipeline, DataPipelineError};
+use decibel::{convert_decibels, DecibelError};
 use duration::{convert_duration, is_clock_duration, DurationError};
 use equation::{solve_equation, solve_linear_system, EquationError};
 use examples::{
@@ -397,6 +399,7 @@ enum ValueError {
     AspectRatio(AspectRatioError),
     Paper(PaperError),
     Pitch(PitchError),
+    Decibel(DecibelError),
     Rectangle(RectangleError),
     Cidr(CidrError),
     FileMode(FileModeError),
@@ -510,6 +513,7 @@ impl ValueError {
             Self::AspectRatio(error) => error.message(),
             Self::Paper(error) => error.message(),
             Self::Pitch(error) => error.message(),
+            Self::Decibel(error) => error.message(),
             Self::Rectangle(error) => error.message(),
             Self::Cidr(error) => error.message(),
             Self::FileMode(error) => error.message(),
@@ -905,6 +909,9 @@ impl Results {
                 }
                 Scope::Paper => Self::text_value(calculate_paper(term).map_err(ValueError::Paper)),
                 Scope::Pitch => Self::text_value(convert_pitch(term).map_err(ValueError::Pitch)),
+                Scope::Decibel => {
+                    Self::text_value(convert_decibels(term).map_err(ValueError::Decibel))
+                }
                 Scope::Rectangle => {
                     Self::text_value(calculate_rectangle(term).map_err(ValueError::Rectangle))
                 }

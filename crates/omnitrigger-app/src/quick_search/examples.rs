@@ -1352,6 +1352,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把功率比换算为分贝",
+        query: "分贝: 功率比 100",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把幅度比换算为分贝",
+        query: "分贝: 幅度比 10",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按分贝反推功率比",
+        query: "分贝: 转功率比 20 dB",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按分贝反推幅度比",
+        query: "分贝: 转幅度比 20 dB",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按整数半音移动音高",
         query: "音高: 转调 Bb3 @ 2",
     },
@@ -4680,6 +4700,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Circuit
         | Scope::Period
         | Scope::Pitch
+        | Scope::Decibel
         | Scope::AspectRatio
         | Scope::MapScale
         | Scope::PixelDensity
@@ -4702,6 +4723,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if term.is_empty() => {}
         Scope::Polygon
             if ["重心", "包含", "周长", "边界框", "凸性"]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
+        Scope::Decibel
+            if ["功率比", "幅度比", "转功率比", "转幅度比"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Pitch
@@ -4810,6 +4835,7 @@ mod tests {
             Scope::Circuit,
             Scope::Period,
             Scope::Pitch,
+            Scope::Decibel,
             Scope::AspectRatio,
             Scope::MapScale,
             Scope::PixelDensity,
