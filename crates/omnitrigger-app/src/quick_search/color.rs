@@ -64,7 +64,7 @@ impl ColorError {
             Self::InvalidPalette => {
                 "填写起始颜色、结束颜色和 2 至 32 个色值，例如 #000 到 #fff @ 5"
             }
-            Self::MixColorSpace => "颜色混合支持 in srgb 或 in srgb-linear",
+            Self::MixColorSpace => "颜色混合支持 in srgb、in srgb-linear 或 in oklab",
             Self::TransparentContrast => "计算对比度需要两个不透明颜色",
             Self::TransparentTextBackground => "需要不透明底色，也可先叠加到实际背景上",
         }
@@ -84,20 +84,30 @@ enum ColorFormat {
 pub(super) enum ColorMixSpace {
     Srgb,
     LinearSrgb,
+    Oklab,
 }
 
 impl ColorMixSpace {
-    fn interpolate_channel(self, left: u8, right: u8, first: f64, second: f64, total: f64) -> u8 {
+    fn interpolate(
+        self,
+        left: [u8; 3],
+        right: [u8; 3],
+        first: f64,
+        second: f64,
+        total: f64,
+    ) -> Result<[u8; 3], ColorError> {
+        let blend = |left: [f64; 3], right: [f64; 3]| {
+            std::array::from_fn(|index| (left[index] * first + right[index] * second) / total)
+        };
         match self {
-            Self::Srgb => {
-                ((f64::from(left) * first + f64::from(right) * second) / total).round() as u8
-            }
-            Self::LinearSrgb => {
-                let linear = (srgb_channel_to_linear(left) * first
-                    + srgb_channel_to_linear(right) * second)
-                    / total;
-                linear_to_srgb_channel(linear)
-            }
+            Self::Srgb => Ok(blend(left.map(f64::from), right.map(f64::from))
+                .map(|channel| channel.round() as u8)),
+            Self::LinearSrgb => Ok(blend(
+                left.map(srgb_channel_to_linear),
+                right.map(srgb_channel_to_linear),
+            )
+            .map(linear_to_srgb_channel)),
+            Self::Oklab => srgb_from_oklab(blend(oklab_from_srgb(left), oklab_from_srgb(right))),
         }
     }
 }
@@ -190,15 +200,7 @@ impl Channels {
         let rgb = if combined == 0. {
             [0; 3]
         } else {
-            std::array::from_fn(|index| {
-                space.interpolate_channel(
-                    self.rgb[index],
-                    other.rgb[index],
-                    first,
-                    second,
-                    combined,
-                )
-            })
+            space.interpolate(self.rgb, other.rgb, first, second, combined)?
         };
         let alpha = (combined / total.max(100.)).round() as u8;
         Ok(Self {
@@ -529,6 +531,7 @@ fn mix_color(input: &str) -> Result<Channels, ColorError> {
     let space = match (words.next(), words.next(), words.next()) {
         (Some("in"), Some("srgb"), None) => ColorMixSpace::Srgb,
         (Some("in"), Some("srgb-linear"), None) => ColorMixSpace::LinearSrgb,
+        (Some("in"), Some("oklab"), None) => ColorMixSpace::Oklab,
         _ => return Err(ColorError::MixColorSpace),
     };
 
@@ -858,7 +861,7 @@ mod tests {
             assert_eq!(convert_color(input), Err(ColorError::InvalidMix), "{input}");
         }
         assert_eq!(
-            convert_color("color-mix(in oklab, white, black)"),
+            convert_color("color-mix(in lab, white, black)"),
             Err(ColorError::MixColorSpace),
         );
         assert_eq!(
@@ -900,6 +903,40 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn mixes_in_oklab_with_premultiplied_alpha_and_checks_the_srgb_gamut() {
+        for (input, output, swatch) in [
+            ("color-mix(in oklab, #000, #fff)", "#636363", 0x636363ff),
+            (
+                "color-mix(in OKLAB, #f00, transparent)",
+                "#FF000080",
+                0xff000080,
+            ),
+            (
+                "color-mix(in oklab, #0f0 100%, #00f)",
+                "#00FF00",
+                0x00ff00ff,
+            ),
+        ] {
+            assert_eq!(
+                convert_color(input),
+                Ok(Color {
+                    output: output.to_owned(),
+                    swatch,
+                }),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_color("color-mix(in oklab, #0f0, #00f)"),
+            Err(ColorError::OutsideSrgbGamut)
+        );
+        assert_eq!(
+            make_color_palette("#000 到 #fff @ 3", ColorMixSpace::Oklab).as_deref(),
+            Ok("#000000\n#636363\n#FFFFFF")
+        );
     }
 
     #[test]

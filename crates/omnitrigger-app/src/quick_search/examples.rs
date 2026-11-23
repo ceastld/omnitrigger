@@ -2500,6 +2500,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "颜色: color-mix(in srgb-linear, white, black)",
     },
     Example {
+        icon: Icon::Layers,
+        title: "在 OKLab 空间混合颜色",
+        query: "颜色: color-mix(in oklab, #000, #fff)",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按 sRGB 等距离生成两种颜色之间的色阶",
         query: "颜色: 色阶 #004080 到 #80C0FF @ 5",
@@ -2508,6 +2513,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "在线性光强空间生成两种颜色之间的色阶",
         query: "颜色: 线性色阶 #000 到 #fff @ 3",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "在 OKLab 空间生成色阶",
+        query: "颜色: OKLab色阶 #000 到 #fff @ 3",
     },
     Example {
         icon: Icon::Layers,
@@ -4778,7 +4788,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term))) => {}
         Scope::Color
             if !term.is_empty()
-                && ["色阶", "线性色阶"]
+                && ["色阶", "线性色阶", "OKLab色阶"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Timestamp

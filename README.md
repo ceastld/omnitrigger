@@ -385,6 +385,7 @@
 - 输入 `颜色: #0080FF80 叠加 #fff` 得到 `#7FBFFF`。前一种颜色覆盖在后一种颜色上，也可用 `over`，按 sRGB 通道计算 [透明度叠加](https://www.w3.org/TR/compositing-1/#simplealphacompositing)。
 - 输入 `颜色: color-mix(in srgb, #fff 25%, #000)` 得到 `#404040`。搜索框按 8 位 sRGB 通道混合两个颜色，支持在色值前后指定百分比。两个比例都省略时各占 50%，都指定且总和低于 100% 时会保留相应的透明度。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: color-mix(in srgb-linear, white, black)` 得到 `#BCBCBC`。该模式先将 sRGB 通道转为线性光强，按权重与透明度混合，再转回 sRGB。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
+- 输入 `颜色: color-mix(in oklab, #000, #fff)` 得到 `#636363`。可用 `颜色: OKLab色阶 #000 到 #fff @ 3` 在同一空间等间隔取色。混合色超出 sRGB 色域时，搜索框会提示。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 显示单个色样时按 `Tab`，可将该颜色以 HEX 填回输入框，并保留透明度。接着可以输入 `to hsl` 换格式，或输入 `叠加 #fff` 合成到白色背景。
 - 输入 `颜色: 色阶 #004080 到 #80C0FF @ 5`，可生成包含起止色的 5 个 HEX 色值。数量可填 2 至 32，按 sRGB 等间隔插值，半透明颜色使用预乘透明度插值。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: 线性色阶 #000 到 #fff @ 3`，会按线性光强等间距取色，再转回 sRGB HEX。黑白之间的中间色为 `#BCBCBC`，半透明颜色也支持。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)

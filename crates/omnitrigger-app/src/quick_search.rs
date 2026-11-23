@@ -980,6 +980,10 @@ impl Results {
                         .or_else(|| {
                             batch_arguments(term, "线性色阶", "linear-palette")
                                 .map(|input| (input, ColorMixSpace::LinearSrgb))
+                        })
+                        .or_else(|| {
+                            batch_arguments(term, "OKLab色阶", "oklab-palette")
+                                .map(|input| (input, ColorMixSpace::Oklab))
                         });
                     if let Some((input, space)) = palette {
                         Self::text_value(
@@ -3494,6 +3498,7 @@ mod tests {
             ("颜色: red to rgb", Some("颜色: #FF0000")),
             ("颜色: 色阶 #000 到 #fff @ 3", None),
             ("颜色: 线性色阶 #000 到 #fff @ 3", None),
+            ("颜色: OKLab色阶 #000 到 #fff @ 3", None),
             ("对比度: #fff vs #000", None),
         ] {
             assert_eq!(
