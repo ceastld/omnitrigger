@@ -12,6 +12,7 @@ use super::operators::split_top_level_commas;
 
 const MAX_POINTS: usize = 64;
 const MAX_PREDICTIONS: usize = 64;
+const MAX_INTERPOLATION_POINTS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LinearFitError {
@@ -19,6 +20,8 @@ pub(super) enum LinearFitError {
     InvalidPoint,
     TooManyPoints,
     TooManyPredictions,
+    TooManyInterpolationPoints,
+    RepeatedInterpolationX,
     ConstantX,
     ZeroX,
     ConstantCoordinate,
@@ -32,6 +35,8 @@ impl LinearFitError {
             Self::InvalidPoint => "每组须包含 x 和 y，用逗号或制表符隔开",
             Self::TooManyPoints => "最多可输入 64 对数值",
             Self::TooManyPredictions => "每次最多可预测 64 个 x 值",
+            Self::TooManyInterpolationPoints => "多项式插值最多可输入 16 对数值",
+            Self::RepeatedInterpolationX => "多项式插值中的数据点须有不同的横坐标",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
             Self::ZeroX => "过原点拟合至少需要一个非零 x",
             Self::ConstantCoordinate => "x 和 y 各自至少需要两个不同的值才能计算相关系数",
@@ -62,21 +67,14 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         Some((operation, rest))
             if operation == "预测" || operation.eq_ignore_ascii_case("predict") =>
         {
-            let (x, points) = rest.split_once('@').ok_or(LinearFitError::Incomplete)?;
-            if x.trim().is_empty() {
-                return Err(LinearFitError::Incomplete);
-            }
-            let terms = split_top_level_commas(x)
-                .take(MAX_PREDICTIONS + 1)
-                .collect::<Vec<_>>();
-            if terms.len() > MAX_PREDICTIONS {
-                return Err(LinearFitError::TooManyPredictions);
-            }
-            let predictions = terms
-                .into_iter()
-                .map(evaluate)
-                .collect::<Result<Vec<_>, _>>()?;
-            (points.trim(), FitOutput::Predictions(predictions))
+            let (xs, points) = prediction_arguments(rest)?;
+            (points, FitOutput::Predictions(xs))
+        }
+        Some((operation, rest))
+            if operation == "插值" || operation.eq_ignore_ascii_case("interpolate") =>
+        {
+            let (xs, points) = prediction_arguments(rest)?;
+            return interpolate(&xs, points);
         }
         Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
@@ -116,14 +114,7 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             ));
         }
         FitOutput::Predictions(xs) => {
-            if let [x] = xs.as_slice() {
-                return predict_y(x).map(|value| value.to_string());
-            }
-            let mut rows = vec!["x,预测值".to_owned()];
-            for x in &xs {
-                rows.push(format!("{x},{}", predict_y(x)?));
-            }
-            return Ok(rows.join("\r\n"));
+            return format_prediction_values(&xs, "预测值", predict_y);
         }
         FitOutput::Residuals => {
             let mut rows = vec!["x,实际值,拟合值,残差".to_owned()];
@@ -162,6 +153,71 @@ fn fit_through_origin(points: &str) -> Result<String, LinearFitError> {
     Ok(format!(
         "斜率 {slope} · 截距 0\n残差平方和 {residual_sum}\n未中心化 R² {r_squared}"
     ))
+}
+
+fn prediction_arguments(input: &str) -> Result<(Vec<BigRational>, &str), LinearFitError> {
+    let (x, points) = input.split_once('@').ok_or(LinearFitError::Incomplete)?;
+    if x.trim().is_empty() {
+        return Err(LinearFitError::Incomplete);
+    }
+    let terms = split_top_level_commas(x)
+        .take(MAX_PREDICTIONS + 1)
+        .collect::<Vec<_>>();
+    if terms.len() > MAX_PREDICTIONS {
+        return Err(LinearFitError::TooManyPredictions);
+    }
+    let xs = terms
+        .into_iter()
+        .map(evaluate)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((xs, points.trim()))
+}
+
+fn format_prediction_values(
+    xs: &[BigRational],
+    label: &str,
+    evaluate_y: impl Fn(&BigRational) -> Result<BigRational, LinearFitError>,
+) -> Result<String, LinearFitError> {
+    if let [x] = xs {
+        return evaluate_y(x).map(|value| value.to_string());
+    }
+    let mut rows = vec![format!("x,{label}")];
+    for x in xs {
+        rows.push(format!("{x},{}", evaluate_y(x)?));
+    }
+    Ok(rows.join("\r\n"))
+}
+
+fn interpolate(xs: &[BigRational], points: &str) -> Result<String, LinearFitError> {
+    if points
+        .split([';', '\n'])
+        .nth(MAX_INTERPOLATION_POINTS)
+        .is_some()
+    {
+        return Err(LinearFitError::TooManyInterpolationPoints);
+    }
+    let mut points = parse_paired_points(points)?.collect::<Result<Vec<_>, _>>()?;
+    points.sort_unstable_by(|(x, _), (other, _)| x.cmp(other));
+    if points.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(LinearFitError::RepeatedInterpolationX);
+    }
+    let (nodes, mut differences): (Vec<_>, Vec<_>) = points.into_iter().unzip();
+    // 倒序更新差商，所需的上一阶系数在本轮计算前仍保持原值。
+    for order in 1..nodes.len() {
+        for index in (order..nodes.len()).rev() {
+            let distance = &nodes[index] - &nodes[index - order];
+            differences[index] = (&differences[index] - &differences[index - 1]) / distance;
+            check_size([&differences[index]])?;
+        }
+    }
+    format_prediction_values(xs, "插值", |x| {
+        let mut value = differences[differences.len() - 1].clone();
+        for (node, difference) in nodes.iter().zip(&differences).rev().skip(1) {
+            value = difference + (x - node) * value;
+            check_size([&value])?;
+        }
+        Ok(value)
+    })
 }
 
 pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
@@ -359,6 +415,36 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluates_exact_interpolation_for_one_or_many_queries() {
+        for (input, expected) in [
+            ("插值 3 @ 0,1; 1,2; 2,5", "10"),
+            (
+                "interpolate 1/2,2,-1 @ 2,5; 0,1; 1,2",
+                "x,插值\r\n1/2,5/4\r\n2,5\r\n-1,2",
+            ),
+            ("插值 1/2 @ 0\t1\r\n1\t2", "3/2"),
+            ("插值 1/2 @ 0,0; 1,1; 2,8; 3,27", "1/8"),
+        ] {
+            assert_eq!(
+                calculate_linear_fit(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_linear_fit("插值 3 @ 1,2; 0,1; 1.0,8"),
+            Err(LinearFitError::RepeatedInterpolationX)
+        );
+        let many = (0..=MAX_INTERPOLATION_POINTS)
+            .map(|x| format!("{x},{x}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            calculate_linear_fit(&format!("插值 3 @ {}", many.join(";"))),
+            Err(LinearFitError::TooManyInterpolationPoints)
+        );
+    }
 
     #[test]
     fn accepts_two_spreadsheet_columns_for_fit_and_covariance() {

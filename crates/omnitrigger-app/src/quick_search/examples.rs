@@ -182,7 +182,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
-        title: "求二次函数在指定横坐标的切线系数",
+        title: "求切线系数",
         query: "方程: 切线 1/2,-1,3/4 @ 2",
     },
     Example {
@@ -202,7 +202,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
-        title: "写出无穷多解方程组的通解",
+        title: "写出联立方程通解",
         query: "联立: 通解 1,2,3; 2,4,6",
     },
     Example {
@@ -219,6 +219,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "用拟合直线预测给定 x 对应的 y",
         query: "拟合: 预测 10 @ 0,1; 1,3; 2,5",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用经过给定数据点的多项式求插值",
+        query: "拟合: 插值 1/2,2 @ 0,1; 1,2; 2,5",
     },
     Example {
         icon: Icon::Terminal,
@@ -5035,6 +5040,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "区间极值",
         ],
         Scope::LinearSystem => &["通解"],
+        Scope::LinearFit => &["插值"],
         Scope::Matrix => &["通解"],
         Scope::Date => &[
             "列出",
@@ -5251,7 +5257,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::LinearFit
             if !term.is_empty()
-                && ["预测", "残差", "误差", "过原点"]
+                && ["预测", "插值", "残差", "误差", "过原点"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Triangle
