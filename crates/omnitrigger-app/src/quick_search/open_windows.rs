@@ -1,12 +1,14 @@
-use std::{collections::HashMap, fmt::Write as _};
+use std::{cmp::Ordering, collections::HashMap, fmt::Write as _};
 
 use omnitrigger_windows::{list_open_windows, OpenWindow};
 use regex::Regex;
 use serde::Serialize;
 
 use super::{
-    csv_tools::csv_cell, examples::search_key, text_tools::compile_regex, title_rank, Destination,
-    Results,
+    csv_tools::csv_cell,
+    examples::search_key,
+    text_tools::{compare_natural, compile_regex},
+    title_rank, Destination, Results,
 };
 
 const MAX_WINDOW_EXPORT_BYTES: usize = 1024 * 1024;
@@ -27,6 +29,7 @@ struct WindowSummary<'a> {
 enum WindowQueryError {
     Filters,
     TitleRegex,
+    Order,
 }
 
 impl WindowQueryError {
@@ -34,6 +37,31 @@ impl WindowQueryError {
         match self {
             Self::Filters => "状态可用 已最小化 或 未最小化。进程和排除进程各填一个程序文件名，文件名含空格时加双引号。",
             Self::TitleRegex => "填写一个有效的标题正则表达式，含空格时用双引号包住。",
+            Self::Order => "排序可用 标题 或 进程，每次查询可指定一种排序。",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WindowOrder {
+    Title,
+    Process,
+}
+
+impl WindowOrder {
+    fn compare(
+        self,
+        (left_process, left_title): (&str, &str),
+        (right_process, right_title): (&str, &str),
+    ) -> Ordering {
+        let by_title = || compare_natural(left_title, right_title);
+        match self {
+            Self::Title => by_title(),
+            Self::Process => left_process
+                .is_empty()
+                .cmp(&right_process.is_empty())
+                .then_with(|| compare_natural(left_process, right_process))
+                .then_with(by_title),
         }
     }
 }
@@ -43,6 +71,7 @@ struct WindowFilter {
     excluded_process: Option<String>,
     minimized: Option<bool>,
     title_regex: Option<Regex>,
+    order: Option<WindowOrder>,
     terms: String,
 }
 
@@ -144,8 +173,17 @@ impl OpenWindowsIndex {
                     .map(|rank| (rank, window))
             })
             .collect();
-        if !terms.is_empty() {
-            matches.sort_by_key(|(rank, _)| *rank);
+        match filter.order {
+            Some(order) if !matches!(export, Some(WindowExport::ProcessCounts)) => {
+                matches.sort_by(|(_, left), (_, right)| {
+                    order.compare(
+                        (&left.process_key, &left.title_key),
+                        (&right.process_key, &right.title_key),
+                    )
+                });
+            }
+            _ if !terms.is_empty() => matches.sort_by_key(|(rank, _)| *rank),
+            _ => {}
         }
         if let Some(export) = export {
             let windows = matches.into_iter().map(|(_, window)| WindowSummary {
@@ -218,12 +256,13 @@ fn export_windows<'a>(
 }
 
 fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
-    use WindowQueryError::{Filters, TitleRegex};
+    use WindowQueryError::{Filters, Order, TitleRegex};
 
     let mut process = None;
     let mut excluded_process = None;
     let mut minimized = None;
     let mut title_regex = None;
+    let mut order = None;
     while let Some((name, input)) = query.split_once(['=', '＝']) {
         let slot = match search_key(name).as_str() {
             "进程" | "process" => &mut process,
@@ -251,6 +290,19 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
                 query = rest;
                 continue;
             }
+            "排序" | "sort" => {
+                if order.is_some() {
+                    return Err(Order);
+                }
+                let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+                order = Some(match search_key(value).as_str() {
+                    "标题" | "title" => WindowOrder::Title,
+                    "进程" | "process" => WindowOrder::Process,
+                    _ => return Err(Order),
+                });
+                query = rest.trim_start();
+                continue;
+            }
             _ => break,
         };
         if slot.is_some() {
@@ -270,6 +322,7 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
         excluded_process,
         minimized,
         title_regex,
+        order,
         terms: search_key(query),
     })
 }
@@ -505,6 +558,48 @@ mod tests {
                 matches!(
                     index.results(query),
                     Results::OpenWindowsUnavailable(message) if message.contains("标题正则")
+                ),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn sorts_normalized_window_titles_naturally_and_keeps_unknown_processes_last() {
+        let titles = [
+            ("notes.exe", "项目10"),
+            ("notes.exe", "项目０２"),
+            ("", "项目1"),
+            ("editor.exe", "项目4"),
+            ("notes.exe", "项目2"),
+        ];
+        let sorted = |query| {
+            let filter = window_query(query).unwrap();
+            assert_eq!(filter.terms, "项目");
+            let order = filter.order.unwrap();
+            let mut indices = [0, 1, 2, 3, 4];
+            let keys = titles.map(|(process, title)| (search_key(process), search_key(title)));
+            indices.sort_by(|&left, &right| {
+                order.compare(
+                    (&keys[left].0, &keys[left].1),
+                    (&keys[right].0, &keys[right].1),
+                )
+            });
+            indices
+        };
+        assert_eq!(sorted("排序=标题 状态=未最小化 项目"), [2, 1, 4, 3, 0]);
+        assert_eq!(sorted("ＳＯＲＴ＝ＰＲＯＣＥＳＳ 项目"), [3, 1, 4, 0, 2]);
+
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        assert!(matches!(
+            index.results("输出=CSV 排序=标题 标题正则=^项目"),
+            Results::Value(Ok(result)) if result.text == "标题,程序文件名"
+        ));
+        for query in ["排序=", "排序=创建时间", "排序=标题 sort=process"] {
+            assert!(
+                matches!(
+                    index.results(query),
+                    Results::OpenWindowsUnavailable(message) if message.contains("排序")
                 ),
                 "{query}"
             );

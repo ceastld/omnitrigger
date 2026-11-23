@@ -950,6 +950,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Grid,
+        title: "把窗口按程序和标题排序",
+        query: "窗口: 排序=进程",
+    },
+    Example {
+        icon: Icon::Grid,
         title: "打开 Windows 的蓝牙设置",
         query: "系统设置: 蓝牙",
     },
