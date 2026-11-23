@@ -61,6 +61,7 @@ use super::{
     },
     timestamp::{absolute_timestamp, timestamp_clock_difference, timestamp_zone_converter},
     url_encoding::url_parameter_values,
+    vector::euclidean_distance,
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
@@ -195,6 +196,8 @@ pub(super) enum CsvError {
     ObservationColumn,
     PairMatrixColumns,
     PairMatrixRows,
+    DistanceMatrixArguments,
+    DistanceMatrixRows,
     StatisticsOutputTooLarge,
     AggregateColumn,
     GroupingColumns,
@@ -420,6 +423,10 @@ impl CsvError {
             Self::ObservationColumn => "填写一个列号或带双引号的列名，例如 \"金额\"",
             Self::PairMatrixColumns => "填写 2 至 8 个不同的列名或列号，例如 [\"温度\",2]",
             Self::PairMatrixRows => "所选列至少需要两行坐标完整的数值",
+            Self::DistanceMatrixArguments => {
+                "填写标签列和 1 至 16 个不同的坐标列，例如 [\"编号\",[\"x\",\"y\"]]"
+            }
+            Self::DistanceMatrixRows => "支持 1 至 32 行坐标完整的数据",
             Self::StatisticsOutputTooLarge => "统计结果超过 1 MiB，请缩小表格范围",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
@@ -790,6 +797,10 @@ enum Operation {
     PairMatrix {
         columns: Vec<ColumnReference>,
         statistic: PairMatrixStatistic,
+    },
+    DistanceMatrix {
+        labels: ColumnReference,
+        coordinates: Vec<ColumnReference>,
     },
     SortByColumns {
         columns: Vec<ColumnReference>,
@@ -2163,6 +2174,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             };
             Operation::PairMatrix { columns, statistic }
         }
+        "距离矩阵" | "distance-matrix" => {
+            let invalid = CsvError::DistanceMatrixArguments;
+            let ((labels, coordinates), data) =
+                json_argument_and_data::<(ColumnReference, Vec<ColumnReference>)>(input, invalid)?;
+            if !(1..=16).contains(&coordinates.len()) {
+                return Err(invalid);
+            }
+            input = data;
+            Operation::DistanceMatrix {
+                labels,
+                coordinates,
+            }
+        }
         "透视合计" | "pivot-sum" | "透视计数" | "pivot-count" | "透视原值" | "pivot-values" =>
         {
             let kind = match operation.as_str() {
@@ -2654,6 +2678,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::PairMatrix { columns, statistic } => {
             column_pair_matrix(&rows, &columns, statistic, false).map(|(csv, _)| csv)
         }
+        Operation::DistanceMatrix {
+            labels,
+            coordinates,
+        } => row_distance_matrix(&rows, labels, &coordinates),
         Operation::SortByColumns {
             columns,
             descending,
@@ -5194,7 +5222,7 @@ fn pivot_csv(
             if original_values.insert(location, value).is_some() {
                 return Err(CsvError::DataRowValue {
                     row: index + 1,
-                    cause: "行与列的组合已出现，透视原值要求每个组合只出现一次",
+                    cause: "行列组合重复，请为每个组合保留一条记录",
                 });
             }
             continue;
@@ -5688,6 +5716,84 @@ enum PairMatrixStatistic {
     Correlation,
     Spearman,
     Covariance { sample: bool },
+}
+
+fn row_distance_matrix(
+    rows: &[Vec<String>],
+    labels: ColumnReference,
+    coordinates: &[ColumnReference],
+) -> Result<String, CsvError> {
+    const MAX_ROWS: usize = 32;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let invalid = CsvError::DistanceMatrixArguments;
+    let labels = labels.resolve(header)?;
+    validate_column_width(&[labels], header.len())?;
+    let coordinates = resolve_distinct_columns(header, coordinates, invalid)?;
+    if coordinates.contains(&labels) {
+        return Err(invalid);
+    }
+    let mut points = Vec::new();
+    let mut seen_labels = HashSet::new();
+    for (index, record) in records.iter().enumerate() {
+        if coordinates
+            .iter()
+            .any(|&column| record[column].trim().is_empty())
+        {
+            continue;
+        }
+        if points.len() == MAX_ROWS {
+            return Err(CsvError::DistanceMatrixRows);
+        }
+        let label = record[labels].as_str();
+        let row = index + 1;
+        if label.trim().is_empty() || !seen_labels.insert(label) {
+            return Err(CsvError::DataRowValue {
+                row,
+                cause: "距离矩阵的标签须非空且互不重复",
+            });
+        }
+        let values = coordinates
+            .iter()
+            .map(|&column| {
+                parse_fraction_literal(record[column].trim()).map_err(|error| {
+                    CsvError::DataRowValue {
+                        row,
+                        cause: error.message(),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        points.push((row, label, values));
+    }
+    if points.is_empty() {
+        return Err(CsvError::DistanceMatrixRows);
+    }
+    let mut matrix = vec![vec!["0".to_owned(); points.len()]; points.len()];
+    for (left, (_, _, a)) in points.iter().enumerate() {
+        for (right, (row, _, b)) in points.iter().enumerate().skip(left + 1) {
+            let distance = euclidean_distance(a, b).map_err(|error| CsvError::DataRowValue {
+                row: *row,
+                cause: error.message(),
+            })?;
+            matrix[left][right] = distance.clone();
+            matrix[right][left] = distance;
+        }
+    }
+    let mut output = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(
+        &mut output,
+        std::iter::once(header[labels].as_str()).chain(points.iter().map(|(_, label, _)| *label)),
+        limit,
+    )?;
+    for ((_, label, _), distances) in points.iter().zip(matrix) {
+        append_bounded_csv_row(
+            &mut output,
+            std::iter::once(*label).chain(distances.iter().map(String::as_str)),
+            limit,
+        )?;
+    }
+    Ok(output)
 }
 
 fn pair_matrix_arguments(input: &str) -> Result<(Vec<ColumnReference>, &str), CsvError> {
@@ -6383,6 +6489,44 @@ mod tests {
             csv_count_chart("group-frequency-plot [1] 状态"),
             Some(Err(CsvError::EmptyStatisticsColumn))
         ));
+    }
+
+    #[test]
+    fn computes_symmetric_exact_distances_for_complete_csv_rows() {
+        let input =
+            "距离矩阵 [\"编号\",[\"x\",3]] 编号,x,y\n001,0,0\n跳过,,99\n1,3/5,4/5\n\"甲,乙\",1,1";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("编号,001,1,\"甲,乙\"\r\n001,0,1,√2\r\n1,1,0,√(1/5)\r\n\"甲,乙\",√2,√(1/5),0")
+        );
+        assert_eq!(
+            transform_csv("distance-matrix [1,[2]] 编号,x\nA,1/3").as_deref(),
+            Ok("编号,A\r\nA,0")
+        );
+        assert_eq!(
+            transform_csv("距离矩阵 [1,[2]] 编号,x\nA,0\nA,1"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: "距离矩阵的标签须非空且互不重复"
+            })
+        );
+        assert_eq!(
+            transform_csv("距离矩阵 [1,[1]] 编号,x\nA,0"),
+            Err(CsvError::DistanceMatrixArguments)
+        );
+        assert_eq!(
+            transform_csv("距离矩阵 [1,[2]] 编号,x\nA,"),
+            Err(CsvError::DistanceMatrixRows)
+        );
+        assert!(matches!(
+            transform_csv("距离矩阵 [1,[2]] 编号,x\nA,待定"),
+            Err(CsvError::DataRowValue { row: 1, .. })
+        ));
+        let mut too_many = "距离矩阵 [1,[2]] 编号,x".to_owned();
+        for index in 0..33 {
+            too_many.push_str(&format!("\n{index},0"));
+        }
+        assert_eq!(transform_csv(&too_many), Err(CsvError::DistanceMatrixRows));
     }
 
     #[test]
@@ -7822,7 +7966,7 @@ mod tests {
             transform_csv("透视原值 [1,2,3] 地区,月份,原值\n北,二月,\n北,一月,001\n北,二月,002"),
             Err(CsvError::DataRowValue {
                 row: 3,
-                cause: "行与列的组合已出现，透视原值要求每个组合只出现一次",
+                cause: "行列组合重复，请为每个组合保留一条记录",
             })
         );
         assert_eq!(

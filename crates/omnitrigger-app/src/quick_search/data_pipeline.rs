@@ -762,7 +762,7 @@ mod tests {
                 Err(DataPipelineError::CsvTableStep {
                     index: 2,
                     row: 2,
-                    cause: "行与列的组合已出现，透视原值要求每个组合只出现一次",
+                    cause: "行列组合重复，请为每个组合保留一条记录",
                 })
             );
         }

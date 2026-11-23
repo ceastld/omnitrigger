@@ -4688,6 +4688,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用选定坐标计算 CSV 各行之间的欧氏距离",
+        query: "CSV: 距离矩阵 [\"编号\",[\"x\",\"y\"]] 编号,x,y\n001,0,0\n002,3/5,4/5\n003,1,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算所选 CSV 列的精确样本协方差矩阵",
         query: "CSV: 协方差矩阵 [\"x\",\"y\",\"固定\"] x,y,固定\n-1,2,5\n0,0,5\n1,-2,5",
     },
