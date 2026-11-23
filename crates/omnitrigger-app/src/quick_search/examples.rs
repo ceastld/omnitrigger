@@ -241,6 +241,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在单谷区间内估算极小值和横坐标",
+        query: "方程: 数值极小 (x-3/2)^2 @ 0..3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在单峰区间内估算极大值和横坐标",
+        query: "方程: 数值极大 sin(x) @ 0..pi",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查找采样零值和相邻异号区间",
         query: "方程: 找异号区间 x²-2 @ 0..2; 3",
     },
@@ -5510,6 +5520,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "函数图",
             "函数采样",
             "采样极值",
+            "数值极小",
+            "数值极大",
             "找异号区间",
             "搜索零点",
             "采样图",

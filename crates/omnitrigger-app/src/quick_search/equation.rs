@@ -30,6 +30,7 @@ const BISECTION_ITERATIONS: usize = 128;
 const BISECTION_RESIDUAL_RATIO: f64 = 1e-8;
 const MAX_SAMPLED_BISECTIONS: usize = 8;
 const MAX_INTEGRAL_INTERVALS: u32 = 128;
+const MAX_EXTREMUM_REFINEMENT_STEPS: usize = 96;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
@@ -60,6 +61,7 @@ pub(super) enum EquationError {
     NumericIntegralIntervals,
     NumericDerivativeArguments,
     NumericDerivativeStep,
+    NumericExtremumArguments,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -125,6 +127,7 @@ impl EquationError {
                 "填写要估算导数的算式和横坐标，可在分号后填写正步长"
             }
             Self::NumericDerivativeStep => "该步长下无法取到两个不同的有限横坐标",
+            Self::NumericExtremumArguments => "填写函数算式和不同的区间端点，例如 (x-1)^2 @ 0..3",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -176,6 +179,12 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
                 return format_function_samples(&function_sample_points(arguments)?);
             }
             "采样极值" | "sample-extrema" => return sampled_function_extrema(arguments),
+            "数值极小" | "numeric-minimum" => {
+                return numeric_function_extremum(arguments, false)
+            }
+            "数值极大" | "numeric-maximum" => {
+                return numeric_function_extremum(arguments, true)
+            }
             "找异号区间" | "sign-change-intervals" => return sampled_sign_changes(arguments),
             "搜索零点" | "search-roots" => return refine_sampled_roots(arguments),
             "函数值" | "function-values" => {
@@ -1068,6 +1077,53 @@ fn sampled_function_extrema(input: &str) -> Result<String, EquationError> {
         display(maximum.0)?,
         samples.len(),
     ))
+}
+
+fn numeric_function_extremum(input: &str, maximum: bool) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericExtremumArguments;
+    let (expression, bounds) = split_function_arguments(input, invalid)?;
+    let [mut left, mut right] = function_interval(bounds, invalid)?;
+    let evaluate_at = |x| evaluate_at_x(expression, x).map_err(EquationError::Approximation);
+    let better = |first, second| {
+        if maximum {
+            first > second
+        } else {
+            first < second
+        }
+    };
+
+    let mut best = (left, evaluate_at(left)?);
+    let mut candidate = |x| {
+        let y = evaluate_at(x)?;
+        if better(y, best.1) || (y == best.1 && x < best.0) {
+            best = (x, y);
+        }
+        Ok::<_, EquationError>(y)
+    };
+    candidate(right)?;
+    for _ in 0..MAX_EXTREMUM_REFINEMENT_STEPS {
+        let first = interpolate_between(left, right, 1. / 3.);
+        let second = interpolate_between(left, right, 2. / 3.);
+        if !(left < first && first < second && second < right) {
+            break;
+        }
+        let first_value = candidate(first)?;
+        let second_value = candidate(second)?;
+        // 在单谷或单峰区间舍弃较差的一侧。
+        if better(first_value, second_value) {
+            right = second;
+        } else if better(second_value, first_value) {
+            left = first;
+        } else {
+            left = first;
+            right = second;
+        }
+    }
+    let (x, value) = best;
+    let x = format_coordinate(x);
+    let value = format_result(value).map_err(EquationError::Approximation)?;
+    let label = if maximum { "极大值" } else { "极小值" };
+    Ok(format!("x ≈ {x}\r\n{label} ≈ {value}"))
 }
 
 fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, EquationError> {
@@ -2592,6 +2648,30 @@ mod tests {
         assert_eq!(
             solve_equation("找异号区间 0 @ 1..1.0000000000000002; 4").as_deref(),
             Ok("类型,左端点,右端点\r\n采样值为零,1,1\r\n采样值为零,1.0000000000000002,1.0000000000000002")
+        );
+    }
+
+    #[test]
+    fn refines_an_interior_extremum_checks_the_endpoints_and_reports_domain_errors() {
+        let result = solve_equation("数值极小 f(x)=(x-3/2)^2 @ 3 to 0").unwrap();
+        let (x, y) = result.split_once("\r\n").unwrap();
+        let x = x.strip_prefix("x ≈ ").unwrap().parse::<f64>().unwrap();
+        let y = y.strip_prefix("极小值 ≈ ").unwrap().parse::<f64>().unwrap();
+        assert!((x - 1.5).abs() < 1e-10);
+        assert!(y.abs() < 1e-20);
+        assert_eq!(
+            solve_equation("numeric-maximum cosd(x) @ 180..0").as_deref(),
+            Ok("x ≈ 0\r\n极大值 ≈ 1")
+        );
+        assert_eq!(
+            solve_equation("数值极小 sqrt(x) @ -1..2"),
+            Err(EquationError::Approximation(
+                CalculationError::FunctionDomain
+            ))
+        );
+        assert_eq!(
+            solve_equation("数值极大 x @ 1..1"),
+            Err(EquationError::NumericExtremumArguments)
         );
     }
 
