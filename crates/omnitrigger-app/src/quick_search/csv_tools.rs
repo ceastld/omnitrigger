@@ -168,6 +168,7 @@ pub(super) enum CsvError {
     FormulaEvaluation(FractionError),
     FunctionColumnArguments,
     FunctionFilterArguments,
+    FunctionSortArguments,
     FunctionColumnLimit,
     ComputedDivisionByZero,
     ComputedNumberRange,
@@ -401,6 +402,9 @@ impl CsvError {
             }
             Self::FunctionFilterArguments => {
                 "填写一至两列、算式、比较符和阈值，例如 [[1,2],\"cosd(x)*y\",\">\",\"0\"]"
+            }
+            Self::FunctionSortArguments => {
+                "填写一至两列、算式和数值排序方向，例如 [[1,2],\"cosd(x)*y\",\"数值降序\"]"
             }
             Self::FunctionColumnLimit => "CSV 函数运算每次最多处理 128 条数据",
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
@@ -1011,6 +1015,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
+        "函数排序" | "sort-function" => return sort_function_rows(input),
         operation if is_scatter_operation(operation) => {
             return parse_scatter_table(input)?.to_csv();
         }
@@ -4085,14 +4090,63 @@ fn filter_function_rows(input: &str) -> Result<String, CsvError> {
     let invalid = CsvError::FunctionFilterArguments;
     let ((columns, expression, operator, threshold), data) =
         json_argument_and_data::<(Vec<ColumnReference>, String, String, String)>(input, invalid)?;
+    let comparison = NumberComparison::parse(operator.trim()).ok_or(invalid)?;
+    let threshold = evaluate(&threshold).map_err(|_| invalid)?;
+    let FunctionRows { rows, values } = read_function_rows(data, &columns, &expression, invalid)?;
+    let selected = rows[1..].iter().zip(values).filter_map(|(row, value)| {
+        value
+            .and_then(|value| value.partial_cmp(&threshold))
+            .is_some_and(|order| comparison.accepts(order))
+            .then_some(row)
+    });
+    Ok(write_rows(std::iter::once(&rows[0]).chain(selected), ','))
+}
+
+fn sort_function_rows(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::FunctionSortArguments;
+    let ((columns, expression, order), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, String, FieldSortOrder)>(input, invalid)?;
+    if !order.numeric() {
+        return Err(invalid);
+    }
+    let FunctionRows { rows, values } = read_function_rows(data, &columns, &expression, invalid)?;
+    let mut records: Vec<_> = rows[1..].iter().zip(values).collect();
+    records.sort_by(|(_, left), (_, right)| match (left, right) {
+        (Some(left), Some(right)) => {
+            let relative_order = left.partial_cmp(right).expect("有限函数值可比较");
+            if order.descending() {
+                relative_order.reverse()
+            } else {
+                relative_order
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
+    Ok(write_rows(
+        std::iter::once(&rows[0]).chain(records.into_iter().map(|(row, _)| row)),
+        ',',
+    ))
+}
+
+struct FunctionRows {
+    rows: Vec<Vec<String>>,
+    values: Vec<Option<f64>>,
+}
+
+fn read_function_rows(
+    data: &str,
+    columns: &[ColumnReference],
+    expression: &str,
+    invalid: CsvError,
+) -> Result<FunctionRows, CsvError> {
     if !(1..=2).contains(&columns.len())
         || expression.trim().is_empty()
         || expression.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT
     {
         return Err(invalid);
     }
-    let comparison = NumberComparison::parse(operator.trim()).ok_or(invalid)?;
-    let threshold = evaluate(&threshold).map_err(|_| invalid)?;
     let data = data.strip_prefix('\u{feff}').unwrap_or(data);
     if data.is_empty() {
         return Err(CsvError::MissingInput);
@@ -4108,26 +4162,22 @@ fn filter_function_rows(input: &str) -> Result<String, CsvError> {
         .map(|column| column.resolve(header))
         .transpose()?;
     validate_column_width(&[left, right.unwrap_or(left)], header.len())?;
-    let mut selected = vec![header];
+    let mut values = Vec::with_capacity(records.len());
     for (index, row) in records.iter().enumerate() {
         let x = row[left].trim();
         let y = right.map(|column| row[column].trim());
         if x.is_empty() || y.is_some_and(str::is_empty) {
+            values.push(None);
             continue;
         }
         let value =
-            evaluate_csv_function(&expression, x, y).map_err(|cause| CsvError::DataRowValue {
+            evaluate_csv_function(expression, x, y).map_err(|cause| CsvError::DataRowValue {
                 row: index + 1,
                 cause,
             })?;
-        if value
-            .and_then(|value| value.partial_cmp(&threshold))
-            .is_some_and(|order| comparison.accepts(order))
-        {
-            selected.push(row);
-        }
+        values.push(value);
     }
-    Ok(write_rows(selected, ','))
+    Ok(FunctionRows { rows, values })
 }
 
 fn append_from_one_column(
@@ -9600,6 +9650,23 @@ null"#
         assert_eq!(
             transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
             Err(CsvError::NumericComparisonColumnArguments)
+        );
+    }
+
+    #[test]
+    fn sorts_csv_rows_by_calculator_values_and_keeps_ties_stable_and_empty_last() {
+        assert_eq!(
+            transform_csv("函数排序 [[\"角度\",3],\"cosd(x)*y\",\"数值降序\"] 编号,角度,权重\n001,0,3\n002,180,2\n003,360,3\n004,,9\n005,90,4").as_deref(),
+            Ok("编号,角度,权重\r\n001,0,3\r\n003,360,3\r\n005,90,4\r\n002,180,2\r\n004,\"\",9")
+        );
+        assert_eq!(
+            transform_csv("sort-function [[1],\"sqrt(x)\",\"numeric-asc\"] 数值\n4\n-1\n1")
+                .as_deref(),
+            Ok("数值\r\n1\r\n4\r\n-1")
+        );
+        assert_eq!(
+            transform_csv("函数排序 [[1],\"x\",\"文本升序\"] X\n1"),
+            Err(CsvError::FunctionSortArguments)
         );
     }
 

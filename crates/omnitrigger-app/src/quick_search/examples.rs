@@ -4258,6 +4258,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按函数计算值排序原始行",
+        query: "CSV: 函数排序 [[\"角度\",\"权重\"],\"cosd(x)*y\",\"数值降序\"]\n编号,角度,权重\n001,0,3\n002,180,2\n003,360,3\n004,,9",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按精确数值比较两列并标记是否达标",
         query: "CSV: 数值比较列 [\"达标\",\"实测\",2,\">=\"] 实测,门槛\n1.50,3/2\n1,2\n,0",
     },
