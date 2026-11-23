@@ -28,6 +28,7 @@ mod operators;
 mod paper;
 mod path_tools;
 mod percentage;
+mod pitch;
 mod plane;
 mod polygon;
 mod presets;
@@ -112,6 +113,7 @@ use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
 use path_tools::{path_component, PathError};
 use percentage::{compare_percentages, PercentageError};
+use pitch::{convert_pitch, PitchError};
 use polygon::{calculate_polygon, PolygonError};
 use presets::matching_presets;
 use radix::{convert_arbitrary_radix, RadixError};
@@ -394,6 +396,7 @@ enum ValueError {
     Intervals(IntervalError),
     AspectRatio(AspectRatioError),
     Paper(PaperError),
+    Pitch(PitchError),
     Rectangle(RectangleError),
     Cidr(CidrError),
     FileMode(FileModeError),
@@ -506,6 +509,7 @@ impl ValueError {
             Self::Intervals(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
             Self::Paper(error) => error.message(),
+            Self::Pitch(error) => error.message(),
             Self::Rectangle(error) => error.message(),
             Self::Cidr(error) => error.message(),
             Self::FileMode(error) => error.message(),
@@ -900,6 +904,7 @@ impl Results {
                     Self::text_value(calculate_pixel_density(term).map_err(ValueError::Conversion))
                 }
                 Scope::Paper => Self::text_value(calculate_paper(term).map_err(ValueError::Paper)),
+                Scope::Pitch => Self::text_value(convert_pitch(term).map_err(ValueError::Pitch)),
                 Scope::Rectangle => {
                     Self::text_value(calculate_rectangle(term).map_err(ValueError::Rectangle))
                 }

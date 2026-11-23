@@ -1321,6 +1321,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "比例尺: 1:50000 3.2 cm to km",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用音名或 MIDI 编号查询频率",
+        query: "音高: A4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用 MIDI 编号查询音名和频率",
+        query: "音高: MIDI 69",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查找最接近输入频率的音名和音分偏差",
+        query: "音高: 442 Hz",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用图上和实际距离反求地图比例",
         query: "比例尺: 求 3.2 cm = 1.6 km",
@@ -4638,6 +4653,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Renminbi
         | Scope::Circuit
         | Scope::Period
+        | Scope::Pitch
         | Scope::AspectRatio
         | Scope::MapScale
         | Scope::PixelDensity
@@ -4662,6 +4678,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if ["重心", "包含", "周长", "边界框", "凸性"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
+        Scope::Pitch if "midi".starts_with(&term.to_ascii_lowercase()) => {}
         _ => return None,
     }
     let prefix = term.to_ascii_lowercase();
@@ -4763,6 +4780,7 @@ mod tests {
             Scope::Renminbi,
             Scope::Circuit,
             Scope::Period,
+            Scope::Pitch,
             Scope::AspectRatio,
             Scope::MapScale,
             Scope::PixelDensity,
