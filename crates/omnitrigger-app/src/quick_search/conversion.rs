@@ -40,6 +40,7 @@ pub(super) enum ConversionError {
     InvalidVoltageDivider,
     InvalidLoadedVoltageDivider,
     InvalidCurrentDivider,
+    InvalidRcFilter,
     InvalidEnergyUse,
     InvalidBatteryEnergy,
     InvalidPeriod,
@@ -92,6 +93,7 @@ impl ConversionError {
                 "输入电压、两个正电阻和负载电阻，例如 负载分压 12 V @ 1 kΩ,2 kΩ,2 kΩ"
             }
             Self::InvalidCurrentDivider => "输入总电流和两个正电阻，例如 分流 6 mA @ 1 kΩ,2 kΩ",
+            Self::InvalidRcFilter => "输入正电阻和正电容，例如 RC 1 kΩ,1 μF",
             Self::InvalidEnergyUse => "填写非负功率和用时，例如 耗电 1.5 kW @ 2h",
             Self::InvalidBatteryEnergy => "填写容量和标称电压，例如 电池能量 2500 mAh @ 3.7 V",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
@@ -1027,6 +1029,7 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
                 return calculate_divider(values, Divider::LoadedVoltage);
             }
             "分流" | "current-divider" => return calculate_divider(values, Divider::Current),
+            "rc" | "rc滤波" | "rc-filter" => return calculate_rc_filter(values),
             "耗电" | "energy-use" => return calculate_energy_use(values),
             "电池能量" | "battery-energy" => return calculate_battery_energy(values),
             _ => {}
@@ -1127,6 +1130,58 @@ fn calculate_divider(input: &str, divider: Divider) -> Result<String, Conversion
         return Err(ConversionError::OutOfRange);
     }
     format_circuit_value(output, unit)
+}
+
+fn calculate_rc_filter(input: &str) -> Result<String, ConversionError> {
+    let invalid = ConversionError::InvalidRcFilter;
+    let mut components = split_top_level_commas(input);
+    let (Some(resistance), Some(capacitance), None) =
+        (components.next(), components.next(), components.next())
+    else {
+        return Err(invalid);
+    };
+    let CircuitInput::Resistance(resistance) =
+        CircuitInput::parse(resistance).map_err(|error| {
+            if error == ConversionError::OutOfRange {
+                error
+            } else {
+                invalid
+            }
+        })?
+    else {
+        return Err(invalid);
+    };
+    let farads = capacitance.trim().strip_suffix(['F', 'f']).ok_or(invalid)?;
+    let (amount, scale) = [
+        ('m', 1e-3),
+        ('μ', 1e-6),
+        ('µ', 1e-6),
+        ('u', 1e-6),
+        ('n', 1e-9),
+        ('p', 1e-12),
+    ]
+    .into_iter()
+    .find_map(|(prefix, scale)| farads.strip_suffix(prefix).map(|amount| (amount, scale)))
+    .unwrap_or((farads, 1.0));
+    let amount = evaluate(amount.trim()).map_err(|_| invalid)?;
+    if amount <= 0.0 {
+        return Err(invalid);
+    }
+    let farads = amount * scale;
+    let time = if farads.is_normal() {
+        resistance * farads
+    } else {
+        // 先换算电阻的倍率，保留电容换算成法拉时可能下溢的结果。
+        (resistance * scale) * amount
+    };
+    if !time.is_finite() || time == 0.0 {
+        return Err(ConversionError::OutOfRange);
+    }
+    let frequency = TAU.recip() / time;
+    let time = format_positive_quantity(time, &Unit::parse(default_time_unit(time))?)?;
+    let frequency =
+        format_positive_quantity(frequency, &Unit::parse(default_frequency_unit(frequency))?)?;
+    Ok(format!("{time} · {frequency}"))
 }
 
 fn calculate_battery_energy(input: &str) -> Result<String, ConversionError> {
@@ -1252,15 +1307,7 @@ pub(super) fn convert_period(query: &str) -> Result<String, ConversionError> {
         return Err(ConversionError::OutOfRange);
     }
     let (dimension, default) = match source.dimension {
-        Dimension::Frequency => (
-            Dimension::Time,
-            match reciprocal {
-                value if value >= 1. => "s",
-                value if value >= 1e-3 => "ms",
-                value if value >= 1e-6 => "us",
-                _ => "ns",
-            },
-        ),
+        Dimension::Frequency => (Dimension::Time, default_time_unit(reciprocal)),
         Dimension::Time => (Dimension::Frequency, default_frequency_unit(reciprocal)),
         _ => return Err(ConversionError::InvalidPeriod),
     };
@@ -1272,12 +1319,16 @@ pub(super) fn convert_period(query: &str) -> Result<String, ConversionError> {
     if dimension != target.dimension {
         return Err(ConversionError::InvalidPeriodTarget);
     }
-    let result = reciprocal / target.scale;
-    if result == 0. {
-        return Err(ConversionError::OutOfRange);
+    format_positive_quantity(reciprocal, &target)
+}
+
+fn default_time_unit(value: f64) -> &'static str {
+    match value {
+        value if value >= 1. => "s",
+        value if value >= 1e-3 => "ms",
+        value if value >= 1e-6 => "us",
+        _ => "ns",
     }
-    let result = format_result(result).map_err(|_| ConversionError::OutOfRange)?;
-    Ok(format!("{result} {}", target.symbol))
 }
 
 fn default_frequency_unit(value: f64) -> &'static str {
@@ -1347,7 +1398,7 @@ pub(super) fn convert_wave(query: &str) -> Result<String, ConversionError> {
     if target.dimension != dimension {
         return Err(ConversionError::InvalidWaveTarget);
     }
-    format_wave_result(value, &target)
+    format_positive_quantity(value, &target)
 }
 
 fn calculate_wave_speed(input: &str, target: Option<&str>) -> Result<String, ConversionError> {
@@ -1372,10 +1423,10 @@ fn calculate_wave_speed(input: &str, target: Option<&str>) -> Result<String, Con
         return Err(ConversionError::InvalidWaveSpeedTarget);
     }
     let speed = (left_amount * left_unit.scale) * (right_amount * right_unit.scale);
-    format_wave_result(speed, &target)
+    format_positive_quantity(speed, &target)
 }
 
-fn format_wave_result(value: f64, target: &Unit) -> Result<String, ConversionError> {
+fn format_positive_quantity(value: f64, target: &Unit) -> Result<String, ConversionError> {
     let result = value / target.scale;
     if result <= 0. {
         return Err(ConversionError::OutOfRange);
@@ -2738,6 +2789,42 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn calculates_first_order_rc_time_constants_and_cutoff_frequencies() {
+        for query in [
+            "RC 1 kΩ,1 μF",
+            "rc-filter (1+1)kΩ,500 nF",
+            "RC滤波 1000 Ω,1 µF",
+        ] {
+            let value = calculate_circuit(query).unwrap();
+            let frequency = value
+                .strip_prefix("1 ms · ")
+                .unwrap()
+                .strip_suffix(" Hz")
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+            assert!((frequency - 159.154943091895).abs() < 1e-10, "{query}");
+        }
+        let nanoseconds = calculate_circuit("RC 1 Ω,1 nF").unwrap();
+        assert!(nanoseconds.starts_with("1 ns · "), "{nanoseconds}");
+        for query in [
+            "RC 1 kΩ,0 F",
+            "RC 1 V,1 μF",
+            "RC 1 kΩ,1 s",
+            "RC 1 kΩ,1 μF,2 μF",
+        ] {
+            assert_eq!(
+                calculate_circuit(query),
+                Err(ConversionError::InvalidRcFilter)
+            );
+        }
+        assert_eq!(
+            calculate_circuit("RC 1e308 Ω,10 F"),
+            Err(ConversionError::OutOfRange),
+        );
     }
 
     #[test]

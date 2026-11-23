@@ -374,6 +374,7 @@
 - 输入 `电路: 分压 12 V @ 1 kΩ,2 kΩ` 得到 `8 V`。按理想空载分压电路，结果是第二个电阻两端的电压。电阻值和电压可写带单位的算式。 [科罗拉多大学博尔德分校的分压公式](https://physicslabs.colorado.edu/courses/phys-3330/lab-guides/lab2/)
 - 输入 `电路: 负载分压 12 V @ 1 kΩ,2 kΩ,2 kΩ` 得到 `6 V`。第三个电阻是接在第二个电阻两端的负载，结果是负载两端的电压。 [科罗拉多大学博尔德分校的带载模型](https://physicslabs.colorado.edu/courses/phys-3330/lab-guides/lab2/#impacts-of-parallel-impedances)
 - 输入 `电路: 分流 6 mA @ 1 kΩ,2 kΩ` 得到 `2 mA`。在 `@` 前填两个并联电阻的总电流，结果是第二个电阻支路的电流。 [MIT 电流分配公式](https://circuits.mit.edu/_static/S23/handouts/lec02a/lecture02a.pdf#page=11)
+- 输入 `电路: RC 1 kΩ,1 μF` 可求一阶 RC 电路的时间常数 `1 ms` 和截止频率约 `159.15 Hz`。先填电阻，再填法拉、毫法、微法、纳法或皮法的电容值。 [科罗拉多大学博尔德分校的 RC 滤波实验](https://physicslabs.colorado.edu/courses/phys-3330/lab-guides/lab3/)
 - 输入 `电路: 耗电 1.5 kW @ 2h` 得到 `3 kWh`。用功率乘以时长，适用于恒定功率。时长也可写成 `30min` 或 `01:30:00`。结果满 1000 Wh 时用 kWh 表示。
 - 输入 `电路: 电池能量 2500 mAh @ 3.7 V` 得到 `9.25 Wh`。计算按安时容量乘以标称电压，容量可填 `Ah` 或 `mAh`。结果满 1000 Wh 时用 kWh 显示。 [FAA 电池能量换算公式](https://www.faa.gov/sites/faa.gov/files/2024-Interactive%20Guide%20to%20Shipping%20Litihum%20Batteries.pdf)
 - 单位可紧跟括号内的算式。例如 `(2**10)B to KiB` 得到 `1 KiB`，`((2 + 1/2) * 2)km to m` 得到 `5000 m`。只输入带单位的算式，也可选择换算目标。

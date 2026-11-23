@@ -1477,6 +1477,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算 RC 时间常数和截止频率",
+        query: "电路: RC 1 kΩ,1 μF",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按功率和用时计算耗电量",
         query: "电路: 耗电 1.5 kW @ 2h",
     },
@@ -4827,6 +4832,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "分压",
             "负载分压",
             "分流",
+            "RC",
             "耗电",
             "电池能量",
         ],
