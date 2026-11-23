@@ -17,6 +17,7 @@ pub(super) enum MatrixError {
     UnevenRows,
     TooLarge,
     SquareRequired,
+    SymmetricRequired,
     EigenvalueDimensions,
     ElementwiseDimensions,
     ProductDimensions,
@@ -33,11 +34,12 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
             Self::SquareRequired => "行列式、迹、乘方、求解、求逆和条件数需要方阵",
+            Self::SymmetricRequired => "正定性检查需要实对称方阵",
             Self::EigenvalueDimensions => "请输入 2 行 2 列的矩阵求特征值",
             Self::ElementwiseDimensions => "加减法和逐项乘法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
@@ -95,6 +97,9 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
             max_absolute_row_sum(parse_matrix(input)?).map(|norm| norm.to_string())
         }
         "条件数" | "condition-number" => matrix_condition_number(input),
+        "正定性" | "正定" | "positive-definite" => {
+            matrix_positive_definiteness(parse_matrix(input)?)
+        }
         "乘法" | "乘" | "multiply" => {
             let (left, right) = parse_pair(input)?;
             multiply(&left, &right).map(format_matrix)
@@ -235,6 +240,38 @@ fn scale_matrix(mut matrix: Matrix, factor: &BigRational) -> Result<Matrix, Matr
         ensure_exact_size(element).map_err(MatrixError::Evaluation)?;
     }
     Ok(matrix)
+}
+
+fn matrix_positive_definiteness(mut matrix: Matrix) -> Result<String, MatrixError> {
+    let dimension = matrix.len();
+    if matrix[0].len() != dimension
+        || matrix.iter().enumerate().any(|(row, values)| {
+            values[..row]
+                .iter()
+                .enumerate()
+                .any(|(column, value)| value != &matrix[column][row])
+        })
+    {
+        return Err(MatrixError::SymmetricRequired);
+    }
+    let mut minor = BigRational::from_integer(1.into());
+    let mut minors = Vec::with_capacity(dimension);
+    for column in 0..dimension {
+        let (leading, remaining) = matrix.split_at_mut(column + 1);
+        let pivot = &leading[column];
+        // 顺序主子式等于当前主元和之前各主元的乘积。
+        minor *= &pivot[column];
+        ensure_exact_size(&minor).map_err(MatrixError::Evaluation)?;
+        if minor.numer().sign() != Sign::Plus {
+            return Ok(format!(
+                "正定性 · 否\n第 {} 阶顺序主子式 {minor}",
+                column + 1
+            ));
+        }
+        minors.push(minor.to_string());
+        eliminate_below(pivot, remaining, column)?;
+    }
+    Ok(format!("正定性 · 是\n顺序主子式 {}", minors.join(", ")))
 }
 
 fn determinant(mut matrix: Matrix) -> Result<BigRational, MatrixError> {
@@ -635,6 +672,29 @@ mod tests {
             );
         }
         assert_eq!(calculate_matrix("加法 1,2"), Err(MatrixError::Incomplete));
+    }
+
+    #[test]
+    fn checks_positive_definiteness_using_exact_leading_principal_minors() {
+        for (query, expected) in [
+            ("正定性 2,1; 1,2", "正定性 · 是\n顺序主子式 2, 3"),
+            (
+                "positive-definite 1/2,0.5; 1/2,1",
+                "正定性 · 是\n顺序主子式 1/2, 1/4",
+            ),
+            ("正定性 1,2; 2,1", "正定性 · 否\n第 2 阶顺序主子式 -3"),
+            ("正定 1,1; 1,1", "正定性 · 否\n第 2 阶顺序主子式 0"),
+            (
+                "正定性 1,0,0;0,1,2;0,2,1",
+                "正定性 · 否\n第 3 阶顺序主子式 -3",
+            ),
+            ("正定性 -1", "正定性 · 否\n第 1 阶顺序主子式 -1"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["正定性 1,2", "正定性 1,2; 0,1"] {
+            assert_eq!(calculate_matrix(query), Err(MatrixError::SymmetricRequired));
+        }
     }
 
     #[test]

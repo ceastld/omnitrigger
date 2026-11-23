@@ -605,6 +605,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 条件数 1 @ 2,0; 0,1/3",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用顺序主子式检查矩阵正定性",
+        query: "矩阵: 正定性 2,1; 1,2",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
@@ -4077,7 +4082,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Matrix
             if matches!(term, "乘方" | "特" | "特征" | "特征值")
                 || (!term.is_empty()
-                    && ["最小二乘", "1范数", "无穷范数", "条件数"]
+                    && ["最小二乘", "1范数", "无穷范数", "条件数", "正定性"]
                         .iter()
                         .any(|op| op.starts_with(term))) => {}
         Scope::Duration

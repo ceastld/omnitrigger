@@ -193,6 +193,7 @@
 - 用 `矩阵: 逐项乘法 1/2,2; 3,4 @ 3,1/3; 0,-1` 可把两个同尺寸矩阵的对应元素相乘，得到 `3/2, 2/3` 和 `0, -4`。`矩阵: F范数 1/2,1/2` 计算所有元素的平方和的平方根，得到精确结果 `√(1/2)`。 [LAPACK 的 Frobenius 范数定义](https://www.netlib.org/lapack/explore-html/d8/d2e/group__lange_ga8581d687290b36c6e24fe76b3be7caa3.html)
 - 输入 `矩阵: 1范数 1/2,-2;3,1` 得到 `7/2`，即各列绝对值之和的最大值。用 `矩阵: 无穷范数 1/2,-2;3,1` 得到 `4`，即各行绝对值之和的最大值。两种操作都支持矩形矩阵和精确分数。 [LAPACK 矩阵范数定义](https://www.netlib.org/lapack/explore-html/d8/d2e/group__lange_ga8581d687290b36c6e24fe76b3be7caa3.html)
 - 输入 `矩阵: 条件数 1 @ 2,0; 0,1/3` 得到 `6`。可选 `1` 或 `∞` 范数，用 `@` 隔开范数和方阵。搜索框计算矩阵与逆矩阵的范数乘积，奇异矩阵显示 `∞`。 [LAPACK 条件数定义](https://www.netlib.org/lapack/explore-html/d4/daf/group__gecon_ga4f9b830e19e12c7f082ddb497a57af18.html)
+- 输入 `矩阵: 正定性 2,1; 1,2` 可判定实对称方阵是否正定。样例的顺序主子式为 `2`、`3`，均为正。遇到非正的顺序主子式时会显示其阶数和精确数值。 [MIT 正定性判据](https://ocw.mit.edu/courses/15-084j-nonlinear-programming-spring-2004/8a2f7cda0c6c448c17e8a8272697f55c_lec4_quad_form.pdf#page=14)
 - 输入 `矩阵: 特征值 2,1; 1,2` 可求 2×2 矩阵的特征值 `1` 和 `3`。结果保留精确分数，支持根式、共轭复数和重复特征值。 [MIT 二维矩阵的特征方程](https://www.ocw.mit.edu/ans7870/18/18.013a/textbook/HTML/chapter04/section06.html)
 - 分数算式可用 `**` 或 `^` 求整数次幂。`分数: 计算 2**80` 得到 `1208925819614629174706176`。指数绝对值最多为 1024，运算中分子和分母各最多 8192 个二进制位。[Python 幂运算优先级](https://docs.python.org/3/reference/expressions.html#the-power-operator)
 - 精确算式支持科学计数法。输入 `分数: 计算 2.5e-3 * 4e3` 得到 `10`。统计、矩阵和 CSV 数值排序中的数字也可使用这种写法。
