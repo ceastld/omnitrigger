@@ -169,6 +169,7 @@ pub(super) enum CsvError {
     FunctionColumnArguments,
     FunctionFilterArguments,
     FunctionSortArguments,
+    FunctionRankArguments,
     FunctionColumnLimit,
     ComputedDivisionByZero,
     ComputedNumberRange,
@@ -405,6 +406,9 @@ impl CsvError {
             }
             Self::FunctionSortArguments => {
                 "填写一至两列、算式和数值排序方向，例如 [[1,2],\"cosd(x)*y\",\"数值降序\"]"
+            }
+            Self::FunctionRankArguments => {
+                "填写新列名、一至两列、算式和数值排序方向，例如 [\"名次\",[1,2],\"x*y\",\"数值降序\"]"
             }
             Self::FunctionColumnLimit => "CSV 函数运算每次最多处理 128 条数据",
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
@@ -1016,6 +1020,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
         "函数排序" | "sort-function" => return sort_function_rows(input),
+        "函数排名列" | "rank-function-column" => return rank_function_rows(input),
         operation if is_scatter_operation(operation) => {
             return parse_scatter_table(input)?.to_csv();
         }
@@ -4130,6 +4135,30 @@ fn sort_function_rows(input: &str) -> Result<String, CsvError> {
     ))
 }
 
+fn rank_function_rows(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::FunctionRankArguments;
+    let ((name, columns, expression, order), data) =
+        json_argument_and_data::<(String, Vec<ColumnReference>, String, FieldSortOrder)>(
+            input, invalid,
+        )?;
+    if !order.numeric() {
+        return Err(invalid);
+    }
+    let ascending = !order.descending();
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(invalid);
+    }
+    let FunctionRows { rows, values } = read_function_rows(data, &columns, &expression, invalid)?;
+    let mut ranks = vec![None; values.len()];
+    let mut ranked_values: Vec<_> = values
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, value)| value.map(|value| (value, index)))
+        .collect();
+    assign_csv_ranks(&mut ranked_values, ascending, false, &mut ranks);
+    write_csv_ranks(&rows[0], &rows[1..], &name, ranks)
+}
+
 struct FunctionRows {
     rows: Vec<Vec<String>>,
     values: Vec<Option<f64>>,
@@ -4465,21 +4494,40 @@ fn rank_column(
     }
     let mut ranks = vec![None; records.len()];
     for group in grouped_rows.values_mut() {
-        group.sort_unstable_by(|left, right| {
-            if ascending {
-                left.0.cmp(&right.0)
-            } else {
-                right.0.cmp(&left.0)
-            }
-        });
-        let mut rank = 1;
-        for (position, (value, index)) in group.iter().enumerate() {
-            if position > 0 && *value != group[position - 1].0 {
-                rank = if dense { rank + 1 } else { position + 1 };
-            }
-            ranks[*index] = Some(rank);
-        }
+        assign_csv_ranks(group, ascending, dense, &mut ranks);
     }
+    write_csv_ranks(header, records, name, ranks)
+}
+
+fn assign_csv_ranks<Value: PartialOrd>(
+    group: &mut [(Value, usize)],
+    ascending: bool,
+    dense: bool,
+    ranks: &mut [Option<usize>],
+) {
+    group.sort_unstable_by(|left, right| {
+        let order = left.0.partial_cmp(&right.0).expect("参与排名的数值可比较");
+        if ascending {
+            order
+        } else {
+            order.reverse()
+        }
+    });
+    let mut rank = 1;
+    for (position, (value, index)) in group.iter().enumerate() {
+        if position > 0 && *value != group[position - 1].0 {
+            rank = if dense { rank + 1 } else { position + 1 };
+        }
+        ranks[*index] = Some(rank);
+    }
+}
+
+fn write_csv_ranks(
+    header: &[String],
+    records: &[Vec<String>],
+    name: &str,
+    ranks: Vec<Option<usize>>,
+) -> Result<String, CsvError> {
     let mut ranks = ranks.into_iter();
     write_appended_column(header, records, name, |_| {
         Ok(ranks
@@ -9650,6 +9698,21 @@ null"#
         assert_eq!(
             transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
             Err(CsvError::NumericComparisonColumnArguments)
+        );
+    }
+
+    #[test]
+    fn ranks_function_values_without_reordering_csv_rows() {
+        assert_eq!(
+            transform_csv("函数排名列 [\"名次\",[\"角度\",3],\"cosd(x)*y\",\"数值降序\"] 编号,角度,权重\n001,0,3\n002,180,2\n003,360,3\n004,,9\n005,90,4").as_deref(),
+            Ok("编号,角度,权重,名次\r\n001,0,3,1\r\n002,180,2,4\r\n003,360,3,1\r\n004,\"\",9,\"\"\r\n005,90,4,3")
+        );
+        assert_eq!(
+            transform_csv(
+                "rank-function-column [\"名次\",[1],\"sqrt(x)\",\"numeric-asc\"] 数值\n4\n-1\n1"
+            )
+            .as_deref(),
+            Ok("数值,名次\r\n4,2\r\n-1,\"\"\r\n1,1")
         );
     }
 
