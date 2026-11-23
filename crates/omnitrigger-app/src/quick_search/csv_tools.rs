@@ -167,6 +167,7 @@ pub(super) enum CsvError {
     FormulaColumnLimit,
     FormulaEvaluation(FractionError),
     FunctionColumnArguments,
+    FunctionFilterArguments,
     FunctionColumnLimit,
     ComputedDivisionByZero,
     ComputedNumberRange,
@@ -398,7 +399,10 @@ impl CsvError {
             Self::FunctionColumnArguments => {
                 "填写新列名、一至两列和算式，例如 [\"余弦\",1,\"cosd(x)\"] 或 [\"加权\",1,2,\"cosd(x)*y\"]"
             }
-            Self::FunctionColumnLimit => "函数列每次最多处理 128 条数据",
+            Self::FunctionFilterArguments => {
+                "填写一至两列、算式、比较符和阈值，例如 [[1,2],\"cosd(x)*y\",\">\",\"0\"]"
+            }
+            Self::FunctionColumnLimit => "CSV 函数运算每次最多处理 128 条数据",
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
             Self::InvalidColumnValue => "输入列号或带双引号的列名，再输入带双引号的值",
@@ -1006,6 +1010,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
         "拟合列" | "fit-columns" => return append_fit_columns(input),
+        "函数筛选" | "filter-function" => return filter_function_rows(input),
         operation if is_scatter_operation(operation) => {
             return parse_scatter_table(input)?.to_csv();
         }
@@ -2460,12 +2465,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 return Err(CsvError::FunctionColumnLimit);
             }
             let sample = |x: &str, y: Option<&str>| {
-                let parse =
-                    |value: &str| evaluate(value).map_err(|_| CsvError::InvalidNumber.message());
-                let x = parse(x)?;
-                let y = y.map(parse).transpose()?;
-                sample_at_coordinates(&expression, x, y)
-                    .and_then(|y| y.map(format_result).transpose())
+                evaluate_csv_function(&expression, x, y)?
+                    .map(format_result)
+                    .transpose()
                     .map(Option::unwrap_or_default)
                     .map_err(|error| error.message())
             };
@@ -4066,6 +4068,66 @@ fn date_offset_column(
         .map(|date| date.to_string())
         .map_err(|error| at_row(error.message()))
     })
+}
+
+fn evaluate_csv_function(
+    expression: &str,
+    x: &str,
+    y: Option<&str>,
+) -> Result<Option<f64>, &'static str> {
+    let parse = |value: &str| evaluate(value).map_err(|_| CsvError::InvalidNumber.message());
+    let x = parse(x)?;
+    let y = y.map(parse).transpose()?;
+    sample_at_coordinates(expression, x, y).map_err(|error| error.message())
+}
+
+fn filter_function_rows(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::FunctionFilterArguments;
+    let ((columns, expression, operator, threshold), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, String, String, String)>(input, invalid)?;
+    if !(1..=2).contains(&columns.len())
+        || expression.trim().is_empty()
+        || expression.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT
+    {
+        return Err(invalid);
+    }
+    let comparison = NumberComparison::parse(operator.trim()).ok_or(invalid)?;
+    let threshold = evaluate(&threshold).map_err(|_| invalid)?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let rows = read_rows(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if records.len() > MAX_FUNCTION_RECORDS {
+        return Err(CsvError::FunctionColumnLimit);
+    }
+    let left = columns[0].resolve(header)?;
+    let right = columns
+        .get(1)
+        .map(|column| column.resolve(header))
+        .transpose()?;
+    validate_column_width(&[left, right.unwrap_or(left)], header.len())?;
+    let mut selected = vec![header];
+    for (index, row) in records.iter().enumerate() {
+        let x = row[left].trim();
+        let y = right.map(|column| row[column].trim());
+        if x.is_empty() || y.is_some_and(str::is_empty) {
+            continue;
+        }
+        let value =
+            evaluate_csv_function(&expression, x, y).map_err(|cause| CsvError::DataRowValue {
+                row: index + 1,
+                cause,
+            })?;
+        if value
+            .and_then(|value| value.partial_cmp(&threshold))
+            .is_some_and(|order| comparison.accepts(order))
+        {
+            selected.push(row);
+        }
+    }
+    Ok(write_rows(selected, ','))
 }
 
 fn append_from_one_column(
@@ -9539,6 +9601,23 @@ null"#
             transform_csv("数值比较列 [\"达标\",1,2,\"=>\"] 实测,门槛\n3,2"),
             Err(CsvError::NumericComparisonColumnArguments)
         );
+    }
+
+    #[test]
+    fn filters_original_csv_rows_using_one_or_two_columns_as_function_inputs() {
+        assert_eq!(
+            transform_csv("函数筛选 [[\"角度\",3],\"cosd(x)*y\",\">\",\"0\"] 编号,角度,权重\n001,0,2\n002,180,3\n003,90,4\n004,,5\n005,360,6").as_deref(),
+            Ok("编号,角度,权重\r\n001,0,2\r\n005,360,6")
+        );
+        assert_eq!(
+            transform_csv("filter-function [[1],\"sqrt(x)\",\">=\",\"3/2\"] 数值\n-1\n1\n4")
+                .as_deref(),
+            Ok("数值\r\n4")
+        );
+        assert!(matches!(
+            transform_csv("函数筛选 [[1,2],\"x+y\",\">\",\"0\"] X,Y\n0,2\n1,坏"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
