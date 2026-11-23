@@ -17,7 +17,9 @@ use super::{
     },
     decibel::convert_decibels,
     duration::convert_duration,
-    equation::{solve_equation, solve_linear_system},
+    equation::{
+        function_plot_arguments, plot_quadratic_function, solve_equation, solve_linear_system,
+    },
     fraction::simplify_fraction,
     json_tools::{read_json_array, read_unique_object_entries, transform_json, JsonError},
     linear_fit::{calculate_linear_fit, calculate_plot, plot_request},
@@ -520,6 +522,11 @@ fn prepare_pipeline_chart(
                         .map_err(|error| error.message())
                 })
             }),
+        Scope::Equation => function_plot_arguments(query).map(|input| {
+            plot_quadratic_function(input)
+                .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                .map_err(|error| error.message())
+        }),
         Scope::LinearFit => plot_request(query).map(|request| {
             calculate_plot(request)
                 .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))

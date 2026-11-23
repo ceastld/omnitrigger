@@ -1118,7 +1118,14 @@ impl Results {
                         .map_err(ValueError::Fraction),
                 ),
                 Scope::Equation => {
-                    Self::text_value(solve_equation(term).map_err(ValueError::Equation))
+                    if let Some(arguments) = equation::function_plot_arguments(term) {
+                        Self::plot_value(
+                            equation::plot_quadratic_function(arguments)
+                                .map_err(ValueError::Equation),
+                        )
+                    } else {
+                        Self::text_value(solve_equation(term).map_err(ValueError::Equation))
+                    }
                 }
                 Scope::LinearSystem => {
                     Self::text_value(solve_linear_system(term).map_err(ValueError::Equation))
@@ -4111,6 +4118,36 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("列累计分布 2 {data}")).as_deref(),
             Ok(expected)
+        );
+    }
+
+    #[test]
+    fn quadratic_function_plot_keeps_exact_endpoints_and_an_off_grid_vertex() {
+        let input = "(x-1)**2 - 1 @ 4 到 -1";
+        let chart = for_query(&format!("方程: 函数图 {input}"), &[]);
+        assert!(matches!(
+            &chart,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.has_curve()
+        ));
+        let csv = chart.refillable_text().unwrap();
+        assert!(csv.starts_with("x,y\r\n-1,3\r\n"));
+        assert!(csv.contains("\r\n1,-1\r\n"));
+        assert!(csv.ends_with("\r\n4,8"));
+        assert_eq!(csv.lines().count(), 35);
+        let pipeline = for_query(
+            r#"处理: [{"模板":"方程: 函数图 {结果} @ 4 到 -1"}] (x-1)**2 - 1"#,
+            &[],
+        );
+        assert!(matches!(
+            &pipeline,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.has_curve()
+        ));
+        assert_eq!(pipeline.refillable_text(), Some(csv));
+        assert_eq!(
+            solve_equation("函数图 x² @ 2 到 2"),
+            Err(EquationError::FunctionPlotArguments)
         );
     }
 

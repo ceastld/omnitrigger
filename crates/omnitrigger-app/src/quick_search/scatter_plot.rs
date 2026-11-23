@@ -17,6 +17,7 @@ pub(super) struct ScatterPlot {
     x: [String; 2],
     y: [String; 2],
     axis_names: [String; 2],
+    zero_axes: [Option<u16>; 2],
     kind: ScatterKind,
 }
 
@@ -25,6 +26,7 @@ enum ScatterKind {
     Observations,
     Residuals,
     Cumulative { observations: u64 },
+    Function,
 }
 
 impl ScatterPlot {
@@ -64,6 +66,10 @@ impl ScatterPlot {
         Self::prepare(points, &curve, ScatterKind::Cumulative { observations })
     }
 
+    pub(super) fn from_function_curve(points: &[(BigRational, BigRational)]) -> Self {
+        Self::prepare(&[], points, ScatterKind::Function)
+    }
+
     fn prepare(
         points: &[(BigRational, BigRational)],
         curve: &[(BigRational, BigRational)],
@@ -77,6 +83,17 @@ impl ScatterPlot {
         let max_y = y.max().expect("图形至少有一个数据点");
         let range_x = max_x - min_x;
         let range_y = max_y - min_y;
+        let zero_axes = if kind == ScatterKind::Function {
+            let zero = BigRational::default();
+            [
+                (min_x <= &zero && &zero <= max_x)
+                    .then(|| normalized_position(&zero, min_x, &range_x)),
+                (min_y <= &zero && &zero <= max_y)
+                    .then(|| normalized_position(&zero, min_y, &range_y)),
+            ]
+        } else {
+            [None; 2]
+        };
         let place = |(x, y): &(BigRational, BigRational)| {
             (
                 normalized_position(x, min_x, &range_x),
@@ -89,11 +106,12 @@ impl ScatterPlot {
             x: [min_x.to_string(), max_x.to_string()],
             y: [min_y.to_string(), max_y.to_string()],
             axis_names: match kind {
-                ScatterKind::Observations => ["x", "y"],
+                ScatterKind::Observations | ScatterKind::Function => ["x", "y"],
                 ScatterKind::Residuals => ["x", "残差"],
                 ScatterKind::Cumulative { .. } => ["观测值", "累计频率"],
             }
             .map(str::to_owned),
+            zero_axes,
             kind,
         }
     }
@@ -124,12 +142,15 @@ impl ScatterPlot {
                 format!("{observations} 个观测 · {points} 个不同值"),
                 "累计频率",
             ),
+            ScatterKind::Function => (format!("{} 个采样点", self.curve.len()), "函数曲线"),
         };
         div()
             .flex()
             .items_center()
             .gap(px(7.))
-            .child(div().size(px(6.)).rounded(px(3.)).bg(rgb(theme::ACCENT)))
+            .when(self.kind != ScatterKind::Function, |legend| {
+                legend.child(div().size(px(6.)).rounded(px(3.)).bg(rgb(theme::ACCENT)))
+            })
             .child(count)
             .when(self.has_curve(), |legend| {
                 legend
@@ -148,6 +169,8 @@ impl ScatterPlot {
         let points = self.locations.clone();
         let curve = self.curve.clone();
         let grid = rgb(theme::BORDER_MID);
+        let [zero_x, zero_y] = self.zero_axes;
+        let axis = rgb(theme::BORDER_HI);
         let dot = rgb(theme::ACCENT);
         let line = rgb(theme::ACCENT_2);
         let plot = canvas(
@@ -178,6 +201,20 @@ impl ScatterPlot {
                     let y = f32::from(y) / f32::from(POSITION_STEPS);
                     point(origin.x + width * x, origin.y + height * (1. - y))
                 };
+                if let Some(x) = zero_x {
+                    let x = place(&(x, 0)).x;
+                    window.paint_quad(fill(
+                        Bounds::new(point(x, origin.y), size(px(1.5), height)),
+                        axis,
+                    ));
+                }
+                if let Some(y) = zero_y {
+                    let y = place(&(0, y)).y;
+                    window.paint_quad(fill(
+                        Bounds::new(point(origin.x, y), size(width, px(1.5))),
+                        axis,
+                    ));
+                }
                 if let Some((first, rest)) = curve.split_first() {
                     let start = place(first);
                     if rest.is_empty() {
@@ -293,6 +330,21 @@ pub(super) fn normalized_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn function_plot_positions_only_the_zero_axes_inside_its_range() {
+        let points = [(-2, 1), (2, 3)].map(|(x, y)| {
+            (
+                BigRational::from_integer(x.into()),
+                BigRational::from_integer(y.into()),
+            )
+        });
+        assert_eq!(
+            ScatterPlot::from_function_curve(&points).zero_axes,
+            [Some(2048), None]
+        );
+        assert_eq!(ScatterPlot::from_points(&points).zero_axes, [None; 2]);
+    }
 
     #[test]
     fn cumulative_plot_draws_each_jump_vertically_with_a_closed_point_at_the_top() {

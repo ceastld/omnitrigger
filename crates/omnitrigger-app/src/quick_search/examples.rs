@@ -217,6 +217,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "绘制指定区间内的二次函数曲线",
+        query: "方程: 函数图 (x-1)**2 - 1 @ -1 到 4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求二次函数在给定区间上的精确定积分",
         query: "方程: 定积分 1/2,-1,3/4 @ 0 到 2",
     },
@@ -5277,6 +5282,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "由顶点",
             "切线",
             "法线",
+            "函数图",
             "定积分",
             "区间极值",
         ],

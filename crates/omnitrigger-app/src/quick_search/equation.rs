@@ -11,8 +11,10 @@ use super::fraction::{
 use super::matrix::{general_solution, MatrixError, MAX_DIMENSION};
 use super::operators::{split_top_level_commas, NumberComparison};
 use super::plane::{parse_point, PointError};
+use super::scatter_plot::ScatterPlot;
 
 const MAX_ROOT_CANDIDATES: usize = 64;
+const FUNCTION_PLOT_INTERVALS: u32 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
@@ -27,6 +29,7 @@ pub(super) enum EquationError {
     VertexFormArguments,
     TangentArguments,
     NormalLineArguments,
+    FunctionPlotArguments,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -59,6 +62,7 @@ impl EquationError {
             Self::VertexFormArguments => "按顶点横坐标、顶点纵坐标、二次项系数的顺序填写",
             Self::TangentArguments => "填写函数系数和切点横坐标，例如 1,0,0 @ 2",
             Self::NormalLineArguments => "填写函数和法线经过的横坐标，例如 x² @ 2",
+            Self::FunctionPlotArguments => "填写函数和两个不同的横坐标，例如 x² @ -1 到 2",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -70,10 +74,7 @@ impl EquationError {
 }
 
 pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
-    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
-        return Err(EquationError::Evaluation(FractionError::TooLong));
-    }
-    let input = normalize(query).replace('·', "*");
+    let input = normalize_equation(query)?;
     if let Some((operation, arguments)) = input.trim().split_once(char::is_whitespace) {
         match operation.to_ascii_lowercase().as_str() {
             "不等式" | "inequality" => return solve_inequality(arguments.trim_start()),
@@ -105,6 +106,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "由顶点" | "from-vertex" => return quadratic_from_vertex(arguments.trim_start()),
             "切线" | "tangent" => return polynomial_tangent(arguments.trim_start()),
             "法线" | "normal-line" => return polynomial_normal_line(arguments.trim_start()),
+            "函数图" | "function-plot" => {
+                return quadratic_curve_points(arguments).map(|points| curve_csv(&points));
+            }
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -125,6 +129,13 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         coefficient_row(&input)?
     };
     solve_equation_coefficients(coefficients)
+}
+
+fn normalize_equation(query: &str) -> Result<String, EquationError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(EquationError::Evaluation(FractionError::TooLong));
+    }
+    Ok(normalize(query).replace('·', "*"))
 }
 
 fn equation_input_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
@@ -517,6 +528,55 @@ fn function_and_x(
     let coefficients = function_coefficients(function)?;
     let x = equation_value(point, invalid)?;
     Ok((coefficients, x))
+}
+
+pub(super) fn function_plot_arguments(input: &str) -> Option<&str> {
+    let (command, arguments) = input.trim().split_once(char::is_whitespace)?;
+    (command == "函数图" || command.eq_ignore_ascii_case("function-plot")).then_some(arguments)
+}
+
+pub(super) fn plot_quadratic_function(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let points = quadratic_curve_points(&input)?;
+    Ok((
+        curve_csv(&points),
+        ScatterPlot::from_function_curve(&points),
+    ))
+}
+
+fn quadratic_curve_points(input: &str) -> Result<Vec<(BigRational, BigRational)>, EquationError> {
+    let invalid = EquationError::FunctionPlotArguments;
+    let ([a, b, c], [mut start, mut end]) = polynomial_bounds(input, invalid)?;
+    match start.cmp(&end) {
+        Ordering::Greater => std::mem::swap(&mut start, &mut end),
+        Ordering::Equal => return Err(invalid),
+        Ordering::Less => {}
+    }
+    let step = (&end - &start) / BigInt::from(FUNCTION_PLOT_INTERVALS);
+    let mut xs: Vec<_> = (0..=FUNCTION_PLOT_INTERVALS)
+        .map(|index| &start + &step * BigInt::from(index))
+        .collect();
+    if a.numer().sign() != Sign::NoSign {
+        let vertex = -&b / (&a * BigInt::from(2u8));
+        match xs.binary_search(&vertex) {
+            Err(index) if (1..xs.len()).contains(&index) => xs.insert(index, vertex),
+            _ => {}
+        }
+    }
+    xs.into_iter()
+        .map(|x| {
+            ensure_exact_size(&x).map_err(EquationError::Evaluation)?;
+            let y = polynomial_value(&a, &b, &c, &x)?;
+            Ok((x, y))
+        })
+        .collect()
+}
+
+fn curve_csv(points: &[(BigRational, BigRational)]) -> String {
+    std::iter::once("x,y".to_owned())
+        .chain(points.iter().map(|(x, y)| format!("{x},{y}")))
+        .collect::<Vec<_>>()
+        .join("\r\n")
 }
 
 fn polynomial_integral(input: &str) -> Result<String, EquationError> {
