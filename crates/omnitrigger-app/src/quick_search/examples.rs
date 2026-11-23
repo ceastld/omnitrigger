@@ -3654,6 +3654,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "比较两个网址新增和移除的查询参数",
+        query: r#"URL: 参数差异 ["https://example.invalid/a?page=1&tag=a+b&flag","https://example.invalid/b?tag=new&tag=a%20b&flag=&page=2&tag=new"]"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "将相对链接解析成完整 URL",
         query: r#"URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]"#,
     },

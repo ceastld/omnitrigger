@@ -1,4 +1,7 @@
-use std::{borrow::Cow, collections::HashSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashSet},
+};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::de::DeserializeOwned;
@@ -35,6 +38,7 @@ pub(super) enum UrlEncodingError {
     InvalidParameterUpdates,
     InvalidParameterNames,
     ParameterLookupArguments,
+    InvalidQueryDiffPair,
     InvalidFilePath,
     InvalidFileUrl,
     OpaqueOrigin,
@@ -67,6 +71,7 @@ impl UrlEncodingError {
             }
             Self::InvalidParameterNames => "用 JSON 字符串数组填写参数名，再输入 URL",
             Self::ParameterLookupArguments => "用双引号填写参数名，再输入 URL 或查询串",
+            Self::InvalidQueryDiffPair => "用 JSON 字符串数组填写两个完整网址，原网址在前",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
             Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
             Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
@@ -99,6 +104,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "参数" | "查询参数" | "params" => decode_parameters(value, false),
         "参数json" | "params-json" => decode_parameters(value, true),
         "取参数" | "get-param" => lookup_parameter_values(value),
+        "参数差异" | "diff-params" => compare_url_queries(value),
         "生成查询串" | "build-query" => encode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
         "路径分段" | "path-segments" => decode_path_segments(value),
@@ -571,11 +577,50 @@ pub(super) fn url_parameter_values(source: &str, name: &str) -> Result<String, U
     Ok(serde_json::to_string(&values).expect("字符串数组可序列化"))
 }
 
+fn compare_url_queries(input: &str) -> Result<String, UrlEncodingError> {
+    let [before, after] = url_pair(input, UrlEncodingError::InvalidQueryDiffPair)?;
+    let mut changes = BTreeMap::new();
+    for (address, change) in [(before, -1_i32), (after, 1)] {
+        let url = Url::parse(&address).map_err(|_| UrlEncodingError::InvalidUrl)?;
+        for pair in decode_query_pairs_raw(url.query().unwrap_or_default(), decode_form_component)?
+        {
+            *changes.entry(pair).or_insert(0) += change;
+        }
+    }
+
+    let lines: Vec<_> = changes
+        .into_iter()
+        .filter(|(_, change)| *change != 0)
+        .map(|(pair, change)| {
+            let operation = if change > 0 { "新增" } else { "移除" };
+            let pair = serde_json::to_string(&pair).expect("参数名称和值可以序列化为 JSON");
+            let count = change.unsigned_abs();
+            if count == 1 {
+                format!("{operation} {pair}")
+            } else {
+                format!("{operation} {pair} × {count}")
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        Ok("查询参数相同".to_owned())
+    } else {
+        Ok(lines.join("\n"))
+    }
+}
+
 fn decode_query_pairs(
     source: &str,
     decode: impl Fn(&str) -> Result<String, UrlEncodingError>,
 ) -> Result<Vec<[String; 2]>, UrlEncodingError> {
-    query_text(source)
+    decode_query_pairs_raw(query_text(source), decode)
+}
+
+fn decode_query_pairs_raw(
+    query: &str,
+    decode: impl Fn(&str) -> Result<String, UrlEncodingError>,
+) -> Result<Vec<[String; 2]>, UrlEncodingError> {
+    query
         .split('&')
         .filter(|part| !part.is_empty())
         .map(|part| {
@@ -603,6 +648,60 @@ fn encode_parameters(input: &str) -> Result<String, UrlEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compares_decoded_query_pairs_with_multiplicity() {
+        assert_eq!(
+            convert_url_component(
+                r#"参数差异 ["https://example.invalid/a?page=1&tag=a+b&flag","https://other.invalid/b?tag=new&tag=a%20b&f%6Cag=&page=2&tag=new#ignored"]"#,
+            )
+            .as_deref(),
+            Ok("移除 [\"page\",\"1\"]\n新增 [\"page\",\"2\"]\n新增 [\"tag\",\"new\"] × 2"),
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"参数差异 ["https://example.invalid/?b=x&a=%2b","https://example.invalid/?a=%2B&b=x"]"#,
+            )
+            .as_deref(),
+            Ok("查询参数相同"),
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"参数差异 ["https://example.invalid/#a=1","https://example.invalid/?a=%00%0A"]"#,
+            )
+            .as_deref(),
+            Ok(r#"新增 ["a","\u0000\n"]"#),
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"参数差异 ["https://example.invalid/?Tag=&Tag&tag","https://example.invalid/?tag="]"#,
+            )
+            .as_deref(),
+            Ok(r#"移除 ["Tag",""] × 2"#),
+        );
+    }
+
+    #[test]
+    fn requires_two_full_urls_and_valid_query_encoding_for_parameter_differences() {
+        assert_eq!(
+            convert_url_component(r#"参数差异 ["https://example.invalid/"]"#),
+            Err(UrlEncodingError::InvalidQueryDiffPair),
+        );
+        assert_eq!(
+            convert_url_component(r#"参数差异 ["https://example.invalid/","#),
+            Err(UrlEncodingError::Incomplete),
+        );
+        assert_eq!(
+            convert_url_component(r#"参数差异 ["/a","https://example.invalid/"]"#),
+            Err(UrlEncodingError::InvalidUrl),
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"参数差异 ["https://example.invalid/?x=%GG","https://example.invalid/"]"#,
+            ),
+            Err(UrlEncodingError::InvalidEscape),
+        );
+    }
 
     #[test]
     fn gets_every_value_for_an_exact_decoded_query_parameter_name() {
