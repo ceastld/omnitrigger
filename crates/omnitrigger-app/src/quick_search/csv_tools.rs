@@ -164,6 +164,7 @@ pub(super) enum CsvError {
     ColumnOutOfRange,
     InvalidNumber,
     NumericIssuesTooLarge,
+    DateIssuesTooLarge,
     DecimalColumnsArguments,
     DecimalColumnsTooLarge,
     SignificantColumnsArguments,
@@ -358,6 +359,7 @@ impl CsvError {
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::NumericIssuesTooLarge => "数值列检查结果超过 1 MiB，请缩小表格范围",
+            Self::DateIssuesTooLarge => "日期列检查结果超过 1 MiB，请缩小表格范围",
             Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
             Self::DecimalColumnsTooLarge => "小数列结果超过 1 MiB，请缩小表格范围",
             Self::SignificantColumnsArguments => "填写不同的列和 1 至 100 位有效数字，例如 [[\"金额\",3],3]",
@@ -424,6 +426,7 @@ enum Operation {
     InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
     CheckNumericColumns(Vec<ColumnReference>),
+    CheckDateColumns(Vec<ColumnReference>),
     RoundColumns {
         columns: Vec<ColumnReference>,
         digits: u32,
@@ -884,11 +887,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CountEmptyCells(columns)
         }
-        "检查数值列" | "check-numeric-columns" => {
+        "检查数值列" | "check-numeric-columns" | "检查日期列" | "check-date-columns" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            Operation::CheckNumericColumns(columns)
+            if matches!(operation.as_str(), "检查日期列" | "check-date-columns") {
+                Operation::CheckDateColumns(columns)
+            } else {
+                Operation::CheckNumericColumns(columns)
+            }
         }
         "小数列" | "decimal-columns" | "有效数字列" | "significant-columns" => {
             let significant = matches!(operation.as_str(), "有效数字列" | "significant-columns");
@@ -1809,7 +1816,18 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             interpolate_empty_csv_cells(&rows, column, &groups)
         }
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
-        Operation::CheckNumericColumns(columns) => check_numeric_columns(&rows, &columns),
+        Operation::CheckNumericColumns(columns) => check_columns(
+            &rows,
+            &columns,
+            |cell| parse_fraction_literal(cell).is_ok(),
+            CsvError::NumericIssuesTooLarge,
+        ),
+        Operation::CheckDateColumns(columns) => check_columns(
+            &rows,
+            &columns,
+            |cell| parse_complete_date(cell).is_ok(),
+            CsvError::DateIssuesTooLarge,
+        ),
         Operation::RoundColumns {
             columns,
             digits,
@@ -2846,9 +2864,11 @@ fn round_csv_columns(
     Ok(output)
 }
 
-fn check_numeric_columns(
+fn check_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
+    valid: impl Fn(&str) -> bool,
+    too_large: CsvError,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
@@ -2857,7 +2877,7 @@ fn check_numeric_columns(
         let row_number = (index + 1).to_string();
         for &column in &columns {
             let cell = &record[column];
-            if parse_fraction_literal(cell).is_ok() {
+            if valid(cell) {
                 continue;
             }
             let column_number = (column + 1).to_string();
@@ -2870,7 +2890,7 @@ fn check_numeric_columns(
                     cell.as_str(),
                 ]
                 .into_iter(),
-                CsvError::NumericIssuesTooLarge,
+                too_large,
             )?;
         }
     }
@@ -4928,6 +4948,19 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn reports_invalid_complete_dates_with_original_values_and_coordinates() {
+        let input = "检查日期列 [2,\"开始\"] 开始,结束\n2024-W09-4,2024年3月1日\n2023-02-29,\n今天,2024-02-29";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n2,2,结束,\"\"\r\n2,1,开始,2023-02-29\r\n3,1,开始,今天"),
+        );
+        assert_eq!(
+            transform_csv("check-date-columns [\"日期\"] 日期\n 2024-02-29 ").as_deref(),
+            Ok("数据行,列号,列名,内容"),
+        );
     }
 
     #[test]

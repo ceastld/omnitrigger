@@ -3658,6 +3658,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位日期列中的无效日期",
+        query: "CSV: 检查日期列 [\"日期\"] 编号,日期\n001,2024-02-29\n002,2023-02-29\n003,\n004,2024-W09-4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把选中的 CSV 数值列统一成固定小数位",
         query: "CSV: 小数列 [[\"金额\",3],2] 编号,金额,比率\n001,2.675,1/8\n002,,-0.005",
     },
