@@ -41,6 +41,7 @@ pub(super) struct ScatterPlot {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ScatterKind {
     Observations,
+    ConnectedObservations,
     Residuals,
     Cumulative { observations: u64 },
     Function,
@@ -51,6 +52,10 @@ enum ScatterKind {
 impl ScatterPlot {
     pub(super) fn from_points(points: &[(BigRational, BigRational)]) -> Self {
         Self::from_series(points, &[])
+    }
+
+    pub(super) fn from_connected_points(points: &[(BigRational, BigRational)]) -> Self {
+        Self::prepare(points, points, ScatterKind::ConnectedObservations, None)
     }
 
     pub(super) fn from_series(
@@ -160,7 +165,8 @@ impl ScatterPlot {
         let range_y = max_y - min_y;
         let zero_axes = if matches!(
             kind,
-            ScatterKind::Function
+            ScatterKind::ConnectedObservations
+                | ScatterKind::Function
                 | ScatterKind::SampledFunction { .. }
                 | ScatterKind::Parametric { .. }
         ) {
@@ -198,6 +204,7 @@ impl ScatterPlot {
             y: [min_y, max_y].map(label),
             axis_names: match kind {
                 ScatterKind::Observations
+                | ScatterKind::ConnectedObservations
                 | ScatterKind::Function
                 | ScatterKind::Parametric { .. } => ["x", "y"],
                 ScatterKind::SampledFunction { .. } => ["x", "近似值"],
@@ -254,6 +261,7 @@ impl ScatterPlot {
         let points = self.point_count();
         let (count, line_label) = match self.kind {
             ScatterKind::Observations => (format!("{points} 个观测点"), "拟合曲线"),
+            ScatterKind::ConnectedObservations => (format!("{points} 个样点"), "折线"),
             ScatterKind::Residuals => (format!("{points} 个残差点"), "零残差"),
             ScatterKind::Cumulative { observations } => (
                 format!("{observations} 个观测 · {points} 个不同值"),

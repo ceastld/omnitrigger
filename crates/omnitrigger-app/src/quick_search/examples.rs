@@ -4773,6 +4773,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "沿横坐标顺序连起完整样点并查看原始分数",
+        query: "CSV: 折线图 [\"时间\",\"高度\"] 编号,时间,高度\n003,3,2\n001,0,-1/2\n002,2,\n004,1,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "对表格里的分段直线求带符号的梯形积分",
         query: "CSV: 梯形积分 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0",
     },
@@ -5733,6 +5738,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "稳健直线",
             "散点图",
             "梯形积分",
+            "折线图",
             "梯形平均",
             "梯形面积",
             "梯形累计列",

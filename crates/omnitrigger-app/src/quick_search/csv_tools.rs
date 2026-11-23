@@ -225,6 +225,7 @@ pub(super) enum CsvError {
     ScatterColumns,
     ScatterPointCount,
     ScatterTooLarge,
+    LinePlotPointCount,
     TrapezoidPointCount,
     TrapezoidDuplicateX,
     TrapezoidIntervalArguments,
@@ -507,6 +508,7 @@ impl CsvError {
             Self::ScatterColumns => "填写 x 和 y 两列不同的列名或列号，例如 [\"时间\",\"温度\"]",
             Self::ScatterPointCount => "散点图需要 2 至 64 行同时含 x 和 y 的数据",
             Self::ScatterTooLarge => "散点图 CSV 超过 1 MiB，请缩小数据范围",
+            Self::LinePlotPointCount => "折线图需要 2 至 64 行同时含 x 和 y 的数据",
             Self::TrapezoidPointCount => "梯形积分需要 2 至 64 行同时含 x 和 y 的数据",
             Self::TrapezoidDuplicateX => "梯形积分的横坐标须互不相同",
             Self::TrapezoidIntervalArguments => {
@@ -1090,6 +1092,9 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
 }
 
 fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, CsvError> {
+    if let Some(table) = coordinate_line_table(operation, input) {
+        return table?.to_csv();
+    }
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
@@ -1131,9 +1136,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
         "曲线差值" | "curve-difference" => return compare_coordinate_curves(input),
-        operation if is_cumulative_trapezoid_plot(operation) => {
-            return cumulative_trapezoid_coordinates(input)?.to_csv();
-        }
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -5766,27 +5768,33 @@ fn read_trapezoid_samples(input: &str) -> Result<CsvCoordinates, CsvError> {
     Ok(table)
 }
 
-fn is_cumulative_trapezoid_plot(operation: &str) -> bool {
-    operation == "梯形累计图" || operation.eq_ignore_ascii_case("cumulative-trapezoid-plot")
+fn coordinate_line_table(operation: &str, input: &str) -> Option<Result<CsvCoordinates, CsvError>> {
+    if operation == "梯形累计图" || operation.eq_ignore_ascii_case("cumulative-trapezoid-plot")
+    {
+        return Some(cumulative_trapezoid_coordinates(input));
+    }
+    (operation == "折线图" || operation.eq_ignore_ascii_case("line-plot")).then(|| {
+        let mut table = parse_coordinate_table(input, CsvError::LinePlotPointCount)?;
+        sort_distinct_coordinates(&mut table.samples)?;
+        Ok(table)
+    })
 }
 
-pub(super) fn cumulative_trapezoid_chart(
+pub(super) fn coordinate_line_chart(
     query: &str,
 ) -> Option<Result<(String, ScatterPlot), CsvError>> {
     let (operation, input) = split_argument(query)?;
-    is_cumulative_trapezoid_plot(operation).then(|| {
-        let table = cumulative_trapezoid_coordinates(input)?;
+    let table = coordinate_line_table(operation, input)?;
+    Some(table.and_then(|table| {
         let csv = table.to_csv()?;
         let points: Vec<_> = table
             .samples
             .into_iter()
             .map(|sample| sample.point)
             .collect();
-        let bounds = [&points[0].0, &points.last().expect("至少有两个完整坐标").0];
-        let plot = ScatterPlot::from_sampled_function(&points, bounds, points.len())
-            .with_axis_names(table.headers);
+        let plot = ScatterPlot::from_connected_points(&points).with_axis_names(table.headers);
         Ok((csv, plot))
-    })
+    }))
 }
 
 fn cumulative_trapezoid_coordinates(input: &str) -> Result<CsvCoordinates, CsvError> {
@@ -7547,9 +7555,24 @@ mod tests {
     }
 
     #[test]
+    fn plots_an_exact_line_through_complete_samples_in_horizontal_order() {
+        let query =
+            "折线图 [\"时间\",\"高度\"] 编号,时间,高度\n003,3,2\n001,0,-1/2\n002,2,\n004,1,0";
+        let (csv, plot) = coordinate_line_chart(query).unwrap().unwrap();
+        assert_eq!(plot.point_count(), 3);
+        assert!(plot.has_curve());
+        assert_eq!(csv, "时间,高度\r\n0,-1/2\r\n1,0\r\n3,2");
+        assert_eq!(transform_csv(query), Ok(csv));
+        assert!(matches!(
+            coordinate_line_chart("LINE-PLOT [1,2] x,y\n1/2,0\n0.5,1"),
+            Some(Err(CsvError::CoordinateDuplicateX))
+        ));
+    }
+
+    #[test]
     fn plots_exact_cumulative_trapezoid_values_in_horizontal_order() {
         let query = "梯形累计图 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0";
-        let (csv, plot) = cumulative_trapezoid_chart(query).unwrap().unwrap();
+        let (csv, plot) = coordinate_line_chart(query).unwrap().unwrap();
         assert_eq!(plot.point_count(), 3);
         assert_eq!(csv, "时间,累计积分\r\n0,0\r\n1,-1/2\r\n3,3/2");
         assert_eq!(transform_csv(query), Ok(csv));

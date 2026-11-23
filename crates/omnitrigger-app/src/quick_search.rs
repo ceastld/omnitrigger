@@ -1064,7 +1064,7 @@ impl Results {
                         Self::plot_value(
                             csv_tools::build_scatter_plot(arguments).map_err(ValueError::Csv),
                         )
-                    } else if let Some(result) = csv_tools::cumulative_trapezoid_chart(term) {
+                    } else if let Some(result) = csv_tools::coordinate_line_chart(term) {
                         Self::plot_value(result.map_err(ValueError::Csv))
                     } else if let Some(arguments) =
                         csv_tools::column_cumulative_plot_arguments(term)

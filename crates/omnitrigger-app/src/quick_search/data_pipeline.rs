@@ -519,7 +519,7 @@ fn prepare_pipeline_preview(
                 })
             })
             .or_else(|| {
-                super::csv_tools::cumulative_trapezoid_chart(query).map(|result| {
+                super::csv_tools::coordinate_line_chart(query).map(|result| {
                     result
                         .map(|(text, plot)| (text, PipelinePreview::Scatter(plot)))
                         .map_err(csv_error)
