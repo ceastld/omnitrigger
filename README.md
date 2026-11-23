@@ -370,6 +370,7 @@
 - 输入 `波长: 波速 1 kHz @ 34.3 cm` 得到传播速度 `343 m/s`。频率和波长可以交换位置，也可加 `to km/h` 或其他速度单位。
 - 输入 `节拍: 120 BPM` 得到每拍 `500 ms`，输入 `节拍: 120 BPM @ 3/2` 得到一拍半的 `750 ms`。用 `节拍: 速度 1.5秒 @ 3` 可反推 `120 BPM`。省略拍数时按一拍计算，结果保留精确分数。 [节拍与 BPM](https://learningmusic.ableton.com/make-beats/beat-and-tempo.html)
 - 输入 `分贝: 功率比 100` 或 `分贝: 幅度比 10`，都得到 `20 dB`。输入 `分贝: 转功率比 20 dB` 得到 `100`，用 `转幅度比` 得到 `10`。功率比用 10 倍常用对数，幅度比用 20 倍常用对数，输入可写算式。 [NIST 分贝定义](https://www.nist.gov/pml/special-publication-811/nist-guide-si-chapter-8)
+- 输入 `分贝: 叠加 60 dB,60 dB` 得到约 `63.0103 dB`。适用于具有同一参考量、功率可相加的多个分贝值。支持 2 至 128 项和负数分贝值。 [OSHA 分贝叠加公式，附录 B.3](https://www.osha.gov/otm/section-3-health-hazards/chapter-5)
 - 输入 `音高: A4` 或 `音高: MIDI 69` 得到 `A4 · MIDI 69 · 440 Hz`。输入 `音高: 442 Hz` 可查到最近的音名 `A4` 和偏高 `7.85 音分`。采用 A4 为 440 Hz 的十二平均律，支持 MIDI 0 至 127，以及 `#`、`b`、`♯`、`♭`。结果中的音名统一用升号表示。 [UNSW 音名、MIDI 编号与频率换算](https://newt.phys.unsw.edu.au/jw/notes.html)
 - 输入 `音高: 转调 Bb3 @ 2` 可把音高升两个半音，得到 `C4`。用 `音高: 音程 C4 @ G4` 可算出 `7 半音 · 700 音分`，交换两端会反转正负号。音高可写音名或 MIDI 编号。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
