@@ -18,6 +18,8 @@ use super::scientific::interpolate_between;
 
 const MAX_ROOT_CANDIDATES: usize = 64;
 const FUNCTION_PLOT_INTERVALS: u32 = 32;
+const MAX_FUNCTION_POINTS: u32 = 129;
+const MAX_FUNCTION_INPUTS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
@@ -35,6 +37,7 @@ pub(super) enum EquationError {
     FunctionPlotArguments,
     FunctionSampleArguments,
     FunctionSampleHasNoValues,
+    FunctionValuesArguments,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -73,6 +76,9 @@ impl EquationError {
                 "填写带 x 的算式以及两个不同的端点，可在分号后填写 2 至 129 个采样点"
             }
             Self::FunctionSampleHasNoValues => "该区间没有可绘制的有限函数值",
+            Self::FunctionValuesArguments => {
+                "填写带 x 的算式，用 @ 隔开 1 至 64 个以逗号分隔的横坐标"
+            }
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -122,6 +128,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "函数采样" | "sample-function" | "采样图" | "sample-plot" => {
                 return format_function_samples(&function_sample_points(arguments)?);
+            }
+            "函数值" | "function-values" => {
+                return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
@@ -604,9 +613,11 @@ fn plot_sampled_function(input: &str) -> Result<(String, ScatterPlot), EquationE
     Ok((format_function_samples(&samples)?, plot))
 }
 
-fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
-    let invalid = EquationError::FunctionSampleArguments;
-    let (expression, bounds) = input.split_once('@').ok_or(invalid)?;
+fn split_function_arguments(
+    input: &str,
+    invalid: EquationError,
+) -> Result<(&str, &str), EquationError> {
+    let (expression, arguments) = input.split_once('@').ok_or(invalid)?;
     let expression = match expression.split_once('=') {
         Some((name, formula)) if name.trim().eq_ignore_ascii_case("y") => formula.trim(),
         _ => expression.trim(),
@@ -614,13 +625,19 @@ fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, Equati
     if expression.is_empty() {
         return Err(invalid);
     }
+    Ok((expression, arguments))
+}
+
+fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
+    let invalid = EquationError::FunctionSampleArguments;
+    let (expression, bounds) = split_function_arguments(input, invalid)?;
     let (bounds, count) = match bounds.split_once(';') {
         Some((bounds, count)) => {
             let count = count
                 .trim()
                 .parse::<u32>()
                 .ok()
-                .filter(|count| (2..=129).contains(count))
+                .filter(|count| (2..=MAX_FUNCTION_POINTS).contains(count))
                 .ok_or(invalid)?;
             (bounds, count)
         }
@@ -640,18 +657,35 @@ fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, Equati
     for index in 0..count {
         let fraction = f64::from(index) / f64::from(last);
         let x = interpolate_between(start, end, fraction);
-        let y = match evaluate_at_x(expression, x) {
-            Ok(value) => Some(value),
-            Err(
-                CalculationError::DivisionByZero
-                | CalculationError::FunctionDomain
-                | CalculationError::OutOfRange,
-            ) => None,
-            Err(error) => return Err(EquationError::Approximation(error)),
-        };
-        samples.push((x, y));
+        samples.push((x, function_sample_value(expression, x)?));
     }
     Ok(samples)
+}
+
+fn function_samples_for_inputs(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
+    let invalid = EquationError::FunctionValuesArguments;
+    let (expression, inputs) = split_function_arguments(input, invalid)?;
+    let mut samples = Vec::new();
+    for input in split_top_level_commas(inputs) {
+        if input.trim().is_empty() || samples.len() == MAX_FUNCTION_INPUTS {
+            return Err(invalid);
+        }
+        let x = evaluate(input).map_err(EquationError::Approximation)?;
+        samples.push((x, function_sample_value(expression, x)?));
+    }
+    Ok(samples)
+}
+
+fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
+    match evaluate_at_x(expression, x) {
+        Ok(value) => Ok(Some(value)),
+        Err(
+            CalculationError::DivisionByZero
+            | CalculationError::FunctionDomain
+            | CalculationError::OutOfRange,
+        ) => Ok(None),
+        Err(error) => Err(EquationError::Approximation(error)),
+    }
 }
 
 fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, EquationError> {
@@ -1674,6 +1708,27 @@ mod tests {
         assert_eq!(
             solve_equation("采样图 1/x @ -1 到 1; 3").as_deref(),
             Ok("x,近似值\r\n-1,-1\r\n0,\r\n1,1")
+        );
+    }
+
+    #[test]
+    fn calculates_values_at_requested_coordinates_in_input_order() {
+        assert_eq!(
+            solve_equation("函数值 y = sqrt(x) @ 9, -1, max(1,4), 9").as_deref(),
+            Ok("x,近似值\r\n9,3\r\n-1,\r\n4,2\r\n9,3")
+        );
+        assert_eq!(
+            solve_equation("function-values 2**x @ 1/2").as_deref(),
+            Ok("x,近似值\r\n0.5,1.4142135623731")
+        );
+        assert_eq!(
+            solve_equation("函数值 x @ 1,,2"),
+            Err(EquationError::FunctionValuesArguments)
+        );
+        let over_limit = format!("函数值 x @ 1{}", ",1".repeat(64));
+        assert_eq!(
+            solve_equation(&over_limit),
+            Err(EquationError::FunctionValuesArguments)
         );
     }
 
