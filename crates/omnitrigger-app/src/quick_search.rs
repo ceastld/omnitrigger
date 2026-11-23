@@ -1052,9 +1052,9 @@ impl Results {
                     Self::text_value(solve_linear_system(term).map_err(ValueError::Equation))
                 }
                 Scope::LinearFit => {
-                    if let Some(points) = linear_fit::scatter_arguments(term) {
+                    if let Some(plot) = linear_fit::plot_request(term) {
                         Self::Value(
-                            linear_fit::calculate_scatter(points)
+                            linear_fit::calculate_plot(plot)
                                 .map(|(text, plot)| ResultValue {
                                     text,
                                     kind: ValueKind::Scatter(plot),
@@ -2693,15 +2693,11 @@ impl QuickSearch {
                 .flex_col()
                 .gap(px(8.))
                 .child(
-                    row.justify_between()
-                        .child(format!("{} 个数据点", plot.point_count()))
-                        .child(
-                            button("copy-scatter", "复制 CSV  Enter", Tone::Primary, true)
-                                .flex_none()
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.confirm(window, cx)),
-                                ),
-                        ),
+                    row.justify_between().child(plot.legend()).child(
+                        button("copy-scatter", "复制 CSV  Enter", Tone::Primary, true)
+                            .flex_none()
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    ),
                 )
                 .child(plot.render()),
             Results::Value(Ok(output)) => {
@@ -3858,6 +3854,23 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn polynomial_plot_preserves_the_full_exact_residual_table() {
+        let source = "2 @ -1,2; 0,0; 1,2; 0,2";
+        let plot = for_query(&format!("拟合: 曲线图 {source}"), &[]);
+        let expected = calculate_linear_fit(&format!("多项式残差 {source}")).unwrap();
+        assert!(matches!(
+            &plot,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.has_curve() && plot.point_count() == 4
+        ));
+        assert_eq!(plot.refillable_text(), Some(expected.as_str()));
+        assert_eq!(
+            calculate_linear_fit(&format!("fit-plot {source}")).as_deref(),
+            Ok(expected.as_str())
+        );
     }
 
     #[test]

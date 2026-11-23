@@ -1,4 +1,4 @@
-use gpui::{canvas, div, fill, point, prelude::*, px, size, Bounds, Div};
+use gpui::{canvas, div, fill, point, prelude::*, px, size, Bounds, Div, PathBuilder};
 use num_bigint::BigInt;
 use num_rational::BigRational;
 
@@ -13,31 +13,37 @@ const PLOT_PADDING: f32 = 9.;
 #[derive(PartialEq, Eq)]
 pub(super) struct ScatterPlot {
     locations: Vec<(u16, u16)>,
+    curve: Vec<(u16, u16)>,
     x: [String; 2],
     y: [String; 2],
 }
 
 impl ScatterPlot {
     pub(super) fn from_points(points: &[(BigRational, BigRational)]) -> Self {
-        let x = points.iter().map(|(x, _)| x);
-        let y = points.iter().map(|(_, y)| y);
+        Self::from_series(points, &[])
+    }
+
+    pub(super) fn from_series(
+        points: &[(BigRational, BigRational)],
+        curve: &[(BigRational, BigRational)],
+    ) -> Self {
+        let x = points.iter().chain(curve).map(|(x, _)| x);
+        let y = points.iter().chain(curve).map(|(_, y)| y);
         let min_x = x.clone().min().expect("散点图至少有两个数据点");
         let max_x = x.max().expect("散点图至少有两个数据点");
         let min_y = y.clone().min().expect("散点图至少有两个数据点");
         let max_y = y.max().expect("散点图至少有两个数据点");
         let range_x = max_x - min_x;
         let range_y = max_y - min_y;
-        let locations = points
-            .iter()
-            .map(|(x, y)| {
-                (
-                    normalized_position(x, min_x, &range_x),
-                    normalized_position(y, min_y, &range_y),
-                )
-            })
-            .collect();
+        let place = |(x, y): &(BigRational, BigRational)| {
+            (
+                normalized_position(x, min_x, &range_x),
+                normalized_position(y, min_y, &range_y),
+            )
+        };
         Self {
-            locations,
+            locations: points.iter().map(place).collect(),
+            curve: curve.iter().map(place).collect(),
             x: [min_x.to_string(), max_x.to_string()],
             y: [min_y.to_string(), max_y.to_string()],
         }
@@ -47,10 +53,37 @@ impl ScatterPlot {
         self.locations.len()
     }
 
+    pub(super) fn has_curve(&self) -> bool {
+        !self.curve.is_empty()
+    }
+
+    pub(super) fn legend(&self) -> Div {
+        let count = format!("{} 个观测点", self.point_count());
+        div()
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .child(div().size(px(6.)).rounded(px(3.)).bg(rgb(theme::ACCENT)))
+            .child(count)
+            .when(self.has_curve(), |legend| {
+                legend
+                    .child(
+                        div()
+                            .ml(px(5.))
+                            .w(px(14.))
+                            .h(px(2.))
+                            .bg(rgb(theme::ACCENT_2)),
+                    )
+                    .child("拟合曲线")
+            })
+    }
+
     pub(super) fn render(&self) -> Div {
         let points = self.locations.clone();
+        let curve = self.curve.clone();
         let grid = rgb(theme::BORDER_MID);
         let dot = rgb(theme::ACCENT);
+        let line = rgb(theme::ACCENT_2);
         let plot = canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
@@ -74,10 +107,30 @@ impl ScatterPlot {
                         grid,
                     ));
                 }
-                for &(x, y) in &points {
+                let place = |&(x, y): &(u16, u16)| {
                     let x = f32::from(x) / f32::from(POSITION_STEPS);
                     let y = f32::from(y) / f32::from(POSITION_STEPS);
-                    let center = point(origin.x + width * x, origin.y + height * (1. - y));
+                    point(origin.x + width * x, origin.y + height * (1. - y))
+                };
+                if let Some((first, rest)) = curve.split_first() {
+                    let start = place(first);
+                    if rest.is_empty() {
+                        window.paint_quad(fill(
+                            Bounds::new(start - point(px(5.), px(1.)), size(px(10.), px(2.))),
+                            line,
+                        ));
+                    } else {
+                        let mut path = PathBuilder::stroke(px(2.));
+                        path.move_to(start);
+                        for point in rest {
+                            path.line_to(place(point));
+                        }
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, line);
+                        }
+                    }
+                }
+                for center in points.iter().map(place) {
                     window.paint_quad(
                         fill(
                             Bounds::new(center - point(px(3.), px(3.)), size(px(6.), px(6.))),

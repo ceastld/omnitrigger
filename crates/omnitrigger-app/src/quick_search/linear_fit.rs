@@ -72,8 +72,13 @@ enum FitOutput {
 pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError> {
     let normalized = normalize(input);
     let input = normalized.trim();
-    if let Some(points) = scatter_arguments(input) {
-        return calculate_scatter(points).map(|(csv, _)| csv);
+    if let Some(plot) = plot_request(input) {
+        return match plot {
+            FitPlotRequest::Scatter(points) => {
+                scatter_points(points).map(|points| scatter_csv(&points))
+            }
+            FitPlotRequest::Polynomial(arguments) => polynomial_residuals(arguments),
+        };
     }
     let (points, output) = match input.split_once(char::is_whitespace) {
         Some((operation, rest))
@@ -196,18 +201,51 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
     Ok(format!("斜率 {slope} · 截距 {intercept}\nR² {r_squared}"))
 }
 
-pub(super) fn scatter_arguments(input: &str) -> Option<&str> {
-    let (operation, points) = input.trim().split_once(char::is_whitespace)?;
-    (operation == "散点图" || operation.eq_ignore_ascii_case("scatter")).then_some(points.trim())
+pub(super) enum FitPlotRequest<'a> {
+    Scatter(&'a str),
+    Polynomial(&'a str),
 }
 
-pub(super) fn calculate_scatter(input: &str) -> Result<(String, ScatterPlot), LinearFitError> {
+pub(super) fn plot_request(input: &str) -> Option<FitPlotRequest<'_>> {
+    let (operation, points) = input.trim().split_once(char::is_whitespace)?;
+    let points = points.trim();
+    if operation == "散点图" || operation.eq_ignore_ascii_case("scatter") {
+        Some(FitPlotRequest::Scatter(points))
+    } else if operation == "曲线图" || operation.eq_ignore_ascii_case("fit-plot") {
+        Some(FitPlotRequest::Polynomial(points))
+    } else {
+        None
+    }
+}
+
+pub(super) fn calculate_plot(
+    request: FitPlotRequest<'_>,
+) -> Result<(String, ScatterPlot), LinearFitError> {
+    match request {
+        FitPlotRequest::Scatter(input) => {
+            let points = scatter_points(input)?;
+            Ok((scatter_csv(&points), ScatterPlot::from_points(&points)))
+        }
+        FitPlotRequest::Polynomial(input) => {
+            let input = normalize(input);
+            let fit = fit_polynomial(&input)?;
+            let curve = sample_polynomial_curve(&fit)?;
+            let plot = ScatterPlot::from_series(&fit.points, &curve);
+            Ok((polynomial_residual_csv(&fit)?, plot))
+        }
+    }
+}
+
+fn scatter_points(input: &str) -> Result<Vec<Point>, LinearFitError> {
     let input = normalize(input);
-    let points = parse_paired_points(input.trim())?.collect::<Result<Vec<_>, _>>()?;
+    let points = parse_paired_points(input.trim())?;
+    points.collect()
+}
+
+fn scatter_csv(points: &[Point]) -> String {
     let mut rows = vec!["x,y".to_owned()];
     rows.extend(points.iter().map(|(x, y)| format!("{x},{y}")));
-    let plot = ScatterPlot::from_points(&points);
-    Ok((rows.join("\r\n"), plot))
+    rows.join("\r\n")
 }
 
 fn fit_through_origin(points: &str) -> Result<String, LinearFitError> {
@@ -469,14 +507,34 @@ fn fit_polynomial_coefficients(
 
 fn polynomial_residuals(input: &str) -> Result<String, LinearFitError> {
     let fit = fit_polynomial(input)?;
+    polynomial_residual_csv(&fit)
+}
+
+fn polynomial_residual_csv(fit: &PolynomialFit) -> Result<String, LinearFitError> {
     let mut rows = vec!["x,实际值,拟合值,残差".to_owned()];
-    for (x, actual) in fit.points {
-        let predicted = polynomial_fit_value(&fit.coefficients, &x)?;
-        let residual = &actual - &predicted;
+    for (x, actual) in &fit.points {
+        let predicted = polynomial_fit_value(&fit.coefficients, x)?;
+        let residual = actual - &predicted;
         check_size([&residual])?;
         rows.push(format!("{x},{actual},{predicted},{residual}"));
     }
     Ok(rows.join("\r\n"))
+}
+
+fn sample_polynomial_curve(fit: &PolynomialFit) -> Result<Vec<Point>, LinearFitError> {
+    const SEGMENTS: u32 = 48;
+    let xs = fit.points.iter().map(|(x, _)| x);
+    let min = xs.clone().min().expect("拟合至少含两个数据点");
+    let max = xs.max().expect("拟合至少含两个数据点");
+    let segments = if min == max { 0 } else { SEGMENTS };
+    let step = (max - min) / BigInt::from(SEGMENTS);
+    (0..=segments)
+        .map(|index| {
+            let x = min + &step * BigInt::from(index);
+            let y = polynomial_fit_value(&fit.coefficients, &x)?;
+            Ok((x, y))
+        })
+        .collect()
 }
 
 fn polynomial_fit_value(
