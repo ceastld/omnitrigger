@@ -3683,6 +3683,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位列中无效的 JSON 值",
+        query: "CSV: 检查JSON列 [\"数据\"] 编号,数据\nA,null\nB,\"{\"\"x\"\":1}\"\nC,True\nD,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把选中的 CSV 数值列统一成固定小数位",
         query: "CSV: 小数列 [[\"金额\",3],2] 编号,金额,比率\n001,2.675,1/8\n002,,-0.005",
     },

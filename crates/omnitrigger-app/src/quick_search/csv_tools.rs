@@ -427,6 +427,7 @@ enum ColumnValidation {
         upper: BigRational,
     },
     AllowedValues(HashSet<String>),
+    Json,
 }
 
 #[derive(Deserialize)]
@@ -458,6 +459,7 @@ impl ColumnValidation {
             Self::Pattern(_) => "正则",
             Self::NumericRange { .. } => "数值范围",
             Self::AllowedValues(_) => "允许值",
+            Self::Json => "JSON",
         }
     }
 
@@ -467,6 +469,7 @@ impl ColumnValidation {
             Self::Date => parse_complete_date(cell).is_ok(),
             Self::Pattern(pattern) => pattern.is_match(cell),
             Self::AllowedValues(values) => values.contains(cell),
+            Self::Json => serde_json::from_str::<&RawValue>(cell).is_ok(),
             Self::NumericRange { lower, upper } => {
                 parse_fraction_literal(cell).is_ok_and(|value| lower <= &value && &value <= upper)
             }
@@ -957,15 +960,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CountEmptyCells(columns)
         }
-        "检查数值列" | "check-numeric-columns" | "检查日期列" | "check-date-columns" => {
+        "检查数值列"
+        | "check-numeric-columns"
+        | "检查日期列"
+        | "check-date-columns"
+        | "检查json列"
+        | "check-json-columns" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            let validation = if matches!(operation.as_str(), "检查日期列" | "check-date-columns")
-            {
-                ColumnValidation::Date
-            } else {
-                ColumnValidation::Number
+            let validation = match operation.as_str() {
+                "检查日期列" | "check-date-columns" => ColumnValidation::Date,
+                "检查json列" | "check-json-columns" => ColumnValidation::Json,
+                _ => ColumnValidation::Number,
             };
             Operation::CheckColumns(columns, validation)
         }
@@ -1020,6 +1027,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                         let validation = match kind.to_ascii_lowercase().as_str() {
                             "数值" | "number" => ColumnValidation::Number,
                             "日期" | "date" => ColumnValidation::Date,
+                            "json" => ColumnValidation::Json,
                             _ => return Err(invalid),
                         };
                         Ok((column, validation))
@@ -3021,7 +3029,9 @@ fn check_columns(
         }
         ColumnValidation::Date => CsvError::DateIssuesTooLarge,
         ColumnValidation::Pattern(_) => CsvError::RegexIssuesTooLarge,
-        ColumnValidation::AllowedValues(_) => CsvError::ValidationRulesTooLarge,
+        ColumnValidation::AllowedValues(_) | ColumnValidation::Json => {
+            CsvError::ValidationRulesTooLarge
+        }
     };
     let rules: Vec<_> = columns
         .into_iter()
@@ -5163,6 +5173,20 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn checks_full_json_values_with_locations_for_invalid_cells() {
+        let input =
+            "检查JSON列 [\"数据\"] 编号,数据\nA,null\nB,\"{\"\"x\"\":1}\"\nC,True\nD,\nE,\"[1,]\"";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n3,2,数据,True\r\n4,2,数据,\"\"\r\n5,2,数据,\"[1,]\""),
+        );
+        assert_eq!(
+            transform_csv("检查规则 [[1,\"JSON\"]] 数据\nfalse\n普通文本").as_deref(),
+            Ok("数据行,列号,列名,规则号,规则,内容\r\n2,1,数据,1,JSON,普通文本"),
+        );
     }
 
     #[test]
