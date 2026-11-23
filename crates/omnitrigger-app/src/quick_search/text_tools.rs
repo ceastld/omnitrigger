@@ -27,7 +27,7 @@ use super::{
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 512;
 const MAX_COMPARISON_GRAPHEMES: usize = 512;
-pub(super) const MAX_EDIT_DISTANCE_WORK: usize = 1024 * 1024;
+pub(super) const MAX_TEXT_COMPARISON_WORK: usize = 1024 * 1024;
 const MAX_PIPELINE_STEPS: usize = 8;
 
 #[derive(Clone, Copy)]
@@ -77,6 +77,7 @@ pub(super) enum TextError {
     TooManyEditGraphemes,
     TooManyCommonSubstringGraphemes,
     EditDistanceWorkLimit,
+    CommonSubstringWorkLimit,
     EmptyDelimiter,
     InvalidColumn,
     CsvColumnCount,
@@ -129,6 +130,7 @@ impl TextError {
             Self::TooManyEditGraphemes => "编辑距离最多支持每段 512 个字素簇",
             Self::TooManyCommonSubstringGraphemes => "公共片段最多支持每段 512 个字素簇",
             Self::EditDistanceWorkLimit => "编辑距离计算量过大，请缩小数据范围",
+            Self::CommonSubstringWorkLimit => "公共片段计算量过大，请缩小数据范围",
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
@@ -1526,12 +1528,21 @@ fn join_distinct_lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
 
 fn edit_distance(input: &str) -> Result<String, TextError> {
     let (first, second) = read_text_pair(input)?;
-    let mut remaining_work = MAX_EDIT_DISTANCE_WORK;
+    let mut remaining_work = MAX_TEXT_COMPARISON_WORK;
     Ok(grapheme_edit_distance(&first, &second, &mut remaining_work)?.to_string())
 }
 
 fn common_substring(input: &str) -> Result<String, TextError> {
     let (first, second) = read_text_pair(input)?;
+    let mut remaining_work = MAX_TEXT_COMPARISON_WORK;
+    grapheme_common_substring(&first, &second, &mut remaining_work).map(str::to_owned)
+}
+
+pub(super) fn grapheme_common_substring<'a>(
+    first: &'a str,
+    second: &str,
+    remaining_work: &mut usize,
+) -> Result<&'a str, TextError> {
     let first_graphemes: Vec<_> = first
         .grapheme_indices(true)
         .take(MAX_COMPARISON_GRAPHEMES + 1)
@@ -1543,6 +1554,10 @@ fn common_substring(input: &str) -> Result<String, TextError> {
     if first_graphemes.len().max(second_graphemes.len()) > MAX_COMPARISON_GRAPHEMES {
         return Err(TextError::TooManyCommonSubstringGraphemes);
     }
+    let work = (first_graphemes.len() + 1) * (second_graphemes.len() + 1);
+    *remaining_work = remaining_work
+        .checked_sub(work)
+        .ok_or(TextError::CommonSubstringWorkLimit)?;
 
     let mut suffix_lengths = vec![0; second_graphemes.len() + 1];
     let mut best_length = 0;
@@ -1568,7 +1583,7 @@ fn common_substring(input: &str) -> Result<String, TextError> {
             .get(index)
             .map_or(first.len(), |&(start, _)| start)
     };
-    Ok(first[byte_offset(best_end - best_length)..byte_offset(best_end)].to_owned())
+    Ok(&first[byte_offset(best_end - best_length)..byte_offset(best_end)])
 }
 
 pub(super) fn grapheme_edit_distance(

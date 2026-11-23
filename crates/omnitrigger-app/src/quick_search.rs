@@ -2624,7 +2624,12 @@ impl QuickSearch {
                 let compact = result.contains('\n')
                     || value_preview::columns(result.graphemes(true).take(large_text_columns + 1))
                         > large_text_columns;
-                let value = if compact {
+                let value = if result.is_empty() {
+                    value
+                        .text_size(px(14.))
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .child("空文本")
+                } else if compact {
                     let start = self
                         .expanded_value_pages
                         .as_ref()

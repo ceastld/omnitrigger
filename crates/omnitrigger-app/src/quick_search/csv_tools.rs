@@ -49,9 +49,9 @@ use super::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
     text_tools::{
-        compare_natural, compile_regex, grapheme_edit_distance, newline_pattern, regex_group_index,
-        replace_literal_matches, replace_regex_matches, GraphemeRange, TextError, TextLengthUnit,
-        UnicodeForm, MAX_EDIT_DISTANCE_WORK,
+        compare_natural, compile_regex, grapheme_common_substring, grapheme_edit_distance,
+        newline_pattern, regex_group_index, replace_literal_matches, replace_regex_matches,
+        GraphemeRange, TextError, TextLengthUnit, UnicodeForm, MAX_TEXT_COMPARISON_WORK,
     },
     url_encoding::url_parameter_values,
 };
@@ -141,6 +141,7 @@ pub(super) enum CsvError {
     MovingColumnArguments,
     UnicodeColumnArguments,
     EditDistanceColumnArguments,
+    CommonSubstringColumnArguments,
     MovingQuantileColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
@@ -322,6 +323,9 @@ impl CsvError {
             Self::EditDistanceColumnArguments => {
                 "填写新列名和两个文本来源列，例如 [\"距离\",\"原文\",\"现文\"]"
             }
+            Self::CommonSubstringColumnArguments => {
+                "填写新列名和两个文本来源列，例如 [\"片段\",\"原名\",\"现名\"]"
+            }
             Self::MovingQuantileColumnArguments => {
                 "填写新列名、数值列、分组列、窗口大小和分位概率，例如 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]"
             }
@@ -389,6 +393,11 @@ enum FillDirection {
     Up,
 }
 
+enum TextComparison {
+    EditDistance,
+    CommonSubstring,
+}
+
 enum Operation {
     Validate,
     PadRows,
@@ -406,7 +415,7 @@ enum Operation {
     DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
     UnicodeNormalizedColumn(String, ColumnReference, UnicodeForm),
-    EditDistanceColumn(String, ColumnReference, ColumnReference),
+    CompareTextColumns(String, ColumnReference, ColumnReference, TextComparison),
     FillEmptyCells(Vec<ColumnReference>, FillDirection),
     InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
@@ -814,17 +823,30 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::UnicodeNormalizedColumn(name, source, form)
         }
-        "编辑距离列" | "edit-distance-column" => {
-            let ((name, first, second), data) =
-                json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
-                    input,
+        comparison @ ("编辑距离列"
+        | "edit-distance-column"
+        | "公共片段列"
+        | "common-substring-column") => {
+            let (comparison, argument_error) = match comparison {
+                "编辑距离列" | "edit-distance-column" => (
+                    TextComparison::EditDistance,
                     CsvError::EditDistanceColumnArguments,
-                )?;
+                ),
+                _ => (
+                    TextComparison::CommonSubstring,
+                    CsvError::CommonSubstringColumnArguments,
+                ),
+            };
+            let ((name, first, second), data) = json_argument_and_data::<(
+                String,
+                ColumnReference,
+                ColumnReference,
+            )>(input, argument_error)?;
             if name.trim().is_empty() || name.contains('\0') {
-                return Err(CsvError::EditDistanceColumnArguments);
+                return Err(argument_error);
             }
             input = data;
-            Operation::EditDistanceColumn(name, first, second)
+            Operation::CompareTextColumns(name, first, second, comparison)
         }
         kind @ ("向下填充" | "fill-down" | "向上填充" | "fill-up") => {
             let (columns, data) =
@@ -1725,22 +1747,30 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 Ok(form.normalize(&row[source]))
             })
         }
-        Operation::EditDistanceColumn(name, first, second) => {
+        Operation::CompareTextColumns(name, first, second, comparison) => {
             let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
             let first = first.resolve(header)?;
             let second = second.resolve(header)?;
             validate_column_width(&[first, second], header.len())?;
-            let mut remaining_work = MAX_EDIT_DISTANCE_WORK;
+            let mut remaining_work = MAX_TEXT_COMPARISON_WORK;
             let mut row_number = 0;
             write_appended_column(header, records, &name, |row| {
                 row_number += 1;
-                let distance =
-                    grapheme_edit_distance(&row[first], &row[second], &mut remaining_work)
-                        .map_err(|error| CsvError::DataRowValue {
-                            row: row_number,
-                            cause: error.message(),
-                        })?;
-                Ok(distance.to_string())
+                let (first, second) = (&row[first], &row[second]);
+                match comparison {
+                    TextComparison::EditDistance => {
+                        grapheme_edit_distance(first, second, &mut remaining_work)
+                            .map(|distance| Cow::Owned(distance.to_string()))
+                    }
+                    TextComparison::CommonSubstring => {
+                        grapheme_common_substring(first, second, &mut remaining_work)
+                            .map(Cow::Borrowed)
+                    }
+                }
+                .map_err(|error| CsvError::DataRowValue {
+                    row: row_number,
+                    cause: error.message(),
+                })
             })
         }
         Operation::FillEmptyCells(columns, direction) => {
@@ -5183,6 +5213,42 @@ mod tests {
                 row: 4,
                 cause: TextError::EditDistanceWorkLimit.message()
             }),
+        );
+    }
+
+    #[test]
+    fn appends_longest_common_fragments_to_csv_and_bounds_the_work() {
+        assert_eq!(
+            transform_csv(concat!(
+                "公共片段列 [\"片段\",\"原名\",3] 编号,原名,现名\n",
+                "001,北京报告2024.txt,上海报告2024.csv\n",
+                "002,ab-cd,cd+ab\n",
+                "003,猫👩‍💻,狗👩‍💻\n",
+                "004,,茶\n",
+                "005,\"a,b!\",\"a,b?\""
+            ))
+            .as_deref(),
+            Ok(concat!(
+                "编号,原名,现名,片段\r\n",
+                "001,北京报告2024.txt,上海报告2024.csv,报告2024.\r\n",
+                "002,ab-cd,cd+ab,ab\r\n",
+                "003,猫👩‍💻,狗👩‍💻,👩‍💻\r\n",
+                "004,\"\",茶,\"\"\r\n",
+                "005,\"a,b!\",\"a,b?\",\"a,b\""
+            ))
+        );
+        assert_eq!(
+            transform_csv(r#"公共片段列 ["前",1,2] 前,后"#),
+            Err(CsvError::HeaderNameConflict)
+        );
+        let repeated = format!("\n{},{}", "a".repeat(512), "b".repeat(512));
+        let input = format!("公共片段列 [\"片段\",1,2] 前,后{}", repeated.repeat(4));
+        assert_eq!(
+            transform_csv(&input),
+            Err(CsvError::DataRowValue {
+                row: 4,
+                cause: TextError::CommonSubstringWorkLimit.message()
+            })
         );
     }
 

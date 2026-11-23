@@ -3491,6 +3491,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把两个文本列逐行共有的最长片段写入新列",
+        query: "CSV: 公共片段列 [\"片段\",\"原名\",\"现名\"]\n编号,原名,现名\n001,北京报告2024.txt,上海报告2024.csv\n002,ab-cd,cd+ab\n003,,茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按字素位置截取 CSV 单元格的内容",
         query: "CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]\n编号,文本\n1,A👩‍💻e\u{301}Z\n2,北\n3,",
     },
