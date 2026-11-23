@@ -5,10 +5,12 @@ use chrono::NaiveDate;
 use super::{
     calendar::calculate_date,
     csv_tools::{append_bounded_csv_row, transform_csv},
+    fraction::simplify_fraction,
     json_tools::transform_json,
     operators::json_argument_and_tail,
     path_tools::path_component,
     scope::{scoped_query, Scope},
+    statistics::calculate_statistics,
     text_tools::transform_text,
     toml_tools::transform_toml,
     url_encoding::convert_url_component,
@@ -16,7 +18,8 @@ use super::{
 
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
-const STEP_SYNTAX: &str = "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径或日期命令";
+const STEP_SYNTAX: &str =
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、分数或统计命令";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -68,6 +71,8 @@ pub(super) fn transform_data_pipeline(
             Scope::UrlEncoding => convert_url_component(&query).map_err(|cause| cause.message()),
             Scope::Path => path_component(&query).map_err(|cause| cause.message()),
             Scope::Date => calculate_date(&query, today).map_err(|cause| cause.message()),
+            Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
+            Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
         }
         .map_err(error)?;
@@ -172,6 +177,27 @@ mod tests {
             run_pipeline(r#"["TOML: 转JSON","JSON: 取值 /port"] port = 8000"#).as_deref(),
             Ok("8000"),
         );
+    }
+
+    #[test]
+    fn runs_exact_calculations_and_statistics_on_data_from_a_previous_step() {
+        let table_query = concat!(
+            r#"["CSV: 选列 2","文本: 间隔取行 2,1","统计: 分位数 50%"]"#,
+            "\n名称,金额\n茶,1/2\n咖啡,5/2\n豆浆,3/2"
+        );
+        assert_eq!(run_pipeline(table_query).as_deref(), Ok("3/2"));
+        assert_eq!(
+            run_pipeline(concat!(
+                r#"["文本: 按行拼接 \"+\"","分数: 计算"]"#,
+                "\n1/3\n1/6"
+            ))
+            .as_deref(),
+            Ok("1/2"),
+        );
+        assert!(matches!(
+            run_pipeline(r#"["文本: 大写","分数: 计算"] tea"#),
+            Err(DataPipelineError::Step { index: 2, .. })
+        ));
     }
 
     #[test]
