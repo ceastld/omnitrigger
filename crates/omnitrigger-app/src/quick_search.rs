@@ -187,7 +187,7 @@ enum Results {
     Conversions(Vec<InputSuggestion>),
     ConversionTargets(Vec<InputSuggestion>),
     FileOptions(Vec<InputSuggestion>),
-    WindowOptions(Vec<InputSuggestion>),
+    FilterOptions(Vec<InputSuggestion>),
     Bookmarks(Vec<InputSuggestion>),
     BookmarksUnavailable(String),
     BookmarkNameInput(Option<String>),
@@ -721,7 +721,7 @@ impl Results {
                     || Self::Bookmarks(recent.bookmarks.matching(term)),
                     Self::BookmarksUnavailable,
                 ),
-                Scope::Triggers(filter) => search_triggers(triggers, term, filter),
+                Scope::Triggers(filter) => search_triggers(triggers, query, term, filter),
                 Scope::Wheels => Self::Destinations(
                     matching_wheels(wheels, term)
                         .into_iter()
@@ -1238,7 +1238,7 @@ impl Results {
             | Self::Conversions(items)
             | Self::ConversionTargets(items)
             | Self::FileOptions(items)
-            | Self::WindowOptions(items)
+            | Self::FilterOptions(items)
             | Self::Bookmarks(items) => Some(&items.get(selected)?.expression),
             _ => None,
         }
@@ -1324,7 +1324,7 @@ impl Results {
                 132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
             Self::FileOptions(items)
-            | Self::WindowOptions(items)
+            | Self::FilterOptions(items)
             | Self::Bookmarks(items)
             | Self::Calculations(items)
             | Self::Conversions(items)
@@ -1967,7 +1967,7 @@ impl QuickSearch {
             && !matches!(
                 self.results,
                 Results::FileOptions(_)
-                    | Results::WindowOptions(_)
+                    | Results::FilterOptions(_)
                     | Results::BookmarksUnavailable(_)
                     | Results::Value(Err(ValueError::InputTooLong))
             ))
@@ -2363,7 +2363,7 @@ impl QuickSearch {
                     | Results::Conversions(items)
                     | Results::ConversionTargets(items)
                     | Results::FileOptions(items)
-                    | Results::WindowOptions(items)
+                    | Results::FilterOptions(items)
                     | Results::Bookmarks(items) => items.len(),
                     Results::Value(_)
                     | Results::RefilledInput
@@ -2398,7 +2398,7 @@ impl QuickSearch {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
             Results::FileOptions(items)
-            | Results::WindowOptions(items)
+            | Results::FilterOptions(items)
             | Results::Bookmarks(items)
             | Results::Calculations(items)
             | Results::Conversions(items) => (items.len(), EXAMPLE_PAGE_SIZE),
@@ -2583,7 +2583,10 @@ impl QuickSearch {
             .children(visible.map(|(index, item)| {
                 let expression = item.expression.clone();
                 let (label, detail) = match item.label {
-                    Some(label) => (label.into(), Some(item.result.clone())),
+                    Some(label) => (
+                        label.into(),
+                        (!item.result.is_empty()).then(|| item.result.clone()),
+                    ),
                     None if bookmarks && !item.result.is_empty() => (
                         item.result.clone().into(),
                         Some(input_preview(expression.clone()).to_string()),
@@ -2818,7 +2821,7 @@ impl QuickSearch {
             Results::FileOptions(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("没有可追加的选项"),
-            Results::FileOptions(items) | Results::WindowOptions(items) => {
+            Results::FileOptions(items) | Results::FilterOptions(items) => {
                 self.render_input_suggestions(items, Icon::Layers, EXAMPLE_PAGE_SIZE, cx)
             }
             Results::Bookmarks(items) if items.is_empty() => {
@@ -5466,6 +5469,38 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn completes_trigger_filters_without_changing_previous_conditions() {
+        let Results::FilterOptions(options) = for_query("触发器: 状态=", &[]) else {
+            panic!("缺少状态选项");
+        };
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].label, Some("已启用"));
+        assert_eq!(options[1].label, Some("已停用"));
+
+        for (query, filled) in [
+            (
+                r#"已启用触发器： 输出=CSV 名称正则="^Open Ａ" INPUT＝ＫＥ"#,
+                r#"已启用触发器： 输出=CSV 名称正则="^Open Ａ" INPUT＝keyboard"#,
+            ),
+            ("触发器: 范围=指", "触发器: 范围=指定应用"),
+            ("触发器: 动作=快速搜", "触发器: 动作=快速搜索"),
+        ] {
+            let results = for_query(query, &[]);
+            assert_eq!(results.suggested_input(0), Some(filled), "{query}");
+            assert!(matches!(
+                for_query(filled, &[]),
+                Results::Destinations(_) | Results::Value(Ok(_))
+            ));
+        }
+        assert!(matches!(
+            for_query("已启用触发器: 状态=", &[]),
+            Results::Value(Err(ValueError::TriggerSearch(
+                TriggerSearchError::RepeatedFacet
+            )))
+        ));
     }
 
     #[test]

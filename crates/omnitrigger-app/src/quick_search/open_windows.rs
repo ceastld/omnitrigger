@@ -227,7 +227,7 @@ impl OpenWindowsIndex {
                 return if suggestions.is_empty() {
                     Results::OpenWindowsUnavailable(error.message().into())
                 } else {
-                    Results::WindowOptions(suggestions)
+                    Results::FilterOptions(suggestions)
                 };
             }
             Err(error) => return Results::OpenWindowsUnavailable(error.message().into()),
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn suggests_window_filter_values_and_preserves_earlier_conditions_verbatim() {
         let index = OpenWindowsIndex::Ready(Vec::new());
-        let Results::WindowOptions(choices) =
+        let Results::FilterOptions(choices) =
             index.results(r#"输出=CSV 进程="Example Tool.exe" 标题正则="^Budget Ａ" 排序＝"#)
         else {
             panic!("缺少窗口排序选项");
@@ -812,12 +812,12 @@ mod tests {
             r#"窗口: 输出=CSV 进程="Example Tool.exe" 标题正则="^Budget Ａ" 排序＝标题"#
         );
         assert_eq!(choices[1].label, Some("进程"));
-        let Results::WindowOptions(choices) = index.results("输出=JSON 状态=未") else {
+        let Results::FilterOptions(choices) = index.results("输出=JSON 状态=未") else {
             panic!("缺少窗口状态选项");
         };
         assert_eq!(choices.len(), 1);
         assert_eq!(choices[0].expression, "窗口: 输出=JSON 状态=未最小化");
-        let Results::WindowOptions(choices) = index.results("output=csv SORT=pr") else {
+        let Results::FilterOptions(choices) = index.results("output=csv SORT=pr") else {
             panic!("缺少英文排序选项");
         };
         assert_eq!(choices[0].expression, "窗口: output=csv SORT=process");

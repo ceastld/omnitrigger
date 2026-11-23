@@ -4,19 +4,20 @@ use crate::{
     assets::Icon,
     binding_context_label, browse_row, caps_for,
     settings::Binding,
-    trigger_browse::{self, Facet, FacetValue, Filter, StatusKind},
+    trigger_browse::{self, Facet, FacetValue, Filter, InputKind, ScopeKind, StatusKind},
 };
 
 use super::{
     csv_tools::append_bounded_csv_row, examples::search_key, operators::query_option_value,
-    text_tools::compile_regex, Destination, Results, ValueError,
+    text_tools::compile_regex, Destination, InputSuggestion, Results, ValueError,
+    INPUT_CHARACTER_LIMIT,
 };
 
 const TRIGGER_CSV_HEADER: &str = "名称,组合与条件,输入,动作,范围,启用状态";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TriggerSearchError {
-    InvalidValue(Facet),
+    InvalidValue { facet: Facet, start: usize },
     RepeatedFacet,
     CsvTooLarge,
     TitleRegex,
@@ -25,10 +26,12 @@ pub(super) enum TriggerSearchError {
 impl TriggerSearchError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::InvalidValue(Facet::Status) => "状态可用 已启用 或 已停用",
-            Self::InvalidValue(Facet::Scope) => "范围可用 所有应用 或 指定应用",
-            Self::InvalidValue(Facet::Input) => "输入可用 键盘、鼠标按键、滚轮或屏幕区域",
-            Self::InvalidValue(Facet::Action) => "动作填写触发器页的分类名称，例如 快速搜索",
+            Self::InvalidValue { facet, .. } => match facet {
+                Facet::Status => "状态可用 已启用 或 已停用",
+                Facet::Scope => "范围可用 所有应用 或 指定应用",
+                Facet::Input => "输入可用 键盘、鼠标按键、滚轮或屏幕区域",
+                Facet::Action => "动作填写触发器页的分类名称，例如 快速搜索",
+            },
             Self::RepeatedFacet => "每类筛选条件填写一次",
             Self::CsvTooLarge => "触发器 CSV 超过 1 MiB，请缩小筛选范围",
             Self::TitleRegex => "填写一个有效的名称正则表达式，含空格时用双引号包住",
@@ -86,10 +89,52 @@ struct TriggerQuery<'a> {
     title_regex: Option<Regex>,
 }
 
+fn facet_values(facet: Facet) -> impl Iterator<Item = FacetValue> {
+    facet
+        .options()
+        .into_iter()
+        .filter(|value| *value != FacetValue::Status(StatusKind::Unready))
+}
+
+fn facet_value_names(value: FacetValue) -> impl Iterator<Item = &'static str> {
+    let aliases: &[&str] = match value {
+        FacetValue::Status(StatusKind::Enabled) => &["enabled"],
+        FacetValue::Status(StatusKind::Disabled) => &["disabled"],
+        FacetValue::Scope(ScopeKind::Global) => &["全局", "global"],
+        FacetValue::Scope(ScopeKind::Scoped) => &["app", "scoped"],
+        FacetValue::Input(InputKind::Keyboard) => &["keyboard"],
+        FacetValue::Input(InputKind::MouseButton) => &["mouse"],
+        FacetValue::Input(InputKind::Wheel) => &["wheel"],
+        FacetValue::Input(InputKind::PointerRegion) => &["region"],
+        _ => &[],
+    };
+    std::iter::once(value.label()).chain(aliases.iter().copied())
+}
+
+fn filter_suggestions(
+    facet: Facet,
+    query_prefix: &str,
+    value_prefix: &str,
+) -> Vec<InputSuggestion> {
+    let prefix = search_key(value_prefix);
+    facet_values(facet)
+        .filter_map(|value| {
+            let name = facet_value_names(value).find(|name| name.starts_with(&prefix))?;
+            let expression = format!("{query_prefix}{name}");
+            (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then(|| InputSuggestion {
+                expression,
+                label: Some(name),
+                result: String::new(),
+            })
+        })
+        .collect()
+}
+
 fn parse_trigger_query(
     mut query: &str,
     inherited: Option<FacetValue>,
 ) -> Result<TriggerQuery<'_>, TriggerSearchError> {
+    let query_len = query.len();
     let mut filter = Filter::default();
     let mut title_regex = None;
     if let Some(value) = inherited {
@@ -119,24 +164,12 @@ fn parse_trigger_query(
         }
         let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
         let value = search_key(value);
-        let name = match (facet, value.as_str()) {
-            (Facet::Status, "enabled") => "已启用",
-            (Facet::Status, "disabled") => "已停用",
-            (Facet::Scope, "全局" | "global") => "所有应用",
-            (Facet::Scope, "app" | "scoped") => "指定应用",
-            (Facet::Input, "keyboard") => "键盘",
-            (Facet::Input, "mouse") => "鼠标按键",
-            (Facet::Input, "wheel") => "滚轮",
-            (Facet::Input, "region") => "屏幕区域",
-            _ => value.as_str(),
-        };
-        let value = facet
-            .options()
-            .into_iter()
-            .find(|value| {
-                value.label() == name && *value != FacetValue::Status(StatusKind::Unready)
-            })
-            .ok_or(TriggerSearchError::InvalidValue(facet))?;
+        let value = facet_values(facet)
+            .find(|option| facet_value_names(*option).any(|name| name == value))
+            .ok_or(TriggerSearchError::InvalidValue {
+                facet,
+                start: query_len - input.len(),
+            })?;
         filter.set(facet, Some(value));
         query = rest.trim_start();
     }
@@ -149,6 +182,7 @@ fn parse_trigger_query(
 
 pub(super) fn search_triggers(
     triggers: &[SearchTrigger],
+    full_query: &str,
     term: &str,
     inherited: Option<FacetValue>,
 ) -> Results {
@@ -157,6 +191,15 @@ pub(super) fn search_triggers(
     let query = if export { rest.trim_start() } else { term };
     let query = match parse_trigger_query(query, inherited) {
         Ok(parsed) => parsed,
+        Err(error @ TriggerSearchError::InvalidValue { facet, start }) => {
+            let (prefix, value) = full_query.split_at(full_query.len() - query.len() + start);
+            let suggestions = filter_suggestions(facet, prefix, value);
+            return if suggestions.is_empty() {
+                Results::Value(Err(ValueError::TriggerSearch(error)))
+            } else {
+                Results::FilterOptions(suggestions)
+            };
+        }
         Err(error) => return Results::Value(Err(ValueError::TriggerSearch(error))),
     };
     let matches = matching_triggers(
@@ -229,7 +272,7 @@ pub(super) fn matching_triggers<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trigger_browse::{ActionKind, InputKind, ScopeKind};
+    use crate::trigger_browse::ActionKind;
 
     #[test]
     fn parses_all_trigger_facets_and_keeps_the_chord_as_search_text() {
