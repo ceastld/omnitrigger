@@ -35,7 +35,11 @@ impl Example {
             let (_, data) = json_argument_and_tail::<Vec<serde::de::IgnoredAny>>(arguments)?;
             return (!data.is_empty()).then_some(self.query.len() - data.len());
         }
-        let (operation, arguments) = input.trim_start().split_once(char::is_whitespace)?;
+        let input = input.trim_start();
+        let (operation, arguments) = input.split_once(char::is_whitespace)?;
+        let named_operation = replaceable_tool_operations(scope)
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(operation));
         if !matches!(
             scope,
             Scope::Json
@@ -46,13 +50,16 @@ impl Example {
                 | Scope::Path
                 | Scope::Uuid
                 | Scope::Ulid
-        ) && !replaceable_tool_operations(scope)
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(operation))
+                | Scope::Circuit
+        ) && !named_operation
         {
             return None;
         }
-        let arguments = arguments.trim_start();
+        let arguments = if scope == Scope::Circuit && !named_operation {
+            input
+        } else {
+            arguments.trim_start()
+        };
         (!arguments.is_empty()).then_some(self.query.len() - arguments.len())
     }
 }
@@ -4789,6 +4796,15 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "加权平均",
         ],
         Scope::Tempo => &["时长", "速度", "拍数"],
+        Scope::Circuit => &[
+            "串联",
+            "并联",
+            "分压",
+            "负载分压",
+            "分流",
+            "耗电",
+            "电池能量",
+        ],
         Scope::Solid => &[
             "圆柱",
             "圆锥",
@@ -4816,6 +4832,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Pitch
         | Scope::Decibel
         | Scope::Tempo
+        | Scope::Circuit
         | Scope::Solid
             if !term.is_empty()
                 && replaceable_tool_operations(scope).iter().any(|operation| {
@@ -4906,19 +4923,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "序列",
                 ]
                 .into_iter()
-                .any(|operation| operation.starts_with(term)) => {}
-        Scope::Circuit
-            if !term.is_empty()
-                && [
-                    "串联",
-                    "并联",
-                    "分压",
-                    "负载分压",
-                    "分流",
-                    "耗电",
-                    "电池能量",
-                ]
-                .iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Equation
             if !term.is_empty()
@@ -5223,6 +5227,22 @@ mod tests {
         ] {
             assert!(tool_operation_examples(scope, prefix).is_some());
             assert_eq!(tool_operation_examples(scope, with_argument), None);
+        }
+    }
+
+    #[test]
+    fn selects_the_electrical_values_in_circuit_examples() {
+        for (term, expected) in [
+            ("", "5 V, 20 Ω"),
+            ("分流", "6 mA @ 1 kΩ,2 kΩ"),
+            ("负载", "12 V @ 1 kΩ,2 kΩ,2 kΩ"),
+        ] {
+            let items = tool_operation_examples(Scope::Circuit, term).unwrap();
+            let example = &EXAMPLES[items[0]];
+            assert_eq!(
+                &example.query[example.argument_start().unwrap()..],
+                expected
+            );
         }
     }
 
