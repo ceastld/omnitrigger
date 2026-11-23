@@ -16,9 +16,11 @@ use omnitrigger_windows::{
 };
 
 use super::{
-    conversion::exact_byte_quantity, csv_tools::csv_cell, path_tools::file_url,
-    text_tools::compare_natural, title_rank, Destination, InputSuggestion, Results,
-    INPUT_CHARACTER_LIMIT,
+    conversion::exact_byte_quantity,
+    csv_tools::csv_cell,
+    path_tools::file_url,
+    text_tools::{compare_natural, compile_regex},
+    title_rank, Destination, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
 };
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -42,6 +44,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("按后缀", "相同扩展名的文件排在一起"),
     ("任一名称=预算,发票", "名称只需包含其中一个片段"),
     ("排除名称=草稿,副本", "跳过名称中含有指定文字的项"),
+    (r"名称正则=^报告[0-9]+\.pdf$", "按正则表达式筛选名称"),
     ("前=10", "取排序后的前 10 项"),
     ("路径列表", "每行一个绝对路径"),
     ("名称列表", "每行一个名称"),
@@ -255,6 +258,10 @@ impl LocalFilesIndex {
             Ok(entries) => entries,
             Err(error) => return Results::LocalFilesUnavailable(error.clone()),
         };
+        let name_regex = match query.name_regex.map(compile_regex).transpose() {
+            Ok(pattern) => pattern,
+            Err(error) => return Results::LocalFilesUnavailable(error.message().into()),
+        };
         let filter = if wildcard_pattern(query.filter).is_some() {
             String::new()
         } else {
@@ -270,6 +277,9 @@ impl LocalFilesIndex {
                 matches!(entry.kind, "file" | "directory")
                     && matches_extensions(entry, extensions.as_ref(), excluded_extensions.as_ref())
                     && query.matches_dates(entry)
+                    && name_regex
+                        .as_ref()
+                        .is_none_or(|pattern| pattern.is_match(&entry.name))
                     && query.size_bounds.is_none_or(|(minimum, maximum)| {
                         entry
                             .size_bytes
@@ -659,6 +669,7 @@ struct FileQuery<'a> {
     excluded_extensions: Option<&'a str>,
     any_names: Option<&'a str>,
     excluded_names: Option<&'a str>,
+    name_regex: Option<&'a str>,
     limit: Option<usize>,
     output: FileOutput,
 }
@@ -794,6 +805,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
     let mut excluded_extensions = None;
     let mut any_names = None;
     let mut excluded_names = None;
+    let mut name_regex = None;
     let mut limit = None;
     let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
@@ -880,6 +892,9 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
                     "排除名称" | "exclude-name" => {
                         set_name_filter(&mut excluded_names, quantity)?
                     }
+                    "名称正则" | "name-regex" if name_regex.is_none() => {
+                        name_regex = Some(quantity)
+                    }
                     "前" | "limit" if limit.is_none() => {
                         limit = Some(
                             quantity
@@ -963,6 +978,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             excluded_extensions,
             any_names,
             excluded_names,
+            name_regex,
             limit,
             output,
         })
@@ -2015,6 +2031,45 @@ mod tests {
         for invalid in ["任一名称=", "任一名称=a，，b", "任一名称=a any-name=b"] {
             assert!(split_query(&format!("{original} | {invalid}")).is_none());
         }
+    }
+
+    #[test]
+    fn filters_original_file_names_by_regex_without_reloading_the_directory() {
+        let mut index = LocalFilesIndex::default();
+        let original = r"C:\Work | Budget";
+        let load = index.request(Some(original)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("Budget 02.txt", "file"),
+                entry("Budget 2.txt", "file"),
+                entry("Budget 07.TXT", "file"),
+                entry("Notes 02.txt", "file"),
+                entry("Budget 05 Archive", "directory"),
+            ]),
+        ));
+        let query = format!(r"{original} | 名称正则=\s[0-9]{{2}}\.txt$ 名称列表");
+        assert!(index.request(Some(&query)).is_none());
+        assert!(index.results(&query) == Results::text_value(Ok("Budget 02.txt".into())));
+        let query = format!(r"{original} | NAME-REGEX=(?i)^\w+\s[0-9]{{2}}\.txt$ 名称列表");
+        assert!(index.request(Some(&query)).is_none());
+        assert!(
+            index.results(&query) == Results::text_value(Ok("Budget 02.txt\nBudget 07.TXT".into()))
+        );
+        for pattern in ["", "("] {
+            let query = format!("{original} | 名称正则={pattern}");
+            assert!(matches!(
+                index.results(&query),
+                Results::LocalFilesUnavailable(_)
+            ));
+        }
+        assert!(split_query(r"C:\Work | | 名称正则=a name-regex=b").is_none());
+        let Results::FileOptions(items) = index.results(r"C:\Work | | ?") else {
+            panic!("缺少文件选项");
+        };
+        assert!(items
+            .iter()
+            .any(|item| item.label == Some(r"名称正则=^报告[0-9]+\.pdf$")));
     }
 
     #[test]
