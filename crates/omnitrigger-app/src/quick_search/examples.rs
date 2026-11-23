@@ -825,6 +825,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行换算节拍速度并导出输入与结果",
+        query: "批量换算: 节拍对照 速度 1.5秒 @ 3\n速度 2秒 @ 3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "逐行换算分贝、功率比和幅度比",
+        query: "批量换算: 分贝 功率比 100\n转幅度比 20 dB",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "逐行计算立体表面积和体积并导出 CSV",
+        query: "批量换算: 立体对照 圆柱 3,5\n球 1/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
     },
@@ -4654,6 +4669,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "日期对照",
                     "颜色对照",
                     "进制对照",
+                    "节拍对照",
+                    "分贝对照",
+                    "立体对照",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term))) => {}

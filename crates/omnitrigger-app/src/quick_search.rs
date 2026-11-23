@@ -79,7 +79,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
-use batch::{batch_arguments, map_batch_csv, map_batch_lines, BatchError};
+use batch::{batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, parse_complete_date, DateError};
 use cidr::{calculate_cidr, CidrError};
@@ -398,6 +398,7 @@ enum ValueError {
     BatchDate(BatchError<DateError>),
     BatchColor(BatchError<ColorError>),
     BatchRadix(BatchError<RadixError>),
+    BatchTool(BatchError<&'static str>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     Intervals(IntervalError),
@@ -507,6 +508,9 @@ impl ValueError {
                     ColorError::message,
                 );
             }
+            Self::BatchTool(error) => {
+                return batch_error_message(error, "逐行填写要计算的输入", std::convert::identity);
+            }
             Self::BatchRadix(error) => {
                 return batch_error_message(
                     error,
@@ -588,6 +592,7 @@ impl ValueError {
                 | Self::BatchDate(BatchError::Empty)
                 | Self::BatchColor(BatchError::Empty)
                 | Self::BatchRadix(BatchError::Empty)
+                | Self::BatchTool(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -852,6 +857,8 @@ impl Results {
                             map_batch_csv(arguments, "输入", convert_arbitrary_radix)
                                 .map_err(ValueError::BatchRadix),
                         )
+                    } else if let Some(result) = map_tool_batch(term) {
+                        Self::text_value(result.map_err(ValueError::BatchTool))
                     } else {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
                     }
@@ -3269,6 +3276,33 @@ mod tests {
             for_query("批量换算: 对", &[]).suggested_input(0),
             Some("批量换算: 对照 3 m to cm\n0xff to dec\n1 GiB to MiB")
         );
+    }
+
+    #[test]
+    fn runs_tempo_decibel_and_solid_tools_on_batch_inputs() {
+        for (query, expected) in [
+            (
+                "批量换算: 节拍 时长 120 BPM @ 3/2\n速度 1.5秒 @ 3",
+                "750 ms\n120 BPM",
+            ),
+            (
+                "批量换算: DECIBEL-CSV 功率比 100\n转幅度比 20 dB",
+                "输入,结果\r\n功率比 100,20 dB\r\n转幅度比 20 dB,10",
+            ),
+            (
+                "批量换算: 立体对照 圆柱 3,5\n球 1/2",
+                "输入,结果\r\n\"圆柱 3,5\",表面积 48π · 体积 45π\r\n球 1/2,表面积 π · 体积 π/6",
+            ),
+        ] {
+            assert!(
+                matches!(for_query(query, &[]), Results::Value(Ok(value)) if value.text == expected),
+                "{query}"
+            );
+        }
+        assert!(matches!(
+            for_query("批量换算: 立体 球 1/2\n\n球 0", &[]),
+            Results::Value(Err(ValueError::BatchTool(BatchError::Row { line: 3, .. })))
+        ));
     }
 
     #[test]

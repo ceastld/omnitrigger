@@ -1,4 +1,6 @@
-use super::csv_tools::csv_cell;
+use super::{
+    csv_tools::csv_cell, decibel::convert_decibels, solid::calculate_solid, tempo::calculate_tempo,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BatchError<E> {
@@ -9,6 +11,26 @@ pub(super) enum BatchError<E> {
 pub(super) fn batch_arguments<'a>(query: &'a str, name: &str, alias: &str) -> Option<&'a str> {
     let (operation, arguments) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
     (operation == name || operation.eq_ignore_ascii_case(alias)).then_some(arguments)
+}
+
+pub(super) fn map_tool_batch(query: &str) -> Option<Result<String, BatchError<&'static str>>> {
+    let (operation, input) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+    let operation = operation.to_ascii_lowercase();
+    let csv_operation = operation
+        .strip_suffix("对照")
+        .or_else(|| operation.strip_suffix("-csv"));
+    let convert: fn(&str) -> Result<String, &'static str> =
+        match csv_operation.unwrap_or(&operation) {
+            "节拍" | "tempo" => |line| calculate_tempo(line).map_err(|error| error.message()),
+            "分贝" | "decibel" => |line| convert_decibels(line).map_err(|error| error.message()),
+            "立体" | "solid" => |line| calculate_solid(line).map_err(|error| error.message()),
+            _ => return None,
+        };
+    Some(if csv_operation.is_some() {
+        map_batch_csv(input, "输入", convert)
+    } else {
+        map_batch_lines(input, convert)
+    })
 }
 
 pub(super) fn map_batch_lines<E>(
