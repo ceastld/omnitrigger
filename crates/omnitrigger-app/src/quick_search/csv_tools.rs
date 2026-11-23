@@ -51,6 +51,7 @@ use super::{
     text_tools::{
         compare_natural, compile_regex, newline_pattern, regex_group_index,
         replace_literal_matches, replace_regex_matches, GraphemeRange, TextError, TextLengthUnit,
+        UnicodeForm,
     },
     url_encoding::url_parameter_values,
 };
@@ -137,6 +138,7 @@ pub(super) enum CsvError {
     GroupCountColumnArguments,
     ShiftedColumnArguments,
     MovingColumnArguments,
+    UnicodeColumnArguments,
     MovingQuantileColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
@@ -309,6 +311,9 @@ impl CsvError {
             Self::MovingColumnArguments => {
                 "填写新列名、数值列、分组列和窗口大小，例如 [\"近两笔\",\"金额\",[\"部门\"],2]。窗口为 1 至 128"
             }
+            Self::UnicodeColumnArguments => {
+                "填写新列名、来源列和 NFC、NFD、NFKC 或 NFKD，例如 [\"标准名\",\"名称\",\"NFC\"]"
+            }
             Self::MovingQuantileColumnArguments => {
                 "填写新列名、数值列、分组列、窗口大小和分位概率，例如 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]"
             }
@@ -392,6 +397,7 @@ enum Operation {
     SelectNamedColumns(Vec<String>),
     DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
+    UnicodeNormalizedColumn(String, ColumnReference, UnicodeForm),
     FillEmptyCells(Vec<ColumnReference>, FillDirection),
     InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
@@ -779,6 +785,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::TrimColumns(columns)
+        }
+        "unicode规范化列" | "unicode-normalize-column" => {
+            let ((name, source, form), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(
+                    input,
+                    CsvError::UnicodeColumnArguments,
+                )?;
+            let form = UnicodeForm::parse(&form).ok_or(CsvError::UnicodeColumnArguments)?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(CsvError::UnicodeColumnArguments);
+            }
+            input = data;
+            Operation::UnicodeNormalizedColumn(name, source, form)
         }
         kind @ ("向下填充" | "fill-down" | "向上填充" | "fill-up") => {
             let (columns, data) =
@@ -1643,6 +1662,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::DropColumns(columns) => drop_columns(&rows, &columns),
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
+        Operation::UnicodeNormalizedColumn(name, source, form) => {
+            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+            let source = source.resolve(header)?;
+            validate_column_width(&[source], header.len())?;
+            write_appended_column(header, records, &name, |row| {
+                Ok(form.normalize(&row[source]))
+            })
+        }
         Operation::FillEmptyCells(columns, direction) => {
             fill_empty_csv_cells(&rows, &columns, direction)
         }
@@ -4972,6 +4999,29 @@ mod tests {
         assert_eq!(
             transform_csv(r#"map-values [1,[["P","\u0000"]]] 状态,编号"#),
             Err(CsvError::NullReplacementValue)
+        );
+    }
+
+    #[test]
+    fn normalizes_unicode_into_a_new_column_while_retaining_source_text() {
+        assert_eq!(
+            transform_csv(
+                "Unicode规范化列 [\"标准名\",\"名称\",\"NFC\"] 编号,名称\n001, Cafe\u{301} \n002,",
+            )
+            .as_deref(),
+            Ok("编号,名称,标准名\r\n001, Cafe\u{301} , Café \r\n002,\"\",\"\""),
+        );
+        assert_eq!(
+            transform_csv(r#"unicode-normalize-column ["标准名",1,"nfkc"] 名称"#).as_deref(),
+            Ok("名称,标准名"),
+        );
+        assert_eq!(
+            transform_csv(r#"Unicode规范化列 ["结果",1,"UTF16"] 名称"#),
+            Err(CsvError::UnicodeColumnArguments),
+        );
+        assert_eq!(
+            transform_csv(r#"Unicode规范化列 ["名称",1,"NFC"] 名称"#),
+            Err(CsvError::HeaderNameConflict),
         );
     }
 

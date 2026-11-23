@@ -756,19 +756,41 @@ fn encode_code_points(text: &str) -> String {
     encoded
 }
 
+pub(super) enum UnicodeForm {
+    Nfc,
+    Nfd,
+    Nfkc,
+    Nfkd,
+}
+
+impl UnicodeForm {
+    pub(super) fn parse(form: &str) -> Option<Self> {
+        match form.trim().to_ascii_uppercase().as_str() {
+            "NFC" => Some(Self::Nfc),
+            "NFD" => Some(Self::Nfd),
+            "NFKC" => Some(Self::Nfkc),
+            "NFKD" => Some(Self::Nfkd),
+            _ => None,
+        }
+    }
+
+    pub(super) fn normalize(&self, text: &str) -> String {
+        match self {
+            Self::Nfc => text.nfc().collect(),
+            Self::Nfd => text.nfd().collect(),
+            Self::Nfkc => text.nfkc().collect(),
+            Self::Nfkd => text.nfkd().collect(),
+        }
+    }
+}
+
 fn normalize_unicode(input: &str) -> Result<String, TextError> {
     let (form, text) = input
         .trim_start()
         .split_once(char::is_whitespace)
         .ok_or(TextError::UnicodeNormalizationArguments)?;
-    let text = text_payload(text)?;
-    let normalized: String = match form.to_ascii_uppercase().as_str() {
-        "NFC" => text.nfc().collect(),
-        "NFD" => text.nfd().collect(),
-        "NFKC" => text.nfkc().collect(),
-        "NFKD" => text.nfkd().collect(),
-        _ => return Err(TextError::UnicodeNormalizationArguments),
-    };
+    let form = UnicodeForm::parse(form).ok_or(TextError::UnicodeNormalizationArguments)?;
+    let normalized = form.normalize(text_payload(text)?);
     if normalized.len() > MAX_EXPANDED_TEXT_BYTES {
         return Err(TextError::ResultTooLarge);
     }

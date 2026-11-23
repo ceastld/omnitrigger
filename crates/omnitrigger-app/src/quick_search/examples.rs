@@ -3249,6 +3249,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "为表格新增统一 Unicode 写法的文本列",
+        query: "CSV: Unicode规范化列 [\"标准名\",\"名称\",\"NFKC\"]\n编号,名称\n001,ＡＢＣ①\n002,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按字素位置截取 CSV 单元格的内容",
         query: "CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]\n编号,文本\n1,A👩‍💻e\u{301}Z\n2,北\n3,",
     },
