@@ -2597,6 +2597,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "导出文本差异与原行号、新行号",
+        query: r#"文本: 逐行比较CSV "苹果\n梨\n茶" "苹果\n柿子\n茶""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算两段文字在字素簇层面的编辑距离",
         query: r#"文本: 编辑距离 "猫👩‍💻" "猫🧑‍💻""#,
     },
