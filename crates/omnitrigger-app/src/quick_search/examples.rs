@@ -4788,6 +4788,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按横坐标绘制 CSV 的累计梯形积分",
+        query: "CSV: 梯形累计图 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留每组金额最高的两条完整记录",
         query: "CSV: 组内最高 [[\"地区\"],\"金额\",2] 地区,金额,编号\n北,1/2,001\n南,3,002\n北,2e0,003\n北,0.50,004",
     },
@@ -5675,6 +5680,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "梯形积分",
             "梯形平均",
             "梯形累计列",
+            "梯形累计图",
             "曲线图",
             "残差图",
             "残差",

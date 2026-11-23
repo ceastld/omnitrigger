@@ -1073,6 +1073,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "梯形累计列" | "cumulative-trapezoid-column" => {
             return append_trapezoid_integral_column(input)
         }
+        operation if is_cumulative_trapezoid_plot(operation) => {
+            return cumulative_trapezoid_coordinates(input)?.to_csv();
+        }
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -5412,6 +5415,43 @@ fn trapezoid_statistic(input: &str, average: bool) -> Result<String, CsvError> {
     Ok(value.to_string())
 }
 
+fn is_cumulative_trapezoid_plot(operation: &str) -> bool {
+    operation == "梯形累计图" || operation.eq_ignore_ascii_case("cumulative-trapezoid-plot")
+}
+
+pub(super) fn cumulative_trapezoid_chart(
+    query: &str,
+) -> Option<Result<(String, ScatterPlot), CsvError>> {
+    let (operation, input) = split_argument(query)?;
+    is_cumulative_trapezoid_plot(operation).then(|| {
+        let table = cumulative_trapezoid_coordinates(input)?;
+        let csv = table.to_csv()?;
+        let points: Vec<_> = table
+            .samples
+            .into_iter()
+            .map(|sample| sample.point)
+            .collect();
+        let bounds = [&points[0].0, &points.last().expect("至少有两个完整坐标").0];
+        let plot = ScatterPlot::from_sampled_function(&points, bounds, points.len())
+            .with_axis_names(table.headers);
+        Ok((csv, plot))
+    })
+}
+
+fn cumulative_trapezoid_coordinates(input: &str) -> Result<CsvCoordinates, CsvError> {
+    let mut table = parse_coordinate_table(input, CsvError::TrapezoidPointCount)?;
+    let mut totals = Vec::with_capacity(table.samples.len());
+    integrate_trapezoid_samples(&mut table.samples, |sample, total| {
+        totals.push(CoordinateSample {
+            row_index: sample.row_index,
+            point: (sample.point.0.clone(), total.clone()),
+        });
+    })?;
+    table.samples = totals;
+    table.headers[1] = "累计积分".to_owned();
+    Ok(table)
+}
+
 fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
     let invalid = CsvError::CumulativeTrapezoidColumnArguments;
     let ((name, coordinates), data) =
@@ -5425,8 +5465,8 @@ fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
     let columns = resolve_distinct_columns(header, &coordinates, invalid)?;
     let mut samples = collect_coordinate_samples(records, &columns, CsvError::TrapezoidPointCount)?;
     let mut totals = vec![String::new(); records.len()];
-    integrate_trapezoid_samples(&mut samples, |index, total| {
-        totals[index] = total.to_string();
+    integrate_trapezoid_samples(&mut samples, |sample, total| {
+        totals[sample.row_index] = total.to_string();
     })?;
     let mut totals = totals.into_iter();
     write_appended_column(header, records, &name, |_| {
@@ -5436,12 +5476,12 @@ fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
 
 fn integrate_trapezoid_samples(
     samples: &mut [CoordinateSample],
-    mut visit: impl FnMut(usize, &BigRational),
+    mut visit: impl FnMut(&CoordinateSample, &BigRational),
 ) -> Result<BigRational, CsvError> {
     samples.sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
     let two = BigInt::from(2u8);
     let mut total = BigRational::default();
-    visit(samples[0].row_index, &total);
+    visit(&samples[0], &total);
     for pair in samples.windows(2) {
         let (left, first) = &pair[0].point;
         let (right, last) = &pair[1].point;
@@ -5452,7 +5492,7 @@ fn integrate_trapezoid_samples(
         ensure_exact_size(&segment).map_err(|_| CsvError::ComputedNumberRange)?;
         total += segment;
         ensure_exact_size(&total).map_err(|_| CsvError::ComputedNumberRange)?;
-        visit(pair[1].row_index, &total);
+        visit(&pair[1], &total);
     }
     Ok(total)
 }
@@ -7021,6 +7061,15 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn plots_exact_cumulative_trapezoid_values_in_horizontal_order() {
+        let query = "梯形累计图 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0";
+        let (csv, plot) = cumulative_trapezoid_chart(query).unwrap().unwrap();
+        assert_eq!(plot.point_count(), 3);
+        assert_eq!(csv, "时间,累计积分\r\n0,0\r\n1,-1/2\r\n3,3/2");
+        assert_eq!(transform_csv(query), Ok(csv));
     }
 
     #[test]
