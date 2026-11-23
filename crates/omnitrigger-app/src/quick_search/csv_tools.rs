@@ -1068,7 +1068,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         operation if is_scatter_operation(operation) => {
             return parse_coordinate_table(input, CsvError::ScatterPointCount)?.to_csv();
         }
-        "梯形积分" | "trapezoid-integral" => return trapezoid_integral(input),
+        "梯形积分" | "trapezoid-integral" => return trapezoid_statistic(input, false),
+        "梯形平均" | "trapezoid-mean" => return trapezoid_statistic(input, true),
         "梯形累计列" | "cumulative-trapezoid-column" => {
             return append_trapezoid_integral_column(input)
         }
@@ -5399,9 +5400,16 @@ fn collect_coordinate_samples(
     Ok(samples)
 }
 
-fn trapezoid_integral(input: &str) -> Result<String, CsvError> {
+fn trapezoid_statistic(input: &str, average: bool) -> Result<String, CsvError> {
     let mut table = parse_coordinate_table(input, CsvError::TrapezoidPointCount)?;
-    integrate_trapezoid_samples(&mut table.samples, |_, _| {}).map(|total| total.to_string())
+    let mut value = integrate_trapezoid_samples(&mut table.samples, |_, _| {})?;
+    if average {
+        let first = &table.samples[0].point.0;
+        let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
+        value /= last - first;
+        ensure_exact_size(&value).map_err(|_| CsvError::ComputedNumberRange)?;
+    }
+    Ok(value.to_string())
 }
 
 fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
@@ -7013,6 +7021,22 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn weights_trapezoid_means_by_exact_horizontal_spans() {
+        assert_eq!(
+            transform_csv("梯形平均 [\"x\",\"y\"] x,y\n3,2\n2,\n0,0\n1,2").as_deref(),
+            Ok("5/3")
+        );
+        assert_eq!(
+            transform_csv("trapezoid-mean [2,1] 高度,时间\n-3,2\n-1,0").as_deref(),
+            Ok("-2")
+        );
+        assert_eq!(
+            transform_csv("梯形平均 [1,2] x,y\n1/2,2\n0.50,3"),
+            Err(CsvError::TrapezoidDuplicateX)
+        );
     }
 
     #[test]

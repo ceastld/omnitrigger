@@ -4778,6 +4778,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按横坐标间距求采样值的精确加权平均",
+        query: "CSV: 梯形平均 [\"时间\",\"高度\"] 时间,高度\n0,0\n1,2\n3,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在原表追加从最小横坐标开始的累计梯形积分",
         query: "CSV: 梯形累计列 [\"积分\",[\"时间\",\"高度\"]] 时间,高度\n3,2\n0,-1\n2,\n1,0",
     },
@@ -5668,6 +5673,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "稳健直线",
             "散点图",
             "梯形积分",
+            "梯形平均",
             "梯形累计列",
             "曲线图",
             "残差图",
