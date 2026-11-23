@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 
 use super::{
     calendar::calculate_date,
-    csv_tools::transform_csv,
+    csv_tools::{append_bounded_csv_row, transform_csv},
     json_tools::transform_json,
     operators::json_argument_and_tail,
     path_tools::path_component,
@@ -23,16 +23,25 @@ pub(super) enum DataPipelineError {
     Step { index: usize, cause: &'static str },
 }
 
+pub(super) fn step_csv_arguments(input: &str) -> Option<&str> {
+    let mut parts = input.trim_start().splitn(2, char::is_whitespace);
+    let operation = parts.next()?;
+    (operation.eq_ignore_ascii_case("步骤CSV") || operation.eq_ignore_ascii_case("steps-csv"))
+        .then(|| parts.next().unwrap_or(""))
+}
+
 pub(super) fn transform_data_pipeline(
     input: &str,
     today: NaiveDate,
 ) -> Result<String, DataPipelineError> {
-    let (steps, source) =
-        json_argument_and_tail::<Vec<String>>(input).ok_or(DataPipelineError::Arguments)?;
+    let csv_arguments = step_csv_arguments(input);
+    let (steps, source) = json_argument_and_tail::<Vec<String>>(csv_arguments.unwrap_or(input))
+        .ok_or(DataPipelineError::Arguments)?;
     if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len()) || source.trim().is_empty() {
         return Err(DataPipelineError::Arguments);
     }
     let mut current = Cow::Borrowed(source);
+    let mut trace = csv_arguments.map(|_| String::from("步骤,命令,结果"));
     for (index, step) in steps.iter().enumerate() {
         let error = |cause| DataPipelineError::Step {
             index: index + 1,
@@ -63,9 +72,17 @@ pub(super) fn transform_data_pipeline(
         if output.len() > MAX_PIPELINE_OUTPUT_BYTES {
             return Err(error("处理结果超过 1 MiB，请缩小数据范围"));
         }
+        if let Some(trace) = &mut trace {
+            let number = (index + 1).to_string();
+            append_bounded_csv_row(
+                trace,
+                [number.as_str(), step.as_str(), output.as_str()].into_iter(),
+                error("步骤CSV超过 1 MiB，请缩小数据范围"),
+            )?;
+        }
         current = Cow::Owned(output);
     }
-    Ok(current.into_owned())
+    Ok(trace.unwrap_or_else(|| current.into_owned()))
 }
 
 #[cfg(test)]
@@ -108,6 +125,43 @@ mod tests {
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn records_each_step_preserving_multiline_outputs_and_quoted_commands() {
+        let query = concat!(
+            r#"["文本: 大写","文本: 按行拼接 \", \""]"#,
+            "\n茶 a\n咖啡 b"
+        );
+        let expected = concat!(
+            "步骤,命令,结果\r\n",
+            "1,文本: 大写,\"茶 A\n咖啡 B\"\r\n",
+            "2,\"文本: 按行拼接 \"\", \"\"\",\"茶 A, 咖啡 B\""
+        );
+        for command in ["步骤CSV", "STEPS-CSV"] {
+            assert_eq!(
+                run_pipeline(&format!("{command} {query}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(run_pipeline(query).as_deref(), Ok("茶 A, 咖啡 B"));
+        assert_eq!(run_pipeline("步骤CSV"), Err(DataPipelineError::Arguments));
+        assert!(matches!(
+            run_pipeline(r#"步骤CSV ["文本: 大写","JSON: 压缩"] tea"#),
+            Err(DataPipelineError::Step { index: 2, .. })
+        ));
+
+        let large = format!(
+            r#"步骤CSV ["文本: 大写","文本: 小写"] {}"#,
+            "a".repeat(MAX_PIPELINE_OUTPUT_BYTES / 2)
+        );
+        assert_eq!(
+            run_pipeline(&large),
+            Err(DataPipelineError::Step {
+                index: 2,
+                cause: "步骤CSV超过 1 MiB，请缩小数据范围",
+            })
+        );
     }
 
     #[test]

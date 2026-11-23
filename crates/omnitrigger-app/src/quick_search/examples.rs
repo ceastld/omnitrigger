@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use crate::assets::Icon;
 
 use super::calculator::narrow_ascii_graphic;
+use super::data_pipeline::step_csv_arguments;
 use super::operators::json_argument_and_tail;
 use super::scientific::split_name;
 use super::scope::{parse_scope, scoped_query, tool_example_keyword, Scope};
@@ -19,7 +20,8 @@ impl Example {
         let (prefix, input) = self.query.split_once([':', '：'])?;
         let scope = parse_scope(prefix)?;
         if scope == Scope::DataPipeline {
-            let (_, data) = json_argument_and_tail::<Vec<String>>(input)?;
+            let arguments = step_csv_arguments(input).unwrap_or(input);
+            let (_, data) = json_argument_and_tail::<Vec<String>>(arguments)?;
             return (!data.is_empty()).then_some(self.query.len() - data.len());
         }
         if !matches!(
@@ -804,6 +806,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "跨工具清理文本、转换 CSV 并取出 JSON 字段",
         query: "处理: [\"文本: 去空行\",\"CSV: 数值对象 [2]\",\"JSON: 取值 /1/金额\"] 编号,金额\n001,1.50\n\n002,2e0",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将每一步的输出与执行命令导出为 CSV",
+        query: "处理: 步骤CSV [\"文本: 大写\",\"文本: 按行拼接 \\\", \\\"\"] 茶 a\n咖啡 b",
     },
     Example {
         icon: Icon::Browser,
@@ -4513,6 +4520,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if ["月初序列", "月末序列", "季初序列", "季末序列"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
+        Scope::DataPipeline if "步骤csv".starts_with(&term.to_ascii_lowercase()) => {}
         Scope::Date
         | Scope::Duration
         | Scope::BatchConversion
@@ -4627,6 +4635,14 @@ mod tests {
         assert!(example.query[..start].ends_with(r#""JSON: 取值 /1/金额"] "#));
         assert_eq!(&example.query[start..], "编号,金额\n001,1.50\n\n002,2e0");
         assert!(tool_operation_examples(Scope::DataPipeline, "[\"文本: 去空行\"]").is_none());
+
+        let items = tool_operation_examples(Scope::DataPipeline, "步骤CSV").unwrap();
+        assert_eq!(items.len(), 1);
+        let example = &EXAMPLES[items[0]];
+        assert_eq!(
+            &example.query[example.argument_start().unwrap()..],
+            "茶 a\n咖啡 b"
+        );
     }
 
     #[test]
