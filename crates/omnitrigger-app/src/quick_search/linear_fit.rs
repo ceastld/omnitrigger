@@ -8,7 +8,7 @@ use super::fraction::{
     calculate_fraction, ensure_exact_size, format_signed_square_root, format_square_root,
     FractionError,
 };
-use super::matrix::{least_squares, MatrixError};
+use super::matrix::{least_squares_with_weights, MatrixError};
 use super::operators::split_top_level_commas;
 
 const MAX_POINTS: usize = 64;
@@ -26,6 +26,9 @@ pub(super) enum LinearFitError {
     RepeatedInterpolationX,
     PolynomialFitArguments,
     PolynomialFitRank,
+    WeightedPoint,
+    NegativeWeight,
+    WeightedFitRank,
     ConstantX,
     ZeroX,
     ConstantCoordinate,
@@ -43,6 +46,9 @@ impl LinearFitError {
             Self::RepeatedInterpolationX => "多项式插值中的数据点须有不同的横坐标",
             Self::PolynomialFitArguments => "填写 0 至 5 的整数次数，用 @ 隔开数据点",
             Self::PolynomialFitRank => "不同横坐标的个数须大于多项式次数",
+            Self::WeightedPoint => "输入至少两组 x,y,权重，用分号或换行隔开",
+            Self::NegativeWeight => "权重须大于或等于零",
+            Self::WeightedFitRank => "权重大于零的不同横坐标个数须大于多项式次数",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
             Self::ZeroX => "过原点拟合至少需要一个非零 x",
             Self::ConstantCoordinate => "x 和 y 各自至少需要两个不同的值才能计算相关系数",
@@ -122,6 +128,12 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
                 || operation.eq_ignore_ascii_case("polynomial-summary") =>
         {
             return polynomial_summary(rest.trim());
+        }
+        Some((operation, rest))
+            if operation == "加权多项式"
+                || operation.eq_ignore_ascii_case("weighted-polynomial") =>
+        {
+            return weighted_polynomial(rest.trim());
         }
         Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
@@ -337,9 +349,53 @@ fn polynomial_prediction(input: &str) -> Result<String, LinearFitError> {
 
 fn fit_polynomial_points(degree: usize, points: &str) -> Result<PolynomialFit, LinearFitError> {
     let points = parse_paired_points(points.trim())?.collect::<Result<Vec<_>, _>>()?;
+    let coefficients = fit_polynomial_coefficients(degree, &points, None)?;
+    Ok(PolynomialFit {
+        coefficients,
+        points,
+    })
+}
+
+fn weighted_polynomial(input: &str) -> Result<String, LinearFitError> {
+    let (degree, input) = polynomial_fit_arguments(input)?;
+    let rows = point_rows(input, LinearFitError::WeightedPoint)?;
+    let mut points = Vec::new();
+    let mut weights = Vec::new();
+    for row in rows {
+        let mut fields: Vec<_> = split_top_level_commas(row).take(4).collect();
+        if fields.len() == 1 {
+            fields = row.split('\t').take(4).collect();
+        }
+        let [x, y, weight] = fields.as_slice() else {
+            return Err(LinearFitError::WeightedPoint);
+        };
+        if fields.iter().any(|field| field.trim().is_empty()) {
+            return Err(LinearFitError::WeightedPoint);
+        }
+        let weight = evaluate(weight)?;
+        if weight.numer().sign() == Sign::Minus {
+            return Err(LinearFitError::NegativeWeight);
+        }
+        let point = (evaluate(x)?, evaluate(y)?);
+        if weight.numer().sign() != Sign::NoSign {
+            points.push(point);
+            weights.push(weight);
+        }
+    }
+    if points.is_empty() {
+        return Err(LinearFitError::WeightedFitRank);
+    }
+    fit_polynomial_coefficients(degree, &points, Some(&weights)).map(format_power_expression)
+}
+
+fn fit_polynomial_coefficients(
+    degree: usize,
+    points: &[Point],
+    weights: Option<&[BigRational]>,
+) -> Result<Vec<BigRational>, LinearFitError> {
     let mut design = Vec::with_capacity(points.len());
     let mut observations = Vec::with_capacity(points.len());
-    for (x, y) in &points {
+    for (x, y) in points {
         let mut row = vec![BigRational::from_integer(1.into())];
         for _ in 0..degree {
             let power = row.last().expect("初始行含常数项") * x;
@@ -349,19 +405,17 @@ fn fit_polynomial_points(degree: usize, points: &str) -> Result<PolynomialFit, L
         design.push(row);
         observations.push(vec![y.clone()]);
     }
-    let coefficients = least_squares(design, observations).map_err(|error| match error {
-        MatrixError::LeastSquaresRank => LinearFitError::PolynomialFitRank,
-        MatrixError::Evaluation(cause) => LinearFitError::Evaluation(cause),
-        _ => LinearFitError::PolynomialFitArguments,
-    })?;
-    let coefficients = coefficients
+    let coefficients =
+        least_squares_with_weights(design, observations, weights).map_err(|error| match error {
+            MatrixError::LeastSquaresRank if weights.is_some() => LinearFitError::WeightedFitRank,
+            MatrixError::LeastSquaresRank => LinearFitError::PolynomialFitRank,
+            MatrixError::Evaluation(cause) => LinearFitError::Evaluation(cause),
+            _ => LinearFitError::PolynomialFitArguments,
+        })?;
+    Ok(coefficients
         .into_iter()
         .map(|row| row.into_iter().next().expect("每项只有一个响应系数"))
-        .collect();
-    Ok(PolynomialFit {
-        coefficients,
-        points,
-    })
+        .collect())
 }
 
 fn polynomial_residuals(input: &str) -> Result<String, LinearFitError> {
@@ -602,17 +656,25 @@ fn paired_sums(points: &str, retain_points: bool) -> Result<PairedSums, LinearFi
     summarize_pairs(parse_paired_points(points)?, retain_points)
 }
 
-fn parse_paired_points(
+fn point_rows(
     points: &str,
-) -> Result<impl Iterator<Item = Result<Point, LinearFitError>> + '_, LinearFitError> {
+    incomplete: LinearFitError,
+) -> Result<impl Iterator<Item = &str>, LinearFitError> {
     let points = points.split([';', '\n']);
     let count = points.clone().count();
     if count < 2 {
-        return Err(LinearFitError::Incomplete);
+        return Err(incomplete);
     }
     if count > MAX_POINTS {
         return Err(LinearFitError::TooManyPoints);
     }
+    Ok(points)
+}
+
+fn parse_paired_points(
+    points: &str,
+) -> Result<impl Iterator<Item = Result<Point, LinearFitError>> + '_, LinearFitError> {
+    let points = point_rows(points, LinearFitError::Incomplete)?;
     let pairs = points.map(|point| {
         let mut coordinates = split_top_level_commas(point);
         let (x, y) = match (coordinates.next(), coordinates.next(), coordinates.next()) {
@@ -676,6 +738,42 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fits_polynomials_with_exact_nonnegative_weights() {
+        assert_eq!(
+            calculate_linear_fit("加权多项式 1 @ 0,0,3; 0,4,1; 1,3,2; 2,-99,0").as_deref(),
+            Ok("2*x + 1")
+        );
+        assert_eq!(
+            calculate_linear_fit("weighted-polynomial 0 @ 0\t1\t1/2\n1\t3\t3/2").as_deref(),
+            Ok("5/2")
+        );
+        assert_eq!(
+            calculate_linear_fit("加权多项式 1 @ 0,0,1; 0,4,1; 1,3,1"),
+            calculate_linear_fit("多项式 1 @ 0,0; 0,4; 1,3")
+        );
+        assert_eq!(
+            calculate_linear_fit("加权多项式 1 @ 0,0,1; 1,1,0"),
+            Err(LinearFitError::WeightedFitRank)
+        );
+        assert_eq!(
+            calculate_linear_fit("加权多项式 0 @ 0,0,0; 1,3,0"),
+            Err(LinearFitError::WeightedFitRank)
+        );
+        assert_eq!(
+            calculate_linear_fit("加权多项式 0 @ 0,99,0; 1,3,1").as_deref(),
+            Ok("3")
+        );
+        assert_eq!(
+            calculate_linear_fit("加权多项式 1 @ 0,0,-1; 1,1,1"),
+            Err(LinearFitError::NegativeWeight)
+        );
+        assert_eq!(
+            calculate_linear_fit("加权多项式 1 @ 0,0; 1,1,1"),
+            Err(LinearFitError::WeightedPoint)
+        );
+    }
 
     #[test]
     fn summarizes_polynomial_fit_and_handles_constant_observations() {

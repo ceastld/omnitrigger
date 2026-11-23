@@ -511,13 +511,29 @@ fn append_parameter(expression: &mut String, coefficient: BigRational, parameter
 }
 
 pub(super) fn least_squares(left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
-    if left.len() != right.len() {
+    least_squares_with_weights(left, right, None)
+}
+
+pub(super) fn least_squares_with_weights(
+    left: Matrix,
+    right: Matrix,
+    weights: Option<&[BigRational]>,
+) -> Result<Matrix, MatrixError> {
+    if left.len() != right.len() || weights.is_some_and(|weights| weights.len() != left.len()) {
         return Err(MatrixError::SolveDimensions);
     }
     if left[0].len() > left.len() {
         return Err(MatrixError::LeastSquaresRank);
     }
-    let transposed = transpose(left.clone());
+    let mut transposed = transpose(left.clone());
+    if let Some(weights) = weights {
+        for row in &mut transposed {
+            for (value, weight) in row.iter_mut().zip(weights) {
+                *value *= weight;
+                ensure_exact_size(value).map_err(MatrixError::Evaluation)?;
+            }
+        }
+    }
     let normal = multiply(&transposed, &left)?;
     let projected = multiply(&transposed, &right)?;
     solve(normal, projected).map_err(|error| match error {
