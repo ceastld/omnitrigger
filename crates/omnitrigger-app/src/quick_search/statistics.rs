@@ -82,8 +82,7 @@ impl StatisticsError {
 enum StatisticsOperation {
     Sample,
     Population,
-    Quartiles,
-    Quantile(BigRational),
+    Quantiles(QuantileReport),
     Frequencies(FrequencyReport),
     CumulativeAt {
         threshold: BigRational,
@@ -118,7 +117,14 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
     let (operation, input) = match operation.to_ascii_lowercase().as_str() {
         "总体" | "population" => (StatisticsOperation::Population, values.trim()),
         "样本" | "sample" => (StatisticsOperation::Sample, values.trim()),
-        "四分位" | "quartiles" => (StatisticsOperation::Quartiles, values.trim()),
+        "四分位" | "quartiles" => (
+            StatisticsOperation::Quantiles(QuantileReport::Quartiles),
+            values.trim(),
+        ),
+        "箱线摘要" | "box-summary" => (
+            StatisticsOperation::Quantiles(QuantileReport::BoxSummary),
+            values.trim(),
+        ),
         "频数表" | "frequency-table" => (
             StatisticsOperation::Frequencies(FrequencyReport::Table),
             values.trim(),
@@ -235,7 +241,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
             (
-                StatisticsOperation::Quantile(parse_probability(probability)?),
+                StatisticsOperation::Quantiles(QuantileReport::Single(parse_probability(
+                    probability,
+                )?)),
                 values.trim(),
             )
         }
@@ -271,10 +279,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             count,
             matches!(operation, StatisticsOperation::Sample),
         ),
-        StatisticsOperation::Quartiles => report_quantiles(values, count, None),
-        StatisticsOperation::Quantile(probability) => {
-            report_quantiles(values, count, Some(&probability))
-        }
+        StatisticsOperation::Quantiles(report) => report_quantiles(values, count, report),
         StatisticsOperation::Frequencies(report) => Ok(report_frequencies(values, count, report)),
         StatisticsOperation::CumulativeAt {
             threshold,
@@ -923,23 +928,63 @@ fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
     Ok(probability)
 }
 
+enum QuantileReport {
+    Single(BigRational),
+    Quartiles,
+    BoxSummary,
+}
+
 fn report_quantiles(
     mut values: Vec<(BigRational, u64)>,
     count: u64,
-    probability: Option<&BigRational>,
+    report: QuantileReport,
 ) -> Result<String, StatisticsError> {
     values.sort_by(|(left, _), (right, _)| left.cmp(right));
     let quantile = |probability: &BigRational| interpolate_quantile(&values, count, probability);
-    if let Some(probability) = probability {
+    if let QuantileReport::Single(probability) = &report {
         return quantile(probability).map(|value| value.to_string());
     }
     let lower = quantile(&BigRational::new(1.into(), 4.into()))?;
     let middle = quantile(&BigRational::new(1.into(), 2.into()))?;
     let upper = quantile(&BigRational::new(3.into(), 4.into()))?;
     let spread = bounded(&upper - &lower)?;
-    Ok(format!(
-        "Q1 {lower} · 中位数 {middle} · Q3 {upper}\n四分位距 {spread}"
-    ))
+    let quartiles = format!("Q1 {lower} · 中位数 {middle} · Q3 {upper}");
+    if matches!(report, QuantileReport::BoxSummary) {
+        let offset = bounded(spread * BigRational::new(3.into(), 2.into()))?;
+        let lower_fence = bounded(lower - &offset)?;
+        let upper_fence = bounded(upper + offset)?;
+        Ok(format!(
+            "{quartiles}\n{}",
+            report_box_summary(&values, &lower_fence, &upper_fence)
+        ))
+    } else {
+        Ok(format!("{quartiles}\n四分位距 {spread}"))
+    }
+}
+
+fn report_box_summary(
+    values: &[(BigRational, u64)],
+    lower_fence: &BigRational,
+    upper_fence: &BigRational,
+) -> String {
+    let first_inside = values.partition_point(|(value, _)| value < lower_fence);
+    let after_inside = values.partition_point(|(value, _)| value <= upper_fence);
+    let lower_whisker = &values[first_inside].0;
+    let upper_whisker = &values[after_inside - 1].0;
+    let mut outliers = BTreeMap::<_, u64>::new();
+    for (value, repetitions) in values[..first_inside].iter().chain(&values[after_inside..]) {
+        *outliers.entry(value).or_default() += repetitions;
+    }
+    let outliers = if outliers.is_empty() {
+        "无".to_owned()
+    } else {
+        outliers
+            .into_iter()
+            .map(|(value, repetitions)| format!("{value}（{repetitions} 次）"))
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    format!("内围栏 {lower_fence} … {upper_fence}\n须端 {lower_whisker} … {upper_whisker}\n离群值 {outliers}")
 }
 
 fn interpolate_quantile(
@@ -1670,6 +1715,34 @@ mod tests {
             calculate_statistics("频数 9@18446744073709551615,1@1"),
             Err(StatisticsError::FrequencyOverflow)
         );
+    }
+
+    #[test]
+    fn summarizes_box_fences_and_counts_observations_strictly_outside_them() {
+        for (query, output) in [
+            (
+                "箱线摘要 100,3,1,4,2",
+                "Q1 2 · 中位数 3 · Q3 4\n内围栏 -1 … 7\n须端 1 … 4\n离群值 100（1 次）",
+            ),
+            (
+                "box-summary 1,2,3,4,7",
+                "Q1 2 · 中位数 3 · Q3 4\n内围栏 -1 … 7\n须端 1 … 7\n离群值 无",
+            ),
+            (
+                "箱线摘要 频数 6@1,5@1000000000,6@1,4@3",
+                "Q1 5 · 中位数 5 · Q3 5\n内围栏 5 … 5\n须端 5 … 5\n离群值 4（3 次）、6（2 次）",
+            ),
+            (
+                "箱线摘要 -1/2",
+                "Q1 -1/2 · 中位数 -1/2 · Q3 -1/2\n内围栏 -1/2 … -1/2\n须端 -1/2 … -1/2\n离群值 无",
+            ),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(output),
+                "{query}"
+            );
+        }
     }
 
     #[test]

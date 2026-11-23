@@ -155,6 +155,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 四分位 4,1,3,2",
     },
     Example {
+        icon: Icon::Layers,
+        title: "查看箱线图的四分位数、须端和离群值",
+        query: "统计: 箱线摘要 100,3,1,4,2",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "求绝对偏差的中位数",
         query: "统计: 中位绝对偏差 0,1/2,1,10",
@@ -4173,6 +4178,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "二项累计",
                     "二项至少",
                     "超几何概率",
+                    "箱线摘要",
                     "截尾平均",
                     "移动合计",
                     "移动样本方差",
@@ -4369,6 +4375,7 @@ mod tests {
         for (scope, prefix, with_argument) in [
             (Scope::Csv, "排序", "排序 1 编号"),
             (Scope::Json, "改键", "改键 ["),
+            (Scope::Statistics, "箱线", "箱线摘要 1,2,3"),
             (Scope::TextTools, "取列", "取列 \"x\""),
         ] {
             assert!(tool_operation_examples(scope, prefix).is_some());
