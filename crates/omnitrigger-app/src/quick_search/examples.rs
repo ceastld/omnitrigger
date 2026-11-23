@@ -1525,6 +1525,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按球半径和截取高度计算球冠",
+        query: "立体: 球冠 3,1",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按半径求球的表面积与体积",
         query: "立体: 球 1/2",
     },
@@ -4695,7 +4700,16 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
         Scope::Pitch => &["MIDI", "转调", "音程"],
         Scope::Decibel => &["功率比", "幅度比", "转功率比", "转幅度比"],
         Scope::Tempo => &["时长", "速度"],
-        Scope::Solid => &["圆柱", "圆锥", "圆台", "圆管", "球", "立方体", "长方体"],
+        Scope::Solid => &[
+            "圆柱",
+            "圆锥",
+            "圆台",
+            "圆管",
+            "球",
+            "球冠",
+            "立方体",
+            "长方体",
+        ],
         _ => &[],
     }
 }

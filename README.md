@@ -195,6 +195,7 @@
 - 输入 `立体: 圆锥 3,4` 可按底面半径和垂直高计算圆锥的总表面积 `24π` 和体积 `12π`。斜高包含根号时仍给出精确式，例如 `立体: 圆锥 1,1` 的表面积为 `π(1 + √2)`。 [OpenStax 圆锥侧面积公式](https://openstax.org/books/calculus-volume-2/pages/2-4-arc-length-of-a-curve-and-surface-area)
 - 输入 `立体: 圆台 2,5,4` 可按两个底面半径和垂直高计算圆台，得到总表面积 `64π` 和体积 `52π`。两个半径可交换顺序，表面积包含两个底面。 [OpenStax 圆台侧面积公式](https://openstax.org/books/calculus-volume-2/pages/2-4-arc-length-of-a-curve-and-surface-area) [圆台体积公式](https://www.grc.nasa.gov/www/k-12/rocket/volume.html)
 - 输入 `立体: 圆管 3,2,5` 可按外半径、内半径和长度计算空心圆管，得到总表面积 `60π` 和材料体积 `25π`。表面积包含内外侧面与两个环形端面，内半径须小于外半径。 [圆管体积公式](https://www.grc.nasa.gov/www/k-12/rocket/volume.html)
+- 输入 `立体: 球冠 3,1` 可按球半径和截取高度计算，得到总表面积 `11π` 和体积 `8π/3`。表面积包含球面与圆形底面，高度须大于零且最多等于球的直径。 [球冠面积和体积公式，第 2 节](https://msp.org/pjm/1999/189-2/pjm-v189-n2-p09-p.pdf#page=4)
 - 输入 `圆: 三点 1,0; 3,0; 1,2` 得到圆心 `(2, 1)`、半径 `√2` 和面积 `2π`。用分号分开三个点，支持分数坐标，三个点须互不重合且不在同一直线上。
 - 输入 `圆: 两圆关系 0,0 @ 1/2; 1,0 @ 1/2` 得到两圆外切、一个交点、圆心距 `1`。每个圆输入圆心和正半径，支持分数和精确算式。结果区分外离、外切、相交、内切、内含和重合。
 - 输入 `圆: 两圆交点 0,0 @ 1; 1,0 @ 1` 得到 `(1/2, √(3/4))` 和 `(1/2, -√(3/4))`。相切时显示一个交点，坐标会保留分数和根式。 [Geometric Tools 两圆交点推导](https://www.geometrictools.com/Documentation/IntersectionLine2Circle2.pdf#page=4)

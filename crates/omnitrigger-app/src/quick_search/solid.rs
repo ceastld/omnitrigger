@@ -13,6 +13,7 @@ pub(super) enum SolidError {
     Arguments,
     NonPositiveDimension,
     InvalidInnerRadius,
+    CapAboveDiameter,
     Evaluation(FractionError),
 }
 
@@ -22,6 +23,7 @@ impl SolidError {
             Self::Arguments => "填入形状和尺寸，例如 圆柱 3,5。按 F1 查看各形状的参数",
             Self::NonPositiveDimension => "每项尺寸须大于零",
             Self::InvalidInnerRadius => "内半径须小于外半径",
+            Self::CapAboveDiameter => "球冠高度须小于或等于球的直径",
             Self::Evaluation(error) => error.message(),
         }
     }
@@ -65,6 +67,19 @@ pub(super) fn calculate_solid(query: &str) -> Result<String, SolidError> {
                 let surface = &radius * &radius * BigInt::from(4);
                 let volume = &surface * radius / BigInt::from(3);
                 (surface, volume, true)
+            }
+            ("球冠" | "球缺" | "spherical-cap", [radius, height]) => {
+                let radius = positive_dimension(radius)?;
+                let height = positive_dimension(height)?;
+                let diameter = &radius * BigInt::from(2);
+                if height > diameter {
+                    return Err(SolidError::CapAboveDiameter);
+                }
+                let curved = &diameter * &height;
+                let base = (diameter - &height) * &height;
+                let volume =
+                    &height * &height * (radius * BigInt::from(3) - height) / BigInt::from(3);
+                (curved + base, volume, true)
             }
             ("立方体" | "cube", [side]) => {
                 let side = positive_dimension(side)?;
@@ -164,6 +179,10 @@ mod tests {
             ("ＣＹＬＩＮＤＥＲ １／２，３", "表面积 7π/2 · 体积 3π/4"),
             ("球 1/2", "表面积 π · 体积 π/6"),
             ("sphere 3", "表面积 36π · 体积 36π"),
+            ("球冠 3,1", "表面积 11π · 体积 8π/3"),
+            ("球缺 3,3", "表面积 27π · 体积 18π"),
+            ("SPHERICAL-CAP 3/2,1/2", "表面积 11π/4 · 体积 π/3"),
+            ("球冠 3,6", "表面积 36π · 体积 36π"),
             ("cube 1/2", "表面积 3/2 · 体积 1/8"),
             ("长方体 2,3,4", "表面积 52 · 体积 24"),
             ("长方体 1+1,3,(2+2)", "表面积 52 · 体积 24"),
@@ -189,6 +208,14 @@ mod tests {
         for query in ["圆管 2,2,3", "圆管 2,3,3"] {
             assert_eq!(calculate_solid(query), Err(SolidError::InvalidInnerRadius));
         }
+        assert_eq!(
+            calculate_solid("球冠 3,7"),
+            Err(SolidError::CapAboveDiameter)
+        );
+        assert_eq!(
+            calculate_solid("球冠 3,0"),
+            Err(SolidError::NonPositiveDimension)
+        );
         assert_eq!(calculate_solid("长方体 1,2"), Err(SolidError::Arguments));
         assert_eq!(calculate_solid("圆柱 1,2,3"), Err(SolidError::Arguments));
     }
