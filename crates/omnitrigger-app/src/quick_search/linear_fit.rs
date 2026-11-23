@@ -77,6 +77,12 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             return interpolate(&xs, points);
         }
         Some((operation, rest))
+            if operation == "插值系数"
+                || operation.eq_ignore_ascii_case("interpolation-coefficients") =>
+        {
+            return interpolation_coefficients(rest.trim());
+        }
+        Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
         {
             (rest.trim(), FitOutput::Residuals)
@@ -188,7 +194,12 @@ fn format_prediction_values(
     Ok(rows.join("\r\n"))
 }
 
-fn interpolate(xs: &[BigRational], points: &str) -> Result<String, LinearFitError> {
+struct Interpolation {
+    nodes: Vec<BigRational>,
+    differences: Vec<BigRational>,
+}
+
+fn interpolation(points: &str) -> Result<Interpolation, LinearFitError> {
     if points
         .split([';', '\n'])
         .nth(MAX_INTERPOLATION_POINTS)
@@ -210,6 +221,11 @@ fn interpolate(xs: &[BigRational], points: &str) -> Result<String, LinearFitErro
             check_size([&differences[index]])?;
         }
     }
+    Ok(Interpolation { nodes, differences })
+}
+
+fn interpolate(xs: &[BigRational], points: &str) -> Result<String, LinearFitError> {
+    let Interpolation { nodes, differences } = interpolation(points)?;
     format_prediction_values(xs, "插值", |x| {
         let mut value = differences[differences.len() - 1].clone();
         for (node, difference) in nodes.iter().zip(&differences).rev().skip(1) {
@@ -218,6 +234,30 @@ fn interpolate(xs: &[BigRational], points: &str) -> Result<String, LinearFitErro
         }
         Ok(value)
     })
+}
+
+fn interpolation_coefficients(points: &str) -> Result<String, LinearFitError> {
+    let Interpolation { nodes, differences } = interpolation(points)?;
+    let mut coefficients = vec![differences[differences.len() - 1].clone()];
+    // 将牛顿形式逐层乘以 x - node，并把下一阶的差商加到常数项。
+    for (node, difference) in nodes.iter().zip(&differences).rev().skip(1) {
+        coefficients.push(BigRational::default());
+        for degree in (1..coefficients.len()).rev() {
+            coefficients[degree] = &coefficients[degree - 1] - node * &coefficients[degree];
+            check_size([&coefficients[degree]])?;
+        }
+        coefficients[0] = difference - node * &coefficients[0];
+        check_size([&coefficients[0]])?;
+    }
+    let degree = coefficients
+        .iter()
+        .rposition(|value| value.numer().sign() != Sign::NoSign)
+        .unwrap_or(0);
+    let mut rows = vec!["次数,系数".to_owned()];
+    for (degree, value) in coefficients[..=degree].iter().enumerate().rev() {
+        rows.push(format!("{degree},{value}"));
+    }
+    Ok(rows.join("\r\n"))
 }
 
 pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
@@ -415,6 +455,33 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writes_the_actual_degree_and_exact_power_coefficients_of_the_interpolant() {
+        for (input, expected) in [
+            ("插值系数 0,1; 1,2; 2,5", "次数,系数\r\n2,1\r\n1,0\r\n0,1"),
+            ("插值系数 3,1/4; 1,1/4; 2,1/4", "次数,系数\r\n0,1/4"),
+            (
+                "interpolation-coefficients 0,1; 2,2",
+                "次数,系数\r\n1,1/2\r\n0,1",
+            ),
+            ("插值系数 0,0; 1,0", "次数,系数\r\n0,0"),
+            (
+                "插值系数 0,0; 1,1; 2,8; 3,27",
+                "次数,系数\r\n3,1\r\n2,0\r\n1,0\r\n0,0",
+            ),
+        ] {
+            assert_eq!(
+                calculate_linear_fit(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_linear_fit("插值系数 1,1; 1.0,2"),
+            Err(LinearFitError::RepeatedInterpolationX)
+        );
+    }
 
     #[test]
     fn evaluates_exact_interpolation_for_one_or_many_queries() {
