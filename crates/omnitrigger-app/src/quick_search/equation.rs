@@ -60,6 +60,7 @@ pub(super) enum EquationError {
     NumericIntegralArguments,
     NumericIntegralIntervals,
     IntegralSampleArguments,
+    NumericAreaArguments,
     NumericDerivativeArguments,
     NumericDerivativeStep,
     DerivativeSampleArguments,
@@ -127,6 +128,9 @@ impl EquationError {
             Self::NumericIntegralIntervals => "当前精度无法区分积分采样点，请减少子区间数",
             Self::IntegralSampleArguments => {
                 "填写被积算式和不同的区间端点，分号后可填 2 至 129 的采样点数"
+            }
+            Self::NumericAreaArguments => {
+                "用数组填写两条算式，再填两个不同端点和可选的偶数子区间数"
             }
             Self::NumericDerivativeArguments => {
                 "填写要估算导数的算式和横坐标，可在分号后填写正步长"
@@ -205,6 +209,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
+            "数值面积" | "numeric-area" => return numeric_function_area(arguments),
             "积分采样" | "sample-integral" | "积分采样图" | "integral-plot" => {
                 return format_function_samples(&integral_samples(arguments)?, "累计积分");
             }
@@ -1401,6 +1406,37 @@ fn estimate_derivative(expression: &str, x: f64, step: f64) -> Result<f64, Equat
 fn numeric_integral(input: &str) -> Result<String, EquationError> {
     let invalid = EquationError::NumericIntegralArguments;
     let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let (bounds, intervals) = numeric_integral_range(arguments, invalid)?;
+    let value = integrate_samples(bounds, intervals, |x| {
+        evaluate_at_x(expression, x).map_err(EquationError::Approximation)
+    })?;
+    display_integral("积分", value, intervals)
+}
+
+fn numeric_function_area(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::NumericAreaArguments;
+    let (expressions, bounds) = function_comparison_arguments(input, invalid)?;
+    let [first, second] = expressions.as_slice() else {
+        return Err(invalid);
+    };
+    let ([left, right], intervals) = numeric_integral_range(bounds, invalid)?;
+    let value = integrate_samples([left.min(right), left.max(right)], intervals, |x| {
+        let value_at =
+            |expression| evaluate_at_x(expression, x).map_err(EquationError::Approximation);
+        let distance = (value_at(first)? - value_at(second)?).abs();
+        if distance.is_finite() {
+            Ok(distance)
+        } else {
+            Err(EquationError::Approximation(CalculationError::OutOfRange))
+        }
+    })?;
+    display_integral("面积", value, intervals)
+}
+
+fn numeric_integral_range(
+    arguments: &str,
+    invalid: EquationError,
+) -> Result<([f64; 2], u32), EquationError> {
     let (bounds, intervals) = match arguments.split_once(';') {
         Some((bounds, intervals)) => {
             let intervals = intervals
@@ -1415,7 +1451,14 @@ fn numeric_integral(input: &str) -> Result<String, EquationError> {
         }
         None => (arguments, 64),
     };
-    let [start, end] = function_endpoints(bounds, invalid)?;
+    Ok((function_endpoints(bounds, invalid)?, intervals))
+}
+
+fn integrate_samples(
+    [start, end]: [f64; 2],
+    intervals: u32,
+    value_at: impl Fn(f64) -> Result<f64, EquationError>,
+) -> Result<f64, EquationError> {
     let mut values = Vec::with_capacity(intervals as usize + 1);
     let mut previous = None;
     for index in 0..=intervals {
@@ -1424,12 +1467,15 @@ fn numeric_integral(input: &str) -> Result<String, EquationError> {
             return Err(EquationError::NumericIntegralIntervals);
         }
         previous = Some(x);
-        values.push(evaluate_at_x(expression, x).map_err(EquationError::Approximation)?);
+        values.push(value_at(x)?);
     }
-    let value = simpson_integral(&values, start, end);
+    Ok(simpson_integral(&values, start, end))
+}
+
+fn display_integral(label: &str, value: f64, intervals: u32) -> Result<String, EquationError> {
     let display = format_result(value).map_err(EquationError::Approximation)?;
     Ok(format!(
-        "积分 ≈ {display}\r\n复合辛普森法 · {intervals} 个子区间"
+        "{label} ≈ {display}\r\n复合辛普森法 · {intervals} 个子区间"
     ))
 }
 
@@ -2583,6 +2629,28 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn estimates_the_area_between_crossing_curves_in_either_endpoint_order() {
+        assert_eq!(
+            solve_equation(r#"数值面积 ["x","0"] @ 1..-1; 8"#).as_deref(),
+            Ok("面积 ≈ 1\r\n复合辛普森法 · 8 个子区间")
+        );
+        assert_eq!(
+            solve_equation(r#"numeric-area ["x²","x²"] @ -2..2"#).as_deref(),
+            Ok("面积 ≈ 0\r\n复合辛普森法 · 64 个子区间")
+        );
+        assert_eq!(
+            solve_equation(r#"数值面积 ["sqrt(x)","0"] @ -1..1"#),
+            Err(EquationError::Approximation(
+                CalculationError::FunctionDomain
+            ))
+        );
+        assert_eq!(
+            solve_equation(r#"数值面积 ["x","0","1"] @ 0..2"#),
+            Err(EquationError::NumericAreaArguments)
         );
     }
 
