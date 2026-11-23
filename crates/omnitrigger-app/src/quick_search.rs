@@ -1175,6 +1175,16 @@ impl Results {
         }
     }
 
+    fn refillable_text(&self) -> Option<&str> {
+        let Self::Value(Ok(value)) = self else {
+            return None;
+        };
+        let text = &value.text;
+        (!text.is_empty()
+            && text.chars().take(INPUT_CHARACTER_LIMIT + 1).count() <= INPUT_CHARACTER_LIMIT)
+            .then_some(text.as_str())
+    }
+
     fn subdirectory_query(&self, selected: usize) -> Option<String> {
         let Self::Destinations(items) = self else {
             return None;
@@ -1288,6 +1298,11 @@ struct BookmarkNameEdit {
     filter: String,
 }
 
+struct ResultRefill {
+    original: String,
+    inserted: String,
+}
+
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
@@ -1301,6 +1316,7 @@ pub(super) struct QuickSearch {
     input_before_help: Option<String>,
     input_before_calculation_history: Option<String>,
     input_before_bookmarks: Option<String>,
+    result_refill: Option<ResultRefill>,
     previous_input: String,
     bookmark_limit_reached: bool,
     bookmark_save_error: Option<String>,
@@ -1409,6 +1425,7 @@ impl QuickSearch {
             input_before_help: None,
             input_before_calculation_history: None,
             input_before_bookmarks: None,
+            result_refill: None,
             previous_input,
             bookmark_limit_reached: false,
             bookmark_save_error: None,
@@ -1453,6 +1470,13 @@ impl QuickSearch {
     fn refresh_results(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.bookmark_name_edit.is_some() {
             return;
+        }
+        if self
+            .result_refill
+            .as_ref()
+            .is_some_and(|refill| refill.inserted != query)
+        {
+            self.result_refill = None;
         }
         let next = self.index.results(query);
         if !Self::shows_help(query, &next) {
@@ -1786,6 +1810,22 @@ impl QuickSearch {
         if let Some(query) = self.results.continuation_query() {
             self.remember_value(cx);
             self.fill_query(query, window, cx);
+        }
+    }
+
+    fn refill_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(refill) = self.result_refill.take() {
+            self.fill_query(refill.original, window, cx);
+        } else if let Some(text) = self.results.refillable_text() {
+            let original = self.input.read(cx).text();
+            let inserted = text.to_owned();
+            self.result_refill = Some(ResultRefill {
+                original,
+                inserted: inserted.clone(),
+            });
+            self.input
+                .update(cx, |input, cx| input.set_text(inserted, cx));
+            window.focus(&self.input.focus_handle(cx));
         }
     }
 
@@ -2125,6 +2165,11 @@ impl QuickSearch {
             "f2" if self.results.value_preview_expandable() => {
                 if !event.is_held {
                     self.toggle_value_preview(window, cx);
+                }
+            }
+            "f3" if self.result_refill.is_some() || self.results.refillable_text().is_some() => {
+                if !event.is_held {
+                    self.refill_result(window, cx);
                 }
             }
             "f4" => {
@@ -2908,6 +2953,13 @@ impl Render for QuickSearch {
         let focused = self.input.focus_handle(cx).is_focused(window);
         let query = self.input.read(cx).text();
         let naming_bookmark = self.bookmark_name_edit.is_some();
+        let refill_action = if naming_bookmark {
+            None
+        } else if self.result_refill.is_some() {
+            Some("恢复输入 F3")
+        } else {
+            self.results.refillable_text().map(|_| "填回结果 F3")
+        };
         let help_action = if naming_bookmark || query.trim().is_empty() {
             None
         } else if Self::shows_help(&query, &self.results) {
@@ -2980,6 +3032,15 @@ impl Render for QuickSearch {
                                 .h(px(24.))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_help(window, cx);
+                                })),
+                        )
+                    })
+                    .when_some(refill_action, |header, label| {
+                        header.child(
+                            button("refill-quick-search-result", label, Tone::Ghost, true)
+                                .h(px(24.))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.refill_result(window, cx);
                                 })),
                         )
                     })
@@ -3546,6 +3607,30 @@ mod tests {
     }
 
     #[test]
+    fn refills_exact_result_text_only_when_it_fits_the_search_input() {
+        let result = |text: String| {
+            Results::Value(Ok(ResultValue {
+                text,
+                kind: ValueKind::Text,
+            }))
+        };
+        assert_eq!(
+            result("甲\r\n乙\t ".to_owned()).refillable_text(),
+            Some("甲\r\n乙\t ")
+        );
+        assert_eq!(
+            result("甲".repeat(INPUT_CHARACTER_LIMIT))
+                .refillable_text()
+                .map(|text| text.chars().count()),
+            Some(INPUT_CHARACTER_LIMIT)
+        );
+        assert!(result("甲".repeat(INPUT_CHARACTER_LIMIT + 1))
+            .refillable_text()
+            .is_none());
+        assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
     fn expands_long_value_previews_without_changing_the_copied_text() {
         let results = for_query(r#"文本: 拆分成行 "," 一,二,三,四,五,六,七,八,九"#, &[]);
         assert!(results.value_preview_expandable());
@@ -3802,6 +3887,41 @@ mod tests {
             for_query("文本: 大写 abc", &[]),
             Results::Value(Ok(value)) if value.text == "ABC"
         ));
+    }
+
+    #[cfg(target_os = "windows")]
+    fn verify_result_refill(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        let original = "文本: 大写 hello\nworld";
+        let result = "HELLO\nWORLD";
+        let key = |is_held| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("f3").unwrap(),
+            is_held,
+        };
+        search.fill_query(original, window, cx);
+        search.refresh_results(original, window, cx);
+        search.key_down(&key(true), window, cx);
+        assert_eq!(search.input.read(cx).text(), original);
+        search.key_down(&key(false), window, cx);
+        assert_eq!(search.input.read(cx).text(), result);
+        search.refresh_results(result, window, cx);
+        search.key_down(&key(true), window, cx);
+        assert_eq!(search.input.read(cx).text(), result);
+        search.key_down(&key(false), window, cx);
+        assert_eq!(search.input.read(cx).text(), original);
+        search.refresh_results(original, window, cx);
+        search.key_down(&key(false), window, cx);
+        search.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "文本: 小写 ", window, cx);
+        });
+        let next = search.input.read(cx).text();
+        assert_eq!(next, "文本: 小写 HELLO\nWORLD");
+        search.refresh_results(&next, window, cx);
+        assert!(search.result_refill.is_none());
+        assert_eq!(search.results.refillable_text(), Some("hello\nworld"));
     }
 
     #[cfg(target_os = "windows")]
@@ -4243,6 +4363,7 @@ mod tests {
                             )
                         })
                         .unwrap();
+                    reopened.update(cx, verify_result_refill).unwrap();
                     send.send((
                         states,
                         reopened_states,
