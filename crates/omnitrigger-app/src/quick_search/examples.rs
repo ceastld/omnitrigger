@@ -2508,6 +2508,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算两段文字在字素簇层面的编辑距离",
+        query: r#"文本: 编辑距离 "猫👩‍💻" "猫🧑‍💻""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留符合正则表达式的行",
         query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
     },

@@ -26,6 +26,7 @@ use super::{
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 512;
+const MAX_EDIT_GRAPHEMES: usize = 512;
 const MAX_PIPELINE_STEPS: usize = 8;
 
 #[derive(Clone, Copy)]
@@ -72,6 +73,7 @@ pub(super) enum TextError {
     IncompleteLineComparison,
     InvalidLineComparison,
     TooManyDiffLines,
+    TooManyEditGraphemes,
     EmptyDelimiter,
     InvalidColumn,
     CsvColumnCount,
@@ -121,6 +123,7 @@ impl TextError {
             Self::IncompleteLineComparison => "输入两组加引号的文本，组间用空格分开",
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
             Self::TooManyDiffLines => "逐行比较最多支持每组 512 行",
+            Self::TooManyEditGraphemes => "编辑距离最多支持每段 512 个字素簇",
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
@@ -241,6 +244,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             return compare_line_sets(text, LineSetOperation::SymmetricDifference);
         }
         "逐行比较" | "diff-lines" => return diff_lines(text),
+        "编辑距离" | "edit-distance" | "levenshtein" => return edit_distance(text),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
         "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
         "正则计数" | "regex-count" => {
@@ -1403,7 +1407,7 @@ fn select_lines(text: &str, matches: impl Fn(&str) -> bool) -> String {
         .join("\n")
 }
 
-fn read_line_comparison(input: &str) -> Result<(String, String), TextError> {
+fn read_text_pair(input: &str) -> Result<(String, String), TextError> {
     let read_lists = || {
         let (first, rest) = replacement_argument(input)?;
         let (second, rest) = replacement_argument(rest)?;
@@ -1435,7 +1439,7 @@ fn pair_lines_as_csv(input: &str) -> Result<String, TextError> {
         }
         texts
     } else {
-        let (left, right) = read_line_comparison(input)?;
+        let (left, right) = read_text_pair(input)?;
         vec![left, right]
     };
     let mut columns = texts
@@ -1486,7 +1490,7 @@ enum LineSetOperation {
 }
 
 fn compare_line_sets(input: &str, operation: LineSetOperation) -> Result<String, TextError> {
-    let (first, second) = read_line_comparison(input)?;
+    let (first, second) = read_text_pair(input)?;
     if matches!(operation, LineSetOperation::Union) {
         return Ok(join_distinct_lines(first.lines().chain(second.lines())));
     }
@@ -1513,8 +1517,35 @@ fn join_distinct_lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
         .join("\n")
 }
 
+fn edit_distance(input: &str) -> Result<String, TextError> {
+    let (first, second) = read_text_pair(input)?;
+    let first: Vec<_> = first.graphemes(true).take(MAX_EDIT_GRAPHEMES + 1).collect();
+    let second: Vec<_> = second
+        .graphemes(true)
+        .take(MAX_EDIT_GRAPHEMES + 1)
+        .collect();
+    if first.len().max(second.len()) > MAX_EDIT_GRAPHEMES {
+        return Err(TextError::TooManyEditGraphemes);
+    }
+
+    let mut distances: Vec<_> = (0..=second.len()).collect();
+    for (row, grapheme) in first.iter().enumerate() {
+        let mut diagonal = distances[0];
+        distances[0] = row + 1;
+        for (column, other) in second.iter().enumerate() {
+            let above = distances[column + 1];
+            let remove = above + 1;
+            let insert = distances[column] + 1;
+            let replace = diagonal + usize::from(grapheme != other);
+            distances[column + 1] = remove.min(insert).min(replace);
+            diagonal = above;
+        }
+    }
+    Ok(distances[second.len()].to_string())
+}
+
 fn diff_lines(input: &str) -> Result<String, TextError> {
-    let (before, after) = read_line_comparison(input)?;
+    let (before, after) = read_text_pair(input)?;
     let before: Vec<_> = before.lines().take(MAX_DIFF_LINES + 1).collect();
     let after: Vec<_> = after.lines().take(MAX_DIFF_LINES + 1).collect();
     if before.len() > MAX_DIFF_LINES || after.len() > MAX_DIFF_LINES {
@@ -1925,6 +1956,23 @@ mod tests {
             transform_text(r#"逐行比较 "一" 二"#),
             Err(TextError::InvalidLineComparison)
         );
+    }
+
+    #[test]
+    fn counts_minimal_edits_in_grapheme_clusters() {
+        for (query, expected) in [
+            (r#"编辑距离 "kitten" "sitting""#, "3"),
+            (r#"编辑距离 "猫👩‍💻" "猫🧑‍💻""#, "1"),
+            ("levenshtein \"e\u{301}\" \"é\"", "1"),
+            (r#"edit-distance "" "猫👩‍💻""#, "2"),
+            (r#"edit-distance "x y" "xy""#, "1"),
+            (r#"edit-distance "Tea" "tea""#, "1"),
+            (r#"编辑距离 "" """#, "0"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        let query = format!("编辑距离 \"{}\" \"\"", "茶".repeat(MAX_EDIT_GRAPHEMES + 1));
+        assert_eq!(transform_text(&query), Err(TextError::TooManyEditGraphemes));
     }
 
     #[test]
