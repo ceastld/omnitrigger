@@ -701,6 +701,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算圆被直线截得的弦长和弦中点",
+        query: "圆: 弦长 0,0 @ 1; -1,1/2; 1,1/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "判断分数坐标的点位于圆内、圆周上还是圆外",
         query: "圆: 包含 3/5,4/5 @ 0,0 @ 1",
     },

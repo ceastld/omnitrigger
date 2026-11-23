@@ -67,7 +67,10 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
         return circle_intersections(arguments);
     }
     if operation == "直线交点" || operation.eq_ignore_ascii_case("line-intersections") {
-        return line_circle_intersections(arguments);
+        return measure_line_and_circle(arguments, LineCircleMeasurement::Intersections);
+    }
+    if operation == "弦长" || operation.eq_ignore_ascii_case("chord-length") {
+        return measure_line_and_circle(arguments, LineCircleMeasurement::Chord);
     }
     if operation == "切点" || operation.eq_ignore_ascii_case("tangent-points") {
         return circle_tangent_points(arguments);
@@ -265,7 +268,15 @@ fn circle_intersections(input: &str) -> Result<String, CircleError> {
     )
 }
 
-fn line_circle_intersections(input: &str) -> Result<String, CircleError> {
+enum LineCircleMeasurement {
+    Intersections,
+    Chord,
+}
+
+fn measure_line_and_circle(
+    input: &str,
+    measurement: LineCircleMeasurement,
+) -> Result<String, CircleError> {
     let invalid = CircleError::LineCircleArguments;
     let mut parts = input.split(';');
     let (Some(circle), Some(first), Some(second), None) =
@@ -293,6 +304,9 @@ fn line_circle_intersections(input: &str) -> Result<String, CircleError> {
     let remainder =
         &circle.radius * &circle.radius - squared_point_distance(&center, &circle.center);
     ensure_exact_size(&remainder).map_err(CircleError::Evaluation)?;
+    if matches!(measurement, LineCircleMeasurement::Chord) {
+        return render_chord(center, remainder);
+    }
     let offset_sign = remainder.numer().sign();
     if offset_sign == Sign::Minus {
         return Ok("无交点".to_owned());
@@ -308,6 +322,26 @@ fn line_circle_intersections(input: &str) -> Result<String, CircleError> {
         offset_sign == Sign::NoSign,
         "交点",
     )
+}
+
+fn render_chord([x, y]: Point2, half_length_squared: BigRational) -> Result<String, CircleError> {
+    match half_length_squared.numer().sign() {
+        Sign::Minus => Ok("无弦 · 直线与圆外离".to_owned()),
+        Sign::NoSign => {
+            for value in [&x, &y] {
+                ensure_exact_size(value).map_err(CircleError::Evaluation)?;
+            }
+            Ok(format!("弦长 0 · 相切\n切点 ({x}, {y})"))
+        }
+        Sign::Plus => {
+            let length_squared = half_length_squared * BigInt::from(4_u8);
+            for value in [&x, &y, &length_squared] {
+                ensure_exact_size(value).map_err(CircleError::Evaluation)?;
+            }
+            let length = format_square_root(&length_squared);
+            Ok(format!("弦长 {length}\n弦中点 ({x}, {y})"))
+        }
+    }
 }
 
 fn circle_tangent_points(input: &str) -> Result<String, CircleError> {
@@ -482,6 +516,26 @@ mod tests {
         assert_eq!(
             calculate_circle("包含 1,1 @ 0,0 @ 0"),
             Err(CircleError::NonPositiveRadius)
+        );
+    }
+
+    #[test]
+    fn measures_an_exact_chord_or_reports_a_tangent_or_external_line() {
+        for (query, expected) in [
+            ("弦长 0,0 @ 1; -1,1/2; 1,1/2", "弦长 √3\n弦中点 (0, 1/2)"),
+            (
+                "chord-length 0,0 @ 1; 3/5,10; 3/5,11",
+                "弦长 8/5\n弦中点 (3/5, 0)",
+            ),
+            ("弦长 1,2 @ 5; 0,1; 1,2", "弦长 10\n弦中点 (1, 2)"),
+            ("弦长 0,0 @ 1; -1,1; 1,1", "弦长 0 · 相切\n切点 (0, 1)"),
+            ("弦长 0,0 @ 1; -1,2; 1,2", "无弦 · 直线与圆外离"),
+        ] {
+            assert_eq!(calculate_circle(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_circle("弦长 0,0 @ 1; 2,2; 2,2"),
+            Err(CircleError::CoincidentLinePoints)
         );
     }
 
