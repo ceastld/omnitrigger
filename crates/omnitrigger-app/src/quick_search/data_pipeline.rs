@@ -1,16 +1,21 @@
 use std::borrow::Cow;
 
+use chrono::NaiveDate;
+
 use super::{
+    calendar::calculate_date,
     csv_tools::transform_csv,
     json_tools::transform_json,
     operators::json_argument_and_tail,
+    path_tools::path_component,
     scope::{scoped_query, Scope},
     text_tools::transform_text,
+    url_encoding::convert_url_component,
 };
 
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
-const STEP_SYNTAX: &str = "每一步填写带前缀的文本、CSV 或 JSON 命令";
+const STEP_SYNTAX: &str = "每一步填写带前缀的文本、CSV、JSON、URL、路径或日期命令";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -18,7 +23,10 @@ pub(super) enum DataPipelineError {
     Step { index: usize, cause: &'static str },
 }
 
-pub(super) fn transform_data_pipeline(input: &str) -> Result<String, DataPipelineError> {
+pub(super) fn transform_data_pipeline(
+    input: &str,
+    today: NaiveDate,
+) -> Result<String, DataPipelineError> {
     let (steps, source) =
         json_argument_and_tail::<Vec<String>>(input).ok_or(DataPipelineError::Arguments)?;
     if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len()) || source.trim().is_empty() {
@@ -46,6 +54,9 @@ pub(super) fn transform_data_pipeline(input: &str) -> Result<String, DataPipelin
             Scope::TextTools => transform_text(&query).map_err(|cause| cause.message()),
             Scope::Csv => transform_csv(&query).map_err(|cause| cause.message()),
             Scope::Json => transform_json(&query).map_err(|cause| cause.message()),
+            Scope::UrlEncoding => convert_url_component(&query).map_err(|cause| cause.message()),
+            Scope::Path => path_component(&query).map_err(|cause| cause.message()),
+            Scope::Date => calculate_date(&query, today).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
         }
         .map_err(error)?;
@@ -61,20 +72,42 @@ pub(super) fn transform_data_pipeline(input: &str) -> Result<String, DataPipelin
 mod tests {
     use super::*;
 
+    fn run_pipeline(input: &str) -> Result<String, DataPipelineError> {
+        transform_data_pipeline(input, NaiveDate::from_ymd_opt(2024, 2, 18).unwrap())
+    }
+
     #[test]
     fn sends_text_through_csv_and_json_steps_without_losing_numeric_spelling() {
         let input = concat!(
             r#"["文本: 去空行","CSV: 数值对象 [2]","JSON: 取值 /1/金额"]"#,
             "\r\n编号,金额\r\n001,1.50\r\n\r\n002,2e0"
         );
-        assert_eq!(transform_data_pipeline(input).as_deref(), Ok("2e0"));
+        assert_eq!(run_pipeline(input).as_deref(), Ok("2e0"));
         assert_eq!(
-            transform_data_pipeline(
-                r#"["JSON: 转CSV","CSV: 选列 2"] [{"编号":"001","金额":1.50}]"#
-            )
-            .as_deref(),
+            run_pipeline(r#"["JSON: 转CSV","CSV: 选列 2"] [{"编号":"001","金额":1.50}]"#)
+                .as_deref(),
             Ok("金额\r\n1.50")
         );
+    }
+
+    #[test]
+    fn combines_url_path_and_date_tools_with_following_steps() {
+        for (input, expected) in [
+            (
+                r#"["URL: 参数JSON","JSON: 取值 /0/1"] https://example.invalid/?q=%E8%8C%B6+1"#,
+                "\"茶 1\"",
+            ),
+            (
+                r#"["路径: 文件名","文本: 大写"] C:/Docs/report.txt"#,
+                "REPORT.TXT",
+            ),
+            (
+                r#"["日期: 月末序列","文本: 按行拼接 \", \""] 本月,2"#,
+                "2024-02-29, 2024-03-31",
+            ),
+        ] {
+            assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
+        }
     }
 
     #[test]
@@ -85,20 +118,19 @@ mod tests {
             r#"["JSON: 压缩","JSON: PIPELINE []"] {}"#,
             r#"["JSON: 压缩","文本: 去空行\n文本: 大写"] {}"#,
             r#"["JSON: 压缩","CSV: "] {}"#,
+            r#"["文本: 小写","URL: 解码"] %zz"#,
+            r#"["文本: 小写","日期: 月末序列"] 2024-13,2"#,
         ] {
             assert!(
                 matches!(
-                    transform_data_pipeline(input),
+                    run_pipeline(input),
                     Err(DataPipelineError::Step { index: 2, .. })
                 ),
                 "{input}"
             );
         }
         for input in [r#"[] {}"#, r#"["JSON: 压缩"]"#, r#"["JSON: 压缩"] "#] {
-            assert_eq!(
-                transform_data_pipeline(input),
-                Err(DataPipelineError::Arguments)
-            );
+            assert_eq!(run_pipeline(input), Err(DataPipelineError::Arguments));
         }
     }
 }

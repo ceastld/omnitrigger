@@ -942,7 +942,8 @@ impl Results {
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 Scope::Csv => Self::text_value(transform_csv(term).map_err(ValueError::Csv)),
                 Scope::DataPipeline => Self::text_value(
-                    transform_data_pipeline(term).map_err(ValueError::DataPipeline),
+                    transform_data_pipeline(term, chrono::Local::now().date_naive())
+                        .map_err(ValueError::DataPipeline),
                 ),
                 Scope::Fraction => Self::Value(
                     simplify_fraction(term)

@@ -786,6 +786,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "处理: [\"文本: 去空行\",\"CSV: 数值对象 [2]\",\"JSON: 取值 /1/金额\"] 编号,金额\n001,1.50\n\n002,2e0",
     },
     Example {
+        icon: Icon::Browser,
+        title: "解码网址查询参数并取出第一个值",
+        query: r#"处理: ["URL: 参数JSON","JSON: 取值 /0/1"] https://example.invalid/?q=%E8%8C%B6+1"#,
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "生成月底日期并在一行中拼接",
+        query: r#"处理: ["日期: 月末序列","文本: 按行拼接 \", \""] 2024-01,3"#,
+    },
+    Example {
         icon: Icon::Grid,
         title: "切换已打开的窗口",
         query: "窗口:",
