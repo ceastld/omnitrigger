@@ -165,6 +165,9 @@ pub(super) enum CsvError {
     InvalidNumber,
     NumericIssuesTooLarge,
     DateIssuesTooLarge,
+    RegexCheckColumnsArguments,
+    RegexCheckColumnsInputTooLarge,
+    RegexIssuesTooLarge,
     DecimalColumnsArguments,
     DecimalColumnsTooLarge,
     SignificantColumnsArguments,
@@ -360,6 +363,9 @@ impl CsvError {
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::NumericIssuesTooLarge => "数值列检查结果超过 1 MiB，请缩小表格范围",
             Self::DateIssuesTooLarge => "日期列检查结果超过 1 MiB，请缩小表格范围",
+            Self::RegexCheckColumnsArguments => "填写列名或列号列表和正则表达式",
+            Self::RegexCheckColumnsInputTooLarge => "所选列的文本合计超过 16 KiB，请缩小表格范围",
+            Self::RegexIssuesTooLarge => "正则检查结果超过 1 MiB，请缩小表格范围",
             Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
             Self::DecimalColumnsTooLarge => "小数列结果超过 1 MiB，请缩小表格范围",
             Self::SignificantColumnsArguments => "填写不同的列和 1 至 100 位有效数字，例如 [[\"金额\",3],3]",
@@ -404,6 +410,12 @@ enum TextComparison {
     CommonSubstring,
 }
 
+enum ColumnValidation {
+    Number,
+    Date,
+    Pattern(Regex),
+}
+
 enum Operation {
     Validate,
     PadRows,
@@ -425,8 +437,7 @@ enum Operation {
     FillEmptyCells(Vec<ColumnReference>, FillDirection),
     InterpolateEmptyCells(ColumnReference, Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
-    CheckNumericColumns(Vec<ColumnReference>),
-    CheckDateColumns(Vec<ColumnReference>),
+    CheckColumns(Vec<ColumnReference>, ColumnValidation),
     RoundColumns {
         columns: Vec<ColumnReference>,
         digits: u32,
@@ -891,11 +902,26 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            if matches!(operation.as_str(), "检查日期列" | "check-date-columns") {
-                Operation::CheckDateColumns(columns)
+            let validation = if matches!(operation.as_str(), "检查日期列" | "check-date-columns")
+            {
+                ColumnValidation::Date
             } else {
-                Operation::CheckNumericColumns(columns)
+                ColumnValidation::Number
+            };
+            Operation::CheckColumns(columns, validation)
+        }
+        "检查正则列" | "check-regex-columns" => {
+            let ((columns, pattern), data) =
+                json_argument_and_data::<(Vec<ColumnReference>, String)>(
+                    input,
+                    CsvError::RegexCheckColumnsArguments,
+                )?;
+            if columns.is_empty() {
+                return Err(CsvError::RegexCheckColumnsArguments);
             }
+            let pattern = compile_regex(&pattern).map_err(CsvError::Regex)?;
+            input = data;
+            Operation::CheckColumns(columns, ColumnValidation::Pattern(pattern))
         }
         "小数列" | "decimal-columns" | "有效数字列" | "significant-columns" => {
             let significant = matches!(operation.as_str(), "有效数字列" | "significant-columns");
@@ -1816,18 +1842,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             interpolate_empty_csv_cells(&rows, column, &groups)
         }
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
-        Operation::CheckNumericColumns(columns) => check_columns(
-            &rows,
-            &columns,
-            |cell| parse_fraction_literal(cell).is_ok(),
-            CsvError::NumericIssuesTooLarge,
-        ),
-        Operation::CheckDateColumns(columns) => check_columns(
-            &rows,
-            &columns,
-            |cell| parse_complete_date(cell).is_ok(),
-            CsvError::DateIssuesTooLarge,
-        ),
+        Operation::CheckColumns(columns, validation) => check_columns(&rows, &columns, &validation),
         Operation::RoundColumns {
             columns,
             digits,
@@ -2867,17 +2882,35 @@ fn round_csv_columns(
 fn check_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
-    valid: impl Fn(&str) -> bool,
-    too_large: CsvError,
+    validation: &ColumnValidation,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    if matches!(validation, ColumnValidation::Pattern(_))
+        && records
+            .iter()
+            .flat_map(|record| columns.iter().map(move |&column| record[column].len()))
+            .sum::<usize>()
+            > MAX_REGEX_COLUMN_INPUT_BYTES
+    {
+        return Err(CsvError::RegexCheckColumnsInputTooLarge);
+    }
+    let too_large = match validation {
+        ColumnValidation::Number => CsvError::NumericIssuesTooLarge,
+        ColumnValidation::Date => CsvError::DateIssuesTooLarge,
+        ColumnValidation::Pattern(_) => CsvError::RegexIssuesTooLarge,
+    };
     let mut output = String::from("数据行,列号,列名,内容");
     for (index, record) in records.iter().enumerate() {
         let row_number = (index + 1).to_string();
         for &column in &columns {
             let cell = &record[column];
-            if valid(cell) {
+            let valid = match validation {
+                ColumnValidation::Number => parse_fraction_literal(cell).is_ok(),
+                ColumnValidation::Date => parse_complete_date(cell).is_ok(),
+                ColumnValidation::Pattern(pattern) => pattern.is_match(cell),
+            };
+            if valid {
                 continue;
             }
             let column_number = (column + 1).to_string();
@@ -4948,6 +4981,27 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn reports_csv_cells_that_do_not_match_the_chosen_regex() {
+        let input = "检查正则列 [[\"编号\"],\"^[A-Z][0-9]{2}$\"] 编号,状态\nA01,通过\nB7,待复核\n,未知\nC23,完成";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n2,1,编号,B7\r\n3,1,编号,\"\""),
+        );
+        assert_eq!(
+            transform_csv("check-regex-columns [[1],\"^$\"] 编号,状态\n,无编号").as_deref(),
+            Ok("数据行,列号,列名,内容"),
+        );
+        let large = format!(
+            "检查正则列 [[1],\"^B\"] 编号\n{}",
+            "x".repeat(MAX_REGEX_COLUMN_INPUT_BYTES + 1),
+        );
+        assert_eq!(
+            transform_csv(&large),
+            Err(CsvError::RegexCheckColumnsInputTooLarge),
+        );
     }
 
     #[test]

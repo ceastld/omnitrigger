@@ -3663,6 +3663,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位不符合正则规则的单元格",
+        query: "CSV: 检查正则列 [[\"编号\"],\"^[A-Z][0-9]{2}$\"] 编号,状态\nA01,通过\nB7,待复核\n,未知\nC23,完成",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把选中的 CSV 数值列统一成固定小数位",
         query: "CSV: 小数列 [[\"金额\",3],2] 编号,金额,比率\n001,2.675,1/8\n002,,-0.005",
     },
