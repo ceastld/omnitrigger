@@ -1068,8 +1068,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         operation if is_scatter_operation(operation) => {
             return parse_coordinate_table(input, CsvError::ScatterPointCount)?.to_csv();
         }
-        "梯形积分" | "trapezoid-integral" => return trapezoid_statistic(input, false),
-        "梯形平均" | "trapezoid-mean" => return trapezoid_statistic(input, true),
+        "梯形积分" | "trapezoid-integral" => {
+            return trapezoid_statistic(input, TrapezoidMeasure::Integral)
+        }
+        "梯形平均" | "trapezoid-mean" => {
+            return trapezoid_statistic(input, TrapezoidMeasure::Mean)
+        }
+        "梯形面积" | "trapezoid-area" => {
+            return trapezoid_statistic(input, TrapezoidMeasure::Area)
+        }
         "梯形累计列" | "cumulative-trapezoid-column" => {
             return append_trapezoid_integral_column(input)
         }
@@ -5403,10 +5410,21 @@ fn collect_coordinate_samples(
     Ok(samples)
 }
 
-fn trapezoid_statistic(input: &str, average: bool) -> Result<String, CsvError> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrapezoidMeasure {
+    Integral,
+    Mean,
+    Area,
+}
+
+fn trapezoid_statistic(input: &str, measure: TrapezoidMeasure) -> Result<String, CsvError> {
     let mut table = parse_coordinate_table(input, CsvError::TrapezoidPointCount)?;
-    let mut value = integrate_trapezoid_samples(&mut table.samples, |_, _| {})?;
-    if average {
+    let mut value = integrate_trapezoid_samples(
+        &mut table.samples,
+        measure == TrapezoidMeasure::Area,
+        |_, _| {},
+    )?;
+    if measure == TrapezoidMeasure::Mean {
         let first = &table.samples[0].point.0;
         let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
         value /= last - first;
@@ -5441,7 +5459,7 @@ pub(super) fn cumulative_trapezoid_chart(
 fn cumulative_trapezoid_coordinates(input: &str) -> Result<CsvCoordinates, CsvError> {
     let mut table = parse_coordinate_table(input, CsvError::TrapezoidPointCount)?;
     let mut totals = Vec::with_capacity(table.samples.len());
-    integrate_trapezoid_samples(&mut table.samples, |sample, total| {
+    integrate_trapezoid_samples(&mut table.samples, false, |sample, total| {
         totals.push(CoordinateSample {
             row_index: sample.row_index,
             point: (sample.point.0.clone(), total.clone()),
@@ -5465,7 +5483,7 @@ fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
     let columns = resolve_distinct_columns(header, &coordinates, invalid)?;
     let mut samples = collect_coordinate_samples(records, &columns, CsvError::TrapezoidPointCount)?;
     let mut totals = vec![String::new(); records.len()];
-    integrate_trapezoid_samples(&mut samples, |sample, total| {
+    integrate_trapezoid_samples(&mut samples, false, |sample, total| {
         totals[sample.row_index] = total.to_string();
     })?;
     let mut totals = totals.into_iter();
@@ -5476,6 +5494,7 @@ fn append_trapezoid_integral_column(input: &str) -> Result<String, CsvError> {
 
 fn integrate_trapezoid_samples(
     samples: &mut [CoordinateSample],
+    absolute_area: bool,
     mut visit: impl FnMut(&CoordinateSample, &BigRational),
 ) -> Result<BigRational, CsvError> {
     samples.sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
@@ -5488,7 +5507,19 @@ fn integrate_trapezoid_samples(
         if left == right {
             return Err(CsvError::TrapezoidDuplicateX);
         }
-        let segment = (right - left) * (first + last) / &two;
+        let doubled_mean_height = if absolute_area && first.numer().sign() != last.numer().sign() {
+            // 两侧三角形的水平宽度与各自的高度成正比。
+            let height_sum = first.max(last) - first.min(last);
+            (first * first + last * last) / height_sum
+        } else {
+            let sum = first + last;
+            if absolute_area && sum.numer().sign() == Sign::Minus {
+                -sum
+            } else {
+                sum
+            }
+        };
+        let segment = (right - left) * doubled_mean_height / &two;
         ensure_exact_size(&segment).map_err(|_| CsvError::ComputedNumberRange)?;
         total += segment;
         ensure_exact_size(&total).map_err(|_| CsvError::ComputedNumberRange)?;
@@ -7061,6 +7092,27 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn splits_crossing_segments_when_measuring_unsigned_trapezoid_area() {
+        let input = "[1,2] x,y\n3,2\n0,-1";
+        assert_eq!(
+            transform_csv(&format!("梯形面积 {input}")).as_deref(),
+            Ok("5/2")
+        );
+        assert_eq!(
+            transform_csv(&format!("梯形积分 {input}")).as_deref(),
+            Ok("3/2")
+        );
+        assert_eq!(
+            transform_csv("trapezoid-area [1,2] x,y\n0,-1\n1,-3\n2,0").as_deref(),
+            Ok("7/2")
+        );
+        assert_eq!(
+            transform_csv("梯形面积 [1,2] x,y\n0,0\n2,0").as_deref(),
+            Ok("0")
+        );
     }
 
     #[test]
