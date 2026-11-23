@@ -3713,6 +3713,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计每条 CSV 规则的通过和失败数",
+        query: "CSV: 规则统计 [[1,\"数值\"],[\"比率\",\"数值范围\",\"0\",\"1\"]] 比率\n1/3\n1.2\n未知",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位列表之外的单元格值",
         query: "CSV: 检查允许值 [[\"状态\"],[\"待办\",\"完成\",\"\"]] 编号,状态\nA,待办\nB,待确认\nC,\nD,完成",
     },
@@ -3821,6 +3826,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "给 CSV 追加两个钟表时刻之间的时长",
         query: "CSV: 时刻差列 [\"经过时长\",\"开始\",\"结束\"]\n开始,结束\n23:45,01:15\n09:00:00.25,09:00:01",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用带时区的时间戳求每行实际时长",
+        query: "CSV: 时间戳差列 [\"时长\",\"开始\",\"结束\"] 开始,结束\n2026-03-08T01:30:00-05:00,2026-03-08T03:30:00-04:00\n1ns,-1ns",
     },
     Example {
         icon: Icon::Clock,

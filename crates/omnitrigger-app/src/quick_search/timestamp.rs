@@ -528,7 +528,7 @@ fn align_timestamp(
         .ok()
         .filter(|duration| !duration.is_zero())
         .ok_or(TimestampError::AlignmentArguments)?;
-    let time = interval_endpoint(value.trim(), now)?;
+    let time = interval_endpoint(value.trim(), Some(now))?;
     let nanos = unix_nanos(time);
     let step = step.as_nanos() as i128;
     let remainder = nanos.rem_euclid(step);
@@ -564,7 +564,7 @@ fn timestamp_series(
         .ok()
         .filter(|count| (1..=MAX_SERIES_TIMESTAMPS).contains(count))
         .ok_or(TimestampError::SeriesArguments)?;
-    let start = interval_endpoint(start, now)?;
+    let start = interval_endpoint(start, Some(now))?;
     let format = TimestampUnit::from_subsecond(start.timestamp_subsec_nanos())
         .max(TimestampUnit::from_subsecond(step.subsec_nanos()))
         .date_format();
@@ -598,11 +598,20 @@ fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, Timesta
         if value.is_empty() {
             return Err(TimestampError::IntervalEndpoints);
         }
-        interval_endpoint(value, now).map(unix_nanos)
+        interval_endpoint(value, Some(now)).map(unix_nanos)
     };
     let start = timeline_nanos(start)?;
     let end = timeline_nanos(end)?;
-    let delta = end - start;
+    format_timestamp_delta(end - start, output)
+}
+
+pub(super) fn timestamp_clock_difference(start: &str, end: &str) -> Result<String, TimestampError> {
+    let start = unix_nanos(interval_endpoint(&normalize(start), None)?);
+    let end = unix_nanos(interval_endpoint(&normalize(end), None)?);
+    format_timestamp_delta(end - start, None)
+}
+
+fn format_timestamp_delta(delta: i128, output: Option<&str>) -> Result<String, TimestampError> {
     let sign = if delta.is_negative() { "-" } else { "" };
     if let Some(unit) = output {
         return format_duration_unit(delta.unsigned_abs(), sign, &unit.to_ascii_lowercase())
@@ -611,12 +620,15 @@ fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, Timesta
     Ok(format_clock_duration(delta.unsigned_abs(), sign))
 }
 
-fn interval_endpoint(value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, TimestampError> {
+fn interval_endpoint(
+    value: &str,
+    now: Option<DateTime<Utc>>,
+) -> Result<DateTime<Utc>, TimestampError> {
     let lower = value.to_ascii_lowercase();
     let (unit, quantity) =
         TimestampUnit::split_suffix(&lower).unwrap_or((TimestampUnit::Seconds, &lower));
     let time = if matches!(lower.as_str(), "现在" | "now") {
-        now
+        now.ok_or(TimestampError::Invalid)?
     } else if integer(quantity.trim_end()) {
         parse_unix(quantity.trim_end(), unit)?
     } else {

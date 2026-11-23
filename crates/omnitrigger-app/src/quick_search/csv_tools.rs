@@ -53,6 +53,7 @@ use super::{
         newline_pattern, regex_group_index, replace_literal_matches, replace_regex_matches,
         GraphemeRange, TextError, TextLengthUnit, UnicodeForm, MAX_TEXT_COMPARISON_WORK,
     },
+    timestamp::timestamp_clock_difference,
     url_encoding::url_parameter_values,
 };
 
@@ -117,6 +118,7 @@ pub(super) enum CsvError {
     OutlierColumnArguments,
     DateDifferenceColumnArguments,
     ClockDifferenceColumnArguments,
+    TimestampDifferenceColumnArguments,
     DateOffsetColumnArguments,
     WorkdayOffsetColumnArguments,
     WorkdayOffsetExceptions,
@@ -275,6 +277,9 @@ impl CsvError {
             }
             Self::ClockDifferenceColumnArguments => {
                 "填写新列名、开始时刻列和结束时刻列，例如 [\"经过时长\",\"开始\",\"结束\"]"
+            }
+            Self::TimestampDifferenceColumnArguments => {
+                "填写新列名、开始时间戳列和结束时间戳列，例如 [\"时长\",\"开始\",\"结束\"]"
             }
             Self::DateOffsetColumnArguments => {
                 "填写新列名、来源日期列和整数偏移量列，例如 [\"到期日期\",\"日期\",\"天数\"]"
@@ -454,6 +459,7 @@ enum ColumnRuleOutput {
     Issues,
     ValidRows,
     InvalidRows,
+    Summary,
 }
 
 impl ColumnValidation {
@@ -600,6 +606,7 @@ enum Operation {
     OutlierColumn(String, ColumnReference),
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
     ClockDifferenceColumn(String, ColumnReference, ColumnReference),
+    TimestampDifferenceColumn(String, ColumnReference, ColumnReference),
     DateOffsetColumn {
         name: String,
         source: ColumnReference,
@@ -1089,7 +1096,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             Operation::CheckColumns(columns, validation)
         }
         "检查规则" | "check-rules" | "规则保留行" | "keep-valid-rows" | "规则问题行"
-        | "keep-invalid-rows" => {
+        | "keep-invalid-rows" | "规则统计" | "rule-summary" => {
             let invalid = CsvError::ValidationRulesArguments;
             let (rules, data) = json_argument_and_data::<Vec<ColumnRuleInput>>(input, invalid)?;
             if !(1..=64).contains(&rules.len()) {
@@ -1145,6 +1152,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let output = match operation.as_str() {
                 "规则保留行" | "keep-valid-rows" => ColumnRuleOutput::ValidRows,
                 "规则问题行" | "keep-invalid-rows" => ColumnRuleOutput::InvalidRows,
+                "规则统计" | "rule-summary" => ColumnRuleOutput::Summary,
                 _ => ColumnRuleOutput::Issues,
             };
             Operation::CheckColumnRules(rules, output)
@@ -1536,6 +1544,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 )?;
             input = data;
             Operation::DateDifferenceColumn(name, start, end)
+        }
+        "时间戳差列" | "timestamp-difference-column" => {
+            let ((name, start, end), data) =
+                json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
+                    input,
+                    CsvError::TimestampDifferenceColumnArguments,
+                )?;
+            input = data;
+            Operation::TimestampDifferenceColumn(name, start, end)
         }
         "时刻差列" | "clock-difference-column" => {
             let ((name, start, end), data) =
@@ -2151,6 +2168,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     .num_days();
                 Ok(days.to_string())
             },
+        ),
+        Operation::TimestampDifferenceColumn(name, start, end) => append_from_two_columns(
+            &rows,
+            &name,
+            start,
+            end,
+            CsvError::TimestampDifferenceColumnArguments,
+            |start, end| timestamp_clock_difference(start, end).map_err(|error| error.message()),
         ),
         Operation::ClockDifferenceColumn(name, start, end) => append_from_two_columns(
             &rows,
@@ -3186,6 +3211,9 @@ fn check_column_rules(
         );
     }
     validate_regex_inputs(records, &rules)?;
+    if matches!(output, ColumnRuleOutput::Summary) {
+        return summarize_column_rules(header, records, &rules);
+    }
     let keep_valid = matches!(output, ColumnRuleOutput::ValidRows);
     let matches = records.iter().filter(|row| {
         rules
@@ -3202,6 +3230,38 @@ fn check_column_rules(
         )?;
     }
     Ok(csv)
+}
+
+fn summarize_column_rules(
+    header: &[String],
+    records: &[Vec<String>],
+    rules: &[(usize, &ColumnValidation)],
+) -> Result<String, CsvError> {
+    let mut output = String::from("规则号,列号,列名,规则,通过数,失败数");
+    for (index, &(column, rule)) in rules.iter().enumerate() {
+        let passed = records
+            .iter()
+            .filter(|row| rule.accepts(&row[column]))
+            .count();
+        let number = (index + 1).to_string();
+        let column_number = (column + 1).to_string();
+        let failures = (records.len() - passed).to_string();
+        let passed = passed.to_string();
+        append_bounded_csv_row(
+            &mut output,
+            [
+                number.as_str(),
+                column_number.as_str(),
+                header[column].as_str(),
+                rule.label(),
+                passed.as_str(),
+                failures.as_str(),
+            ]
+            .into_iter(),
+            CsvError::ValidationRulesTooLarge,
+        )?;
+    }
+    Ok(output)
 }
 
 fn validate_regex_inputs(
@@ -5424,6 +5484,19 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_every_rule_in_query_order_including_rules_with_no_records() {
+        let rules = r#"[[1,"数值"],["比率","数值范围","0","1"]]"#;
+        assert_eq!(
+            transform_csv(&format!("规则统计 {rules} 比率\n1/3\n1.2\n未知")).as_deref(),
+            Ok("规则号,列号,列名,规则,通过数,失败数\r\n1,1,比率,数值,2,1\r\n2,1,比率,数值范围,1,2"),
+        );
+        assert_eq!(
+            transform_csv(&format!("规则统计 {rules} 比率")).as_deref(),
+            Ok("规则号,列号,列名,规则,通过数,失败数\r\n1,1,比率,数值,0,0\r\n2,1,比率,数值范围,0,0"),
+        );
+    }
+
+    #[test]
     fn keeps_each_csv_record_according_to_all_its_column_rules() {
         let input = "[[\"编号\",\"正则\",\"^[AB]$\"],[2,\"日期\"]] 编号,日期,备注\nA,2024-02-29,\"有效,原文\"\nB,2023-02-29,日期错误\nX,2024-01-01,编号错误";
         assert_eq!(
@@ -7636,6 +7709,21 @@ null"#
                 Err(CsvError::MovingColumnArguments)
             );
         }
+    }
+
+    #[test]
+    fn appends_signed_elapsed_timestamps_with_real_offsets_and_nanoseconds() {
+        let query = "时间戳差列 [\"时长\",\"开始\",2] 开始,结束\n2026-03-08 01:30 America/New_York,2026-03-08 03:30 America/New_York\n1ns,-1ns\n0,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("开始,结束,时长\r\n2026-03-08 01:30 America/New_York,2026-03-08 03:30 America/New_York,01:00:00\r\n1ns,-1ns,-00:00:00.000000002\r\n0,\"\",\"\""),
+        );
+        assert!(matches!(
+            transform_csv(
+                "时间戳差列 [\"时长\",1,2] 开始,结束\n0,1\n0,2026-11-01 01:30 America/New_York"
+            ),
+            Err(CsvError::DataRowValue { row: 2, .. }),
+        ));
     }
 
     #[test]
