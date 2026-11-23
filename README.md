@@ -347,6 +347,7 @@
 - 输入 `颜色: color-mix(in srgb-linear, white, black)` 得到 `#BCBCBC`。该模式先将 sRGB 通道转为线性光强，按权重与透明度混合，再转回 sRGB。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 显示单个色样时按 `Tab`，可将该颜色以 HEX 填回输入框，并保留透明度。接着可以输入 `to hsl` 换格式，或输入 `叠加 #fff` 合成到白色背景。
 - 输入 `颜色: 色阶 #004080 到 #80C0FF @ 5`，可生成包含起止色的 5 个 HEX 色值。数量可填 2 至 32，按 sRGB 等间隔插值，半透明颜色使用预乘透明度插值。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
+- 输入 `颜色: 线性色阶 #000 到 #fff @ 3`，会按线性光强等间距取色，再转回 sRGB HEX。黑白之间的中间色为 `#BCBCBC`，半透明颜色也支持。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: 文字色 #3A86FF` 得到 `#000000` 和色样。搜索框比较黑字、白字在指定不透明底色上的对比度，返回对比度更高的颜色。半透明颜色可在同一条输入里用 `叠加` 合成底色。 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。
 - 用 `文本: 长度详情` 可同时查看字素簇、Unicode 码位、UTF-16 单元和 UTF-8 字节。例如用引号输入 `"👩‍💻 é"`，分别得到 3、6、8 和 15。 [Unicode 字素簇规则](https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries)

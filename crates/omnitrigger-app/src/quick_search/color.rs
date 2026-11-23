@@ -54,7 +54,7 @@ enum ColorFormat {
 }
 
 #[derive(Clone, Copy)]
-enum ColorMixSpace {
+pub(super) enum ColorMixSpace {
     Srgb,
     LinearSrgb,
 }
@@ -442,7 +442,7 @@ fn mix_stop(input: &str) -> Result<(Channels, Option<f64>), ColorError> {
     Ok((Channels::parse(color.trim())?, Some(weight)))
 }
 
-pub(super) fn make_color_palette(input: &str) -> Result<String, ColorError> {
+pub(super) fn make_color_palette(input: &str, space: ColorMixSpace) -> Result<String, ColorError> {
     let input = normalize(input);
     let (range, count) = input.rsplit_once('@').ok_or(ColorError::InvalidPalette)?;
     let count = count
@@ -458,11 +458,7 @@ pub(super) fn make_color_palette(input: &str) -> Result<String, ColorError> {
     colors.push(first.format_hex());
     for index in 1..count - 1 {
         let weight = f64::from(index) / f64::from(count - 1) * 100.;
-        colors.push(
-            first
-                .mix(last, 100. - weight, weight, ColorMixSpace::Srgb)?
-                .format_hex(),
-        );
+        colors.push(first.mix(last, 100. - weight, weight, space)?.format_hex());
     }
     colors.push(last.format_hex());
     Ok(colors.join("\n"))
@@ -639,20 +635,36 @@ mod tests {
     #[test]
     fn produces_equally_spaced_srgb_hex_colors_including_both_endpoints() {
         assert_eq!(
-            make_color_palette("#000 到 #fff @ 5").as_deref(),
+            make_color_palette("#000 到 #fff @ 5", ColorMixSpace::Srgb).as_deref(),
             Ok("#000000\n#404040\n#808080\n#BFBFBF\n#FFFFFF")
         );
         assert_eq!(
-            make_color_palette("#F000 TO rgba(0, 0, 255, 0.5) @ 3").as_deref(),
+            make_color_palette("#F000 TO rgba(0, 0, 255, 0.5) @ 3", ColorMixSpace::Srgb).as_deref(),
             Ok("#FF000000\n#0000FF40\n#0000FF80")
         );
         assert_eq!(
-            make_color_palette("rebeccapurple 到 #0080ff @ 2").as_deref(),
+            make_color_palette("rebeccapurple 到 #0080ff @ 2", ColorMixSpace::Srgb).as_deref(),
             Ok("#663399\n#0080FF")
         );
         assert_eq!(
-            make_color_palette("#000 到 #fff @ 33"),
+            make_color_palette("#000 到 #fff @ 33", ColorMixSpace::Srgb),
             Err(ColorError::InvalidPalette)
+        );
+    }
+
+    #[test]
+    fn produces_linear_light_steps_with_premultiplied_alpha() {
+        assert_eq!(
+            make_color_palette("#000 到 #fff @ 3", ColorMixSpace::LinearSrgb).as_deref(),
+            Ok("#000000\n#BCBCBC\n#FFFFFF"),
+        );
+        assert_eq!(
+            make_color_palette(
+                "#F000 TO rgba(0, 0, 255, 0.5) @ 3",
+                ColorMixSpace::LinearSrgb
+            )
+            .as_deref(),
+            Ok("#FF000000\n#0000FF40\n#0000FF80"),
         );
     }
 

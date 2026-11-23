@@ -2138,6 +2138,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "在线性光强空间生成两种颜色之间的色阶",
+        query: "颜色: 线性色阶 #000 到 #fff @ 3",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "选对比度更高的文字色",
         query: "颜色: 文字色 #3A86FF",
     },
@@ -4248,7 +4253,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
-        Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
+        Scope::Color
+            if !term.is_empty()
+                && ["色阶", "线性色阶"]
+                    .into_iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Timestamp
             if !term.is_empty()
                 && [

@@ -81,7 +81,7 @@ use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
 use color::{
     calculate_contrast, convert_color, convert_color_to_hex, hex_for_swatch, make_color_palette,
-    ColorError,
+    ColorError, ColorMixSpace,
 };
 use complex::{calculate_complex, ComplexError};
 use conversion::{
@@ -914,8 +914,16 @@ impl Results {
                     Self::text_value(transform_ulid(term).map_err(ValueError::Identifier))
                 }
                 Scope::Color => {
-                    if let Some(input) = batch_arguments(term, "色阶", "palette") {
-                        Self::text_value(make_color_palette(input).map_err(ValueError::Color))
+                    let palette = batch_arguments(term, "色阶", "palette")
+                        .map(|input| (input, ColorMixSpace::Srgb))
+                        .or_else(|| {
+                            batch_arguments(term, "线性色阶", "linear-palette")
+                                .map(|input| (input, ColorMixSpace::LinearSrgb))
+                        });
+                    if let Some((input, space)) = palette {
+                        Self::text_value(
+                            make_color_palette(input, space).map_err(ValueError::Color),
+                        )
                     } else {
                         Self::Value(
                             convert_color(term)
@@ -3354,6 +3362,7 @@ mod tests {
             ),
             ("颜色: red to rgb", Some("颜色: #FF0000")),
             ("颜色: 色阶 #000 到 #fff @ 3", None),
+            ("颜色: 线性色阶 #000 到 #fff @ 3", None),
             ("对比度: #fff vs #000", None),
         ] {
             assert_eq!(
