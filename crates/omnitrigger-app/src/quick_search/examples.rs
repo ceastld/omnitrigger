@@ -1675,6 +1675,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "统计区间内每个星期的天数",
+        query: "日期: 星期统计 2024-02-29 至 2024-03-09",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
     },
@@ -4384,6 +4389,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "按半年拆分CSV",
                     "按年拆分CSV",
                     "逐日CSV",
+                    "星期统计",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

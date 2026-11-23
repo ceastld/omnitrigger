@@ -40,6 +40,7 @@ pub(super) enum DateError {
     DateSeriesArguments,
     InvalidDateRanges,
     RangeSplitArguments,
+    WeekdayCountArguments,
     InvalidDateInterval,
     WorkdayExceptions,
     PatternArguments,
@@ -95,6 +96,7 @@ impl DateError {
             }
             Self::InvalidDatePattern => "请使用日期格式符，例如 %Y、%m、%d 或 %F",
             Self::DatePatternMismatch => "日期文本与格式不符，或日期无效",
+            Self::WeekdayCountArguments => "输入起止日期，例如 2024-02-29 至 2024-03-03",
             Self::ReversedDateRange => "开始日期须早于或等于结束日期",
             Self::NoMatchingDates => "区间内没有符合条件的日期",
             Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
@@ -624,6 +626,34 @@ fn date_range_operands(
         .ok_or(separator_error)?;
     let (end, remaining) = date_operand(rest.trim_start(), today)?;
     Ok((start, end, remaining))
+}
+
+fn count_weekdays_csv(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return Err(DateError::WeekdayCountArguments);
+    }
+    let (start, end, rest) = date_range_operands(input, today, DateError::WeekdayCountArguments)?;
+    if !rest.is_empty() {
+        return Err(DateError::WeekdayCountArguments);
+    }
+    if end < start {
+        return Err(DateError::ReversedDateRange);
+    }
+    let days = end.signed_duration_since(start).num_days() + 1;
+    let first = start.weekday().num_days_from_monday() as usize;
+    let mut counts = [days / 7; 7];
+    for offset in 0..(days % 7) as usize {
+        counts[(first + offset) % 7] += 1;
+    }
+    let mut rows = vec!["星期,天数".to_owned()];
+    rows.extend(
+        WEEKDAY_LABELS
+            .into_iter()
+            .zip(counts)
+            .map(|(weekday, count)| format!("{weekday},{count}")),
+    );
+    Ok(rows.join("\r\n"))
 }
 
 fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
@@ -1436,6 +1466,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             return split_date_range(rest, today, DateRangeSplit::YearsCsv)
         }
         "逐日csv" | "days-csv" => return split_date_range(rest, today, DateRangeSplit::DaysCsv),
+        "星期统计" | "weekday-counts" => return count_weekdays_csv(rest, today),
         _ => {}
     }
     if let Some((year, day)) = year_day_parts(input) {
@@ -1624,6 +1655,40 @@ mod tests {
         assert_eq!(
             calculate_date("按周拆分CSV 2020-01-01 至 2030-01-01", today),
             Err(DateError::TooManyWeekRanges)
+        );
+    }
+
+    #[test]
+    fn counts_each_weekday_across_complete_weeks_and_a_partial_week() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        assert_eq!(
+            calculate_date("星期统计 今天 至 2024-03-09", today).as_deref(),
+            Ok(concat!(
+                "星期,天数\r\n星期一,1\r\n星期二,1\r\n星期三,1\r\n",
+                "星期四,2\r\n星期五,2\r\n星期六,2\r\n星期日,1",
+            )),
+        );
+        assert_eq!(
+            calculate_date("WEEKDAY-COUNTS 2024-02-29 to 2024-02-29", today).as_deref(),
+            Ok(concat!(
+                "星期,天数\r\n星期一,0\r\n星期二,0\r\n星期三,0\r\n",
+                "星期四,1\r\n星期五,0\r\n星期六,0\r\n星期日,0",
+            )),
+        );
+        assert_eq!(
+            calculate_date("星期统计 0001-01-01 至 9999-12-31", today).as_deref(),
+            Ok(concat!(
+                "星期,天数\r\n星期一,521723\r\n星期二,521723\r\n星期三,521723\r\n",
+                "星期四,521723\r\n星期五,521723\r\n星期六,521722\r\n星期日,521722",
+            )),
+        );
+        assert_eq!(
+            calculate_date("星期统计 2024-03-03 至 今天", today),
+            Err(DateError::ReversedDateRange),
+        );
+        assert_eq!(
+            calculate_date("星期统计 今天 至 2024-03-03 额外文字", today),
+            Err(DateError::WeekdayCountArguments),
         );
     }
 
