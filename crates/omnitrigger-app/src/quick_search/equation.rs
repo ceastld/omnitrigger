@@ -165,6 +165,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
                 return format_function_samples(&function_sample_points(arguments)?);
             }
             "采样极值" | "sample-extrema" => return sampled_function_extrema(arguments),
+            "找异号区间" | "sign-change-intervals" => return sampled_sign_changes(arguments),
             "函数值" | "function-values" => {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
@@ -862,6 +863,42 @@ fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, Equati
     sample_at_x(expression, x).map_err(EquationError::Approximation)
 }
 
+fn sampled_sign_changes(input: &str) -> Result<String, EquationError> {
+    let samples = function_sample_points(input)?;
+    if samples.iter().all(|(_, y)| y.is_none()) {
+        return Err(EquationError::FunctionSampleHasNoValues);
+    }
+    let mut previous: Option<(f64, f64)> = None;
+    let mut rows = vec!["类型,左端点,右端点".to_owned()];
+    for (x, y) in samples {
+        let Some(y) = y else {
+            previous = None;
+            continue;
+        };
+        if previous.is_some_and(|(previous_x, _)| x == previous_x) {
+            continue;
+        }
+        if y == 0.0 {
+            let zero = format_coordinate(x);
+            rows.push(format!("采样值为零,{zero},{zero}"));
+        } else if let Some((left, _)) = previous.filter(|&(_, previous_y)| {
+            previous_y != 0.0 && previous_y.is_sign_negative() != y.is_sign_negative()
+        }) {
+            rows.push(format!(
+                "相邻样值异号,{},{}",
+                format_coordinate(left),
+                format_coordinate(x)
+            ));
+        }
+        previous = Some((x, y));
+    }
+    Ok(if rows.len() == 1 {
+        "采样点中未发现零值或相邻异号值".to_owned()
+    } else {
+        rows.join("\r\n")
+    })
+}
+
 fn sampled_function_extrema(input: &str) -> Result<String, EquationError> {
     let samples = function_sample_points(input)?;
     let mut finite = samples.iter().filter_map(|&(x, y)| y.map(|y| (x, y)));
@@ -1016,16 +1053,20 @@ fn format_bisection_result(
     residual: f64,
     residual_name: &str,
 ) -> Result<String, EquationError> {
-    // 保留可无损读回的横坐标，使显示的残差对应同一个浮点数。
-    let x = if x == 0.0 {
+    let x = format_coordinate(x);
+    let residual = format_result(residual).map_err(EquationError::Approximation)?;
+    Ok(format!("x ≈ {x}\r\n残差 {residual_name} ≈ {residual}"))
+}
+
+fn format_coordinate(x: f64) -> String {
+    // 保留可无损读回的横坐标，供后续代入或求根。
+    if x == 0.0 {
         "0".to_owned()
     } else if (1e-6..1e15).contains(&x.abs()) {
         x.to_string()
     } else {
         format!("{x:e}")
-    };
-    let residual = format_result(residual).map_err(EquationError::Approximation)?;
-    Ok(format!("x ≈ {x}\r\n残差 {residual_name} ≈ {residual}"))
+    }
 }
 
 fn numeric_derivative(input: &str) -> Result<String, EquationError> {
@@ -2347,6 +2388,26 @@ mod tests {
         assert_eq!(
             solve_equation(&over_limit),
             Err(EquationError::FunctionValuesArguments)
+        );
+    }
+
+    #[test]
+    fn finds_sampled_zeros_and_sign_changes_without_crossing_undefined_rows() {
+        assert_eq!(
+            solve_equation("找异号区间 x²-2 @ 0..2; 3").as_deref(),
+            Ok("类型,左端点,右端点\r\n相邻样值异号,1,2")
+        );
+        assert_eq!(
+            solve_equation("sign-change-intervals x³-x @ -2..2; 9").as_deref(),
+            Ok("类型,左端点,右端点\r\n采样值为零,-1,-1\r\n采样值为零,0,0\r\n采样值为零,1,1")
+        );
+        assert_eq!(
+            solve_equation("找异号区间 1/x @ -1..1; 5").as_deref(),
+            Ok("采样点中未发现零值或相邻异号值")
+        );
+        assert_eq!(
+            solve_equation("找异号区间 0 @ 1..1.0000000000000002; 4").as_deref(),
+            Ok("类型,左端点,右端点\r\n采样值为零,1,1\r\n采样值为零,1.0000000000000002,1.0000000000000002")
         );
     }
 
