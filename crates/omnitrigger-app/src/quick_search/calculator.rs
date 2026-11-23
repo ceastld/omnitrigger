@@ -104,14 +104,31 @@ pub(super) fn sample_at_coordinates(
     x: f64,
     y: Option<f64>,
 ) -> Result<Option<f64>, CalculationError> {
-    match evaluate_with_variables(
+    sample_with_variables(
         query,
         Variables {
             x: Some(x),
             y,
             ..Variables::default()
         },
-    ) {
+    )
+}
+
+pub(super) fn sample_at_t(query: &str, t: f64) -> Result<Option<f64>, CalculationError> {
+    sample_with_variables(
+        query,
+        Variables {
+            t: Some(t),
+            ..Variables::default()
+        },
+    )
+}
+
+fn sample_with_variables(
+    query: &str,
+    variables: Variables,
+) -> Result<Option<f64>, CalculationError> {
+    match evaluate_with_variables(query, variables) {
         Ok(value) => Ok(Some(value)),
         Err(
             CalculationError::DivisionByZero
@@ -126,6 +143,7 @@ pub(super) fn sample_at_coordinates(
 struct Variables {
     x: Option<f64>,
     y: Option<f64>,
+    t: Option<f64>,
     answer: Option<f64>,
 }
 
@@ -369,6 +387,7 @@ impl Parser<'_> {
         let coordinate = match name {
             "x" | "X" => self.variables.x,
             "y" | "Y" => self.variables.y,
+            "t" | "T" => self.variables.t,
             _ => None,
         };
         if let Some(value) = coordinate {

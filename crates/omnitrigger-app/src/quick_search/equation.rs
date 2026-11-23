@@ -5,7 +5,7 @@ use num_rational::BigRational;
 
 use super::calculator::{
     evaluate, evaluate_at_x, format_result, format_round_trip as format_coordinate, normalize,
-    sample_at_x, CalculationError, QUERY_LIMIT,
+    sample_at_t, sample_at_x, CalculationError, QUERY_LIMIT,
 };
 use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{
@@ -53,6 +53,7 @@ pub(super) enum EquationError {
     FunctionApproachStep,
     FunctionComparisonArguments,
     FunctionComparisonPlotArguments,
+    ParametricSampleArguments,
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
@@ -116,6 +117,9 @@ impl EquationError {
             }
             Self::FunctionComparisonPlotArguments => {
                 "填写 2 至 4 个算式的 JSON 数组，@ 后接范围，例如 [\"sin(x)\",\"cos(x)\"] @ 0..2*pi; 33"
+            }
+            Self::ParametricSampleArguments => {
+                "按 x、y 的顺序填写两个带 t 的算式，再填两个不同的端点和可选的 2 至 129 个采样点"
             }
             Self::BisectionArguments => {
                 "填写要求零点的算式或等式和两个不同的端点，例如 cos(x)=x @ 0 到 1"
@@ -210,6 +214,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数对照" | "compare-functions" => return compare_function_values(arguments),
             "函数对照图" | "compare-function-plot" => {
                 return sample_function_comparison(arguments)?.csv();
+            }
+            "参数采样" | "sample-parametric" => {
+                return format_parametric_samples(&parametric_samples(arguments)?);
             }
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
@@ -994,6 +1001,53 @@ impl FunctionComparison {
             [display(y_min)?, display(y_max)?],
         ))
     }
+}
+
+struct ParametricSample {
+    t: f64,
+    x: Option<f64>,
+    y: Option<f64>,
+}
+
+fn parametric_samples(input: &str) -> Result<Vec<ParametricSample>, EquationError> {
+    let invalid = EquationError::ParametricSampleArguments;
+    let (expressions, bounds) = function_comparison_arguments(input, invalid)?;
+    let [x, y] = expressions.as_slice() else {
+        return Err(invalid);
+    };
+    sampled_coordinates(bounds, invalid)?
+        .map(|t| {
+            Ok(ParametricSample {
+                t,
+                x: sample_at_t(x, t).map_err(EquationError::Approximation)?,
+                y: sample_at_t(y, t).map_err(EquationError::Approximation)?,
+            })
+        })
+        .collect()
+}
+
+fn format_parametric_samples(samples: &[ParametricSample]) -> Result<String, EquationError> {
+    let display = |value: Option<f64>| {
+        value
+            .map(format_result)
+            .transpose()
+            .map(Option::unwrap_or_default)
+            .map_err(EquationError::Approximation)
+    };
+    let mut csv = String::from("t,x,y");
+    for sample in samples {
+        let row = [
+            format_coordinate(sample.t),
+            display(sample.x)?,
+            display(sample.y)?,
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            row.iter().map(String::as_str),
+            EquationError::ParametricSampleArguments,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
@@ -2730,6 +2784,26 @@ mod tests {
         assert_eq!(
             solve_equation("数值导数 x @ 1e30; 1"),
             Err(EquationError::NumericDerivativeStep)
+        );
+    }
+
+    #[test]
+    fn samples_parametric_coordinates_on_the_same_parameter_grid() {
+        assert_eq!(
+            solve_equation(r#"参数采样 ["cosd(t)","sind(T)"] @ 360..0; 5"#).as_deref(),
+            Ok("t,x,y\r\n0,1,0\r\n90,0,1\r\n180,-1,0\r\n270,0,-1\r\n360,1,0")
+        );
+        assert_eq!(
+            solve_equation(r#"sample-parametric ["sqrt(t)","t²"] @ -1..1; 3"#).as_deref(),
+            Ok("t,x,y\r\n-1,\"\",1\r\n0,0,0\r\n1,1,1")
+        );
+        assert_eq!(
+            solve_equation(r#"参数采样 ["t"] @ 0..1"#),
+            Err(EquationError::ParametricSampleArguments)
+        );
+        assert_eq!(
+            solve_equation(r#"参数采样 ["x","t"] @ 0..1"#),
+            Err(EquationError::Approximation(CalculationError::Invalid))
         );
     }
 
