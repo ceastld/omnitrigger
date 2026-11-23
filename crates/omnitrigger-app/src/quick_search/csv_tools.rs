@@ -169,6 +169,7 @@ pub(super) enum CsvError {
     FormulaEvaluation(FractionError),
     FunctionColumnArguments,
     FunctionFilterArguments,
+    FunctionNearFilterArguments,
     FunctionSortArguments,
     FunctionBinArguments,
     FunctionBinEdges,
@@ -410,6 +411,9 @@ impl CsvError {
             }
             Self::FunctionFilterArguments => {
                 "填写一至两列、算式、比较符和阈值，例如 [[1,2],\"cosd(x)*y\",\">\",\"0\"]"
+            }
+            Self::FunctionNearFilterArguments => {
+                "填写一至两列、算式、目标值和非负容差，例如 [[1],\"x+0.2\",\"0.3\",\"1e-9\"]"
             }
             Self::FunctionSortArguments => {
                 "填写一至两列、算式和数值排序方向，例如 [[1,2],\"cosd(x)*y\",\"数值降序\"]"
@@ -1038,6 +1042,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
+        "函数近似筛选" | "filter-function-near" => return filter_near_function_rows(input),
         "函数排序" | "sort-function" => return sort_function_rows(input),
         "函数分箱" | "function-bins" | "函数分箱图" | "function-bin-plot" => {
             return build_function_bin_plot(input).map(|(csv, _)| csv);
@@ -4123,14 +4128,36 @@ fn filter_function_rows(input: &str) -> Result<String, CsvError> {
         json_argument_and_data::<(Vec<ColumnReference>, String, String, String)>(input, invalid)?;
     let comparison = NumberComparison::parse(operator.trim()).ok_or(invalid)?;
     let threshold = evaluate(&threshold).map_err(|_| invalid)?;
-    let FunctionRows { rows, values } = read_function_rows(data, &columns, &expression, invalid)?;
-    let selected = rows[1..].iter().zip(values).filter_map(|(row, value)| {
+    let function = read_function_rows(data, &columns, &expression, invalid)?;
+    Ok(select_function_rows(function, |value| {
         value
-            .and_then(|value| value.partial_cmp(&threshold))
+            .partial_cmp(&threshold)
             .is_some_and(|order| comparison.accepts(order))
-            .then_some(row)
-    });
-    Ok(write_rows(std::iter::once(&rows[0]).chain(selected), ','))
+    }))
+}
+
+fn filter_near_function_rows(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::FunctionNearFilterArguments;
+    let ((columns, expression, target, tolerance), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, String, String, String)>(input, invalid)?;
+    let target = evaluate(&target).map_err(|_| invalid)?;
+    let tolerance = evaluate(&tolerance).map_err(|_| invalid)?;
+    if tolerance < 0.0 {
+        return Err(invalid);
+    }
+    let function = read_function_rows(data, &columns, &expression, invalid)?;
+    Ok(select_function_rows(function, |value| {
+        (value - target).abs() <= tolerance
+    }))
+}
+
+fn select_function_rows(function: FunctionRows, accepts: impl Fn(f64) -> bool) -> String {
+    let FunctionRows { rows, values } = function;
+    let selected = rows[1..]
+        .iter()
+        .zip(values)
+        .filter_map(|(row, value)| value.is_some_and(&accepts).then_some(row));
+    write_rows(std::iter::once(&rows[0]).chain(selected), ',')
 }
 
 fn sort_function_rows(input: &str) -> Result<String, CsvError> {
@@ -9903,6 +9930,29 @@ null"#
         assert_eq!(
             transform_csv("函数排序 [[1],\"x\",\"文本升序\"] X\n1"),
             Err(CsvError::FunctionSortArguments)
+        );
+    }
+
+    #[test]
+    fn filters_function_values_with_an_explicit_absolute_tolerance() {
+        let data = "编号,数值\n001,0.1\n002,0.11\n003,\n004,0.10";
+        assert_eq!(
+            transform_csv(&format!(
+                "函数近似筛选 [[2],\"x+0.2\",\"0.3\",\"1e-9\"] {data}"
+            ))
+            .as_deref(),
+            Ok("编号,数值\r\n001,0.1\r\n004,0.10")
+        );
+        assert_eq!(
+            transform_csv(
+                "filter-function-near [[1,2],\"x*y\",\"2\",\"1/4\"] x,y\n1,1.75\n1,2.25\n1,2.5"
+            )
+            .as_deref(),
+            Ok("x,y\r\n1,1.75\r\n1,2.25")
+        );
+        assert_eq!(
+            transform_csv("函数近似筛选 [[1],\"x\",\"0\",\"-1\"] x\n0"),
+            Err(CsvError::FunctionNearFilterArguments)
         );
     }
 

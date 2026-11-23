@@ -4258,6 +4258,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按目标值和绝对容差保留 CSV 原始行",
+        query: "CSV: 函数近似筛选 [[2],\"x+0.2\",\"0.3\",\"1e-9\"]\n编号,数值\n001,0.1\n002,0.11\n003,\n004,0.10",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按函数计算值排序原始行",
         query: "CSV: 函数排序 [[\"角度\",\"权重\"],\"cosd(x)*y\",\"数值降序\"]\n编号,角度,权重\n001,0,3\n002,180,2\n003,360,3\n004,,9",
     },
