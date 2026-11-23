@@ -3299,7 +3299,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_tempo_decibel_and_solid_tools_on_batch_inputs() {
+    fn runs_tempo_decibel_solid_and_wave_tools_on_batch_inputs() {
         for (query, expected) in [
             (
                 "批量换算: 节拍 时长 120 BPM @ 3/2\n速度 1.5秒 @ 3",
@@ -3313,6 +3313,10 @@ mod tests {
                 "批量换算: 立体对照 圆柱 3,5\n球 1/2",
                 "输入,结果\r\n\"圆柱 3,5\",表面积 48π · 体积 45π\r\n球 1/2,表面积 π · 体积 π/6",
             ),
+            (
+                "批量换算: 波长对照 1 MHz\n34.3 cm @ 343 m/s to kHz",
+                "输入,结果\r\n1 MHz,299.792458 m\r\n34.3 cm @ 343 m/s to kHz,1 kHz",
+            ),
         ] {
             assert!(
                 matches!(for_query(query, &[]), Results::Value(Ok(value)) if value.text == expected),
@@ -3321,6 +3325,10 @@ mod tests {
         }
         assert!(matches!(
             for_query("批量换算: 立体 球 1/2\n\n球 0", &[]),
+            Results::Value(Err(ValueError::BatchTool(BatchError::Row { line: 3, .. })))
+        ));
+        assert!(matches!(
+            for_query("批量换算: wave 500 nm\n\n1 km @ 0 m/s", &[]),
             Results::Value(Err(ValueError::BatchTool(BatchError::Row { line: 3, .. })))
         ));
     }

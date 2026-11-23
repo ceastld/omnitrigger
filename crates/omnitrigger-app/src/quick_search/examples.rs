@@ -840,6 +840,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行换算波长与频率并导出 CSV",
+        query: "批量换算: 波长对照 1 MHz\n34.3 cm @ 343 m/s to kHz",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
     },
@@ -4722,6 +4727,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "节拍对照",
                     "分贝对照",
                     "立体对照",
+                    "波长对照",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term))) => {}

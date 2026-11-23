@@ -4,6 +4,7 @@ use chrono::NaiveDate;
 
 use super::{
     calendar::calculate_date,
+    conversion::convert_wave,
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, transform_csv, ColumnReference,
         CsvError,
@@ -28,7 +29,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、节拍、分贝、立体、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、节拍、分贝、立体、波长、分数或统计命令";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -211,6 +212,7 @@ fn run_pipeline_steps(
                     | Scope::Duration
                     | Scope::Radix
                     | Scope::Pitch
+                    | Scope::Wave
                     | Scope::Fraction
                     | Scope::Statistics
             )
@@ -239,6 +241,7 @@ fn run_pipeline_steps(
             Scope::Tempo => calculate_tempo(&query).map_err(|cause| cause.message()),
             Scope::Decibel => convert_decibels(&query).map_err(|cause| cause.message()),
             Scope::Solid => calculate_solid(&query).map_err(|cause| cause.message()),
+            Scope::Wave => convert_wave(&query).map_err(|cause| cause.message()),
             Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
             Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
             _ => return Err(error(STEP_SYNTAX)),
@@ -282,6 +285,21 @@ mod tests {
             run_pipeline(r#"["JSON: 转CSV","CSV: 选列 2"] [{"编号":"001","金额":1.50}]"#)
                 .as_deref(),
             Ok("金额\r\n1.50")
+        );
+    }
+
+    #[test]
+    fn uses_wavelength_conversion_as_a_pipeline_step_with_default_arguments() {
+        assert_eq!(
+            run_pipeline(r#"["URL: 解码","波长:"] 500%20nm"#).as_deref(),
+            Ok("599.584916 THz")
+        );
+        assert_eq!(
+            run_pipeline(r#"["分数: 计算","波长: 10 Hz @"] 36/10"#),
+            Err(DataPipelineError::Step {
+                index: 2,
+                cause: "在 @ 后填写大于零的传播速度，例如 343 m/s",
+            })
         );
     }
 

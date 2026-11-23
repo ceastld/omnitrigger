@@ -358,6 +358,7 @@
 - 单位可紧跟括号内的算式。例如 `(2**10)B to KiB` 得到 `1 KiB`，`((2 + 1/2) * 2)km to m` 得到 `5000 m`。只输入带单位的算式，也可选择换算目标。
 - 输入 `周期: 50 Hz to ms` 得到 `20 ms`，输入 `周期: 2.5 ms to Hz` 得到 `400 Hz`。周期与频率互为倒数，省略目标单位时会按结果大小选择单位。
 - 输入 `波长: 2.4 GHz to mm` 可计算真空中的波长，约为 `124.914 mm`。输入 `波长: 500 nm to THz` 可反推频率。默认用真空光速，也可指定传播速度，例如 `波长: 34.3 cm @ 343 m/s to kHz` 得到 `1 kHz`。省略目标单位时会按结果大小选单位。 [NASA 的频率与波长关系](https://science.nasa.gov/learn/basics-of-space-flight/chapter6-2/) · [NIST 真空光速常量](https://www.nist.gov/pml/special-publication-330/sp-330-section-2)
+- 用 `批量换算: 波长` 可逐行换算波长或频率，每行可指定不同的传播速度和目标单位。用 `波长对照` 可导出原输入和结果，也可以在 `处理:` 的步骤中写 `"波长:"`，直接换算前一步给出的带单位数值。
 - 输入 `节拍: 120 BPM` 得到每拍 `500 ms`，输入 `节拍: 120 BPM @ 3/2` 得到一拍半的 `750 ms`。用 `节拍: 速度 1.5秒 @ 3` 可反推 `120 BPM`。省略拍数时按一拍计算，结果保留精确分数。 [节拍与 BPM](https://learningmusic.ableton.com/make-beats/beat-and-tempo.html)
 - 输入 `分贝: 功率比 100` 或 `分贝: 幅度比 10`，都得到 `20 dB`。输入 `分贝: 转功率比 20 dB` 得到 `100`，用 `转幅度比` 得到 `10`。功率比用 10 倍常用对数，幅度比用 20 倍常用对数，输入可写算式。 [NIST 分贝定义](https://www.nist.gov/pml/special-publication-811/nist-guide-si-chapter-8)
 - 输入 `音高: A4` 或 `音高: MIDI 69` 得到 `A4 · MIDI 69 · 440 Hz`。输入 `音高: 442 Hz` 可查到最近的音名 `A4` 和偏高 `7.85 音分`。采用 A4 为 440 Hz 的十二平均律，支持 MIDI 0 至 127，以及 `#`、`b`、`♯`、`♭`。结果中的音名统一用升号表示。 [UNSW 音名、MIDI 编号与频率换算](https://newt.phys.unsw.edu.au/jw/notes.html)

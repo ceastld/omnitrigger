@@ -1,5 +1,6 @@
 use super::{
-    csv_tools::csv_cell, decibel::convert_decibels, solid::calculate_solid, tempo::calculate_tempo,
+    conversion::convert_wave, csv_tools::csv_cell, decibel::convert_decibels,
+    solid::calculate_solid, tempo::calculate_tempo,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub(super) fn map_tool_batch(query: &str) -> Option<Result<String, BatchError<&'
             "节拍" | "tempo" => |line| calculate_tempo(line).map_err(|error| error.message()),
             "分贝" | "decibel" => |line| convert_decibels(line).map_err(|error| error.message()),
             "立体" | "solid" => |line| calculate_solid(line).map_err(|error| error.message()),
+            "波长" | "wave" => |line| convert_wave(line).map_err(|error| error.message()),
             _ => return None,
         };
     Some(if csv_operation.is_some() {
