@@ -1186,6 +1186,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "应用:",
     },
     Example {
+        icon: Icon::Grid,
+        title: "再次打开最近使用的应用",
+        query: "应用历史:",
+    },
+    Example {
         icon: Icon::Keyboard,
         title: "搜索已启用的触发器",
         query: "已启用触发器: ",

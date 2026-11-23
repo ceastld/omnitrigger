@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -10,12 +10,64 @@ use omnitrigger_windows::{list_shell_apps, ShellApp};
 use super::{calculator::narrow_ascii_graphic, title_rank, Destination, Results};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const RECENT_APP_LIMIT: usize = 12;
 
 pub(super) struct SearchApplication {
     app: ShellApp,
     title_key: String,
     identifier_key: String,
     initials: String,
+}
+
+impl SearchApplication {
+    fn new(app: ShellApp) -> Self {
+        let title_key = application_search_key(app.title());
+        Self {
+            initials: application_initials(&title_key),
+            title_key,
+            identifier_key: application_search_key(app.identifier()),
+            app,
+        }
+    }
+
+    fn rank(&self, query: &str) -> Option<u8> {
+        application_rank(&self.title_key, &self.identifier_key, &self.initials, query)
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RecentApplications(Arc<Mutex<Vec<SearchApplication>>>);
+
+impl RecentApplications {
+    pub(crate) fn launch(&self, app: ShellApp) -> Result<(), String> {
+        let recent = app.clone();
+        app.open()?;
+        self.record(recent);
+        Ok(())
+    }
+
+    fn record(&self, app: ShellApp) {
+        let mut history = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let identifier = app.identifier();
+        history.retain(|previous| {
+            previous.app != app
+                && (identifier.is_empty() || previous.app.identifier() != identifier)
+        });
+        history.insert(0, SearchApplication::new(app));
+        history.truncate(RECENT_APP_LIMIT);
+    }
+
+    pub(super) fn results(&self, query: &str) -> Results {
+        let query = application_search_key(query);
+        let history = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        Results::Destinations(
+            history
+                .iter()
+                .filter(|app| app.rank(&query).is_some())
+                .map(|app| Destination::InstalledApp(app.app.clone()))
+                .collect(),
+        )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -50,18 +102,7 @@ impl ApplicationIndex {
             Ok(apps) => apps,
             Err(error) => return Self::Unavailable(error),
         };
-        let mut apps: Vec<_> = apps
-            .into_iter()
-            .map(|app| {
-                let title_key = application_search_key(app.title());
-                SearchApplication {
-                    initials: application_initials(&title_key),
-                    title_key,
-                    identifier_key: application_search_key(app.identifier()),
-                    app,
-                }
-            })
-            .collect();
+        let mut apps: Vec<_> = apps.into_iter().map(SearchApplication::new).collect();
         apps.sort_unstable_by(|a, b| {
             (&a.title_key, &a.identifier_key).cmp(&(&b.title_key, &b.identifier_key))
         });
@@ -90,11 +131,7 @@ impl ApplicationIndex {
         let query = application_search_key(query);
         let mut matches: Vec<_> = apps
             .iter()
-            .filter_map(|app| {
-                let rank =
-                    application_rank(&app.title_key, &app.identifier_key, &app.initials, &query)?;
-                Some((rank, app))
-            })
+            .filter_map(|app| app.rank(&query).map(|rank| (rank, app)))
             .collect();
         matches.sort_by_key(|(rank, _)| *rank);
         Results::Destinations(
@@ -171,6 +208,38 @@ mod tests {
         assert_eq!(rank("vs unknown"), None);
         assert_eq!(rank("vs vsc code"), None);
         assert_eq!(rank("vc code"), None);
+    }
+
+    #[test]
+    #[ignore = "需要 Windows 应用目录"]
+    fn remembers_recent_shell_applications_without_duplicates() {
+        let catalog = list_shell_apps().unwrap();
+        let first = catalog
+            .iter()
+            .find(|app| !app.identifier().is_empty())
+            .unwrap();
+        let second = catalog
+            .iter()
+            .find(|app| !app.identifier().is_empty() && app.identifier() != first.identifier())
+            .unwrap();
+        let history = RecentApplications::default();
+        history.record(first.clone());
+        history.record(second.clone());
+        history.record(first.clone());
+        let Results::Destinations(items) = history.results("") else {
+            panic!("应返回应用列表");
+        };
+        assert_eq!(
+            items,
+            vec![
+                Destination::InstalledApp(first.clone()),
+                Destination::InstalledApp(second.clone()),
+            ],
+        );
+        let Results::Destinations(matches) = history.results(first.identifier()) else {
+            panic!("应返回筛选后的应用");
+        };
+        assert_eq!(matches.first(), items.first());
     }
 
     #[test]

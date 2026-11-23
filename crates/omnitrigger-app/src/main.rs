@@ -2775,7 +2775,8 @@ impl Workspace {
                 return;
             }
             quick_search::Destination::InstalledApp(app) => {
-                Self::open_shell_search_target(move || app.open(), cx);
+                let history = self.quick_search_recent.launched_apps.clone();
+                Self::open_shell_search_target(move || history.launch(app), cx);
                 return;
             }
             quick_search::Destination::KnownFolder(folder) => {

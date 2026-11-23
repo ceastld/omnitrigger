@@ -77,7 +77,7 @@ use crate::{
     Page, Workspace,
 };
 use actions::{matching_actions, SearchAction};
-use applications::{ApplicationCache, ApplicationIndex};
+use applications::{ApplicationCache, ApplicationIndex, RecentApplications};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use batch::{batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
@@ -286,6 +286,7 @@ pub(super) struct SearchIndex {
 #[derive(Clone, Default)]
 pub(super) struct RecentSearch {
     pub(super) destinations: RecentDestinations,
+    pub(super) launched_apps: RecentApplications,
     calculations: RecentValues,
     conversions: RecentValues,
     examples: RecentExamples,
@@ -900,6 +901,7 @@ impl Results {
                         .map_err(ValueError::Radix),
                 ),
                 Scope::Applications => applications.results(term),
+                Scope::ApplicationHistory => recent.launched_apps.results(term),
                 Scope::Folders => Self::Destinations(matching_folders(term)),
                 Scope::WindowsSettings => {
                     Self::Destinations(windows_settings::matching_windows_settings(term))
@@ -2877,7 +2879,16 @@ impl QuickSearch {
                 .text_color(rgb(theme::DANGER_TEXT))
                 .child(div().truncate().child(error.clone())),
             Results::Destinations(items) if items.is_empty() => {
-                row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
+                row.text_color(rgb(theme::TEXT_MUTED)).child(
+                    if matches!(
+                        scoped_query(&self.input.read(cx).text()),
+                        Some((Scope::ApplicationHistory, ""))
+                    ) {
+                        "本次运行还没有从快速搜索打开的应用"
+                    } else {
+                        "未找到匹配项"
+                    },
+                )
             }
             Results::Destinations(items) => div()
                 .flex()
@@ -5074,7 +5085,10 @@ mod tests {
                 | Results::OpenWindowsLoading
                 | Results::LocalFilesPrompt => {}
                 Results::ConversionTargets(items) if !items.is_empty() => {}
-                Results::Destinations(items) if !items.is_empty() => {}
+                Results::Destinations(items)
+                    if !items.is_empty()
+                        || scoped_query(example.query) == Some((Scope::ApplicationHistory, "")) => {
+                }
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }
         }
@@ -5119,6 +5133,11 @@ mod tests {
         let index = SearchIndex::default();
         for query in ["应用: 计算器", "apps: calculator", "程序：记事本", "记事本"] {
             assert!(matches!(index.results(query), Results::ApplicationsLoading));
+        }
+        for query in ["应用历史:", "recent apps: calculator"] {
+            assert!(
+                matches!(index.results(query), Results::Destinations(items) if items.is_empty())
+            );
         }
         assert!(matches!(
             index.results("动作: calculator"),
