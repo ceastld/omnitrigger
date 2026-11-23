@@ -20,6 +20,7 @@ pub(super) enum DurationError {
     Incomplete,
     Invalid,
     InvalidClockTime,
+    InvalidOverlapArguments,
     InvalidBreakArguments,
     BreakOutOfRange,
     InvalidUnit,
@@ -39,6 +40,9 @@ impl DurationError {
             Self::Incomplete => "输入时长，例如 时长: 01:30:00 或 时长: 5400秒",
             Self::Invalid => "使用分:秒、时:分:秒、带单位的时长或 PnDTnHnMnS",
             Self::InvalidClockTime => "输入两个 24 小时时刻，例如 23:45 到 01:15",
+            Self::InvalidOverlapArguments => {
+                "用竖线分隔两个时刻区间，例如 23:00 到 01:00 | 00:30 到 02:00"
+            }
             Self::InvalidBreakArguments => {
                 "用竖线分隔时刻区间和休息时长，例如 23:45 到 01:15 | 30分钟"
             }
@@ -91,6 +95,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         "频数平均" | "frequency-average" => (frequency_average(values)?, false),
         "频数中位数" | "frequency-median" => (median_duration_list(values, true)?, false),
         "扣除休息" | "subtract-break" => (elapsed_after_break(values)?, false),
+        "重叠" | "overlap" => (clock_overlap(values)?, false),
         "中位数" | "median" => (median_duration_list(values, false)?, false),
         "最短" | "min" => (duration_extremes(values)?.0, false),
         "最长" | "max" => (duration_extremes(values)?.1, false),
@@ -144,6 +149,36 @@ fn elapsed_after_break(input: &str) -> Result<i128, DurationError> {
         return Err(DurationError::BreakOutOfRange);
     }
     Ok(elapsed - break_duration)
+}
+
+fn clock_overlap(input: &str) -> Result<i128, DurationError> {
+    let (first, second) = input
+        .split_once('|')
+        .ok_or(DurationError::InvalidOverlapArguments)?;
+    let first = split_clock_spans(first)?;
+    let second = split_clock_spans(second)?;
+    let mut total = 0;
+    for (left_start, left_end) in first {
+        for (right_start, right_end) in second {
+            total += left_end
+                .min(right_end)
+                .saturating_sub(left_start.max(right_start));
+        }
+    }
+    Ok(total as i128)
+}
+
+fn split_clock_spans(input: &str) -> Result<[(u128, u128); 2], DurationError> {
+    let (start, end) = input
+        .split_once(['到', '至'])
+        .ok_or(DurationError::InvalidOverlapArguments)?;
+    let start = time_of_day(start)?;
+    let end = time_of_day(end)?;
+    Ok(if start <= end {
+        [(start, end), (0, 0)]
+    } else {
+        [(start, NANOS_PER_DAY), (0, end)]
+    })
 }
 
 fn duration_terms(input: &str) -> impl Iterator<Item = &str> {
@@ -762,6 +797,31 @@ mod tests {
         ] {
             assert_eq!(convert_duration(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn measures_clock_overlap_across_midnight_on_a_single_daily_cycle() {
+        for (query, expected) in [
+            ("重叠 23:00 到 01:00 | 00:30 到 02:00", "00:30:00"),
+            ("重叠 22:00 至 02:00 | 01:00 至 23:00 to min", "120 min"),
+            ("overlap 09:30 到 12:00 | 11:00 到 13:00", "01:00:00"),
+            ("重叠 09:00 到 10:00 | 10:00 到 12:00", "00:00:00"),
+            ("重叠 09:00 到 09:00 | 08:00 到 12:00", "00:00:00"),
+            (
+                "重叠 10:00:00.000000001 到 10:00:01 | 10:00 到 10:00:00.000000002 to ns",
+                "1 ns",
+            ),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_duration("重叠 23:00 到 01:00"),
+            Err(DurationError::InvalidOverlapArguments),
+        );
+        assert_eq!(
+            convert_duration("重叠 23:00 到 01:00 | 24:00 到 02:00"),
+            Err(DurationError::InvalidClockTime),
+        );
     }
 
     #[test]

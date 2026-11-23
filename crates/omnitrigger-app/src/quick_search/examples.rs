@@ -1099,6 +1099,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "计算两个时刻区间的重叠时长",
+        query: "时长: 重叠 23:00 到 01:00 | 00:30 到 02:00",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按精确分数缩放时长",
         query: "时长: 缩放 01:30:00 @ 2/3",
     },
@@ -4468,6 +4473,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "频数平均",
                     "频数中位数",
                     "扣除休息",
+                    "重叠",
                     "比率",
                     "缩放",
                     "分摊",

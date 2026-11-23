@@ -251,6 +251,7 @@ fn convert_timestamp_with_local(
             DurationError::Precision => TimestampError::UnsupportedPrecision,
             DurationError::Invalid
             | DurationError::InvalidClockTime
+            | DurationError::InvalidOverlapArguments
             | DurationError::InvalidBreakArguments
             | DurationError::BreakOutOfRange
             | DurationError::InvalidUnit
