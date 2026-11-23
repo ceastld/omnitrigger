@@ -107,6 +107,11 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             return polynomial_residuals(rest.trim());
         }
         Some((operation, rest))
+            if operation == "多项式误差" || operation.eq_ignore_ascii_case("polynomial-errors") =>
+        {
+            return polynomial_errors(rest.trim());
+        }
+        Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
         {
             (rest.trim(), FitOutput::Residuals)
@@ -136,12 +141,7 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         FitOutput::Errors => {
             // 中心化平方和与乘积和已乘以样本数量。
             let residual_sum = (&products.square_y - &products.cross * &slope) / &sums.count;
-            let mean_squared = &residual_sum / sums.count;
-            check_size([&residual_sum, &mean_squared])?;
-            let root_mean_squared = format_square_root(&mean_squared);
-            return Ok(format!(
-                "残差平方和 {residual_sum}\n均方误差 {mean_squared}\n均方根误差 {root_mean_squared}"
-            ));
+            return format_fit_errors(residual_sum, sums.count);
         }
         FitOutput::Predictions(xs) => {
             return format_prediction_values(&xs, "预测值", predict_y);
@@ -338,16 +338,46 @@ fn polynomial_residuals(input: &str) -> Result<String, LinearFitError> {
     let fit = fit_polynomial(input)?;
     let mut rows = vec!["x,实际值,拟合值,残差".to_owned()];
     for (x, actual) in fit.points {
-        let mut predicted = BigRational::default();
-        for coefficient in fit.coefficients.iter().rev() {
-            predicted = predicted * &x + coefficient;
-            check_size([&predicted])?;
-        }
+        let predicted = polynomial_fit_value(&fit.coefficients, &x)?;
         let residual = &actual - &predicted;
         check_size([&residual])?;
         rows.push(format!("{x},{actual},{predicted},{residual}"));
     }
     Ok(rows.join("\r\n"))
+}
+
+fn polynomial_fit_value(
+    coefficients: &[BigRational],
+    x: &BigRational,
+) -> Result<BigRational, LinearFitError> {
+    let mut value = BigRational::default();
+    for coefficient in coefficients.iter().rev() {
+        value = value * x + coefficient;
+        check_size([&value])?;
+    }
+    Ok(value)
+}
+
+fn polynomial_errors(input: &str) -> Result<String, LinearFitError> {
+    let fit = fit_polynomial(input)?;
+    let count = BigInt::from(fit.points.len());
+    let mut squared_sum = BigRational::default();
+    for (x, actual) in fit.points {
+        let residual = actual - polynomial_fit_value(&fit.coefficients, &x)?;
+        check_size([&residual])?;
+        squared_sum += &residual * &residual;
+        check_size([&squared_sum])?;
+    }
+    format_fit_errors(squared_sum, count)
+}
+
+fn format_fit_errors(residual_sum: BigRational, count: BigInt) -> Result<String, LinearFitError> {
+    let mean_squared = &residual_sum / count;
+    check_size([&residual_sum, &mean_squared])?;
+    let root_mean_squared = format_square_root(&mean_squared);
+    Ok(format!(
+        "残差平方和 {residual_sum}\n均方误差 {mean_squared}\n均方根误差 {root_mean_squared}"
+    ))
 }
 
 fn format_power_expression(coefficients: Vec<BigRational>) -> String {
@@ -586,6 +616,18 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_exact_polynomial_fit_errors_with_the_same_denominator_as_linear_fit() {
+        assert_eq!(
+            calculate_linear_fit("多项式误差 2 @ -1,2; 0,0; 1,2; 0,2").as_deref(),
+            Ok("残差平方和 2\n均方误差 1/2\n均方根误差 √(1/2)")
+        );
+        assert_eq!(
+            calculate_linear_fit("polynomial-errors 1 @ 1,1; 2,1; 0,0"),
+            calculate_linear_fit("误差 1,1; 2,1; 0,0"),
+        );
+    }
 
     #[test]
     fn reports_polynomial_fit_residuals_in_the_original_row_order() {
