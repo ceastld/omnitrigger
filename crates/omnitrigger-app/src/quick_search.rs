@@ -137,7 +137,7 @@ use timecode::{convert_timecode, TimecodeError};
 use timestamp::{convert_timestamp, is_offset_timestamp, TimestampError};
 use toml_tools::{transform_toml, TomlError};
 use triangle::{calculate_triangle, TriangleError};
-use triggers::{matching_triggers, trigger_search_filters, SearchTrigger, TriggerFilterError};
+use triggers::{matching_triggers, search_triggers, SearchTrigger, TriggerSearchError};
 use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
 use value_history::RecentValues;
@@ -387,7 +387,7 @@ fn value_extra_height(value: &str, line_limit: usize) -> f32 {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ValueError {
     InputTooLong,
-    TriggerFilter(TriggerFilterError),
+    TriggerSearch(TriggerSearchError),
     Calculation(CalculationError),
     BatchCalculation(BatchError<CalculationError>),
     BatchFraction(BatchError<FractionError>),
@@ -445,7 +445,7 @@ impl ValueError {
     fn message(self) -> gpui::SharedString {
         let message = match self {
             Self::InputTooLong => "输入最多支持 4096 个字符",
-            Self::TriggerFilter(error) => error.message(),
+            Self::TriggerSearch(error) => error.message(),
             Self::Calculation(error) => error.message(),
             Self::BatchCalculation(error) => {
                 return batch_error_message(
@@ -721,15 +721,7 @@ impl Results {
                     || Self::Bookmarks(recent.bookmarks.matching(term)),
                     Self::BookmarksUnavailable,
                 ),
-                Scope::Triggers(filter) => match trigger_search_filters(term, filter) {
-                    Ok((filter, query)) => Self::Destinations(
-                        matching_triggers(triggers, query, &filter)
-                            .into_iter()
-                            .map(Destination::Trigger)
-                            .collect(),
-                    ),
-                    Err(error) => Self::Value(Err(ValueError::TriggerFilter(error))),
-                },
+                Scope::Triggers(filter) => search_triggers(triggers, term, filter),
                 Scope::Wheels => Self::Destinations(
                     matching_wheels(wheels, term)
                         .into_iter()
@@ -1138,7 +1130,7 @@ impl Results {
         destinations.extend(
             matching_triggers(triggers, &query, &Default::default())
                 .into_iter()
-                .map(Destination::Trigger),
+                .map(|trigger| Destination::Trigger(trigger.id())),
         );
         destinations.extend(
             matching_wheels(wheels, &query)
@@ -5464,11 +5456,37 @@ mod tests {
             assert!(
                 matches!(
                     for_query(query, &triggers),
-                    Results::Value(Err(ValueError::TriggerFilter(_)))
+                    Results::Value(Err(ValueError::TriggerSearch(_)))
                 ),
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn exports_filtered_triggers_with_the_same_fields_and_order_as_the_list() {
+        let mut bindings = crate::settings::defaults();
+        let bindings = &mut bindings[..2];
+        bindings[0].message = "甲,乙".into();
+        bindings[0].enabled = true;
+        bindings[1].message = "停用项".into();
+        bindings[1].enabled = false;
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        let header = "名称,组合与条件,输入,动作,范围,启用状态";
+        let Results::Value(Ok(result)) = for_query("触发器: 输出=CSV 状态=已启用", &triggers)
+        else {
+            panic!("未生成触发器 CSV");
+        };
+        let mut rows = result.text.lines();
+        assert_eq!(rows.next(), Some(header));
+        let row = rows.next().unwrap();
+        assert!(row.starts_with("\"甲,乙\","));
+        assert!(row.ends_with(",所有应用,已启用"));
+        assert_eq!(rows.next(), None);
+        assert!(matches!(
+            for_query("已停用触发器: output=csv 没有该触发器", &triggers),
+            Results::Value(Ok(result)) if result.text == header
+        ));
     }
 
     #[test]

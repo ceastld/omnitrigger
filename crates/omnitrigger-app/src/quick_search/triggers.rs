@@ -5,15 +5,20 @@ use crate::{
     trigger_browse::{self, Facet, FacetValue, Filter, StatusKind},
 };
 
-use super::examples::search_key;
+use super::{
+    csv_tools::append_bounded_csv_row, examples::search_key, Destination, Results, ValueError,
+};
+
+const TRIGGER_CSV_HEADER: &str = "名称,组合与条件,输入,动作,范围,启用状态";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TriggerFilterError {
+pub(super) enum TriggerSearchError {
     InvalidValue(Facet),
     RepeatedFacet,
+    CsvTooLarge,
 }
 
-impl TriggerFilterError {
+impl TriggerSearchError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::InvalidValue(Facet::Status) => "状态可用 已启用 或 已停用",
@@ -21,6 +26,7 @@ impl TriggerFilterError {
             Self::InvalidValue(Facet::Input) => "输入可用 键盘、鼠标按键、滚轮或屏幕区域",
             Self::InvalidValue(Facet::Action) => "动作填写触发器页的分类名称，例如 快速搜索",
             Self::RepeatedFacet => "每类筛选条件填写一次",
+            Self::CsvTooLarge => "触发器 CSV 超过 1 MiB，请缩小筛选范围",
         }
     }
 }
@@ -69,10 +75,10 @@ impl SearchTrigger {
     }
 }
 
-pub(super) fn trigger_search_filters(
+fn trigger_search_filters(
     mut query: &str,
     inherited: Option<FacetValue>,
-) -> Result<(Filter, &str), TriggerFilterError> {
+) -> Result<(Filter, &str), TriggerSearchError> {
     let mut filter = Filter::default();
     if let Some(value) = inherited {
         filter.set(value.facet(), Some(value));
@@ -86,7 +92,7 @@ pub(super) fn trigger_search_filters(
             _ => break,
         };
         if filter.get(facet).is_some() {
-            return Err(TriggerFilterError::RepeatedFacet);
+            return Err(TriggerSearchError::RepeatedFacet);
         }
         let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
         let value = search_key(value);
@@ -107,18 +113,62 @@ pub(super) fn trigger_search_filters(
             .find(|value| {
                 value.label() == name && *value != FacetValue::Status(StatusKind::Unready)
             })
-            .ok_or(TriggerFilterError::InvalidValue(facet))?;
+            .ok_or(TriggerSearchError::InvalidValue(facet))?;
         filter.set(facet, Some(value));
         query = rest.trim_start();
     }
     Ok((filter, query))
 }
 
-pub(super) fn matching_triggers(
+pub(super) fn search_triggers(
     triggers: &[SearchTrigger],
+    term: &str,
+    inherited: Option<FacetValue>,
+) -> Results {
+    let (format, rest) = term.split_once(char::is_whitespace).unwrap_or((term, ""));
+    let export = matches!(search_key(format).as_str(), "输出=csv" | "output=csv");
+    let query = if export { rest.trim_start() } else { term };
+    let (filter, query) = match trigger_search_filters(query, inherited) {
+        Ok(parsed) => parsed,
+        Err(error) => return Results::Value(Err(ValueError::TriggerSearch(error))),
+    };
+    let matches = matching_triggers(triggers, query, &filter);
+    if export {
+        return Results::text_value(export_triggers(matches).map_err(ValueError::TriggerSearch));
+    }
+    Results::Destinations(
+        matches
+            .into_iter()
+            .map(|trigger| Destination::Trigger(trigger.id()))
+            .collect(),
+    )
+}
+
+fn export_triggers(triggers: Vec<&SearchTrigger>) -> Result<String, TriggerSearchError> {
+    let mut csv = String::from(TRIGGER_CSV_HEADER);
+    for entry in triggers {
+        append_bounded_csv_row(
+            &mut csv,
+            [
+                entry.title.as_str(),
+                entry.detail.as_str(),
+                entry.row.input.label(),
+                entry.row.action.label(),
+                entry.row.scope.label(),
+                entry.row.status.label(),
+            ]
+            .into_iter(),
+            TriggerSearchError::CsvTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+pub(super) fn matching_triggers<'a>(
+    triggers: &'a [SearchTrigger],
     query: &str,
     filter: &Filter,
-) -> Vec<u64> {
+) -> Vec<&'a SearchTrigger> {
     let query = trigger_browse::normalize_query(query);
     let unfiltered = filter.is_empty();
     let mut matches: Vec<_> = triggers
@@ -138,7 +188,7 @@ pub(super) fn matching_triggers(
     matches.sort_unstable();
     matches
         .into_iter()
-        .map(|(_, _, index)| triggers[index].id())
+        .map(|(_, _, index)| &triggers[index])
         .collect()
 }
 
