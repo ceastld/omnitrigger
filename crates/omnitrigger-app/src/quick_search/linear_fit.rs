@@ -118,6 +118,12 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             return polynomial_prediction(rest.trim());
         }
         Some((operation, rest))
+            if operation == "多项式摘要"
+                || operation.eq_ignore_ascii_case("polynomial-summary") =>
+        {
+            return polynomial_summary(rest.trim());
+        }
+        Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
         {
             (rest.trim(), FitOutput::Residuals)
@@ -385,14 +391,44 @@ fn polynomial_fit_value(
 fn polynomial_errors(input: &str) -> Result<String, LinearFitError> {
     let fit = fit_polynomial(input)?;
     let count = BigInt::from(fit.points.len());
+    format_fit_errors(polynomial_squared_error(&fit)?, count)
+}
+
+fn polynomial_squared_error(fit: &PolynomialFit) -> Result<BigRational, LinearFitError> {
     let mut squared_sum = BigRational::default();
-    for (x, actual) in fit.points {
-        let residual = actual - polynomial_fit_value(&fit.coefficients, &x)?;
+    for (x, actual) in &fit.points {
+        let residual = actual - polynomial_fit_value(&fit.coefficients, x)?;
         check_size([&residual])?;
         squared_sum += &residual * &residual;
         check_size([&squared_sum])?;
     }
-    format_fit_errors(squared_sum, count)
+    Ok(squared_sum)
+}
+
+fn polynomial_summary(input: &str) -> Result<String, LinearFitError> {
+    let fit = fit_polynomial(input)?;
+    let residual_sum = polynomial_squared_error(&fit)?;
+    let mut observation_sum = BigRational::default();
+    let mut squared_sum = BigRational::default();
+    for (_, actual) in &fit.points {
+        observation_sum += actual;
+        squared_sum += actual * actual;
+        check_size([&observation_sum, &squared_sum])?;
+    }
+    let count = BigInt::from(fit.points.len());
+    let total = squared_sum - &observation_sum * &observation_sum / count;
+    check_size([&total])?;
+    let r_squared = if total.numer().sign() == Sign::NoSign {
+        "未定义".to_owned()
+    } else {
+        let value = BigRational::from_integer(1.into()) - &residual_sum / total;
+        check_size([&value])?;
+        value.to_string()
+    };
+    let expression = format_power_expression(fit.coefficients);
+    Ok(format!(
+        "拟合式 {expression}\nR² {r_squared}\n残差平方和 {residual_sum}"
+    ))
 }
 
 fn format_fit_errors(residual_sum: BigRational, count: BigInt) -> Result<String, LinearFitError> {
@@ -640,6 +676,18 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarizes_polynomial_fit_and_handles_constant_observations() {
+        assert_eq!(
+            calculate_linear_fit("多项式摘要 2 @ -1,2; 0,0; 1,2; 0,2").as_deref(),
+            Ok("拟合式 x**2 + 1\nR² 1/3\n残差平方和 2")
+        );
+        assert_eq!(
+            calculate_linear_fit("polynomial-summary 2 @ 0,2; 1,2; 2,2").as_deref(),
+            Ok("拟合式 2\nR² 未定义\n残差平方和 0")
+        );
+    }
 
     #[test]
     fn predicts_with_one_polynomial_fit_and_preserves_query_order() {
