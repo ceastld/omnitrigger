@@ -2957,6 +2957,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 CSV 数值列按指定有效数字写成科学记数法",
+        query: "CSV: 有效数字列 [[2,\"比率\"],3] 编号,金额,比率\n001,9.995,1/3\n002,-1.245,0.0012345\n003,0,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除所有单元格都为空的 CSV 数据行",
         query: "CSV: 去空行 编号,备注\n001,茶\n\n,\n002,梨",
     },

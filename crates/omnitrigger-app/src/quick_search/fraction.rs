@@ -908,7 +908,7 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places)
 }
 
-fn format_significant_digits(value: BigRational, digits: u32) -> String {
+pub(super) fn format_significant_digits(value: BigRational, digits: u32) -> String {
     let numerator = value.numer().magnitude();
     let denominator = value.denom().magnitude();
     let places = digits - 1;
