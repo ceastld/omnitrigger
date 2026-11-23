@@ -6,12 +6,15 @@ use num_rational::BigRational;
 use super::calculator::{
     evaluate, evaluate_at_x, format_result, normalize, sample_at_x, CalculationError, QUERY_LIMIT,
 };
+use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{
     calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
     format_square_root, FractionError,
 };
 use super::matrix::{general_solution, MatrixError, MAX_DIMENSION};
-use super::operators::{split_top_level_commas, visit_additive_terms, NumberComparison};
+use super::operators::{
+    json_value_and_tail, split_top_level_commas, visit_additive_terms, NumberComparison,
+};
 use super::plane::{parse_point, PointError};
 use super::scatter_plot::ScatterPlot;
 use super::scientific::{interpolate_between, named_value, split_name};
@@ -20,6 +23,7 @@ const MAX_ROOT_CANDIDATES: usize = 64;
 const FUNCTION_PLOT_INTERVALS: u32 = 32;
 const MAX_FUNCTION_POINTS: u32 = 129;
 const MAX_FUNCTION_INPUTS: usize = 64;
+const MAX_COMPARED_FUNCTIONS: usize = 4;
 const BISECTION_ITERATIONS: usize = 128;
 const BISECTION_RESIDUAL_RATIO: f64 = 1e-8;
 const MAX_INTEGRAL_INTERVALS: u32 = 128;
@@ -41,6 +45,7 @@ pub(super) enum EquationError {
     FunctionSampleArguments,
     FunctionSampleHasNoValues,
     FunctionValuesArguments,
+    FunctionComparisonArguments,
     BisectionArguments,
     BisectionSameSign,
     BisectionResidual,
@@ -88,6 +93,9 @@ impl EquationError {
             Self::FunctionSampleHasNoValues => "该区间没有可绘制的有限函数值",
             Self::FunctionValuesArguments => {
                 "填写带 x 的算式，用 @ 隔开 1 至 64 个以逗号分隔的横坐标"
+            }
+            Self::FunctionComparisonArguments => {
+                "填写 2 至 4 个算式的 JSON 数组，@ 后接横坐标，例如 [\"sin(x)\",\"cos(x)\"] @ 0,pi/2"
             }
             Self::BisectionArguments => {
                 "填写要求零点的算式或等式和两个不同的端点，例如 cos(x)=x @ 0 到 1"
@@ -155,6 +163,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数值" | "function-values" => {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
+            "函数对照" | "compare-functions" => return compare_function_values(arguments),
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
@@ -698,15 +707,55 @@ fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, Equati
 fn function_samples_for_inputs(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
     let invalid = EquationError::FunctionValuesArguments;
     let (expression, inputs) = split_function_arguments(input, invalid)?;
-    let mut samples = Vec::new();
-    for input in split_top_level_commas(inputs) {
-        if input.trim().is_empty() || samples.len() == MAX_FUNCTION_INPUTS {
-            return Err(invalid);
-        }
-        let x = evaluate(input).map_err(EquationError::Approximation)?;
-        samples.push((x, function_sample_value(expression, x)?));
+    function_input_coordinates(inputs, invalid)
+        .map(|x| {
+            let x = x?;
+            Ok((x, function_sample_value(expression, x)?))
+        })
+        .collect()
+}
+
+fn function_input_coordinates(
+    inputs: &str,
+    invalid: EquationError,
+) -> impl Iterator<Item = Result<f64, EquationError>> + '_ {
+    split_top_level_commas(inputs)
+        .enumerate()
+        .map(move |(index, input)| {
+            if input.trim().is_empty() || index >= MAX_FUNCTION_INPUTS {
+                return Err(invalid);
+            }
+            evaluate(input).map_err(EquationError::Approximation)
+        })
+}
+
+fn compare_function_values(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::FunctionComparisonArguments;
+    let (expressions, tail) = json_value_and_tail::<Vec<String>>(input).ok_or(invalid)?;
+    let inputs = tail.trim_start().strip_prefix('@').ok_or(invalid)?;
+    if !(2..=MAX_COMPARED_FUNCTIONS).contains(&expressions.len())
+        || expressions
+            .iter()
+            .any(|expression| expression.trim().is_empty())
+    {
+        return Err(invalid);
     }
-    Ok(samples)
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    let mut csv = String::new();
+    let labels = std::iter::once("x").chain(expressions.iter().map(|expression| expression.trim()));
+    append_bounded_csv_row(&mut csv, labels, invalid)?;
+    for x in function_input_coordinates(inputs, invalid) {
+        let x = x?;
+        let mut row = vec![display(x)?];
+        for expression in &expressions {
+            let y = function_sample_value(expression, x)?
+                .map(display)
+                .transpose()?;
+            row.push(y.unwrap_or_default());
+        }
+        append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), invalid)?;
+    }
+    Ok(csv)
 }
 
 fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
@@ -2114,6 +2163,26 @@ mod tests {
             Err(EquationError::Approximation(
                 CalculationError::DivisionByZero
             ))
+        );
+    }
+
+    #[test]
+    fn compares_multiple_functions_in_a_single_csv_and_quotes_expression_headers() {
+        assert_eq!(
+            solve_equation(r#"函数对照 ["sqrt(x)","max(x,0)"] @ -1,0,4"#).as_deref(),
+            Ok("x,sqrt(x),\"max(x,0)\"\r\n-1,\"\",0\r\n0,0,0\r\n4,2,4")
+        );
+        assert_eq!(
+            solve_equation(r#"compare-functions ["cosd(x)","sind(x)"] @ 90,0,90"#).as_deref(),
+            Ok("x,cosd(x),sind(x)\r\n90,0,1\r\n0,1,0\r\n90,0,1")
+        );
+        assert_eq!(
+            solve_equation(r#"函数对照 ["x"] @ 1"#),
+            Err(EquationError::FunctionComparisonArguments)
+        );
+        assert_eq!(
+            solve_equation(r#"函数对照 ["x","x**2"] @ 1,"#),
+            Err(EquationError::FunctionComparisonArguments)
         );
     }
 

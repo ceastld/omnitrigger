@@ -256,6 +256,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在相同横坐标上并排比较多个函数",
+        query: r#"方程: 函数对照 ["cosd(x)","sind(x)"] @ 0,90,180"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用二分法求连续函数的一个近似零点",
         query: "方程: 二分求根 cos(x)-x @ 0 到 1",
     },
@@ -5431,6 +5436,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "函数采样",
             "采样图",
             "函数值",
+            "函数对照",
             "二分求根",
             "数值积分",
             "数值导数",
