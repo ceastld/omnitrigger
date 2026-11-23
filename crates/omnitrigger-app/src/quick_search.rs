@@ -1028,7 +1028,15 @@ impl Results {
                 }
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 Scope::Toml => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
-                Scope::Csv => Self::text_value(transform_csv(term).map_err(ValueError::Csv)),
+                Scope::Csv => {
+                    if let Some(arguments) = csv_tools::scatter_arguments(term) {
+                        Self::plot_value(
+                            csv_tools::build_scatter_plot(arguments).map_err(ValueError::Csv),
+                        )
+                    } else {
+                        Self::text_value(transform_csv(term).map_err(ValueError::Csv))
+                    }
+                }
                 Scope::DataPipeline => Self::text_value(
                     transform_data_pipeline(term, chrono::Local::now().fixed_offset())
                         .map_err(ValueError::DataPipeline),
@@ -1053,13 +1061,8 @@ impl Results {
                 }
                 Scope::LinearFit => {
                     if let Some(plot) = linear_fit::plot_request(term) {
-                        Self::Value(
-                            linear_fit::calculate_plot(plot)
-                                .map(|(text, plot)| ResultValue {
-                                    text,
-                                    kind: ValueKind::Scatter(plot),
-                                })
-                                .map_err(ValueError::LinearFit),
+                        Self::plot_value(
+                            linear_fit::calculate_plot(plot).map_err(ValueError::LinearFit),
                         )
                     } else {
                         Self::text_value(calculate_linear_fit(term).map_err(ValueError::LinearFit))
@@ -1200,6 +1203,13 @@ impl Results {
         Self::Value(result.map(|text| ResultValue {
             text,
             kind: ValueKind::Text,
+        }))
+    }
+
+    fn plot_value(result: Result<(String, scatter_plot::ScatterPlot), ValueError>) -> Self {
+        Self::Value(result.map(|(text, plot)| ResultValue {
+            text,
+            kind: ValueKind::Scatter(plot),
         }))
     }
 
@@ -3854,6 +3864,22 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn csv_scatter_renders_the_selected_columns_and_refills_the_same_schema() {
+        let results = for_query(
+            r#"CSV: 散点图 ["时间","温度"] 编号,时间,温度
+001,0,2
+002,1,5/2"#,
+            &[],
+        );
+        assert!(matches!(
+            &results,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.point_count() == 2
+        ));
+        assert_eq!(results.refillable_text(), Some("时间,温度\r\n0,2\r\n1,5/2"));
     }
 
     #[test]

@@ -4419,6 +4419,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接使用 CSV 指定的两列绘制散点图",
+        query: "CSV: 散点图 [\"时间\",\"温度\"] 编号,时间,温度\n001,0,1/2\n002,1,2\n003,2,\n004,3,3/2\n005,4,4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留每组金额最高的两条完整记录",
         query: "CSV: 组内最高 [[\"地区\"],\"金额\",2] 地区,金额,编号\n北,1/2,001\n南,3,002\n北,2e0,003\n北,0.50,004",
     },

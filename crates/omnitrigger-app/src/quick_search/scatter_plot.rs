@@ -16,6 +16,7 @@ pub(super) struct ScatterPlot {
     curve: Vec<(u16, u16)>,
     x: [String; 2],
     y: [String; 2],
+    axis_names: [String; 2],
     residuals: bool,
 }
 
@@ -66,12 +67,25 @@ impl ScatterPlot {
             curve: curve.iter().map(place).collect(),
             x: [min_x.to_string(), max_x.to_string()],
             y: [min_y.to_string(), max_y.to_string()],
+            axis_names: [
+                "x".to_owned(),
+                if residuals { "残差" } else { "y" }.to_owned(),
+            ],
             residuals,
         }
     }
 
     pub(super) fn point_count(&self) -> usize {
         self.locations.len()
+    }
+
+    pub(super) fn with_axis_names(mut self, names: [String; 2]) -> Self {
+        for (label, name) in self.axis_names.iter_mut().zip(names) {
+            if !name.trim().is_empty() {
+                *label = name;
+            }
+        }
+        self
     }
 
     pub(super) fn has_curve(&self) -> bool {
@@ -181,7 +195,7 @@ impl ScatterPlot {
             .flex_col()
             .items_end()
             .py(px(3.));
-        let y_label = if self.residuals { "残差" } else { "y" };
+        let [x_label, y_label] = &self.axis_names;
         let vertical = if self.y[0] == self.y[1] {
             vertical
                 .justify_center()
@@ -190,7 +204,7 @@ impl ScatterPlot {
             vertical
                 .justify_between()
                 .child(axis_label(self.y[1].clone()))
-                .child(axis_label(y_label.to_owned()))
+                .child(axis_label(y_label.clone()))
                 .child(axis_label(self.y[0].clone()))
         };
         let horizontal = div()
@@ -203,12 +217,12 @@ impl ScatterPlot {
         let horizontal = if self.x[0] == self.x[1] {
             horizontal
                 .justify_center()
-                .child(axis_label(format!("x = {}", self.x[0])))
+                .child(axis_label(format!("{x_label} = {}", self.x[0])))
         } else {
             horizontal
                 .justify_between()
                 .child(axis_label(self.x[0].clone()))
-                .child(axis_label("x".to_owned()))
+                .child(axis_label(x_label.clone()))
                 .child(axis_label(self.x[1].clone()))
         };
         div()

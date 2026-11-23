@@ -41,11 +41,12 @@ use super::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
         json_wildcard_values, JsonCellContent, JsonError,
     },
-    linear_fit::{LinearFitError, PairedSums},
+    linear_fit::{LinearFitError, PairedSums, Point, MAX_POINTS},
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
     radix::{convert_radix_fraction, convert_radix_integer},
+    scatter_plot::ScatterPlot,
     statistics::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
@@ -192,6 +193,9 @@ pub(super) enum CsvError {
     GroupFitColumns,
     GroupFitTooLarge,
     LinearFit(LinearFitError),
+    ScatterColumns,
+    ScatterPointCount,
+    ScatterTooLarge,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -408,6 +412,9 @@ impl CsvError {
             Self::GroupFitColumns => "填写分组列和两列不同的坐标，例如 [[\"区域\"],[\"x\",\"y\"]]",
             Self::GroupFitTooLarge => "分组拟合结果超过 1 MiB，请缩小表格范围",
             Self::LinearFit(error) => error.message(),
+            Self::ScatterColumns => "填写 x 和 y 两列不同的列名或列号，例如 [\"时间\",\"温度\"]",
+            Self::ScatterPointCount => "散点图需要 2 至 64 行同时含 x 和 y 的数据",
+            Self::ScatterTooLarge => "散点图 CSV 超过 1 MiB，请缩小数据范围",
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -900,6 +907,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
+        operation if is_scatter_operation(operation) => {
+            return parse_scatter_table(input)?.to_csv();
+        }
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -4595,6 +4605,75 @@ fn median_by_columns(
     Ok(grouped_csv(header, &columns, medians, "中位数"))
 }
 
+fn is_scatter_operation(operation: &str) -> bool {
+    operation == "散点图" || operation.eq_ignore_ascii_case("scatter")
+}
+
+pub(super) fn scatter_arguments(input: &str) -> Option<&str> {
+    let (operation, rest) = split_argument(input)?;
+    is_scatter_operation(operation).then_some(rest)
+}
+
+pub(super) fn build_scatter_plot(input: &str) -> Result<(String, ScatterPlot), CsvError> {
+    let table = parse_scatter_table(input)?;
+    let csv = table.to_csv()?;
+    let plot = ScatterPlot::from_points(&table.points).with_axis_names(table.headers);
+    Ok((csv, plot))
+}
+
+struct CsvScatter {
+    headers: [String; 2],
+    points: Vec<Point>,
+}
+
+impl CsvScatter {
+    fn to_csv(&self) -> Result<String, CsvError> {
+        let mut output = String::new();
+        let limit = CsvError::ScatterTooLarge;
+        append_bounded_csv_row(&mut output, self.headers.iter().map(String::as_str), limit)?;
+        for (x, y) in &self.points {
+            let coordinates = [x.to_string(), y.to_string()];
+            append_bounded_csv_row(&mut output, coordinates.iter().map(String::as_str), limit)?;
+        }
+        Ok(output)
+    }
+}
+
+fn parse_scatter_table(input: &str) -> Result<CsvScatter, CsvError> {
+    let invalid = CsvError::ScatterColumns;
+    let (columns, data) = json_argument_and_data::<[ColumnReference; 2]>(input, invalid)?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let rows = read_rows(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, &columns, invalid)?;
+    let headers = [header[columns[0]].clone(), header[columns[1]].clone()];
+    let mut points = Vec::new();
+    for (index, row) in records.iter().enumerate() {
+        let x = row[columns[0]].trim();
+        let y = row[columns[1]].trim();
+        if x.is_empty() || y.is_empty() {
+            continue;
+        }
+        if points.len() == MAX_POINTS {
+            return Err(CsvError::ScatterPointCount);
+        }
+        let parse = |value| {
+            parse_fraction_literal(value).map_err(|error| CsvError::DataRowValue {
+                row: index + 1,
+                cause: error.message(),
+            })
+        };
+        points.push((parse(x)?, parse(y)?));
+    }
+    if points.len() < 2 {
+        return Err(CsvError::ScatterPointCount);
+    }
+    Ok(CsvScatter { headers, points })
+}
+
 fn fit_by_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -5475,6 +5554,27 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn csv_scatter_selects_numeric_columns_in_axis_order_and_skips_blanks() {
+        let data = "\u{feff}记录,温度,\"分钟,累计\"\r\nA,1.50,0\r\nB,,1\r\nC,7/4,2e0";
+        assert_eq!(
+            transform_csv(&format!(r#"散点图 [3,"温度"] {data}"#)).as_deref(),
+            Ok("\"分钟,累计\",温度\r\n0,3/2\r\n2,7/4")
+        );
+        assert_eq!(
+            transform_csv("scatter [1,2] x,y\n1,2\n3,"),
+            Err(CsvError::ScatterPointCount)
+        );
+        assert_eq!(
+            transform_csv("散点图 [1,\"x\"] x,y\n1,2\n3,4"),
+            Err(CsvError::ScatterColumns)
+        );
+        assert!(matches!(
+            transform_csv("散点图 [1,2] x,y\n1,2\n待定,3"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]

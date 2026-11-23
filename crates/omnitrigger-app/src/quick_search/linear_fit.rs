@@ -13,7 +13,7 @@ use super::operators::split_top_level_commas;
 use super::scatter_plot::ScatterPlot;
 use super::statistics::median_sorted_values;
 
-const MAX_POINTS: usize = 64;
+pub(super) const MAX_POINTS: usize = 64;
 const MAX_PREDICTIONS: usize = 64;
 const MAX_INTERPOLATION_POINTS: usize = 16;
 const MAX_REGRESSION_DEGREE: usize = 5;
@@ -851,7 +851,7 @@ impl CenteredProducts {
     }
 }
 
-type Point = (BigRational, BigRational);
+pub(super) type Point = (BigRational, BigRational);
 
 fn paired_sums(points: &str, retain_points: bool) -> Result<PairedSums, LinearFitError> {
     summarize_pairs(parse_paired_points(points)?, retain_points)
