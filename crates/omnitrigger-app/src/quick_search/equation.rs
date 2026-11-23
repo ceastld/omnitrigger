@@ -91,7 +91,7 @@ impl EquationError {
             Self::FunctionSampleArguments => {
                 "填写带 x 的算式以及两个不同的端点，可在分号后填写 2 至 129 个采样点"
             }
-            Self::FunctionSampleHasNoValues => "该区间没有可绘制的有限函数值",
+            Self::FunctionSampleHasNoValues => "该区间没有有限的函数值",
             Self::FunctionValuesArguments => {
                 "填写带 x 的算式，用 @ 隔开 1 至 64 个以逗号分隔的横坐标"
             }
@@ -164,6 +164,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数采样" | "sample-function" | "采样图" | "sample-plot" => {
                 return format_function_samples(&function_sample_points(arguments)?);
             }
+            "采样极值" | "sample-extrema" => return sampled_function_extrema(arguments),
             "函数值" | "function-values" => {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
@@ -859,6 +860,35 @@ impl FunctionComparison {
 
 fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
     sample_at_x(expression, x).map_err(EquationError::Approximation)
+}
+
+fn sampled_function_extrema(input: &str) -> Result<String, EquationError> {
+    let samples = function_sample_points(input)?;
+    let mut finite = samples.iter().filter_map(|&(x, y)| y.map(|y| (x, y)));
+    let first = finite
+        .next()
+        .ok_or(EquationError::FunctionSampleHasNoValues)?;
+    let mut minimum = first;
+    let mut maximum = first;
+    let mut count = 1;
+    for (x, y) in finite {
+        count += 1;
+        if y < minimum.1 {
+            minimum = (x, y);
+        }
+        if y > maximum.1 {
+            maximum = (x, y);
+        }
+    }
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    Ok(format!(
+        "最小样值 {} · x = {}\r\n最大样值 {} · x = {}\r\n有效样点 {count}/{}",
+        display(minimum.1)?,
+        display(minimum.0)?,
+        display(maximum.1)?,
+        display(maximum.0)?,
+        samples.len(),
+    ))
 }
 
 fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, EquationError> {
@@ -2317,6 +2347,22 @@ mod tests {
         assert_eq!(
             solve_equation(&over_limit),
             Err(EquationError::FunctionValuesArguments)
+        );
+    }
+
+    #[test]
+    fn reports_sampled_extrema_and_uses_the_first_coordinate_when_values_tie() {
+        assert_eq!(
+            solve_equation("采样极值 cosd(x) @ 360..0; 5").as_deref(),
+            Ok("最小样值 -1 · x = 180\r\n最大样值 1 · x = 0\r\n有效样点 5/5")
+        );
+        assert_eq!(
+            solve_equation("sample-extrema sqrt(x) @ -1..1; 3").as_deref(),
+            Ok("最小样值 0 · x = 0\r\n最大样值 1 · x = 1\r\n有效样点 2/3")
+        );
+        assert_eq!(
+            solve_equation("采样极值 sqrt(x) @ -3..-1; 3"),
+            Err(EquationError::FunctionSampleHasNoValues)
         );
     }
 
