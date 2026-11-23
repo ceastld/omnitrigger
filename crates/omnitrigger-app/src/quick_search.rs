@@ -5585,9 +5585,10 @@ mod tests {
         let Results::FilterOptions(options) = for_query("触发器: 输出=", &[]) else {
             panic!("缺少导出格式");
         };
-        assert_eq!(options.len(), 2);
+        assert_eq!(options.len(), 3);
         assert_eq!(options[0].label, Some("CSV"));
         assert_eq!(options[1].label, Some("JSON"));
+        assert_eq!(options[2].label, Some("动作统计"));
 
         let query = "已启用触发器： OUTPUT＝ｊ";
         let result = for_query(query, &[]);
@@ -5673,6 +5674,40 @@ mod tests {
             for_query(filled, &[]),
             Results::Value(Ok(value)) if value.text == "[]"
         ));
+    }
+
+    #[test]
+    fn counts_action_categories_in_the_filtered_trigger_set() {
+        let mut bindings = crate::settings::defaults();
+        let bindings = &mut bindings[..3];
+        bindings[0].action = crate::settings::ActionSpec::ShowPanel;
+        for binding in &mut bindings[1..] {
+            binding.action = crate::settings::ActionSpec::ShowSearch;
+        }
+        for binding in bindings.iter_mut() {
+            binding.enabled = true;
+            binding.message = "示例".into();
+        }
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        for (query, expected) in [
+            (
+                "触发器: 输出=动作统计 状态=已启用 示例",
+                "动作,数量\r\n快速搜索,2\r\n触发面板,1",
+            ),
+            (
+                "已启用触发器: output=action-counts 动作=触发面板",
+                "动作,数量\r\n触发面板,1",
+            ),
+            ("触发器: 输出=动作统计 状态=已停用", "动作,数量"),
+        ] {
+            assert!(
+                matches!(
+                    for_query(query, &triggers),
+                    Results::Value(Ok(value)) if value.text == expected
+                ),
+                "{query}"
+            );
+        }
     }
 
     #[test]

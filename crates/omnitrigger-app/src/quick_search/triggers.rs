@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use regex::Regex;
 use serde::Serialize;
 
@@ -23,15 +25,17 @@ const MAX_TRIGGER_JSON_BYTES: usize = 1024 * 1024;
 enum TriggerExport {
     Csv,
     Json,
+    ActionCounts,
 }
 
 impl TriggerExport {
-    const ALL: [Self; 2] = [Self::Csv, Self::Json];
+    const ALL: [Self; 3] = [Self::Csv, Self::Json, Self::ActionCounts];
 
-    fn keyword(self) -> &'static str {
+    fn keywords(self) -> &'static [&'static str] {
         match self {
-            Self::Csv => "CSV",
-            Self::Json => "JSON",
+            Self::Csv => &["CSV"],
+            Self::Json => &["JSON"],
+            Self::ActionCounts => &["动作统计", "action-counts"],
         }
     }
 }
@@ -70,7 +74,7 @@ impl TriggerSearchError {
             Self::RepeatedFacet => "每类筛选条件填写一次",
             Self::ExportTooLarge => "导出的触发器超过 1 MiB，请缩小筛选范围",
             Self::JsonExport => "生成触发器 JSON 失败",
-            Self::InvalidExport => "触发器导出格式可用 CSV 或 JSON",
+            Self::InvalidExport => "触发器输出可用 CSV、JSON 或动作统计",
             Self::TitleRegex => "填写一个有效的名称正则表达式，含空格时用双引号包住",
             Self::SortOrder { .. } => "触发器排序可用 名称 或 动作",
             Self::RepeatedSortOrder => "触发器排序条件填写一次",
@@ -304,16 +308,24 @@ pub(super) fn search_triggers(
     let (export, query) = match first.split_once(['=', '＝']) {
         Some((label, value)) if matches!(search_key(label).as_str(), "输出" | "output") => {
             let key = search_key(value);
-            let export = TriggerExport::ALL
-                .into_iter()
-                .find(|format| format.keyword().eq_ignore_ascii_case(&key));
+            let export = TriggerExport::ALL.into_iter().find(|format| {
+                format
+                    .keywords()
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(&key))
+            });
             if export.is_none() {
                 if rest.is_empty() {
                     let start = full_query.len() - term.len() + first.len() - value.len();
                     let suggestions: Vec<_> = TriggerExport::ALL
                         .into_iter()
-                        .map(TriggerExport::keyword)
-                        .filter(|name| name.to_ascii_lowercase().starts_with(&key))
+                        .filter_map(|format| {
+                            format
+                                .keywords()
+                                .iter()
+                                .copied()
+                                .find(|name| name.to_ascii_lowercase().starts_with(&key))
+                        })
                         .filter_map(|name| option_suggestion(&full_query[..start], name))
                         .collect();
                     if !suggestions.is_empty() {
@@ -356,7 +368,10 @@ pub(super) fn search_triggers(
         &query.filter,
         query.title_regex.as_ref(),
     );
-    if let Some(order) = query.order {
+    if let Some(order) = query
+        .order
+        .filter(|_| !matches!(export, Some(TriggerExport::ActionCounts)))
+    {
         matches = order.sort(matches);
     }
     match export {
@@ -366,6 +381,9 @@ pub(super) fn search_triggers(
         Some(TriggerExport::Json) => {
             Results::text_value(export_trigger_json(matches).map_err(ValueError::TriggerSearch))
         }
+        Some(TriggerExport::ActionCounts) => {
+            Results::text_value(export_action_counts(matches).map_err(ValueError::TriggerSearch))
+        }
         None => Results::Destinations(
             matches
                 .into_iter()
@@ -373,6 +391,27 @@ pub(super) fn search_triggers(
                 .collect(),
         ),
     }
+}
+
+fn export_action_counts(triggers: Vec<&SearchTrigger>) -> Result<String, TriggerSearchError> {
+    let mut counts = BTreeMap::new();
+    for trigger in triggers {
+        *counts.entry(trigger.row.action.label()).or_insert(0usize) += 1;
+    }
+    let mut counts: Vec<_> = counts.into_iter().collect();
+    counts.sort_by(|(left, left_count), (right, right_count)| {
+        right_count.cmp(left_count).then_with(|| left.cmp(right))
+    });
+    let mut csv = String::from("动作,数量");
+    for (action, count) in counts {
+        let count = count.to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [action, count.as_str()].into_iter(),
+            TriggerSearchError::ExportTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn export_trigger_csv(triggers: Vec<&SearchTrigger>) -> Result<String, TriggerSearchError> {
