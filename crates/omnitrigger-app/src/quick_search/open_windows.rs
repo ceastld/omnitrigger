@@ -81,6 +81,8 @@ enum WindowQueryError {
     ProcessList,
     TitleRegex,
     Order,
+    RepeatedExport,
+    ExportSelection { start: usize, end: usize },
     Selection { kind: WindowSelection, start: usize },
 }
 
@@ -93,6 +95,8 @@ impl WindowQueryError {
             Self::ProcessList => "填写包含程序文件名的非空 JSON 数组，同一个名称只填一次。",
             Self::TitleRegex => "填写一个有效的标题正则表达式，含空格时用双引号包住。",
             Self::Order => "排序可用 标题 或 进程，每次查询可指定一种排序。",
+            Self::RepeatedExport => "每次查询只填写一种输出格式。",
+            Self::ExportSelection { .. } => "请缩短查询后选择输出格式。",
             Self::Selection { kind, .. } => match kind {
                 WindowSelection::State => Self::Filters.message(),
                 WindowSelection::Order => Self::Order.message(),
@@ -171,6 +175,7 @@ struct WindowFilter {
     minimized: Option<bool>,
     title_regex: Option<Regex>,
     order: Option<WindowOrder>,
+    export: Option<WindowExport>,
     terms: String,
 }
 
@@ -237,59 +242,33 @@ impl OpenWindowsIndex {
     }
 
     pub(super) fn results(&self, query: &str) -> Results {
-        let (format, rest) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
-        let (export, filter) = if let Some((_, value)) = format
-            .split_once(['=', '＝'])
-            .filter(|(name, _)| matches!(search_key(name).as_str(), "输出" | "output"))
-        {
-            let key = search_key(value);
-            if let Some((_, _, mode, _)) = WINDOW_EXPORTS.iter().find(|(name, alias, _, _)| {
-                name.eq_ignore_ascii_case(&key) || *alias == key.as_str()
-            }) {
-                (Some(*mode), rest.trim_start())
-            } else {
-                let prefix = &format[..format.len() - value.len()];
-                let tail = &query[format.len()..];
+        let filter = match window_query(query) {
+            Ok(filter) => filter,
+            Err(error @ WindowQueryError::ExportSelection { start, end }) => {
+                let key = search_key(&query[start..end]);
                 let suggestions: Vec<_> = WINDOW_EXPORTS
                     .iter()
-                    .filter_map(|(name, alias, _, detail)| {
-                        let value = if name
-                            .get(..key.len())
-                            .is_some_and(|start| start.eq_ignore_ascii_case(&key))
-                        {
-                            *name
-                        } else if alias.starts_with(&key) {
-                            *alias
-                        } else {
-                            return None;
-                        };
-                        let expression = format!("窗口: {prefix}{value}{tail}");
+                    .filter_map(|&(name, alias, _, detail)| {
+                        let value = export_value_by_prefix(name, alias, &key)?;
+                        let expression =
+                            format!("窗口: {}{value}{}", &query[..start], &query[end..]);
                         (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then(|| {
                             InputSuggestion {
                                 expression,
                                 label: Some(value),
-                                result: (*detail).to_owned(),
+                                result: detail.to_owned(),
                             }
                         })
                     })
                     .collect();
-                if !suggestions.is_empty() {
-                    return Results::FilterOptions(suggestions);
-                }
-                (None, query)
+                return if suggestions.is_empty() {
+                    Results::OpenWindowsUnavailable(error.message().into())
+                } else {
+                    Results::FilterOptions(suggestions)
+                };
             }
-        } else {
-            (None, query)
-        };
-        let windows = match self {
-            Self::Unloaded | Self::Loading => return Results::OpenWindowsLoading,
-            Self::Unavailable(error) => return Results::OpenWindowsUnavailable(error.clone()),
-            Self::Ready(windows) | Self::Refreshing(windows) => windows,
-        };
-        let filter = match window_query(filter) {
-            Ok(filter) => filter,
             Err(error @ WindowQueryError::Selection { kind, start }) => {
-                let (prefix, value) = query.split_at(query.len() - filter.len() + start);
+                let (prefix, value) = query.split_at(start);
                 let suggestions = kind.suggestions(prefix, value);
                 return if suggestions.is_empty() {
                     Results::OpenWindowsUnavailable(error.message().into())
@@ -299,6 +278,12 @@ impl OpenWindowsIndex {
             }
             Err(error) => return Results::OpenWindowsUnavailable(error.message().into()),
         };
+        let windows = match self {
+            Self::Unloaded | Self::Loading => return Results::OpenWindowsLoading,
+            Self::Unavailable(error) => return Results::OpenWindowsUnavailable(error.clone()),
+            Self::Ready(windows) | Self::Refreshing(windows) => windows,
+        };
+        let export = filter.export;
         let query = filter.terms.as_str();
         let terms: Vec<_> = query.split_whitespace().collect();
         let mut matches: Vec<_> = windows
@@ -432,6 +417,21 @@ fn export_windows<'a>(
     }
 }
 
+fn export_value_by_prefix(
+    name: &'static str,
+    alias: &'static str,
+    key: &str,
+) -> Option<&'static str> {
+    if name
+        .get(..key.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(key))
+    {
+        Some(name)
+    } else {
+        alias.starts_with(key).then_some(alias)
+    }
+}
+
 fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
     use WindowQueryError::{Filters, Order, ProcessList, TitleRegex};
 
@@ -441,8 +441,36 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
     let mut minimized = None;
     let mut title_regex = None;
     let mut order = None;
+    let mut export = None;
     while let Some((name, input)) = query.split_once(['=', '＝']) {
         let (slot, list) = match search_key(name).as_str() {
+            "输出" | "output" => {
+                let (value, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+                let key = search_key(value);
+                if let Some((_, _, mode, _)) = WINDOW_EXPORTS.iter().find(|(name, alias, _, _)| {
+                    name.eq_ignore_ascii_case(&key) || *alias == key.as_str()
+                }) {
+                    if export.replace(*mode).is_some() {
+                        return Err(WindowQueryError::RepeatedExport);
+                    }
+                    query = rest.trim_start();
+                    continue;
+                }
+                if WINDOW_EXPORTS
+                    .iter()
+                    .any(|&(name, alias, _, _)| export_value_by_prefix(name, alias, &key).is_some())
+                {
+                    if export.is_some() {
+                        return Err(WindowQueryError::RepeatedExport);
+                    }
+                    let start = query_length - input.len();
+                    return Err(WindowQueryError::ExportSelection {
+                        start,
+                        end: start + value.len(),
+                    });
+                }
+                break;
+            }
             "进程" | "process" => (&mut process, false),
             "排除进程" | "exclude-process" => (&mut excluded_process, false),
             "任一进程" | "any-process" => (&mut process, true),
@@ -518,6 +546,7 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
         minimized,
         title_regex,
         order,
+        export,
         terms: search_key(query),
     })
 }
@@ -895,6 +924,30 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn exports_after_other_window_filters_without_losing_the_quoted_values() {
+        let query = r#"进程="Example Tool.exe" 标题正则="^报告 Ａ" 输出=JSON 备注"#;
+        let filter = window_query(query).unwrap();
+        assert!(filter.matches_process("example tool.exe"));
+        assert!(matches!(filter.export, Some(WindowExport::Json)));
+        assert_eq!(filter.terms, "备注");
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        assert!(matches!(index.results(query), Results::Value(Ok(value)) if value.text == "[]"));
+        let Results::FilterOptions(choices) =
+            index.results(r#"任一进程=["code.exe","notes.exe"] 输出＝进程状  状态=未最小化"#)
+        else {
+            panic!("应返回导出格式补全");
+        };
+        assert_eq!(
+            choices[0].expression,
+            r#"窗口: 任一进程=["code.exe","notes.exe"] 输出＝进程状态统计  状态=未最小化"#
+        );
+        assert!(matches!(
+            window_query("输出=JSON 进程=notes.exe 输出=CSV"),
+            Err(WindowQueryError::RepeatedExport),
+        ));
     }
 
     #[test]
