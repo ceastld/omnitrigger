@@ -32,6 +32,7 @@ pub(super) enum JsonError {
     InvalidPointer,
     InvalidPointerSegment,
     PointerSelection,
+    WildcardPathArguments,
     SourceAndTargetPaths,
     MoveIntoDescendant,
     PatchArguments,
@@ -96,6 +97,9 @@ impl JsonError {
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
             Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
+            Self::WildcardPathArguments => {
+                "填写由字符串和 null 组成的路径数组，例如 [\"订单\",null,\"金额\"]"
+            }
             Self::SourceAndTargetPaths => "用 JSON 数组填写来源和目标两个路径，再粘贴 JSON",
             Self::MoveIntoDescendant => "目标路径不能位于要移动的值内",
             Self::PatchArguments => {
@@ -186,6 +190,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "取值" | "get" | "pointer" => return select_json_value(source),
         "类型" | "type" => return json_value_type(source),
         "取多路径" | "get-paths" => return select_json_paths(source),
+        "通配取值" | "select-wildcard" => return select_json_wildcard(source),
         "取列" | "column" => return select_json_column(source),
         "合并子数组" | "flatten-arrays" => return flatten_json_arrays(source),
         "有路径" | "has-pointer" => return filter_json_by_pointer(source, true),
@@ -439,6 +444,53 @@ fn select_json_paths(query: &str) -> Result<String, JsonError> {
         return Err(JsonError::LayoutTooLarge);
     }
     Ok(result)
+}
+
+fn select_json_wildcard(query: &str) -> Result<String, JsonError> {
+    let (path, source) = json_value_and_source(query, JsonError::WildcardPathArguments)?;
+    let segments = serde_json::from_str::<Vec<Option<String>>>(path.get())
+        .map_err(|_| JsonError::WildcardPathArguments)?;
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut matches = vec![root];
+    for segment in segments {
+        let mut children = Vec::new();
+        for value in matches {
+            if let Some(key) = &segment {
+                match select_member(value, key) {
+                    Ok(child) => children.push(child),
+                    Err(JsonError::MissingValue) => (),
+                    Err(error) => return Err(error),
+                }
+            } else {
+                let raw = value.get();
+                match raw.as_bytes()[0] {
+                    b'{' => children.extend(
+                        read_unique_object_entries(raw)?
+                            .into_iter()
+                            .map(|(_, child)| child),
+                    ),
+                    b'[' => children.extend(read_json_array(raw)?),
+                    _ => (),
+                }
+            }
+        }
+        if children.is_empty() {
+            return Ok("[]".into());
+        }
+        matches = children;
+    }
+    let mut output = String::from("[");
+    for value in matches {
+        let separator = if output.len() > 1 { "," } else { "" };
+        let raw = value.get();
+        if output.len() + separator.len() + raw.len() + 1 > MAX_PRETTY_BYTES {
+            return Err(JsonError::LayoutTooLarge);
+        }
+        output.push_str(separator);
+        output.push_str(raw);
+    }
+    output.push(']');
+    Ok(output)
 }
 
 fn selected_pointers(query: &str) -> Result<(Vec<String>, &str), JsonError> {
@@ -1466,6 +1518,15 @@ fn merge_json_objects(source: &str) -> Result<String, JsonError> {
     write_object_entries(ordered.into_iter().map(|(key, (_, value))| (key, value)))
 }
 
+fn read_unique_object_entries(source: &str) -> Result<Vec<(String, &RawValue)>, JsonError> {
+    let entries = read_object_entries(source)?;
+    let mut seen = HashSet::with_capacity(entries.len());
+    if entries.iter().any(|(key, _)| !seen.insert(key)) {
+        return Err(JsonError::DuplicateKey);
+    }
+    Ok(entries)
+}
+
 fn read_object_entries(source: &str) -> Result<Vec<(String, &RawValue)>, JsonError> {
     if !source.starts_with('{') {
         serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
@@ -2015,14 +2076,7 @@ fn write_json_pointer_results(
         let raw = value.get();
         let kind = raw.as_bytes()[0];
         let children = match kind {
-            b'{' => {
-                let entries = read_object_entries(raw)?;
-                let mut seen = HashSet::with_capacity(entries.len());
-                if entries.iter().any(|(key, _)| !seen.insert(key)) {
-                    return Err(JsonError::DuplicateKey);
-                }
-                entries
-            }
+            b'{' => read_unique_object_entries(raw)?,
             b'[' => read_json_array(raw)?
                 .into_iter()
                 .enumerate()
@@ -2890,6 +2944,34 @@ mod tests {
         );
         assert_eq!(
             transform_json(r#"找键 "x" {"对象":{"x":null,"\u0078":1}}"#),
+            Err(JsonError::DuplicateKey)
+        );
+    }
+
+    #[test]
+    fn selects_values_across_array_and_object_wildcards_in_document_order() {
+        for (query, expected) in [
+            (
+                r#"通配取值 ["订单",null,"金额"] {"订单":[{"金额":1.20},{"状态":"草稿"},{"金额":null},{"金额":9007199254740993}]}"#,
+                "[1.20,null,9007199254740993]",
+            ),
+            (
+                r#"select-wildcard [null,null,"*"] {"南":[{"*":"\u8336"}],"北":[{"*":"米","a/b":1}]}"#,
+                r#"["\u8336","米"]"#,
+            ),
+            (r#"通配取值 ["0","a/b"] [{"a/b":true}]"#, "[true]"),
+            (r#"通配取值 ["01"] [0,1]"#, "[]"),
+            (r#"通配取值 [null] "茶""#, "[]"),
+            (r#"通配取值 [] {"x":1.00}"#, r#"[{"x":1.00}]"#),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_json(r#"通配取值 [false] {}"#),
+            Err(JsonError::WildcardPathArguments)
+        );
+        assert_eq!(
+            transform_json(r#"通配取值 [null] {"a":1,"\u0061":2}"#),
             Err(JsonError::DuplicateKey)
         );
     }
