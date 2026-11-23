@@ -26,7 +26,7 @@ use super::{
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 512;
-const MAX_EDIT_GRAPHEMES: usize = 512;
+const MAX_COMPARISON_GRAPHEMES: usize = 512;
 pub(super) const MAX_EDIT_DISTANCE_WORK: usize = 1024 * 1024;
 const MAX_PIPELINE_STEPS: usize = 8;
 
@@ -75,6 +75,7 @@ pub(super) enum TextError {
     InvalidLineComparison,
     TooManyDiffLines,
     TooManyEditGraphemes,
+    TooManyCommonSubstringGraphemes,
     EditDistanceWorkLimit,
     EmptyDelimiter,
     InvalidColumn,
@@ -126,6 +127,7 @@ impl TextError {
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
             Self::TooManyDiffLines => "逐行比较最多支持每组 512 行",
             Self::TooManyEditGraphemes => "编辑距离最多支持每段 512 个字素簇",
+            Self::TooManyCommonSubstringGraphemes => "公共片段最多支持每段 512 个字素簇",
             Self::EditDistanceWorkLimit => "编辑距离计算量过大，请缩小数据范围",
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
@@ -249,6 +251,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行比较" | "diff-lines" => return diff_lines(text, LineOutput::Text),
         "逐行比较csv" | "diff-lines-csv" => return diff_lines(text, LineOutput::Csv),
         "编辑距离" | "edit-distance" | "levenshtein" => return edit_distance(text),
+        "公共片段" | "common-substring" => return common_substring(text),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
         "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
         "正则计数" | "regex-count" => {
@@ -1527,17 +1530,61 @@ fn edit_distance(input: &str) -> Result<String, TextError> {
     Ok(grapheme_edit_distance(&first, &second, &mut remaining_work)?.to_string())
 }
 
+fn common_substring(input: &str) -> Result<String, TextError> {
+    let (first, second) = read_text_pair(input)?;
+    let first_graphemes: Vec<_> = first
+        .grapheme_indices(true)
+        .take(MAX_COMPARISON_GRAPHEMES + 1)
+        .collect();
+    let second_graphemes: Vec<_> = second
+        .graphemes(true)
+        .take(MAX_COMPARISON_GRAPHEMES + 1)
+        .collect();
+    if first_graphemes.len().max(second_graphemes.len()) > MAX_COMPARISON_GRAPHEMES {
+        return Err(TextError::TooManyCommonSubstringGraphemes);
+    }
+
+    let mut suffix_lengths = vec![0; second_graphemes.len() + 1];
+    let mut best_length = 0;
+    let mut best_end = 0;
+    for (left, &(_, left_grapheme)) in first_graphemes.iter().enumerate() {
+        // 从右往左更新，保留上一行的左上角长度。
+        for (right, &right_grapheme) in second_graphemes.iter().enumerate().rev() {
+            let length = if left_grapheme == right_grapheme {
+                suffix_lengths[right] + 1
+            } else {
+                0
+            };
+            suffix_lengths[right + 1] = length;
+            if length > best_length {
+                best_length = length;
+                best_end = left + 1;
+            }
+        }
+    }
+
+    let byte_offset = |index| {
+        first_graphemes
+            .get(index)
+            .map_or(first.len(), |&(start, _)| start)
+    };
+    Ok(first[byte_offset(best_end - best_length)..byte_offset(best_end)].to_owned())
+}
+
 pub(super) fn grapheme_edit_distance(
     first: &str,
     second: &str,
     remaining_work: &mut usize,
 ) -> Result<usize, TextError> {
-    let first: Vec<_> = first.graphemes(true).take(MAX_EDIT_GRAPHEMES + 1).collect();
+    let first: Vec<_> = first
+        .graphemes(true)
+        .take(MAX_COMPARISON_GRAPHEMES + 1)
+        .collect();
     let second: Vec<_> = second
         .graphemes(true)
-        .take(MAX_EDIT_GRAPHEMES + 1)
+        .take(MAX_COMPARISON_GRAPHEMES + 1)
         .collect();
-    if first.len().max(second.len()) > MAX_EDIT_GRAPHEMES {
+    if first.len().max(second.len()) > MAX_COMPARISON_GRAPHEMES {
         return Err(TextError::TooManyEditGraphemes);
     }
     let work = (first.len() + 1) * (second.len() + 1);
@@ -2041,8 +2088,41 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
-        let query = format!("编辑距离 \"{}\" \"\"", "茶".repeat(MAX_EDIT_GRAPHEMES + 1));
+        let query = format!(
+            "编辑距离 \"{}\" \"\"",
+            "茶".repeat(MAX_COMPARISON_GRAPHEMES + 1)
+        );
         assert_eq!(transform_text(&query), Err(TextError::TooManyEditGraphemes));
+    }
+
+    #[test]
+    fn finds_the_longest_contiguous_match_on_grapheme_boundaries() {
+        for (query, expected) in [
+            (
+                r#"公共片段 "北京报告2024.txt" "上海报告2024.csv""#,
+                "报告2024.",
+            ),
+            (r#"公共片段 "ab-cd" "cd+ab""#, "ab"),
+            (r#"common-substring "1👩‍💻猫" "2👩‍💻猫""#, "👩‍💻猫"),
+            (r#"公共片段 "👩‍💻" "👩""#, ""),
+            (r#"公共片段 "a-b-c" "abc""#, "a"),
+            (r#"公共片段 "Tea" "tea""#, "ea"),
+            (r#"公共片段 "茶" """#, ""),
+            (r#"公共片段 "xyz" "茶""#, ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+
+        let too_long = "茶".repeat(MAX_COMPARISON_GRAPHEMES + 1);
+        for query in [
+            format!("公共片段 \"{too_long}\" \"茶\""),
+            format!("公共片段 \"茶\" \"{too_long}\""),
+        ] {
+            assert_eq!(
+                transform_text(&query),
+                Err(TextError::TooManyCommonSubstringGraphemes)
+            );
+        }
     }
 
     #[test]

@@ -2715,6 +2715,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "找出两段文字中最长的连续公共片段",
+        query: r#"文本: 公共片段 "北京报告2024.txt" "上海报告2024.csv""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留符合正则表达式的行",
         query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
     },
