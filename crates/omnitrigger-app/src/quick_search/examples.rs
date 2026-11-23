@@ -1730,6 +1730,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 工作日序列 2026-11,3 @ -1",
     },
     Example {
+        icon: Icon::Clock,
+        title: "列出连续几个月各自的最后一个周五",
+        query: "日期: 星期序列 2026-10,4 @ 最后一个周五",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "将相邻或重叠的日期区间合并",
         query: "日期: 合并区间 2026-11-01 至 2026-11-04; 2026-11-05 至 2026-11-08",
@@ -4486,6 +4491,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "工作日序号",
             "工作日位置",
             "工作日序列",
+            "星期序列",
             "合并区间",
             "区间交集",
             "扣除区间",

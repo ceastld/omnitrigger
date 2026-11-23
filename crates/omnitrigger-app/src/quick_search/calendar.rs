@@ -31,6 +31,7 @@ pub(super) enum DateError {
     InvalidYearDay,
     InvalidWeekdayOccurrence,
     MissingWeekdayOccurrence,
+    InvalidWeekdaySeries,
     InvalidWorkdayOrdinal,
     InvalidWorkdayPosition,
     MissingWorkdayOrdinal,
@@ -73,6 +74,9 @@ impl DateError {
                 "请输入第 1 至第 5 个或最后一个星期几，例如 日期: 2026-11 最后一个星期四"
             }
             Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
+            Self::InvalidWeekdaySeries => {
+                "填写起始月份和 1 至 366 个月，例如 2026-10,4 @ 最后一个周五"
+            }
             Self::InvalidWorkdayOrdinal => {
                 "填写月份和工作日序号，例如 2026-11 @ 3。用 -1 表示最后一个工作日"
             }
@@ -1243,6 +1247,25 @@ fn workday_series(input: &str, today: NaiveDate) -> Result<String, DateError> {
     Ok(dates.join("\n"))
 }
 
+fn weekday_series(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let (range, rule) = input
+        .split_once('@')
+        .ok_or(DateError::InvalidWeekdaySeries)?;
+    let (month, count) = date_series_parts(range, DateError::InvalidWeekdaySeries)?;
+    let start = calendar_month_start(month, today)?;
+    let rule = rule.trim();
+    let mut dates = Vec::with_capacity(count as usize);
+    for offset in 0..count {
+        let month = in_range(start.checked_add_months(Months::new(offset)))?;
+        match weekday_occurrence(month.year(), month.month(), rule) {
+            Ok(date) => dates.push(date),
+            Err(DateError::MissingWeekdayOccurrence) => (),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(dates.join("\n"))
+}
+
 fn parse_workday_ordinal(input: &str) -> Result<i32, DateError> {
     input
         .trim()
@@ -1528,6 +1551,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "工作日序号" | "nth-workday" => return workday_by_ordinal(rest, today),
         "工作日位置" | "workday-position" => return workday_position(rest, today),
         "工作日序列" | "workday-series" => return workday_series(rest, today),
+        "星期序列" | "weekday-series" => return weekday_series(rest, today),
         "合并区间" | "merge-ranges" => {
             return combine_date_ranges(rest, today, DateRangeOperation::Merge);
         }
@@ -2517,6 +2541,42 @@ mod tests {
             calculate_date("工作日序列 9999-12,2 @ 1", today),
             Err(DateError::OutOfRange),
         );
+    }
+
+    #[test]
+    fn lists_monthly_weekday_occurrences_and_skips_missing_fifths() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            (
+                "星期序列 2026-10,4 @ 最后一个周五",
+                "2026-10-30\n2026-11-27\n2026-12-25\n2027-01-29",
+            ),
+            (
+                "WEEKDAY-SERIES 2024-01,5 @ 第５个星期四",
+                "2024-02-29\n2024-05-30",
+            ),
+            ("星期序列 本月,2 @ 第1个周日", "2026-11-01\n2026-12-06"),
+            ("星期序列 本月,1 @ 第5个周四", ""),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            (
+                "星期序列 本月,0 @ 第1个周五",
+                DateError::InvalidWeekdaySeries,
+            ),
+            (
+                "星期序列 本月,2 @ 第0个周五",
+                DateError::InvalidWeekdayOccurrence,
+            ),
+            ("星期序列 9999-12,2 @ 最后一个周五", DateError::OutOfRange),
+        ] {
+            assert_eq!(calculate_date(query, today), Err(error), "{query}");
+        }
     }
 
     #[test]
