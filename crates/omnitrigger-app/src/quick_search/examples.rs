@@ -4488,6 +4488,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "绘制 CSV 中最常见的类别及其次数",
+        query: "CSV: 分组频数图 [\"状态\"] 编号,状态\n001,完成\n002,待办\n003,完成\n004,\n005,完成\n006,待办",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定列分组汇总另一列的数值",
         query: "CSV: 分组合计 2 3 编号,状态,金额\n001,完成,1/2\n002,待办,2.5e0\n003,完成,1.5",
     },

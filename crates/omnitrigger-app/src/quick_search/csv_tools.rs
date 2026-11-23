@@ -2611,7 +2611,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         } => filter_column(&rows, column, &condition, keep_matches),
         Operation::FilterMultiple { filters, any } => filter_multiple_columns(&rows, &filters, any),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
-        Operation::FrequencyByColumns(columns) => frequencies_by_columns(&rows, &columns),
+        Operation::FrequencyByColumns(columns) => group_frequencies(&rows, &columns)?.csv(),
         Operation::AggregateByColumns {
             columns,
             amount,
@@ -4667,34 +4667,88 @@ fn group_counts<'a>(
     groups
 }
 
-fn frequencies_by_columns(
-    rows: &[Vec<String>],
+struct GroupFrequency<'a> {
+    key: Vec<&'a str>,
+    count: usize,
+}
+
+struct GroupFrequencies<'a> {
+    headings: Vec<&'a str>,
+    groups: Vec<GroupFrequency<'a>>,
+    observations: usize,
+}
+
+fn group_frequencies<'a>(
+    rows: &'a [Vec<String>],
     columns: &[ColumnReference],
-) -> Result<String, CsvError> {
+) -> Result<GroupFrequencies<'a>, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
     let mut groups: Vec<_> = group_counts(records, &columns).into_iter().collect();
     groups.sort_unstable_by_key(|(_, (position, count))| (std::cmp::Reverse(*count), *position));
-    let mut output = String::new();
-    let limit = CsvError::StatisticsOutputTooLarge;
-    append_bounded_csv_row(
-        &mut output,
-        columns
+    Ok(GroupFrequencies {
+        headings: columns
             .iter()
             .map(|&index| header[index].as_str())
-            .chain(["次数", "频率"]),
-        limit,
-    )?;
-    for (key, (_, count)) in groups {
-        let fraction = BigRational::new(count.into(), records.len().into()).to_string();
-        let count = count.to_string();
+            .collect(),
+        groups: groups
+            .into_iter()
+            .map(|(key, (_, count))| GroupFrequency { key, count })
+            .collect(),
+        observations: records.len(),
+    })
+}
+
+impl GroupFrequencies<'_> {
+    fn csv(&self) -> Result<String, CsvError> {
+        let mut output = String::new();
+        let limit = CsvError::StatisticsOutputTooLarge;
         append_bounded_csv_row(
             &mut output,
-            key.into_iter().chain([count.as_str(), fraction.as_str()]),
+            self.headings.iter().copied().chain(["次数", "频率"]),
             limit,
         )?;
+        for group in &self.groups {
+            let fraction =
+                BigRational::new(group.count.into(), self.observations.into()).to_string();
+            let count = group.count.to_string();
+            append_bounded_csv_row(
+                &mut output,
+                group
+                    .key
+                    .iter()
+                    .copied()
+                    .chain([count.as_str(), fraction.as_str()]),
+                limit,
+            )?;
+        }
+        Ok(output)
     }
-    Ok(output)
+
+    fn plot(&self) -> Result<BinPlot, CsvError> {
+        const MAX_VISIBLE_GROUPS: usize = 8;
+        if self.groups.is_empty() {
+            return Err(CsvError::EmptyStatisticsColumn);
+        }
+        let (labels, counts) = self
+            .groups
+            .iter()
+            .take(MAX_VISIBLE_GROUPS)
+            .map(|group| {
+                let label = group
+                    .key
+                    .iter()
+                    .map(|value| csv_cell(value))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (label, group.count as u64)
+            })
+            .unzip();
+        Ok(
+            BinPlot::from_categories(labels, counts, self.observations as u64, self.groups.len())
+                .with_label(self.headings.join(" / ")),
+        )
+    }
 }
 
 fn aggregate_by_columns(
@@ -5372,9 +5426,24 @@ fn order_records<'a>(
     Ok(ordered)
 }
 
-pub(super) fn column_bin_plot_arguments(query: &str) -> Option<&str> {
+pub(super) fn csv_count_chart(query: &str) -> Option<Result<(String, BinPlot), CsvError>> {
     let (operation, rest) = split_argument(query)?;
-    (operation == "列分箱图" || operation.eq_ignore_ascii_case("column-bin-plot")).then_some(rest)
+    match operation.to_ascii_lowercase().as_str() {
+        "列分箱图" | "column-bin-plot" => Some(build_column_bin_plot(rest)),
+        "分组频数图" | "group-frequency-plot" => Some(build_group_frequency_plot(rest)),
+        _ => None,
+    }
+}
+
+fn build_group_frequency_plot(input: &str) -> Result<(String, BinPlot), CsvError> {
+    let (columns, data) = column_reference_arguments(input, CsvError::GroupingColumns)?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let rows = read_rows(data, ',')?;
+    let table = group_frequencies(&rows, &columns)?;
+    Ok((table.csv()?, table.plot()?))
 }
 
 fn column_bin_arguments(
@@ -5386,7 +5455,7 @@ fn column_bin_arguments(
     Ok((column, edges, data))
 }
 
-pub(super) fn build_column_bin_plot(input: &str) -> Result<(String, BinPlot), CsvError> {
+fn build_column_bin_plot(input: &str) -> Result<(String, BinPlot), CsvError> {
     let (column, edges, data) = column_bin_arguments(input)?;
     let data = data.strip_prefix('\u{feff}').unwrap_or(data);
     if data.is_empty() {
@@ -6293,6 +6362,26 @@ mod tests {
         assert!(matches!(
             transform_csv("分组拟合 [[1],[2,3]] 地区,x,y\n北,1,3\n南,2,待定"),
             Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn charts_the_most_frequent_csv_groups_and_exports_all_exact_counts() {
+        let data = "\u{feff}状态\n001\n1\n001\n\"\"\nA\nB\nC\nD\nE\nF\nG";
+        let (csv, chart) = csv_count_chart(&format!(r#"分组频数图 ["状态"] {data}"#))
+            .unwrap()
+            .unwrap();
+        assert_eq!(chart.bin_count(), 8);
+        assert_eq!(csv.lines().count(), 11);
+        assert!(csv.starts_with("状态,次数,频率\r\n001,2,2/11\r\n1,1,1/11\r\n\"\",1,1/11"));
+        assert!(csv.ends_with("G,1,1/11"));
+        assert_eq!(
+            transform_csv(&format!(r#"分组频数 ["状态"] {data}"#)).as_deref(),
+            Ok(csv.as_str())
+        );
+        assert!(matches!(
+            csv_count_chart("group-frequency-plot [1] 状态"),
+            Some(Err(CsvError::EmptyStatisticsColumn))
         ));
     }
 

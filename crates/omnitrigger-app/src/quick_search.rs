@@ -1065,9 +1065,9 @@ impl Results {
                                 })
                                 .map_err(ValueError::Csv),
                         )
-                    } else if let Some(arguments) = csv_tools::column_bin_plot_arguments(term) {
+                    } else if let Some(result) = csv_tools::csv_count_chart(term) {
                         Self::Value(
-                            csv_tools::build_column_bin_plot(arguments)
+                            result
                                 .map(|(text, plot)| ResultValue {
                                     text,
                                     kind: ValueKind::BinPlot(plot),

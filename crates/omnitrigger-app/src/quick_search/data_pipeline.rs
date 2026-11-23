@@ -11,10 +11,10 @@ use super::{
     conversion::{calculate_circuit, convert_wave},
     correlation_plot::CorrelationPlot,
     csv_tools::{
-        append_bounded_csv_row, append_transformed_csv_column, build_column_bin_plot,
-        build_column_box_plot, build_correlation_plot, build_scatter_plot,
-        column_bin_plot_arguments, column_box_plot_arguments, correlation_plot_arguments,
-        scatter_arguments, transform_csv, ColumnReference, CsvError,
+        append_bounded_csv_row, append_transformed_csv_column, build_column_box_plot,
+        build_correlation_plot, build_scatter_plot, column_box_plot_arguments,
+        correlation_plot_arguments, csv_count_chart, scatter_arguments, transform_csv,
+        ColumnReference, CsvError,
     },
     decibel::convert_decibels,
     duration::convert_duration,
@@ -497,8 +497,8 @@ fn prepare_pipeline_chart(
                     .map_err(|error| error.message())
             })
             .or_else(|| {
-                column_bin_plot_arguments(query).map(|input| {
-                    build_column_bin_plot(input)
+                csv_count_chart(query).map(|result| {
+                    result
                         .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
                         .map_err(|error| error.message())
                 })
