@@ -3009,13 +3009,24 @@ impl QuickSearch {
                         )
                     })
             }
-            Results::Value(Err(error)) => row
-                .text_color(rgb(if error.is_incomplete() {
+            Results::Value(Err(error)) => {
+                let message = error.message();
+                row.text_color(rgb(if error.is_incomplete() {
                     theme::TEXT_MUTED
                 } else {
                     theme::DANGER_TEXT
                 }))
-                .child(error.message()),
+                .child(
+                    div()
+                        .id("quick-search-error")
+                        .flex_1()
+                        .min_w_0()
+                        .line_clamp(2)
+                        .text_ellipsis()
+                        .child(message.clone())
+                        .tooltip(theme::text_tooltip(message)),
+                )
+            }
             Results::RefilledInput => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("可在结果前添加下一条命令"),
