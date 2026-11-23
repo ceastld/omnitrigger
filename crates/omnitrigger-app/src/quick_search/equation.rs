@@ -74,6 +74,17 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
             "因式分解" | "factor" => return factor_polynomial(arguments.trim_start()),
             "展开" | "expand" => return expand_polynomial(arguments.trim_start()),
+            "求根" | "roots" => {
+                let coefficients = if arguments
+                    .split_once('=')
+                    .is_some_and(|(left, _)| !left.trim().eq_ignore_ascii_case("y"))
+                {
+                    expanded_equation_coefficients(arguments)?
+                } else {
+                    function_coefficients(arguments)?
+                };
+                return solve_equation_coefficients(coefficients);
+            }
             "取系数" | "coefficients" => {
                 let [a, b, c] = expanded_equation_coefficients(arguments)?;
                 return format_quadratic_coefficients(a, b, c);
@@ -105,11 +116,15 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             _ => {}
         }
     }
-    let [a, b, c] = if input.contains('=') {
+    let coefficients = if input.contains('=') {
         expanded_equation_coefficients(&input)?
     } else {
         coefficient_row(&input)?
     };
+    solve_equation_coefficients(coefficients)
+}
+
+fn solve_equation_coefficients([a, b, c]: [BigRational; 3]) -> Result<String, EquationError> {
     if a.numer().sign() == Sign::NoSign {
         if b.numer().sign() != Sign::NoSign {
             let root = -c / b;
@@ -1201,6 +1216,23 @@ mod tests {
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn solves_roots_from_direct_function_inputs_and_standard_form_output() {
+        for (input, expected) in [
+            ("求根 y = 2x² - 5x + 2", "x₁ = 1/2 · x₂ = 2"),
+            ("roots 2x² - 5x + 2", "x₁ = 1/2 · x₂ = 2"),
+            ("求根 2x = 3", "x = 3/2"),
+            ("求根 2,-5,2", "x₁ = 1/2 · x₂ = 2"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        let expanded = solve_equation("展开 (2x - 1)(x - 2)").unwrap();
+        assert_eq!(
+            solve_equation(&format!("求根 {expanded}")).as_deref(),
+            Ok("x₁ = 1/2 · x₂ = 2"),
+        );
     }
 
     #[test]

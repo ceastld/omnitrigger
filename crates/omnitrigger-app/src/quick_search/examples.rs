@@ -167,6 +167,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接对函数标准式求根",
+        query: "方程: 求根 y = 2x² - 5x + 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用函数展开式直接求积分",
         query: "方程: 定积分 y = x**2 @ 0 到 2",
     },
@@ -5051,6 +5056,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
     match scope {
         Scope::Equation => &[
+            "求根",
             "展开",
             "求导",
             "原函数",
