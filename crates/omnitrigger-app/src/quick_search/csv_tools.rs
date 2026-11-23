@@ -225,6 +225,8 @@ pub(super) enum CsvError {
     ScatterColumns,
     ScatterPointCount,
     ScatterTooLarge,
+    TrapezoidPointCount,
+    TrapezoidDuplicateX,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -488,6 +490,8 @@ impl CsvError {
             Self::ScatterColumns => "填写 x 和 y 两列不同的列名或列号，例如 [\"时间\",\"温度\"]",
             Self::ScatterPointCount => "散点图需要 2 至 64 行同时含 x 和 y 的数据",
             Self::ScatterTooLarge => "散点图 CSV 超过 1 MiB，请缩小数据范围",
+            Self::TrapezoidPointCount => "梯形积分需要 2 至 64 行同时含 x 和 y 的数据",
+            Self::TrapezoidDuplicateX => "梯形积分的横坐标须互不相同",
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -1058,8 +1062,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return summarize_grouped_function_rows(input)
         }
         operation if is_scatter_operation(operation) => {
-            return parse_scatter_table(input)?.to_csv();
+            return parse_coordinate_table(input, CsvError::ScatterPointCount)?.to_csv();
         }
+        "梯形积分" | "trapezoid-integral" => return trapezoid_integral(input),
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -5303,18 +5308,18 @@ pub(super) fn scatter_arguments(input: &str) -> Option<&str> {
 }
 
 pub(super) fn build_scatter_plot(input: &str) -> Result<(String, ScatterPlot), CsvError> {
-    let table = parse_scatter_table(input)?;
+    let table = parse_coordinate_table(input, CsvError::ScatterPointCount)?;
     let csv = table.to_csv()?;
     let plot = ScatterPlot::from_points(&table.points).with_axis_names(table.headers);
     Ok((csv, plot))
 }
 
-struct CsvScatter {
+struct CsvCoordinates {
     headers: [String; 2],
     points: Vec<Point>,
 }
 
-impl CsvScatter {
+impl CsvCoordinates {
     fn to_csv(&self) -> Result<String, CsvError> {
         let mut output = String::new();
         let limit = CsvError::ScatterTooLarge;
@@ -5327,7 +5332,10 @@ impl CsvScatter {
     }
 }
 
-fn parse_scatter_table(input: &str) -> Result<CsvScatter, CsvError> {
+fn parse_coordinate_table(
+    input: &str,
+    point_count_error: CsvError,
+) -> Result<CsvCoordinates, CsvError> {
     let invalid = CsvError::ScatterColumns;
     let (columns, data) = json_argument_and_data::<[ColumnReference; 2]>(input, invalid)?;
     let data = data.strip_prefix('\u{feff}').unwrap_or(data);
@@ -5346,7 +5354,7 @@ fn parse_scatter_table(input: &str) -> Result<CsvScatter, CsvError> {
             continue;
         }
         if points.len() == MAX_POINTS {
-            return Err(CsvError::ScatterPointCount);
+            return Err(point_count_error);
         }
         let parse = |value| {
             parse_fraction_literal(value).map_err(|error| CsvError::DataRowValue {
@@ -5357,9 +5365,30 @@ fn parse_scatter_table(input: &str) -> Result<CsvScatter, CsvError> {
         points.push((parse(x)?, parse(y)?));
     }
     if points.len() < 2 {
-        return Err(CsvError::ScatterPointCount);
+        return Err(point_count_error);
     }
-    Ok(CsvScatter { headers, points })
+    Ok(CsvCoordinates { headers, points })
+}
+
+fn trapezoid_integral(input: &str) -> Result<String, CsvError> {
+    let mut table = parse_coordinate_table(input, CsvError::TrapezoidPointCount)?;
+    table
+        .points
+        .sort_unstable_by(|(x, _), (other, _)| x.cmp(other));
+    let two = BigInt::from(2u8);
+    let mut total = BigRational::default();
+    for pair in table.points.windows(2) {
+        let (left, first) = &pair[0];
+        let (right, last) = &pair[1];
+        if left == right {
+            return Err(CsvError::TrapezoidDuplicateX);
+        }
+        let segment = (right - left) * (first + last) / &two;
+        ensure_exact_size(&segment).map_err(|_| CsvError::ComputedNumberRange)?;
+        total += segment;
+        ensure_exact_size(&total).map_err(|_| CsvError::ComputedNumberRange)?;
+    }
+    Ok(total.to_string())
 }
 
 fn append_fit_columns(input: &str) -> Result<String, CsvError> {
@@ -6922,6 +6951,26 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn integrates_piecewise_linear_coordinates_in_x_order_without_rounding() {
+        assert_eq!(
+            transform_csv("梯形积分 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0").as_deref(),
+            Ok("3/2")
+        );
+        assert_eq!(
+            transform_csv("trapezoid-integral [2,1] 高度,时间\n-1,1/2\n-2,2").as_deref(),
+            Ok("-9/4")
+        );
+        assert_eq!(
+            transform_csv("梯形积分 [1,2] x,y\n1/2,2\n0.50,3"),
+            Err(CsvError::TrapezoidDuplicateX)
+        );
+        assert_eq!(
+            transform_csv("梯形积分 [1,2] x,y\n1/2,2\n0.50,"),
+            Err(CsvError::TrapezoidPointCount)
+        );
     }
 
     #[test]
