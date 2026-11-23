@@ -171,6 +171,7 @@ pub(super) enum CsvError {
     NumericRangeCheckArguments,
     ValidationRulesArguments,
     ValidationRulesTooLarge,
+    AllowedValuesCheckArguments,
     DecimalColumnsArguments,
     DecimalColumnsTooLarge,
     SignificantColumnsArguments,
@@ -372,6 +373,7 @@ impl CsvError {
             Self::NumericRangeCheckArguments => "填写列列表和两个数值字符串，下界须不大于上界",
             Self::ValidationRulesArguments => "填写最多 64 条列规则，例如 [[\"日期\",\"日期\"],[\"编号\",\"正则\",\"^A\"]]",
             Self::ValidationRulesTooLarge => "规则检查结果超过 1 MiB，请缩小表格范围",
+            Self::AllowedValuesCheckArguments => "填写列列表和非空的允许值列表，每个允许值只写一次",
             Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
             Self::DecimalColumnsTooLarge => "小数列结果超过 1 MiB，请缩小表格范围",
             Self::SignificantColumnsArguments => "填写不同的列和 1 至 100 位有效数字，例如 [[\"金额\",3],3]",
@@ -424,6 +426,7 @@ enum ColumnValidation {
         lower: BigRational,
         upper: BigRational,
     },
+    AllowedValues(HashSet<String>),
 }
 
 #[derive(Deserialize)]
@@ -431,10 +434,17 @@ enum ColumnValidation {
 enum ColumnRuleInput {
     Simple(ColumnReference, String),
     Pattern(ColumnReference, String, String),
+    Allowed(ColumnReference, String, Vec<String>),
     Range(ColumnReference, String, String, String),
 }
 
 impl ColumnValidation {
+    fn allowed_values(values: Vec<String>) -> Option<Self> {
+        let count = values.len();
+        let values: HashSet<_> = values.into_iter().collect();
+        (count > 0 && values.len() == count).then_some(Self::AllowedValues(values))
+    }
+
     fn numeric_range(lower: &str, upper: &str) -> Option<Self> {
         let lower = parse_fraction_literal(lower).ok()?;
         let upper = parse_fraction_literal(upper).ok()?;
@@ -447,6 +457,7 @@ impl ColumnValidation {
             Self::Date => "日期",
             Self::Pattern(_) => "正则",
             Self::NumericRange { .. } => "数值范围",
+            Self::AllowedValues(_) => "允许值",
         }
     }
 
@@ -455,6 +466,7 @@ impl ColumnValidation {
             Self::Number => parse_fraction_literal(cell).is_ok(),
             Self::Date => parse_complete_date(cell).is_ok(),
             Self::Pattern(pattern) => pattern.is_match(cell),
+            Self::AllowedValues(values) => values.contains(cell),
             Self::NumericRange { lower, upper } => {
                 parse_fraction_literal(cell).is_ok_and(|value| lower <= &value && &value <= upper)
             }
@@ -984,6 +996,17 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CheckColumns(columns, validation)
         }
+        "检查允许值" | "check-allowed-values" => {
+            let invalid = CsvError::AllowedValuesCheckArguments;
+            let ((columns, values), data) =
+                json_argument_and_data::<(Vec<ColumnReference>, Vec<String>)>(input, invalid)?;
+            if columns.is_empty() {
+                return Err(invalid);
+            }
+            let validation = ColumnValidation::allowed_values(values).ok_or(invalid)?;
+            input = data;
+            Operation::CheckColumns(columns, validation)
+        }
         "检查规则" | "check-rules" => {
             let invalid = CsvError::ValidationRulesArguments;
             let (rules, data) = json_argument_and_data::<Vec<ColumnRuleInput>>(input, invalid)?;
@@ -1013,6 +1036,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                         let range =
                             ColumnValidation::numeric_range(&lower, &upper).ok_or(invalid)?;
                         Ok((column, range))
+                    }
+                    ColumnRuleInput::Allowed(column, kind, values)
+                        if kind == "允许值" || kind.eq_ignore_ascii_case("allowed-values") =>
+                    {
+                        Ok((
+                            column,
+                            ColumnValidation::allowed_values(values).ok_or(invalid)?,
+                        ))
                     }
                     _ => Err(invalid),
                 })
@@ -2990,6 +3021,7 @@ fn check_columns(
         }
         ColumnValidation::Date => CsvError::DateIssuesTooLarge,
         ColumnValidation::Pattern(_) => CsvError::RegexIssuesTooLarge,
+        ColumnValidation::AllowedValues(_) => CsvError::ValidationRulesTooLarge,
     };
     let rules: Vec<_> = columns
         .into_iter()
@@ -5131,6 +5163,23 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn checks_csv_values_without_folding_case_or_trimming_and_can_allow_blank_cells() {
+        let query = "检查允许值 [[\"状态\"],[\"待办\",\"完成\",\"\"]] 编号,状态\nA,待办\nB,完成 \nC,\nD,未知";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("数据行,列号,列名,内容\r\n2,2,状态,完成 \r\n4,2,状态,未知"),
+        );
+        assert_eq!(
+            transform_csv("检查规则 [[1,\"允许值\",[\"ok\",\"\"]]] 状态\nOK").as_deref(),
+            Ok("数据行,列号,列名,规则号,规则,内容\r\n1,1,状态,1,允许值,OK"),
+        );
+        assert_eq!(
+            transform_csv(r#"检查允许值 [[1],["完成","完成"]] 状态"#),
+            Err(CsvError::AllowedValuesCheckArguments),
+        );
     }
 
     #[test]

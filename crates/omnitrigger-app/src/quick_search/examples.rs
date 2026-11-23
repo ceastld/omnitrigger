@@ -3678,6 +3678,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位列表之外的单元格值",
+        query: "CSV: 检查允许值 [[\"状态\"],[\"待办\",\"完成\",\"\"]] 编号,状态\nA,待办\nB,待确认\nC,\nD,完成",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把选中的 CSV 数值列统一成固定小数位",
         query: "CSV: 小数列 [[\"金额\",3],2] 编号,金额,比率\n001,2.675,1/8\n002,,-0.005",
     },
