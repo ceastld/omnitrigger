@@ -61,6 +61,7 @@ pub(super) enum EquationError {
     NumericIntegralIntervals,
     NumericDerivativeArguments,
     NumericDerivativeStep,
+    DerivativeSampleArguments,
     NumericExtremumArguments,
     IntegralArguments,
     ExtremaArguments,
@@ -127,6 +128,9 @@ impl EquationError {
                 "填写要估算导数的算式和横坐标，可在分号后填写正步长"
             }
             Self::NumericDerivativeStep => "该步长下无法取到两个不同的有限横坐标",
+            Self::DerivativeSampleArguments => {
+                "填写函数算式和不同的区间端点，分号后可填 2 至 129 的采样点数"
+            }
             Self::NumericExtremumArguments => "填写函数算式和不同的区间端点，例如 (x-1)^2 @ 0..3",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
@@ -176,7 +180,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
                 return quadratic_curve_points(arguments).map(|points| curve_csv(&points));
             }
             "函数采样" | "sample-function" | "采样图" | "sample-plot" => {
-                return format_function_samples(&function_sample_points(arguments)?);
+                return format_function_samples(&function_sample_points(arguments)?, "近似值");
             }
             "采样极值" | "sample-extrema" => return sampled_function_extrema(arguments),
             "数值极小" | "numeric-minimum" => {
@@ -188,7 +192,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "找异号区间" | "sign-change-intervals" => return sampled_sign_changes(arguments),
             "搜索零点" | "search-roots" => return refine_sampled_roots(arguments),
             "函数值" | "function-values" => {
-                return format_function_samples(&function_samples_for_inputs(arguments)?);
+                return format_function_samples(&function_samples_for_inputs(arguments)?, "近似值");
             }
             "两侧采样" | "approach-samples" => return function_approach_samples(arguments),
             "函数对照" | "compare-functions" => return compare_function_values(arguments),
@@ -198,6 +202,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "二分求根" | "bisect-root" => return bisect_function_root(arguments),
             "数值积分" | "numeric-integral" => return numeric_integral(arguments),
             "数值导数" | "numeric-derivative" => return numeric_derivative(arguments),
+            "导数采样" | "sample-derivative" | "导数采样图" | "derivative-plot" => {
+                return format_function_samples(&derivative_samples(arguments)?, "近似导数");
+            }
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -595,6 +602,7 @@ pub(super) fn equation_chart(input: &str) -> Option<Result<(String, ScatterPlot)
     match command.to_ascii_lowercase().as_str() {
         "函数图" | "function-plot" => Some(plot_quadratic_function(arguments)),
         "采样图" | "sample-plot" => Some(plot_sampled_function(arguments)),
+        "导数采样图" | "derivative-plot" => Some(plot_sampled_derivative(arguments)),
         "函数对照图" | "compare-function-plot" => Some(plot_function_comparison(arguments)),
         _ => None,
     }
@@ -647,6 +655,18 @@ fn curve_csv(points: &[(BigRational, BigRational)]) -> String {
 fn plot_sampled_function(input: &str) -> Result<(String, ScatterPlot), EquationError> {
     let input = normalize_equation(input)?;
     let samples = function_sample_points(&input)?;
+    let plot = plot_samples(&samples)?;
+    Ok((format_function_samples(&samples, "近似值")?, plot))
+}
+
+fn plot_sampled_derivative(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let samples = derivative_samples(&input)?;
+    let plot = plot_samples(&samples)?.with_axis_names(["x".to_owned(), "导数".to_owned()]);
+    Ok((format_function_samples(&samples, "近似导数")?, plot))
+}
+
+fn plot_samples(samples: &[(f64, Option<f64>)]) -> Result<ScatterPlot, EquationError> {
     let valid: Vec<_> = samples
         .iter()
         .filter_map(|&(x, y)| y.map(|y| (x, y)))
@@ -673,7 +693,7 @@ fn plot_sampled_function(input: &str) -> Result<(String, ScatterPlot), EquationE
             [display(first)?, display(last)?],
             [display(y_min)?, display(y_max)?],
         );
-    Ok((format_function_samples(&samples)?, plot))
+    Ok(plot)
 }
 
 fn plot_function_comparison(input: &str) -> Result<(String, ScatterPlot), EquationError> {
@@ -752,6 +772,28 @@ fn sampled_coordinates(
     let last = count - 1;
     Ok((0..count)
         .map(move |index| interpolate_between(start, end, f64::from(index) / f64::from(last))))
+}
+
+fn derivative_samples(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
+    let invalid = EquationError::DerivativeSampleArguments;
+    let (expression, bounds) = split_function_arguments(input, invalid)?;
+    sampled_coordinates(bounds, invalid)?
+        .map(|x| {
+            let value = match estimate_derivative(expression, x, derivative_step(x)) {
+                Ok(value) => Some(value),
+                Err(
+                    EquationError::NumericDerivativeStep
+                    | EquationError::Approximation(
+                        CalculationError::DivisionByZero
+                        | CalculationError::FunctionDomain
+                        | CalculationError::OutOfRange,
+                    ),
+                ) => None,
+                Err(error) => return Err(error),
+            };
+            Ok((x, value))
+        })
+        .collect()
 }
 
 fn function_samples_for_inputs(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
@@ -1126,9 +1168,12 @@ fn numeric_function_extremum(input: &str, maximum: bool) -> Result<String, Equat
     Ok(format!("x ≈ {x}\r\n{label} ≈ {value}"))
 }
 
-fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, EquationError> {
+fn format_function_samples(
+    samples: &[(f64, Option<f64>)],
+    heading: &str,
+) -> Result<String, EquationError> {
     let display = |value| format_result(value).map_err(EquationError::Approximation);
-    let mut csv = String::from("x,近似值");
+    let mut csv = format!("x,{heading}");
     for &(x, y) in samples {
         let x = display(x)?;
         let y = y.map(display).transpose()?.unwrap_or_default();
@@ -1274,11 +1319,24 @@ fn numeric_derivative(input: &str) -> Result<String, EquationError> {
     let x = evaluate(center).map_err(EquationError::Approximation)?;
     let step = match step {
         Some(step) => evaluate(step).map_err(EquationError::Approximation)?,
-        None => f64::EPSILON.cbrt() * x.abs().max(1.0),
+        None => derivative_step(x),
     };
     if step <= 0.0 {
         return Err(invalid);
     }
+    Ok(format!(
+        "中心差分 ≈ {}\r\nx = {} · 步长 {}",
+        display(estimate_derivative(expression, x, step)?)?,
+        display(x)?,
+        display(step)?
+    ))
+}
+
+fn derivative_step(x: f64) -> f64 {
+    f64::EPSILON.cbrt() * x.abs().max(1.0)
+}
+
+fn estimate_derivative(expression: &str, x: f64, step: f64) -> Result<f64, EquationError> {
     let lower = x - step;
     let upper = x + step;
     if lower == x || upper == x || !lower.is_finite() || !upper.is_finite() {
@@ -1296,12 +1354,11 @@ fn numeric_derivative(input: &str) -> Result<String, EquationError> {
     } else {
         (right * 0.5 - left * 0.5) / (upper * 0.5 - lower * 0.5)
     };
-    Ok(format!(
-        "中心差分 ≈ {}\r\nx = {} · 步长 {}",
-        display(derivative)?,
-        display(x)?,
-        display(step)?
-    ))
+    if derivative.is_finite() {
+        Ok(derivative)
+    } else {
+        Err(EquationError::Approximation(CalculationError::OutOfRange))
+    }
 }
 
 fn numeric_integral(input: &str) -> Result<String, EquationError> {
@@ -2423,6 +2480,24 @@ mod tests {
                 Err(EquationError::Approximation(CalculationError::Invalid))
             );
         }
+    }
+
+    #[test]
+    fn samples_derivatives_skips_domain_gaps_and_keeps_chart_data() {
+        assert_eq!(
+            solve_equation("导数采样 x @ -1..1; 3").as_deref(),
+            Ok("x,近似导数\r\n-1,1\r\n0,1\r\n1,1")
+        );
+        let input = "f(x)=sqrt(x) @ -1..1; 5";
+        let expected = solve_equation(&format!("导数采样 {input}")).unwrap();
+        assert!(expected.starts_with("x,近似导数\r\n-1,\r\n-0.5,\r\n0,\r\n0.5,"));
+        let (csv, plot) = plot_sampled_derivative(input).unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(plot.point_count(), 2);
+        assert_eq!(
+            solve_equation("sample-derivative unknown(x) @ 0..1; 2"),
+            Err(EquationError::Approximation(CalculationError::Invalid))
+        );
     }
 
     #[test]
