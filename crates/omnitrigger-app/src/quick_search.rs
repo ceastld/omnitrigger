@@ -1121,11 +1121,8 @@ impl Results {
                         .map_err(ValueError::Fraction),
                 ),
                 Scope::Equation => {
-                    if let Some(arguments) = equation::function_plot_arguments(term) {
-                        Self::plot_value(
-                            equation::plot_quadratic_function(arguments)
-                                .map_err(ValueError::Equation),
-                        )
+                    if let Some(result) = equation::equation_chart(term) {
+                        Self::plot_value(result.map_err(ValueError::Equation))
                     } else {
                         Self::text_value(solve_equation(term).map_err(ValueError::Equation))
                     }

@@ -14,6 +14,7 @@ use super::matrix::{general_solution, MatrixError, MAX_DIMENSION};
 use super::operators::{split_top_level_commas, visit_additive_terms, NumberComparison};
 use super::plane::{parse_point, PointError};
 use super::scatter_plot::ScatterPlot;
+use super::scientific::interpolate_between;
 
 const MAX_ROOT_CANDIDATES: usize = 64;
 const FUNCTION_PLOT_INTERVALS: u32 = 32;
@@ -33,6 +34,7 @@ pub(super) enum EquationError {
     NormalLineArguments,
     FunctionPlotArguments,
     FunctionSampleArguments,
+    FunctionSampleHasNoValues,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -70,6 +72,7 @@ impl EquationError {
             Self::FunctionSampleArguments => {
                 "填写带 x 的算式以及两个不同的端点，可在分号后填写 2 至 129 个采样点"
             }
+            Self::FunctionSampleHasNoValues => "该区间没有可绘制的有限函数值",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -117,7 +120,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数图" | "function-plot" => {
                 return quadratic_curve_points(arguments).map(|points| curve_csv(&points));
             }
-            "函数采样" | "sample-function" => return sampled_function_csv(arguments),
+            "函数采样" | "sample-function" | "采样图" | "sample-plot" => {
+                return format_function_samples(&function_sample_points(arguments)?);
+            }
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -510,9 +515,13 @@ fn function_and_x(
     Ok((coefficients, x))
 }
 
-pub(super) fn function_plot_arguments(input: &str) -> Option<&str> {
+pub(super) fn equation_chart(input: &str) -> Option<Result<(String, ScatterPlot), EquationError>> {
     let (command, arguments) = input.trim().split_once(char::is_whitespace)?;
-    (command == "函数图" || command.eq_ignore_ascii_case("function-plot")).then_some(arguments)
+    match command.to_ascii_lowercase().as_str() {
+        "函数图" | "function-plot" => Some(plot_quadratic_function(arguments)),
+        "采样图" | "sample-plot" => Some(plot_sampled_function(arguments)),
+        _ => None,
+    }
 }
 
 pub(super) fn plot_quadratic_function(input: &str) -> Result<(String, ScatterPlot), EquationError> {
@@ -559,7 +568,43 @@ fn curve_csv(points: &[(BigRational, BigRational)]) -> String {
         .join("\r\n")
 }
 
-fn sampled_function_csv(input: &str) -> Result<String, EquationError> {
+fn plot_sampled_function(input: &str) -> Result<(String, ScatterPlot), EquationError> {
+    let input = normalize_equation(input)?;
+    let samples = function_sample_points(&input)?;
+    let valid: Vec<_> = samples
+        .iter()
+        .filter_map(|&(x, y)| y.map(|y| (x, y)))
+        .collect();
+    if valid.is_empty() {
+        return Err(EquationError::FunctionSampleHasNoValues);
+    }
+    let to_rational = |value| {
+        BigRational::from_float(value)
+            .ok_or(EquationError::Approximation(CalculationError::OutOfRange))
+    };
+    let points = valid
+        .iter()
+        .map(|&(x, y)| Ok((to_rational(x)?, to_rational(y)?)))
+        .collect::<Result<Vec<_>, EquationError>>()?;
+    let first = samples.first().expect("至少有两个采样点").0;
+    let last = samples.last().expect("至少有两个采样点").0;
+    let x = [to_rational(first)?, to_rational(last)?];
+    let ys = valid.iter().map(|&(_, y)| y);
+    let y_min = ys
+        .clone()
+        .min_by(f64::total_cmp)
+        .expect("至少有一个有效函数值");
+    let y_max = ys.max_by(f64::total_cmp).expect("至少有一个有效函数值");
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    let plot = ScatterPlot::from_sampled_function(&points, [&x[0], &x[1]], samples.len())
+        .with_range_labels(
+            [display(first)?, display(last)?],
+            [display(y_min)?, display(y_max)?],
+        );
+    Ok((format_function_samples(&samples)?, plot))
+}
+
+fn function_sample_points(input: &str) -> Result<Vec<(f64, Option<f64>)>, EquationError> {
     let invalid = EquationError::FunctionSampleArguments;
     let (expression, bounds) = input.split_once('@').ok_or(invalid)?;
     let expression = match expression.split_once('=') {
@@ -591,24 +636,30 @@ fn sampled_function_csv(input: &str) -> Result<String, EquationError> {
         std::mem::swap(&mut start, &mut end);
     }
     let last = count - 1;
-    let mut csv = String::from("x,近似值");
+    let mut samples = Vec::with_capacity(count as usize);
     for index in 0..count {
         let fraction = f64::from(index) / f64::from(last);
-        let x = match index {
-            0 => start,
-            index if index == last => end,
-            _ => start * (1.0 - fraction) + end * fraction,
-        };
+        let x = interpolate_between(start, end, fraction);
         let y = match evaluate_at_x(expression, x) {
-            Ok(value) => format_result(value).map_err(EquationError::Approximation)?,
+            Ok(value) => Some(value),
             Err(
                 CalculationError::DivisionByZero
                 | CalculationError::FunctionDomain
                 | CalculationError::OutOfRange,
-            ) => String::new(),
+            ) => None,
             Err(error) => return Err(EquationError::Approximation(error)),
         };
-        let x = format_result(x).map_err(EquationError::Approximation)?;
+        samples.push((x, y));
+    }
+    Ok(samples)
+}
+
+fn format_function_samples(samples: &[(f64, Option<f64>)]) -> Result<String, EquationError> {
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    let mut csv = String::from("x,近似值");
+    for &(x, y) in samples {
+        let x = display(x)?;
+        let y = y.map(display).transpose()?.unwrap_or_default();
         csv.push_str(&format!("\r\n{x},{y}"));
     }
     Ok(csv)
@@ -1590,6 +1641,40 @@ mod tests {
         }
         let first = solve_equation("求导 x² - 2x + 1").unwrap();
         assert_eq!(solve_equation(&format!("求导 {first}")).as_deref(), Ok("2"));
+    }
+
+    #[test]
+    fn keeps_rounded_samples_inside_very_narrow_large_intervals() {
+        let start = 1.7976931348623155e308;
+        let end = f64::MAX;
+        let samples =
+            function_sample_points("x @ 1.7976931348623155e308 到 1.7976931348623157e308; 10")
+                .unwrap();
+        assert_eq!(samples.len(), 10);
+        assert_eq!(samples.first().unwrap().0, start);
+        assert_eq!(samples.last().unwrap().0, end);
+        assert!(samples
+            .iter()
+            .all(|&(x, y)| (start..=end).contains(&x) && y == Some(x)));
+        assert!(samples.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    }
+
+    #[test]
+    fn plots_only_finite_calculator_samples_and_preserves_blank_csv_values() {
+        let (csv, plot) = equation_chart("采样图 sqrt(x) @ -1 到 1; 3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(csv, "x,近似值\r\n-1,\r\n0,0\r\n1,1");
+        assert_eq!(plot.point_count(), 2);
+        assert!(!plot.has_curve());
+        assert!(matches!(
+            equation_chart("sample-plot sqrt(x) @ -2 到 -1; 2"),
+            Some(Err(EquationError::FunctionSampleHasNoValues))
+        ));
+        assert_eq!(
+            solve_equation("采样图 1/x @ -1 到 1; 3").as_deref(),
+            Ok("x,近似值\r\n-1,-1\r\n0,\r\n1,1")
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ enum ScatterKind {
     Residuals,
     Cumulative { observations: u64 },
     Function,
+    SampledFunction { requested: usize },
 }
 
 impl ScatterPlot {
@@ -38,7 +39,7 @@ impl ScatterPlot {
         points: &[(BigRational, BigRational)],
         curve: &[(BigRational, BigRational)],
     ) -> Self {
-        Self::prepare(points, curve, ScatterKind::Observations)
+        Self::prepare(points, curve, ScatterKind::Observations, None)
     }
 
     pub(super) fn from_residuals(points: &[(BigRational, BigRational)]) -> Self {
@@ -49,7 +50,7 @@ impl ScatterPlot {
         if min != max {
             baseline.push((max.clone(), BigRational::default()));
         }
-        Self::prepare(points, &baseline, ScatterKind::Residuals)
+        Self::prepare(points, &baseline, ScatterKind::Residuals, None)
     }
 
     pub(super) fn from_cumulative_distribution(
@@ -63,27 +64,53 @@ impl ScatterPlot {
             curve.push((value.clone(), frequency.clone()));
             previous = frequency.clone();
         }
-        Self::prepare(points, &curve, ScatterKind::Cumulative { observations })
+        Self::prepare(
+            points,
+            &curve,
+            ScatterKind::Cumulative { observations },
+            None,
+        )
     }
 
     pub(super) fn from_function_curve(points: &[(BigRational, BigRational)]) -> Self {
-        Self::prepare(&[], points, ScatterKind::Function)
+        Self::prepare(&[], points, ScatterKind::Function, None)
+    }
+
+    pub(super) fn from_sampled_function(
+        points: &[(BigRational, BigRational)],
+        x_bounds: [&BigRational; 2],
+        requested: usize,
+    ) -> Self {
+        Self::prepare(
+            points,
+            &[],
+            ScatterKind::SampledFunction { requested },
+            Some(x_bounds),
+        )
     }
 
     fn prepare(
         points: &[(BigRational, BigRational)],
         curve: &[(BigRational, BigRational)],
         kind: ScatterKind,
+        x_bounds: Option<[&BigRational; 2]>,
     ) -> Self {
-        let x = points.iter().chain(curve).map(|(x, _)| x);
+        let [min_x, max_x] = x_bounds.unwrap_or_else(|| {
+            let x = points.iter().chain(curve).map(|(x, _)| x);
+            [
+                x.clone().min().expect("图形至少有一个数据点"),
+                x.max().expect("图形至少有一个数据点"),
+            ]
+        });
         let y = points.iter().chain(curve).map(|(_, y)| y);
-        let min_x = x.clone().min().expect("图形至少有一个数据点");
-        let max_x = x.max().expect("图形至少有一个数据点");
         let min_y = y.clone().min().expect("图形至少有一个数据点");
         let max_y = y.max().expect("图形至少有一个数据点");
         let range_x = max_x - min_x;
         let range_y = max_y - min_y;
-        let zero_axes = if kind == ScatterKind::Function {
+        let zero_axes = if matches!(
+            kind,
+            ScatterKind::Function | ScatterKind::SampledFunction { .. }
+        ) {
             let zero = BigRational::default();
             [
                 (min_x <= &zero && &zero <= max_x)
@@ -107,6 +134,7 @@ impl ScatterPlot {
             y: [min_y.to_string(), max_y.to_string()],
             axis_names: match kind {
                 ScatterKind::Observations | ScatterKind::Function => ["x", "y"],
+                ScatterKind::SampledFunction { .. } => ["x", "近似值"],
                 ScatterKind::Residuals => ["x", "残差"],
                 ScatterKind::Cumulative { .. } => ["观测值", "累计频率"],
             }
@@ -133,6 +161,12 @@ impl ScatterPlot {
         !self.curve.is_empty()
     }
 
+    pub(super) fn with_range_labels(mut self, x: [String; 2], y: [String; 2]) -> Self {
+        self.x = x;
+        self.y = y;
+        self
+    }
+
     pub(super) fn legend(&self) -> Div {
         let points = self.point_count();
         let (count, line_label) = match self.kind {
@@ -143,6 +177,9 @@ impl ScatterPlot {
                 "累计频率",
             ),
             ScatterKind::Function => (format!("{} 个采样点", self.curve.len()), "函数曲线"),
+            ScatterKind::SampledFunction { requested } => {
+                (format!("近似采样 · {points}/{requested} 个有效点"), "")
+            }
         };
         div()
             .flex()
@@ -330,6 +367,20 @@ pub(super) fn normalized_position(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_the_sampled_function_x_range_when_endpoint_values_are_missing() {
+        let axis: [BigRational; 2] = [
+            BigRational::from_integer((-1).into()),
+            BigRational::from_integer(1.into()),
+        ];
+        let points = [(BigRational::default(), BigRational::default())];
+        let plot = ScatterPlot::from_sampled_function(&points, [&axis[0], &axis[1]], 3);
+        assert_eq!(plot.x, ["-1", "1"]);
+        assert_eq!(plot.locations, [(POSITION_STEPS / 2, POSITION_STEPS / 2)]);
+        assert_eq!(plot.zero_axes[0], Some(POSITION_STEPS / 2));
+        assert!(!plot.has_curve());
+    }
 
     #[test]
     fn function_plot_positions_only_the_zero_axes_inside_its_range() {

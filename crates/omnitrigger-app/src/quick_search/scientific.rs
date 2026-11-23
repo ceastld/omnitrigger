@@ -200,6 +200,10 @@ fn linear_interpolation(values: &[f64]) -> f64 {
     if !(0. ..=1.).contains(&progress) {
         return f64::NAN;
     }
+    interpolate_between(start, end, progress)
+}
+
+pub(super) fn interpolate_between(start: f64, end: f64, progress: f64) -> f64 {
     if progress == 0. {
         return start;
     }
