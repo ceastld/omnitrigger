@@ -97,7 +97,14 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         Some((operation, rest))
             if operation == "多项式" || operation.eq_ignore_ascii_case("polynomial-fit") =>
         {
-            return fit_polynomial(rest.trim());
+            return fit_polynomial(rest.trim())
+                .map(|fit| format_power_expression(fit.coefficients));
+        }
+        Some((operation, rest))
+            if operation == "多项式残差"
+                || operation.eq_ignore_ascii_case("polynomial-residuals") =>
+        {
+            return polynomial_residuals(rest.trim());
         }
         Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
@@ -287,25 +294,30 @@ fn interpolation_expression(points: &str) -> Result<String, LinearFitError> {
     interpolation_power_coefficients(points).map(format_power_expression)
 }
 
-fn fit_polynomial(input: &str) -> Result<String, LinearFitError> {
+struct PolynomialFit {
+    coefficients: Vec<BigRational>,
+    points: Vec<Point>,
+}
+
+fn fit_polynomial(input: &str) -> Result<PolynomialFit, LinearFitError> {
     let invalid = LinearFitError::PolynomialFitArguments;
     let (degree, points) = input.split_once('@').ok_or(invalid)?;
     let degree: usize = degree.trim().parse().map_err(|_| invalid)?;
     if degree > MAX_REGRESSION_DEGREE {
         return Err(invalid);
     }
-    let mut design = Vec::new();
-    let mut observations = Vec::new();
-    for point in parse_paired_points(points.trim())? {
-        let (x, y) = point?;
+    let points = parse_paired_points(points.trim())?.collect::<Result<Vec<_>, _>>()?;
+    let mut design = Vec::with_capacity(points.len());
+    let mut observations = Vec::with_capacity(points.len());
+    for (x, y) in &points {
         let mut row = vec![BigRational::from_integer(1.into())];
         for _ in 0..degree {
-            let power = row.last().expect("初始行含常数项") * &x;
+            let power = row.last().expect("初始行含常数项") * x;
             check_size([&power])?;
             row.push(power);
         }
         design.push(row);
-        observations.push(vec![y]);
+        observations.push(vec![y.clone()]);
     }
     let coefficients = least_squares(design, observations).map_err(|error| match error {
         MatrixError::LeastSquaresRank => LinearFitError::PolynomialFitRank,
@@ -316,7 +328,26 @@ fn fit_polynomial(input: &str) -> Result<String, LinearFitError> {
         .into_iter()
         .map(|row| row.into_iter().next().expect("每项只有一个响应系数"))
         .collect();
-    Ok(format_power_expression(coefficients))
+    Ok(PolynomialFit {
+        coefficients,
+        points,
+    })
+}
+
+fn polynomial_residuals(input: &str) -> Result<String, LinearFitError> {
+    let fit = fit_polynomial(input)?;
+    let mut rows = vec!["x,实际值,拟合值,残差".to_owned()];
+    for (x, actual) in fit.points {
+        let mut predicted = BigRational::default();
+        for coefficient in fit.coefficients.iter().rev() {
+            predicted = predicted * &x + coefficient;
+            check_size([&predicted])?;
+        }
+        let residual = &actual - &predicted;
+        check_size([&residual])?;
+        rows.push(format!("{x},{actual},{predicted},{residual}"));
+    }
+    Ok(rows.join("\r\n"))
 }
 
 fn format_power_expression(coefficients: Vec<BigRational>) -> String {
@@ -555,6 +586,18 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_polynomial_fit_residuals_in_the_original_row_order() {
+        assert_eq!(
+            calculate_linear_fit("多项式残差 2 @ -1,2; 0,0; 1,2; 0,2").as_deref(),
+            Ok("x,实际值,拟合值,残差\r\n-1,2,2,0\r\n0,0,1,-1\r\n1,2,2,0\r\n0,2,1,1")
+        );
+        assert_eq!(
+            calculate_linear_fit("多项式残差 1 @ 1,1; 2,1; 0,0"),
+            calculate_linear_fit("残差 1,1; 2,1; 0,0"),
+        );
+    }
 
     #[test]
     fn fits_exact_polynomials_to_more_points_than_the_degree_requires() {
