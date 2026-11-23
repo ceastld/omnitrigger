@@ -1604,6 +1604,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "音高: 音分差 A4 @ 442 Hz",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "将音高按音分移调并计算频率",
+        query: "音高: 音分移调 442 Hz @ -1200",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用图上和实际距离反求地图比例",
         query: "比例尺: 求 3.2 cm = 1.6 km",
@@ -4732,7 +4737,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "排序",
             "降序",
         ],
-        Scope::Pitch => &["MIDI", "转调", "音程", "音分差"],
+        Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
         Scope::Decibel => &["功率比", "幅度比", "转功率比", "转幅度比", "叠加", "功率差"],
         Scope::Tempo => &["时长", "速度", "拍数"],
         Scope::Solid => &[

@@ -1,4 +1,4 @@
-use super::calculator::{format_result, normalize};
+use super::calculator::{evaluate, format_result, normalize};
 
 const REFERENCE_NOTE: u8 = 69;
 const REFERENCE_FREQUENCY: f64 = 440.0;
@@ -16,6 +16,8 @@ pub(super) enum PitchError {
     TransposeArguments,
     IntervalArguments,
     CentsArguments,
+    CentsShiftArguments,
+    ShiftFrequencyRange,
 }
 
 impl PitchError {
@@ -28,6 +30,8 @@ impl PitchError {
             Self::TransposeArguments => "用 @ 分隔音高和半音数，例如 Bb3 @ 2",
             Self::IntervalArguments => "用 @ 分隔两个音高，例如 C4 @ G4",
             Self::CentsArguments => "用 @ 分隔参考音高和待比较的音高，例如 A4 @ 442 Hz",
+            Self::CentsShiftArguments => "用 @ 分隔音高和移调音分，例如 A4 @ 100",
+            Self::ShiftFrequencyRange => "移调后的频率超出可表示范围",
         }
     }
 }
@@ -41,6 +45,7 @@ pub(super) fn convert_pitch(query: &str) -> Result<String, PitchError> {
         "转调" | "transpose" => return transpose_pitch(arguments),
         "音程" | "interval" => return pitch_interval(arguments),
         "音分差" | "cents" => return compare_cents(arguments),
+        "音分移调" | "transpose-cents" => return transpose_cents(arguments),
         _ => {}
     }
     if let Some(frequency) = parse_frequency(input).map_err(|_| PitchError::FrequencyRange)? {
@@ -120,11 +125,8 @@ fn compare_cents(input: &str) -> Result<String, PitchError> {
         .split_once('@')
         .filter(|(reference, target)| !reference.trim().is_empty() && !target.trim().is_empty())
         .ok_or(PitchError::CentsArguments)?;
-    let frequency = |input| {
-        parse_frequency(input)?.map_or_else(|| parse_written_pitch(input).map(note_frequency), Ok)
-    };
-    let reference = frequency(reference)?;
-    let target = frequency(target)?;
+    let reference = pitch_frequency(reference)?;
+    let target = pitch_frequency(target)?;
     let ratio = target / reference;
     let octaves = if ratio.is_normal() {
         ratio.log2()
@@ -133,6 +135,30 @@ fn compare_cents(input: &str) -> Result<String, PitchError> {
     };
     let cents = (120_000.0 * octaves).round() / 100.0;
     Ok(format!("{} 音分", signed_cents(cents)))
+}
+
+fn transpose_cents(input: &str) -> Result<String, PitchError> {
+    let (pitch, cents) = input
+        .split_once('@')
+        .filter(|(pitch, cents)| !pitch.trim().is_empty() && !cents.trim().is_empty())
+        .ok_or(PitchError::CentsShiftArguments)?;
+    let frequency = pitch_frequency(pitch)?;
+    let octaves = evaluate(cents).map_err(|_| PitchError::CentsShiftArguments)? / 1200.0;
+    let scale = octaves.exp2();
+    let shifted = if scale.is_normal() {
+        frequency * scale
+    } else {
+        (frequency.log2() + octaves).exp2()
+    };
+    if !shifted.is_finite() || shifted <= 0.0 {
+        return Err(PitchError::ShiftFrequencyRange);
+    }
+    let shifted = format_result(shifted).map_err(|_| PitchError::ShiftFrequencyRange)?;
+    Ok(format!("{shifted} Hz"))
+}
+
+fn pitch_frequency(input: &str) -> Result<f64, PitchError> {
+    parse_frequency(input)?.map_or_else(|| parse_written_pitch(input).map(note_frequency), Ok)
 }
 
 fn parse_note(input: &str) -> Result<u8, PitchError> {
@@ -253,6 +279,30 @@ mod tests {
         assert_eq!(
             convert_pitch("音分差 A4 @ 0 Hz"),
             Err(PitchError::InvalidFrequency)
+        );
+    }
+
+    #[test]
+    fn transposes_frequencies_by_fractional_or_integer_cents() {
+        for (query, expected) in [
+            ("音分移调 A4 @ 100", "466.16376151809 Hz"),
+            ("TRANSPOSE-CENTS MIDI 69 @ 2*600", "880 Hz"),
+            ("音分移调 442 Hz @ -1200", "221 Hz"),
+            ("音分移调 0.442 kHz @ 0", "442 Hz"),
+        ] {
+            assert_eq!(convert_pitch(query).as_deref(), Ok(expected), "{query}");
+        }
+        let result = convert_pitch("音分移调 1e-300 Hz @ 1320000").unwrap();
+        let result = result.strip_suffix(" Hz").unwrap().parse::<f64>().unwrap();
+        let expected = (300.0 * -10.0_f64.log2() + 1100.0).exp2();
+        assert!((result / expected - 1.0).abs() < 1e-12);
+        assert_eq!(
+            convert_pitch("音分移调 A4 @ 12000000"),
+            Err(PitchError::ShiftFrequencyRange)
+        );
+        assert_eq!(
+            convert_pitch("音分移调 A4 @"),
+            Err(PitchError::CentsShiftArguments)
         );
     }
 
