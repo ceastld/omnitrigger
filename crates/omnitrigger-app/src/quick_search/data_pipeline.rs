@@ -4,26 +4,28 @@ use chrono::{DateTime, FixedOffset};
 use serde_json::value::RawValue;
 
 use super::{
+    box_plot::BoxPlot,
     calendar::calculate_date,
     conversion::{calculate_circuit, convert_wave},
     csv_tools::{
-        append_bounded_csv_row, append_transformed_csv_column, transform_csv, ColumnReference,
-        CsvError,
+        append_bounded_csv_row, append_transformed_csv_column, build_scatter_plot,
+        scatter_arguments, transform_csv, ColumnReference, CsvError,
     },
     decibel::convert_decibels,
     duration::convert_duration,
     equation::{solve_equation, solve_linear_system},
     fraction::simplify_fraction,
     json_tools::{read_json_array, read_unique_object_entries, transform_json, JsonError},
-    linear_fit::calculate_linear_fit,
+    linear_fit::{calculate_linear_fit, calculate_plot, plot_request},
     matrix::calculate_matrix,
     operators::json_argument_and_tail,
     path_tools::path_component,
     pitch::convert_pitch,
     radix::convert_arbitrary_radix,
+    scatter_plot::ScatterPlot,
     scope::{scoped_query, Scope},
     solid::calculate_solid,
-    statistics::calculate_statistics,
+    statistics::{box_plot_arguments, calculate_box_plot, calculate_statistics},
     tempo::calculate_tempo,
     text_tools::transform_text,
     timestamp::convert_timestamp,
@@ -133,9 +135,30 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
     }
 }
 
+pub(super) enum PipelineChart {
+    Scatter(ScatterPlot),
+    BoxPlot(BoxPlot),
+}
+
+enum PipelineView<'a> {
+    Text,
+    Trace,
+    Chart(&'a mut Option<PipelineChart>),
+}
+
 pub(super) fn transform_data_pipeline(
     input: &str,
     now: DateTime<FixedOffset>,
+) -> Result<(String, Option<PipelineChart>), DataPipelineError> {
+    let mut chart = None;
+    let text = run_data_pipeline(input, now, &mut chart)?;
+    Ok((text, chart))
+}
+
+fn run_data_pipeline(
+    input: &str,
+    now: DateTime<FixedOffset>,
+    chart: &mut Option<PipelineChart>,
 ) -> Result<String, DataPipelineError> {
     let (mode, input) = split_pipeline_input(input);
     let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
@@ -155,7 +178,7 @@ pub(super) fn transform_data_pipeline(
                 &steps,
                 value,
                 now,
-                false,
+                PipelineView::Text,
                 PipelineLocation::CsvRow(row),
                 &mut remaining_work,
             )
@@ -199,7 +222,11 @@ pub(super) fn transform_data_pipeline(
             &steps,
             source,
             now,
-            mode == DataPipelineMode::StepsCsv,
+            if mode == DataPipelineMode::StepsCsv {
+                PipelineView::Trace
+            } else {
+                PipelineView::Chart(chart)
+            },
             PipelineLocation::Whole,
             &mut remaining_work,
         ),
@@ -231,7 +258,14 @@ fn run_pipeline_json<'a>(
         } else {
             PipelineLocation::JsonItem(item)
         };
-        let text = run_pipeline_steps(steps, &input, now, false, location, remaining_work)?;
+        let text = run_pipeline_steps(
+            steps,
+            &input,
+            now,
+            PipelineView::Text,
+            location,
+            remaining_work,
+        )?;
         let encoded = serde_json::to_string(&text)
             .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?;
         let key = key
@@ -282,7 +316,7 @@ fn run_pipeline_rows(
             steps,
             input,
             now,
-            false,
+            PipelineView::Text,
             PipelineLocation::Line(line),
             remaining_work,
         )?;
@@ -305,12 +339,12 @@ fn run_pipeline_steps(
     steps: &[PipelineStep],
     source: &str,
     now: DateTime<FixedOffset>,
-    trace_steps: bool,
+    mut view: PipelineView<'_>,
     location: PipelineLocation,
     remaining_work: &mut usize,
 ) -> Result<String, DataPipelineError> {
     let mut current = Cow::Borrowed(source);
-    let mut trace = trace_steps.then(|| String::from("步骤,命令,结果"));
+    let mut trace = matches!(&view, PipelineView::Trace).then(|| String::from("步骤,命令,结果"));
     for (index, step) in steps.iter().enumerate() {
         let index = index + 1;
         let error = |cause| match location {
@@ -369,36 +403,54 @@ fn run_pipeline_steps(
         if command == "依次处理" || command.eq_ignore_ascii_case("pipeline") {
             return Err(error("请把子步骤直接写在同一个列表中"));
         }
-        let output = match scope {
-            Scope::TextTools => transform_text(&query).map_err(|cause| cause.message()),
-            Scope::Csv => transform_csv(&query).map_err(|cause| cause.message()),
-            Scope::Json => transform_json(&query).map_err(|cause| cause.message()),
-            Scope::Toml => transform_toml(&query).map_err(|cause| cause.message()),
-            Scope::UrlEncoding => convert_url_component(&query).map_err(|cause| cause.message()),
-            Scope::Path => path_component(&query).map_err(|cause| cause.message()),
-            Scope::Date => {
-                calculate_date(&query, now.date_naive()).map_err(|cause| cause.message())
+        let plotted = match &mut view {
+            PipelineView::Chart(chart) if index == steps.len() => {
+                prepare_pipeline_chart(scope, &query)
+                    .transpose()
+                    .map_err(error)?
+                    .map(|(text, plot)| {
+                        **chart = Some(plot);
+                        text
+                    })
             }
-            Scope::Timestamp => {
-                convert_timestamp(&query, now.to_utc()).map_err(|cause| cause.message())
+            _ => None,
+        };
+        let output = if let Some(plotted) = plotted {
+            plotted
+        } else {
+            match scope {
+                Scope::TextTools => transform_text(&query).map_err(|cause| cause.message()),
+                Scope::Csv => transform_csv(&query).map_err(|cause| cause.message()),
+                Scope::Json => transform_json(&query).map_err(|cause| cause.message()),
+                Scope::Toml => transform_toml(&query).map_err(|cause| cause.message()),
+                Scope::UrlEncoding => {
+                    convert_url_component(&query).map_err(|cause| cause.message())
+                }
+                Scope::Path => path_component(&query).map_err(|cause| cause.message()),
+                Scope::Date => {
+                    calculate_date(&query, now.date_naive()).map_err(|cause| cause.message())
+                }
+                Scope::Timestamp => {
+                    convert_timestamp(&query, now.to_utc()).map_err(|cause| cause.message())
+                }
+                Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
+                Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
+                Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
+                Scope::Tempo => calculate_tempo(&query).map_err(|cause| cause.message()),
+                Scope::Decibel => convert_decibels(&query).map_err(|cause| cause.message()),
+                Scope::Solid => calculate_solid(&query).map_err(|cause| cause.message()),
+                Scope::Wave => convert_wave(&query).map_err(|cause| cause.message()),
+                Scope::Circuit => calculate_circuit(&query).map_err(|cause| cause.message()),
+                Scope::Equation => solve_equation(&query).map_err(|cause| cause.message()),
+                Scope::LinearSystem => solve_linear_system(&query).map_err(|cause| cause.message()),
+                Scope::Matrix => calculate_matrix(&query).map_err(|cause| cause.message()),
+                Scope::LinearFit => calculate_linear_fit(&query).map_err(|cause| cause.message()),
+                Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
+                Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
+                _ => return Err(error(STEP_SYNTAX)),
             }
-            Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
-            Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
-            Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
-            Scope::Tempo => calculate_tempo(&query).map_err(|cause| cause.message()),
-            Scope::Decibel => convert_decibels(&query).map_err(|cause| cause.message()),
-            Scope::Solid => calculate_solid(&query).map_err(|cause| cause.message()),
-            Scope::Wave => convert_wave(&query).map_err(|cause| cause.message()),
-            Scope::Circuit => calculate_circuit(&query).map_err(|cause| cause.message()),
-            Scope::Equation => solve_equation(&query).map_err(|cause| cause.message()),
-            Scope::LinearSystem => solve_linear_system(&query).map_err(|cause| cause.message()),
-            Scope::Matrix => calculate_matrix(&query).map_err(|cause| cause.message()),
-            Scope::LinearFit => calculate_linear_fit(&query).map_err(|cause| cause.message()),
-            Scope::Fraction => simplify_fraction(&query).map_err(|cause| cause.message()),
-            Scope::Statistics => calculate_statistics(&query).map_err(|cause| cause.message()),
-            _ => return Err(error(STEP_SYNTAX)),
-        }
-        .map_err(error)?;
+            .map_err(error)?
+        };
         if output.len() > MAX_PIPELINE_OUTPUT_BYTES {
             return Err(error("处理结果超过 1 MiB，请缩小数据范围"));
         }
@@ -418,13 +470,37 @@ fn run_pipeline_steps(
     Ok(trace.unwrap_or_else(|| current.into_owned()))
 }
 
+fn prepare_pipeline_chart(
+    scope: Scope,
+    query: &str,
+) -> Option<Result<(String, PipelineChart), &'static str>> {
+    match scope {
+        Scope::Csv => scatter_arguments(query).map(|input| {
+            build_scatter_plot(input)
+                .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                .map_err(|error| error.message())
+        }),
+        Scope::LinearFit => plot_request(query).map(|request| {
+            calculate_plot(request)
+                .map(|(text, plot)| (text, PipelineChart::Scatter(plot)))
+                .map_err(|error| error.message())
+        }),
+        Scope::Statistics => box_plot_arguments(query).map(|input| {
+            calculate_box_plot(input)
+                .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
+                .map_err(|error| error.message())
+        }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn run_pipeline(input: &str) -> Result<String, DataPipelineError> {
         let now = DateTime::parse_from_rfc3339("2024-02-18T23:30:00-08:00").unwrap();
-        transform_data_pipeline(input, now)
+        transform_data_pipeline(input, now).map(|(text, _)| text)
     }
 
     #[test]

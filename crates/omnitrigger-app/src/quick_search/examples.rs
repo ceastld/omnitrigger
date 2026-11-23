@@ -1132,6 +1132,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "先筛选表格数据，再在搜索框画散点图",
+        query: "处理: [\"CSV: 数值筛选 2 >= 0\",\"CSV: 散点图 [2,3]\"] 编号,时间,温度\n001,-1,2\n002,0,1/2\n003,1,5/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "串联进制换算与音高查询",
         query: r#"处理: ["进制: 罗马数字","音高: MIDI"] LXIX"#,
     },

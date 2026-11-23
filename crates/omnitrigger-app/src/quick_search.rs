@@ -98,7 +98,7 @@ use conversion::{
     suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
-use data_pipeline::{transform_data_pipeline, DataPipelineError};
+use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelineChart};
 use decibel::{convert_decibels, DecibelError};
 use duration::{convert_duration, is_clock_duration, DurationError};
 use equation::{solve_equation, solve_linear_system, EquationError};
@@ -1043,9 +1043,17 @@ impl Results {
                         Self::text_value(transform_csv(term).map_err(ValueError::Csv))
                     }
                 }
-                Scope::DataPipeline => Self::text_value(
+                Scope::DataPipeline => Self::Value(
                     transform_data_pipeline(term, chrono::Local::now().fixed_offset())
-                        .map_err(ValueError::DataPipeline),
+                        .map_err(ValueError::DataPipeline)
+                        .map(|(text, chart)| ResultValue {
+                            text,
+                            kind: match chart {
+                                Some(PipelineChart::Scatter(plot)) => ValueKind::Scatter(plot),
+                                Some(PipelineChart::BoxPlot(plot)) => ValueKind::BoxPlot(plot),
+                                None => ValueKind::Text,
+                            },
+                        }),
                 ),
                 Scope::Fraction => Self::Value(
                     simplify_fraction(term)
@@ -3924,6 +3932,38 @@ mod tests {
             .refillable_text()
             .is_none());
         assert!(result(String::new()).refillable_text().is_none());
+    }
+
+    #[test]
+    fn pipeline_previews_its_final_chart_and_keeps_the_original_trace_format() {
+        let source = r#"["CSV: 数值筛选 2 >= 0","CSV: 散点图 [2,3]"] 编号,时间,温度
+001,-1,2
+002,0,1/2
+003,1,5/2"#;
+        let plot = for_query(&format!("处理: {source}"), &[]);
+        assert!(matches!(
+            &plot,
+            Results::Value(Ok(ResultValue { kind: ValueKind::Scatter(plot), .. }))
+                if plot.point_count() == 2
+        ));
+        assert_eq!(plot.refillable_text(), Some("时间,温度\r\n0,1/2\r\n1,5/2"));
+        let trace = for_query(&format!("处理: 步骤CSV {source}"), &[]);
+        assert!(matches!(
+            trace,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Text,
+                ..
+            }))
+        ));
+
+        let box_plot = for_query(r#"处理: ["分数: 计算","统计: 箱线图"] 2**10"#, &[]);
+        assert!(matches!(
+            box_plot,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::BoxPlot(_),
+                ..
+            }))
+        ));
     }
 
     #[test]
