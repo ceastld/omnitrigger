@@ -5570,6 +5570,33 @@ mod tests {
     }
 
     #[test]
+    fn completes_trigger_export_formats_with_the_original_scope_prefix() {
+        let Results::FilterOptions(options) = for_query("触发器: 输出=", &[]) else {
+            panic!("缺少导出格式");
+        };
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].label, Some("CSV"));
+        assert_eq!(options[1].label, Some("JSON"));
+
+        let query = "已启用触发器： OUTPUT＝ｊ";
+        let result = for_query(query, &[]);
+        let filled = result.suggested_input(0).unwrap();
+        assert_eq!(filled, "已启用触发器： OUTPUT＝JSON");
+        assert!(matches!(
+            for_query(filled, &[]),
+            Results::Value(Ok(value)) if value.text == "[]"
+        ));
+        for invalid in ["触发器: 输出=XML", "触发器: 输出=j 状态=已启用"] {
+            assert!(matches!(
+                for_query(invalid, &[]),
+                Results::Value(Err(ValueError::TriggerSearch(
+                    TriggerSearchError::InvalidExport
+                )))
+            ));
+        }
+    }
+
+    #[test]
     fn trigger_search_keeps_matches_for_later_pages() {
         let bindings = crate::settings::defaults();
         let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();

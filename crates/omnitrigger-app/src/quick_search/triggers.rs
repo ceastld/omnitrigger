@@ -17,9 +17,21 @@ use super::{
 const TRIGGER_CSV_HEADER: &str = "名称,组合与条件,输入,动作,范围,启用状态";
 const MAX_TRIGGER_JSON_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone, Copy)]
 enum TriggerExport {
     Csv,
     Json,
+}
+
+impl TriggerExport {
+    const ALL: [Self; 2] = [Self::Csv, Self::Json];
+
+    fn keyword(self) -> &'static str {
+        match self {
+            Self::Csv => "CSV",
+            Self::Json => "JSON",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -38,6 +50,7 @@ pub(super) enum TriggerSearchError {
     RepeatedFacet,
     ExportTooLarge,
     JsonExport,
+    InvalidExport,
     TitleRegex,
 }
 
@@ -53,6 +66,7 @@ impl TriggerSearchError {
             Self::RepeatedFacet => "每类筛选条件填写一次",
             Self::ExportTooLarge => "导出的触发器超过 1 MiB，请缩小筛选范围",
             Self::JsonExport => "生成触发器 JSON 失败",
+            Self::InvalidExport => "触发器导出格式可用 CSV 或 JSON",
             Self::TitleRegex => "填写一个有效的名称正则表达式，含空格时用双引号包住",
         }
     }
@@ -139,14 +153,18 @@ fn filter_suggestions(
     facet_values(facet)
         .filter_map(|value| {
             let name = facet_value_names(value).find(|name| name.starts_with(&prefix))?;
-            let expression = format!("{query_prefix}{name}");
-            (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then(|| InputSuggestion {
-                expression,
-                label: Some(name),
-                result: String::new(),
-            })
+            option_suggestion(query_prefix, name)
         })
         .collect()
+}
+
+fn option_suggestion(query_prefix: &str, name: &'static str) -> Option<InputSuggestion> {
+    let expression = format!("{query_prefix}{name}");
+    (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then(|| InputSuggestion {
+        expression,
+        label: Some(name),
+        result: String::new(),
+    })
 }
 
 fn parse_trigger_query(
@@ -205,10 +223,32 @@ pub(super) fn search_triggers(
     term: &str,
     inherited: Option<FacetValue>,
 ) -> Results {
-    let (format, rest) = term.split_once(char::is_whitespace).unwrap_or((term, ""));
-    let (export, query) = match search_key(format).as_str() {
-        "输出=csv" | "output=csv" => (Some(TriggerExport::Csv), rest.trim_start()),
-        "输出=json" | "output=json" => (Some(TriggerExport::Json), rest.trim_start()),
+    let (first, rest) = term.split_once(char::is_whitespace).unwrap_or((term, ""));
+    let (export, query) = match first.split_once(['=', '＝']) {
+        Some((label, value)) if matches!(search_key(label).as_str(), "输出" | "output") => {
+            let key = search_key(value);
+            let export = TriggerExport::ALL
+                .into_iter()
+                .find(|format| format.keyword().eq_ignore_ascii_case(&key));
+            if export.is_none() {
+                if rest.is_empty() {
+                    let start = full_query.len() - term.len() + first.len() - value.len();
+                    let suggestions: Vec<_> = TriggerExport::ALL
+                        .into_iter()
+                        .map(TriggerExport::keyword)
+                        .filter(|name| name.to_ascii_lowercase().starts_with(&key))
+                        .filter_map(|name| option_suggestion(&full_query[..start], name))
+                        .collect();
+                    if !suggestions.is_empty() {
+                        return Results::FilterOptions(suggestions);
+                    }
+                }
+                return Results::Value(Err(ValueError::TriggerSearch(
+                    TriggerSearchError::InvalidExport,
+                )));
+            }
+            (export, rest.trim_start())
+        }
         _ => (None, term),
     };
     let query = match parse_trigger_query(query, inherited) {
