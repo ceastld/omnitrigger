@@ -5946,7 +5946,7 @@ null"#
             "1,https://example.invalid/?tag=a+1&t%61g=b%2Bc&Tag=ignored&tag=#fragment\n",
             "2,https://example.invalid/?other=tea\n3,\n4,tag=%00",
         );
-        let output = transform_csv(&csv).unwrap();
+        let output = transform_csv(csv).unwrap();
         let rows = read_rows(&output, ',').unwrap();
         assert_eq!(rows[0], ["编号", "网址", "标签"]);
         assert_eq!(rows[1][2], r#"["a 1","b+c",""]"#);
