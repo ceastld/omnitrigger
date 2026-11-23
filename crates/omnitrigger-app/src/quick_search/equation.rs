@@ -3,7 +3,9 @@ use std::cmp::Ordering;
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
-use super::calculator::{normalize, QUERY_LIMIT};
+use super::calculator::{
+    evaluate, evaluate_at_x, format_result, normalize, CalculationError, QUERY_LIMIT,
+};
 use super::fraction::{
     calculate_fraction, ensure_exact_size, exact_abs_square_root, format_exact_multiple,
     format_square_root, FractionError,
@@ -30,6 +32,7 @@ pub(super) enum EquationError {
     TangentArguments,
     NormalLineArguments,
     FunctionPlotArguments,
+    FunctionSampleArguments,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -37,6 +40,7 @@ pub(super) enum EquationError {
     SystemRows,
     ThreeVariableRows,
     Evaluation(FractionError),
+    Approximation(CalculationError),
 }
 
 impl EquationError {
@@ -63,11 +67,15 @@ impl EquationError {
             Self::TangentArguments => "填写函数系数和切点横坐标，例如 1,0,0 @ 2",
             Self::NormalLineArguments => "填写函数和法线经过的横坐标，例如 x² @ 2",
             Self::FunctionPlotArguments => "填写函数和两个不同的横坐标，例如 x² @ -1 到 2",
+            Self::FunctionSampleArguments => {
+                "填写带 x 的算式以及两个不同的端点，可在分号后填写 2 至 129 个采样点"
+            }
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
             Self::SystemRows => "输入 x + y = 3; x - y = 1，或每行按 x 系数、y 系数、右侧常数填写",
             Self::Evaluation(error) => error.message(),
+            Self::Approximation(error) => error.message(),
             Self::ThreeVariableRows => "填写最多八条含 x、y、z 的展开式方程，用分号或换行隔开",
         }
     }
@@ -109,6 +117,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数图" | "function-plot" => {
                 return quadratic_curve_points(arguments).map(|points| curve_csv(&points));
             }
+            "函数采样" | "sample-function" => return sampled_function_csv(arguments),
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -548,6 +557,61 @@ fn curve_csv(points: &[(BigRational, BigRational)]) -> String {
         .chain(points.iter().map(|(x, y)| format!("{x},{y}")))
         .collect::<Vec<_>>()
         .join("\r\n")
+}
+
+fn sampled_function_csv(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::FunctionSampleArguments;
+    let (expression, bounds) = input.split_once('@').ok_or(invalid)?;
+    let expression = match expression.split_once('=') {
+        Some((name, formula)) if name.trim().eq_ignore_ascii_case("y") => formula.trim(),
+        _ => expression.trim(),
+    };
+    if expression.is_empty() {
+        return Err(invalid);
+    }
+    let (bounds, count) = match bounds.split_once(';') {
+        Some((bounds, count)) => {
+            let count = count
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|count| (2..=129).contains(count))
+                .ok_or(invalid)?;
+            (bounds, count)
+        }
+        None => (bounds, 33),
+    };
+    let (start, end) = bounds.split_once(['到', '至']).ok_or(invalid)?;
+    let mut start = evaluate(start).map_err(EquationError::Approximation)?;
+    let mut end = evaluate(end).map_err(EquationError::Approximation)?;
+    if start == end {
+        return Err(invalid);
+    }
+    if start > end {
+        std::mem::swap(&mut start, &mut end);
+    }
+    let last = count - 1;
+    let mut csv = String::from("x,近似值");
+    for index in 0..count {
+        let fraction = f64::from(index) / f64::from(last);
+        let x = match index {
+            0 => start,
+            index if index == last => end,
+            _ => start * (1.0 - fraction) + end * fraction,
+        };
+        let y = match evaluate_at_x(expression, x) {
+            Ok(value) => format_result(value).map_err(EquationError::Approximation)?,
+            Err(
+                CalculationError::DivisionByZero
+                | CalculationError::FunctionDomain
+                | CalculationError::OutOfRange,
+            ) => String::new(),
+            Err(error) => return Err(EquationError::Approximation(error)),
+        };
+        let x = format_result(x).map_err(EquationError::Approximation)?;
+        csv.push_str(&format!("\r\n{x},{y}"));
+    }
+    Ok(csv)
 }
 
 fn polynomial_integral(input: &str) -> Result<String, EquationError> {
@@ -1526,6 +1590,48 @@ mod tests {
         }
         let first = solve_equation("求导 x² - 2x + 1").unwrap();
         assert_eq!(solve_equation(&format!("求导 {first}")).as_deref(), Ok("2"));
+    }
+
+    #[test]
+    fn samples_calculator_functions_with_x_and_leaves_undefined_values_empty() {
+        for (query, expected) in [
+            (
+                "函数采样 y = cosd(x) @ 180 到 0; 3",
+                "x,近似值\r\n0,1\r\n90,0\r\n180,-1",
+            ),
+            (
+                "函数采样 1/x @ -1 到 1; 3",
+                "x,近似值\r\n-1,-1\r\n0,\r\n1,1",
+            ),
+            (
+                "函数采样 sqrt(X) @ -1 至 1; 3",
+                "x,近似值\r\n-1,\r\n0,0\r\n1,1",
+            ),
+            (
+                "sample-function 0x1e + x**2 @ 0 到 2; 2",
+                "x,近似值\r\n0,30\r\n2,34",
+            ),
+        ] {
+            assert_eq!(solve_equation(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            solve_equation("函数采样 x @ 0 到 1")
+                .unwrap()
+                .lines()
+                .count(),
+            34
+        );
+        assert_eq!(
+            solve_equation("函数采样 unknown(x) @ 0 到 1; 2"),
+            Err(EquationError::Approximation(CalculationError::Invalid))
+        );
+        for query in ["函数采样 x @ 2 到 2", "函数采样 x @ 0 到 1; 130"] {
+            assert_eq!(
+                solve_equation(query),
+                Err(EquationError::FunctionSampleArguments)
+            );
+        }
+        assert_eq!(evaluate("x"), Err(CalculationError::Invalid));
     }
 
     #[test]

@@ -60,26 +60,37 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
 }
 
 pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
+    evaluate_with_coordinate(query, None)
+}
+
+pub(super) fn evaluate_at_x(query: &str, x: f64) -> Result<f64, CalculationError> {
+    evaluate_with_coordinate(query, Some(x))
+}
+
+fn evaluate_with_coordinate(query: &str, coordinate: Option<f64>) -> Result<f64, CalculationError> {
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(CalculationError::TooLong);
     }
 
     let normalized = normalize(query);
     let input = normalized.trim();
-    evaluate_expression(input.strip_prefix('=').unwrap_or(input).trim())
+    evaluate_expression(input.strip_prefix('=').unwrap_or(input).trim(), coordinate)
 }
 
-fn evaluate_expression(input: &str) -> Result<f64, CalculationError> {
+fn evaluate_expression(input: &str, coordinate: Option<f64>) -> Result<f64, CalculationError> {
     if let Some((mode, base, rate)) = percentage_operands(input) {
-        let rate = evaluate_expression(rate)?;
-        return finite(mode.apply(evaluate_expression(base)?, rate));
+        let rate = evaluate_expression(rate, coordinate)?;
+        return finite(mode.apply(evaluate_expression(base, coordinate)?, rate));
     }
     if let Some(rate) = percentage_literal(input) {
         return Ok(rate);
     }
-    let mut parser = Parser(input);
+    let mut parser = Parser {
+        rest: input,
+        coordinate,
+    };
     let value = parser.expression(0)?;
-    if !parser.0.trim().is_empty() {
+    if !parser.rest.trim().is_empty() {
         return Err(CalculationError::Invalid);
     }
     Ok(value)
@@ -95,9 +106,12 @@ fn percentage_literal(input: &str) -> Option<f64> {
     if Base::prefixed(digits).is_some() {
         return None;
     }
-    let mut parser = Parser(digits);
+    let mut parser = Parser {
+        rest: digits,
+        coordinate: None,
+    };
     let value = parser.number().ok()?;
-    parser.0.is_empty().then_some(sign * value / 100.)
+    parser.rest.is_empty().then_some(sign * value / 100.)
 }
 
 pub(super) const FULLWIDTH_ASCII_OFFSET: u32 = 0xfee0;
@@ -144,21 +158,24 @@ pub(super) fn format_result(value: f64) -> Result<String, CalculationError> {
     ))
 }
 
-struct Parser<'a>(&'a str);
+struct Parser<'a> {
+    rest: &'a str,
+    coordinate: Option<f64>,
+}
 
 impl Parser<'_> {
     fn expression(&mut self, min_binding: u8) -> Result<f64, CalculationError> {
         let mut lhs = match self.peek() {
             Some('+') => {
-                self.0 = &self.0[1..];
+                self.rest = &self.rest[1..];
                 self.expression(5)?
             }
             Some('-') => {
-                self.0 = &self.0[1..];
+                self.rest = &self.rest[1..];
                 -self.expression(5)?
             }
             Some(symbol @ ('√' | '∛')) => {
-                self.0 = &self.0[symbol.len_utf8()..];
+                self.rest = &self.rest[symbol.len_utf8()..];
                 let radicand = self.expression(5)?;
                 let root = if symbol == '√' {
                     radicand.sqrt()
@@ -177,12 +194,12 @@ impl Parser<'_> {
             None => return Err(CalculationError::Incomplete),
         };
 
-        while let Some((operator, width)) = Operator::prefix(self.0.trim_start()) {
+        while let Some((operator, width)) = Operator::prefix(self.rest.trim_start()) {
             let (left, right) = operator.binding_power();
             if left < min_binding {
                 break;
             }
-            self.0 = &self.0.trim_start()[width..];
+            self.rest = &self.rest.trim_start()[width..];
             let rhs = self.expression(right)?;
             lhs = finite(operator.apply(lhs, rhs)?)?;
         }
@@ -190,8 +207,8 @@ impl Parser<'_> {
     }
 
     fn peek(&mut self) -> Option<char> {
-        self.0 = self.0.trim_start();
-        self.0.chars().next()
+        self.rest = self.rest.trim_start();
+        self.rest.chars().next()
     }
 
     fn parenthesized(&mut self) -> Result<f64, CalculationError> {
@@ -205,7 +222,7 @@ impl Parser<'_> {
         self.expect('(')?;
         let mut values = vec![self.expression(0)?];
         while self.peek() == Some(',') {
-            self.0 = &self.0[1..];
+            self.rest = &self.rest[1..];
             values.push(self.expression(0)?);
         }
         self.expect(')')?;
@@ -215,7 +232,7 @@ impl Parser<'_> {
     fn expect(&mut self, expected: char) -> Result<(), CalculationError> {
         match self.peek() {
             Some(ch) if ch == expected => {
-                self.0 = &self.0[ch.len_utf8()..];
+                self.rest = &self.rest[ch.len_utf8()..];
                 Ok(())
             }
             None => Err(CalculationError::Incomplete),
@@ -224,8 +241,14 @@ impl Parser<'_> {
     }
 
     fn named(&mut self) -> Result<f64, CalculationError> {
-        let (name, rest) = split_name(self.0);
-        self.0 = rest;
+        let (name, rest) = split_name(self.rest);
+        self.rest = rest;
+        if name.eq_ignore_ascii_case("x") {
+            return self
+                .coordinate
+                .ok_or(CalculationError::Invalid)
+                .and_then(finite);
+        }
         let value = match named_value(name) {
             Some(NamedValue::Constant(value)) => return Ok(value),
             Some(NamedValue::Function(function)) => function(self.parenthesized()?),
@@ -239,7 +262,7 @@ impl Parser<'_> {
     }
 
     fn number(&mut self) -> Result<f64, CalculationError> {
-        if let Some((base, rest)) = Base::prefixed(self.0) {
+        if let Some((base, rest)) = Base::prefixed(self.rest) {
             let rest = rest.strip_prefix('_').unwrap_or(rest);
             let end = rest
                 .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
@@ -256,28 +279,28 @@ impl Parser<'_> {
             if value > MAX_SAFE_INTEGER {
                 return Err(CalculationError::OutOfRange);
             }
-            self.0 = &rest[end..];
+            self.rest = &rest[end..];
             return Ok(value as f64);
         }
-        let start = self.0;
+        let start = self.rest;
         let has_integer = self.number_digits()?;
-        let has_fraction = if let Some(rest) = self.0.strip_prefix('.') {
-            self.0 = rest;
+        let has_fraction = if let Some(rest) = self.rest.strip_prefix('.') {
+            self.rest = rest;
             self.number_digits()?
         } else {
             false
         };
         if !has_integer && !has_fraction {
-            return Err(if self.0.is_empty() {
+            return Err(if self.rest.is_empty() {
                 CalculationError::Incomplete
             } else {
                 CalculationError::Invalid
             });
         }
-        if let Some(rest) = self.0.strip_prefix(['e', 'E']) {
-            self.0 = rest.strip_prefix(['+', '-']).unwrap_or(rest);
+        if let Some(rest) = self.rest.strip_prefix(['e', 'E']) {
+            self.rest = rest.strip_prefix(['+', '-']).unwrap_or(rest);
             if !self.number_digits()? {
-                return Err(if self.0.is_empty() {
+                return Err(if self.rest.is_empty() {
                     CalculationError::Incomplete
                 } else {
                     CalculationError::Invalid
@@ -285,7 +308,7 @@ impl Parser<'_> {
             }
         }
 
-        let literal = &start[..start.len() - self.0.len()];
+        let literal = &start[..start.len() - self.rest.len()];
         let value = if literal.contains('_') {
             literal.replace('_', "").parse::<f64>()
         } else {
@@ -296,25 +319,25 @@ impl Parser<'_> {
     }
 
     fn number_digits(&mut self) -> Result<bool, CalculationError> {
-        if !self.0.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        if !self.rest.as_bytes().first().is_some_and(u8::is_ascii_digit) {
             return Ok(false);
         }
         let end = self
-            .0
+            .rest
             .find(|ch: char| !ch.is_ascii_digit() && ch != '_')
-            .unwrap_or(self.0.len());
-        let digits = &self.0[..end];
+            .unwrap_or(self.rest.len());
+        let digits = &self.rest[..end];
         if digits.contains("__") {
             return Err(CalculationError::Invalid);
         }
         if digits.ends_with('_') {
-            return Err(if end == self.0.len() {
+            return Err(if end == self.rest.len() {
                 CalculationError::Incomplete
             } else {
                 CalculationError::Invalid
             });
         }
-        self.0 = &self.0[end..];
+        self.rest = &self.rest[end..];
         Ok(true)
     }
 }
