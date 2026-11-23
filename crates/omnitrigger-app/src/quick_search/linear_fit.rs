@@ -83,6 +83,12 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             return interpolation_coefficients(rest.trim());
         }
         Some((operation, rest))
+            if operation == "插值式"
+                || operation.eq_ignore_ascii_case("interpolation-expression") =>
+        {
+            return interpolation_expression(rest.trim());
+        }
+        Some((operation, rest))
             if operation == "残差" || operation.eq_ignore_ascii_case("residuals") =>
         {
             (rest.trim(), FitOutput::Residuals)
@@ -236,7 +242,7 @@ fn interpolate(xs: &[BigRational], points: &str) -> Result<String, LinearFitErro
     })
 }
 
-fn interpolation_coefficients(points: &str) -> Result<String, LinearFitError> {
+fn interpolation_power_coefficients(points: &str) -> Result<Vec<BigRational>, LinearFitError> {
     let Interpolation { nodes, differences } = interpolation(points)?;
     let mut coefficients = vec![differences[differences.len() - 1].clone()];
     // 将牛顿形式逐层乘以 x - node，并把下一阶的差商加到常数项。
@@ -253,11 +259,59 @@ fn interpolation_coefficients(points: &str) -> Result<String, LinearFitError> {
         .iter()
         .rposition(|value| value.numer().sign() != Sign::NoSign)
         .unwrap_or(0);
+    coefficients.truncate(degree + 1);
+    Ok(coefficients)
+}
+
+fn interpolation_coefficients(points: &str) -> Result<String, LinearFitError> {
+    let coefficients = interpolation_power_coefficients(points)?;
     let mut rows = vec!["次数,系数".to_owned()];
-    for (degree, value) in coefficients[..=degree].iter().enumerate().rev() {
+    for (degree, value) in coefficients.iter().enumerate().rev() {
         rows.push(format!("{degree},{value}"));
     }
     Ok(rows.join("\r\n"))
+}
+
+fn interpolation_expression(points: &str) -> Result<String, LinearFitError> {
+    let coefficients = interpolation_power_coefficients(points)?;
+    let one = BigInt::from(1u8);
+    let mut expression = String::new();
+    for (degree, coefficient) in coefficients.into_iter().enumerate().rev() {
+        let sign = coefficient.numer().sign();
+        if sign == Sign::NoSign {
+            continue;
+        }
+        let negative = sign == Sign::Minus;
+        let prefix = match (expression.is_empty(), negative) {
+            (true, true) => "-",
+            (true, false) => "",
+            (false, true) => " - ",
+            (false, false) => " + ",
+        };
+        expression.push_str(prefix);
+        let magnitude = if negative { -coefficient } else { coefficient };
+        if degree == 0 {
+            expression.push_str(&magnitude.to_string());
+            continue;
+        }
+        if magnitude.numer() != &one {
+            expression.push_str(&magnitude.numer().to_string());
+            expression.push('*');
+        }
+        expression.push('x');
+        if degree > 1 {
+            expression.push_str("**");
+            expression.push_str(&degree.to_string());
+        }
+        if !magnitude.is_integer() {
+            expression.push('/');
+            expression.push_str(&magnitude.denom().to_string());
+        }
+    }
+    if expression.is_empty() {
+        expression.push('0');
+    }
+    Ok(expression)
 }
 
 pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
@@ -455,6 +509,28 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_an_exact_expression_that_the_fraction_calculator_can_reuse() {
+        for (input, expected) in [
+            ("插值式 0,1; 1,2; 2,5", "x**2 + 1"),
+            ("插值式 0,-1; 2,2", "3*x/2 - 1"),
+            ("interpolation-expression 0,0; 1,0", "0"),
+            ("插值式 0,0; 1,-1; 2,-8; 3,-27", "-x**3"),
+        ] {
+            assert_eq!(
+                calculate_linear_fit(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        let expression = calculate_linear_fit("插值式 0,1; 1,2; 2,5").unwrap();
+        assert_eq!(
+            super::super::fraction::simplify_fraction(&format!("取值表 [0,1,2] {expression}"))
+                .as_deref(),
+            Ok("x\ty\n0\t1\n1\t2\n2\t5")
+        );
+    }
 
     #[test]
     fn writes_the_actual_degree_and_exact_power_coefficients_of_the_interpolant() {

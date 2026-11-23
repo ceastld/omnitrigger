@@ -272,6 +272,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "生成可交给计算器的插值式",
+        query: "拟合: 插值式 0,1; 1,2; 2,5",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用同一条拟合直线预测多个 x",
         query: "拟合: 预测 1/2,0,3 @ 0,1; 1,3; 2,5",
     },
@@ -5100,7 +5105,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "区间极值",
         ],
         Scope::LinearSystem => &["通解", "三元"],
-        Scope::LinearFit => &["插值", "插值系数"],
+        Scope::LinearFit => &["插值", "插值系数", "插值式"],
         Scope::Matrix => &["通解"],
         Scope::Date => &[
             "列出",
@@ -5317,9 +5322,17 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::LinearFit
             if !term.is_empty()
-                && ["预测", "插值", "插值系数", "残差", "误差", "过原点"]
-                    .into_iter()
-                    .any(|operation| operation.starts_with(term)) => {}
+                && [
+                    "预测",
+                    "插值",
+                    "插值系数",
+                    "插值式",
+                    "残差",
+                    "误差",
+                    "过原点",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::Triangle
             if !term.is_empty()
                 && ["斜边", "直角边"]
