@@ -4803,6 +4803,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "找出分段直线与目标水平线的精确交点",
+        query: "CSV: 水平交点 [[\"时间\",\"高度\"],0] 时间,高度\n4,0\n0,0\n1,0\n2,2\n3,-2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按横坐标绘制 CSV 的累计梯形积分",
         query: "CSV: 梯形累计图 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0",
     },
@@ -5698,6 +5703,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "梯形累计列",
             "差商列",
             "线性插值",
+            "水平交点",
             "梯形累计图",
             "曲线图",
             "残差图",

@@ -233,8 +233,10 @@ pub(super) enum CsvError {
     SecantDuplicateX,
     CoordinateInterpolationArguments,
     CoordinateInterpolationPointCount,
-    CoordinateInterpolationDuplicateX,
+    CoordinateDuplicateX,
     CoordinateInterpolationRange,
+    CoordinateCrossingArguments,
+    CoordinateCrossingPointCount,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -512,8 +514,12 @@ impl CsvError {
                 "填写两个坐标列和 1 至 64 个数值横坐标，例如 [[\"时间\",\"高度\"],[\"1/2\",2]]"
             }
             Self::CoordinateInterpolationPointCount => "线性插值需要 2 至 64 行同时含 x 和 y 的数据",
-            Self::CoordinateInterpolationDuplicateX => "线性插值的完整样点横坐标须互不相同",
+            Self::CoordinateDuplicateX => "完整样点的横坐标须互不相同",
             Self::CoordinateInterpolationRange => "查询横坐标须在完整样点的范围内",
+            Self::CoordinateCrossingArguments => {
+                "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
+            }
+            Self::CoordinateCrossingPointCount => "水平交点需要 2 至 64 行同时含 x 和 y 的数据",
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -1102,6 +1108,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return append_sampled_coordinate_column(input, CoordinateColumn::Secant)
         }
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
+        "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
         operation if is_cumulative_trapezoid_plot(operation) => {
             return cumulative_trapezoid_coordinates(input)?.to_csv();
         }
@@ -5370,6 +5377,19 @@ struct CoordinateSample {
 }
 
 impl CsvCoordinates {
+    fn sort_distinct(&mut self) -> Result<(), CsvError> {
+        self.samples
+            .sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
+        if self
+            .samples
+            .windows(2)
+            .any(|pair| pair[0].point.0 == pair[1].point.0)
+        {
+            return Err(CsvError::CoordinateDuplicateX);
+        }
+        Ok(())
+    }
+
     fn to_csv(&self) -> Result<String, CsvError> {
         let mut output = String::new();
         let limit = CsvError::ScatterTooLarge;
@@ -5422,27 +5442,12 @@ fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
         invalid,
         CsvError::CoordinateInterpolationPointCount,
     )?;
-    table
-        .samples
-        .sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
-    if table
-        .samples
-        .windows(2)
-        .any(|pair| pair[0].point.0 == pair[1].point.0)
-    {
-        return Err(CsvError::CoordinateInterpolationDuplicateX);
-    }
+    table.sort_distinct()?;
     let samples = coordinates
         .iter()
         .enumerate()
         .map(|(row_index, raw)| {
-            let text = raw.get();
-            let text = if text.starts_with('"') {
-                Cow::Owned(serde_json::from_str::<String>(text).map_err(|_| invalid)?)
-            } else {
-                Cow::Borrowed(text)
-            };
-            let x = parse_fraction_literal(&text).map_err(|_| invalid)?;
+            let x = coordinate_argument(raw, invalid)?;
             let y = match table
                 .samples
                 .binary_search_by(|sample| sample.point.0.cmp(&x))
@@ -5465,6 +5470,86 @@ fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
         .collect::<Result<Vec<_>, CsvError>>()?;
     table.samples = samples;
     table.to_csv()
+}
+
+fn coordinate_argument(raw: &RawValue, invalid: CsvError) -> Result<BigRational, CsvError> {
+    let text = raw.get();
+    let text = if text.starts_with('"') {
+        Cow::Owned(serde_json::from_str::<String>(text).map_err(|_| invalid)?)
+    } else {
+        Cow::Borrowed(text)
+    };
+    parse_fraction_literal(&text).map_err(|_| invalid)
+}
+
+fn coordinate_horizontal_crossings(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateCrossingArguments;
+    let ((columns, target), data) =
+        json_argument_and_data::<([ColumnReference; 2], Box<RawValue>)>(input, invalid)?;
+    let target = coordinate_argument(&target, invalid)?;
+    let mut table = read_coordinate_table(
+        data,
+        &columns,
+        invalid,
+        CsvError::CoordinateCrossingPointCount,
+    )?;
+    table.sort_distinct()?;
+
+    let samples = &table.samples;
+    let mut csv = String::from("起始横坐标,结束横坐标,类型");
+    let mut index = 0;
+    while let Some(sample) = samples.get(index) {
+        let (x, y) = &sample.point;
+        let row = if *y == target {
+            let first = index;
+            while samples
+                .get(index + 1)
+                .is_some_and(|next| next.point.1 == target)
+            {
+                index += 1;
+            }
+            let kind = if first == index {
+                "交点"
+            } else {
+                "重合区间"
+            };
+            Some([
+                x.to_string(),
+                samples[index].point.0.to_string(),
+                kind.to_owned(),
+            ])
+        } else if let Some(next) = samples.get(index + 1) {
+            crossing_inside_segment(&sample.point, &next.point, &target)?
+                .map(|x| [x.to_string(), x.to_string(), "交点".to_owned()])
+        } else {
+            None
+        };
+        if let Some(row) = row {
+            append_bounded_csv_row(
+                &mut csv,
+                row.iter().map(String::as_str),
+                CsvError::ComputedNumberRange,
+            )?;
+        }
+        index += 1;
+    }
+    Ok(csv)
+}
+
+fn crossing_inside_segment(
+    (left_x, left_y): &Point,
+    (right_x, right_y): &Point,
+    target: &BigRational,
+) -> Result<Option<BigRational>, CsvError> {
+    let left_side = left_y.cmp(target);
+    let right_side = right_y.cmp(target);
+    if left_side == right_side || left_side == Ordering::Equal || right_side == Ordering::Equal {
+        return Ok(None);
+    }
+    let progress = (target - left_y) / (right_y - left_y);
+    interpolate_fraction(left_x, right_x, &progress)
+        .map(Some)
+        .map_err(|_| CsvError::ComputedNumberRange)
 }
 
 fn collect_coordinate_samples(
@@ -7267,6 +7352,27 @@ mod tests {
     }
 
     #[test]
+    fn reports_exact_crossings_and_collapses_consecutive_equal_samples_to_an_interval() {
+        let query = "水平交点 [[1,2],0] x,y\n4,0\n1,0\n2,2\n3,-2\n0,0";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("起始横坐标,结束横坐标,类型\r\n0,1,重合区间\r\n5/2,5/2,交点\r\n4,4,交点")
+        );
+        assert_eq!(
+            transform_csv("horizontal-crossings [[1,2],[1]] x,y\n0,0\n1,1"),
+            Err(CsvError::CoordinateCrossingArguments)
+        );
+        assert_eq!(
+            transform_csv("horizontal-crossings [[1,2],\"3/2\"] x,y\n0,0\n1,1").as_deref(),
+            Ok("起始横坐标,结束横坐标,类型")
+        );
+        assert_eq!(
+            transform_csv("水平交点 [[1,2],0] x,y\n1/2,0\n0.50,1"),
+            Err(CsvError::CoordinateDuplicateX)
+        );
+    }
+
+    #[test]
     fn interpolates_exact_values_at_requested_coordinates_in_input_order() {
         let data = "x,y\n3,3\n1,2\n2,\n0,0";
         assert_eq!(
@@ -7279,7 +7385,7 @@ mod tests {
         );
         assert_eq!(
             transform_csv("线性插值 [[1,2],[0.5]] x,y\n1/2,1\n0.50,2"),
-            Err(CsvError::CoordinateInterpolationDuplicateX)
+            Err(CsvError::CoordinateDuplicateX)
         );
         assert_eq!(
             transform_csv(&format!("线性插值 [[1,2],[true]] {data}")),
