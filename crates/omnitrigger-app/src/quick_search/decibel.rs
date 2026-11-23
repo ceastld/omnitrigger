@@ -20,7 +20,7 @@ impl DecibelError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Arguments => "填写分贝操作和数值，例如 功率比 100。按 F1 查看用法",
-            Self::LevelCount => "用逗号分隔 2 至 128 个分贝值，例如 叠加 60 dB,60 dB",
+            Self::LevelCount => "用逗号分隔 2 至 128 个分贝值，例如 60 dB,70 dB",
             Self::DifferenceArguments => "用 @ 分隔总分贝值和要扣除的分贝值",
             Self::LevelOrder => "总分贝值须高于要扣除的分贝值",
             Self::NonPositiveRatio => "功率比和幅度比须大于零",
@@ -28,6 +28,11 @@ impl DecibelError {
             Self::Evaluation(error) => error.message(),
         }
     }
+}
+
+enum LevelAggregation {
+    Sum,
+    Mean,
 }
 
 pub(super) fn convert_decibels(query: &str) -> Result<String, DecibelError> {
@@ -41,7 +46,12 @@ pub(super) fn convert_decibels(query: &str) -> Result<String, DecibelError> {
         "幅度比" | "amplitude-ratio" => (20.0, false),
         "转功率比" | "to-power-ratio" => (10.0, true),
         "转幅度比" | "to-amplitude-ratio" => (20.0, true),
-        "叠加" | "功率叠加" | "power-sum" => return combine_levels(expression),
+        "叠加" | "功率叠加" | "power-sum" => {
+            return aggregate_levels(expression, LevelAggregation::Sum);
+        }
+        "能量平均" | "energy-mean" | "energy-average" => {
+            return aggregate_levels(expression, LevelAggregation::Mean);
+        }
         "功率差" | "power-difference" => return subtract_levels(expression),
         _ => return Err(DecibelError::Arguments),
     };
@@ -72,7 +82,10 @@ fn parse_level(expression: &str) -> Result<f64, DecibelError> {
     evaluate(value).map_err(DecibelError::Evaluation)
 }
 
-fn combine_levels(expression: &str) -> Result<String, DecibelError> {
+fn aggregate_levels(
+    expression: &str,
+    aggregation: LevelAggregation,
+) -> Result<String, DecibelError> {
     let levels: Vec<_> = split_top_level_commas(expression)
         .take(MAX_COMBINED_LEVELS + 1)
         .collect();
@@ -84,12 +97,16 @@ fn combine_levels(expression: &str) -> Result<String, DecibelError> {
         .map(parse_level)
         .collect::<Result<Vec<_>, _>>()?;
     let peak = levels.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let divisor = match aggregation {
+        LevelAggregation::Sum => 1.0,
+        LevelAggregation::Mean => levels.len() as f64,
+    };
     // 以最大级为基准，避免将较大的分贝值直接转换为功率时溢出。
     let relative_power: f64 = levels
         .into_iter()
         .map(|level| 10.0_f64.powf((level - peak) / 10.0))
         .sum();
-    format_level(peak + 10.0 * relative_power.log10())
+    format_level(peak + 10.0 * (relative_power / divisor).log10())
 }
 
 fn subtract_levels(expression: &str) -> Result<String, DecibelError> {
@@ -174,6 +191,22 @@ mod tests {
         assert_eq!(
             convert_decibels("功率差 60 dB @"),
             Err(DecibelError::DifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn averages_equal_weight_levels_in_power_space() {
+        for (query, expected) in [
+            ("能量平均 60 dB,70 dB", "67.4036268949424 dB"),
+            ("能量平均 4000 dB,4000 dB", "4000 dB"),
+            ("ENERGY-AVERAGE 4000 dB,-4000 dB", "3996.98970004336 dB"),
+            ("能量平均 -20分贝，-20 dB", "-20 dB"),
+        ] {
+            assert_eq!(convert_decibels(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_decibels("能量平均 60 dB"),
+            Err(DecibelError::LevelCount)
         );
     }
 

@@ -1529,6 +1529,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "分贝: 功率差 70 dB @ 60 dB",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "对等权分贝值求能量平均",
+        query: "分贝: 能量平均 60 dB,70 dB",
+    },
+    Example {
         icon: Icon::Layers,
         title: "按半径和高求圆柱的表面积与体积",
         query: "立体: 圆柱 3,5",
@@ -4738,7 +4743,15 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "降序",
         ],
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
-        Scope::Decibel => &["功率比", "幅度比", "转功率比", "转幅度比", "叠加", "功率差"],
+        Scope::Decibel => &[
+            "功率比",
+            "幅度比",
+            "转功率比",
+            "转幅度比",
+            "叠加",
+            "功率差",
+            "能量平均",
+        ],
         Scope::Tempo => &["时长", "速度", "拍数"],
         Scope::Solid => &[
             "圆柱",
