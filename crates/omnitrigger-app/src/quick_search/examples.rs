@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use crate::assets::Icon;
 
 use super::calculator::narrow_ascii_graphic;
+use super::operators::json_argument_and_tail;
 use super::scientific::split_name;
 use super::scope::{parse_scope, scoped_query, tool_example_keyword, Scope};
 use super::title_rank;
@@ -16,9 +17,14 @@ pub(super) struct Example {
 impl Example {
     pub(super) fn argument_start(&self) -> Option<usize> {
         let (prefix, input) = self.query.split_once([':', '：'])?;
+        let scope = parse_scope(prefix)?;
+        if scope == Scope::DataPipeline {
+            let (_, data) = json_argument_and_tail::<Vec<String>>(input)?;
+            return (!data.is_empty()).then_some(self.query.len() - data.len());
+        }
         if !matches!(
-            parse_scope(prefix),
-            Some(Scope::Json | Scope::Csv | Scope::TextTools | Scope::UrlEncoding)
+            scope,
+            Scope::Json | Scope::Csv | Scope::TextTools | Scope::UrlEncoding
         ) {
             return None;
         }
@@ -4283,6 +4289,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Duration
         | Scope::BatchConversion
         | Scope::BatchCalculation
+        | Scope::DataPipeline
         | Scope::VideoFrames
         | Scope::Timecode
         | Scope::TransferTime
@@ -4381,6 +4388,16 @@ mod tests {
             assert!(tool_operation_examples(scope, prefix).is_some());
             assert_eq!(tool_operation_examples(scope, with_argument), None);
         }
+    }
+
+    #[test]
+    fn selects_only_the_source_data_when_replacing_a_pipeline_example() {
+        let items = tool_operation_examples(Scope::DataPipeline, "").unwrap();
+        let example = &EXAMPLES[items[0]];
+        let start = example.argument_start().unwrap();
+        assert!(example.query[..start].ends_with(r#""JSON: 取值 /1/金额"] "#));
+        assert_eq!(&example.query[start..], "编号,金额\n001,1.50\n\n002,2e0");
+        assert!(tool_operation_examples(Scope::DataPipeline, "[\"文本: 去空行\"]").is_none());
     }
 
     #[test]

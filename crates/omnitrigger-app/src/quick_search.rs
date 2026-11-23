@@ -4395,6 +4395,32 @@ mod tests {
                         })
                         .unwrap();
                     reopened.update(cx, verify_result_refill).unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            let prefix = "处理:";
+                            search.fill_query(prefix, window, cx);
+                            search.refresh_results(prefix, window, cx);
+                            search.key_down(
+                                &KeyDownEvent {
+                                    keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
+                                    is_held: false,
+                                },
+                                window,
+                                cx,
+                            );
+                            search.input.update(cx, |input, cx| {
+                                input.replace_text_in_range(
+                                    None,
+                                    "编号,金额\n003,3\n004,4.50",
+                                    window,
+                                    cx,
+                                );
+                            });
+                            let query = search.input.read(cx).text();
+                            search.refresh_results(&query, window, cx);
+                            assert_eq!(search.results.refillable_text(), Some("4.50"));
+                        })
+                        .unwrap();
                     send.send((
                         states,
                         reopened_states,
