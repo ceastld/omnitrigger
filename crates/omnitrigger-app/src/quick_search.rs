@@ -101,7 +101,8 @@ use decibel::{convert_decibels, DecibelError};
 use duration::{convert_duration, is_clock_duration, DurationError};
 use equation::{solve_equation, solve_linear_system, EquationError};
 use examples::{
-    function_examples, matching_examples, tool_index_examples, tool_operation_examples, EXAMPLES,
+    function_examples, matching_examples, tool_index_examples, tool_operation_examples, Example,
+    EXAMPLES,
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
@@ -2098,6 +2099,32 @@ impl QuickSearch {
         self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
     }
 
+    fn select_example_suffix(
+        &self,
+        selection_start: fn(&Example) -> Option<usize>,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Results::Help(items) = &self.results else {
+            return false;
+        };
+        let Some(&index) = items.get(self.selected) else {
+            return false;
+        };
+        let example = &EXAMPLES[index];
+        let Some(start) = selection_start(example) else {
+            return false;
+        };
+        if !is_held {
+            self.index.recent.examples.record(index);
+            self.fill_query(example.query, window, cx);
+            self.input
+                .update(cx, |input, cx| input.select_suffix(start, cx));
+        }
+        true
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.read(cx).is_composing() {
             return;
@@ -2131,23 +2158,9 @@ impl QuickSearch {
                 }
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "tab" {
-                let Results::Help(items) = &self.results else {
-                    return;
-                };
-                let Some(&index) = items.get(self.selected) else {
-                    return;
-                };
-                let example = &EXAMPLES[index];
-                let Some(start) = example.argument_start() else {
-                    return;
-                };
-                if !event.is_held {
-                    self.index.recent.examples.record(index);
-                    self.fill_query(example.query, window, cx);
-                    self.input
-                        .update(cx, |input, cx| input.select_suffix(start, cx));
+                if self.select_example_suffix(Example::argument_start, event.is_held, window, cx) {
+                    cx.stop_propagation();
                 }
-                cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "d" {
                 if !event.is_held {
                     self.toggle_bookmark(window, cx);
@@ -2171,7 +2184,9 @@ impl QuickSearch {
                     cx.stop_propagation();
                 }
             } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "enter" {
-                if !event.is_held && self.reveal_selected_file(window, cx) {
+                if self.select_example_suffix(Example::csv_data_start, event.is_held, window, cx)
+                    || (!event.is_held && self.reveal_selected_file(window, cx))
+                {
                     cx.stop_propagation();
                 }
             } else if modifiers == 1
@@ -2480,6 +2495,8 @@ impl QuickSearch {
                             .when(index == self.selected, |row| {
                                 let hint = if tool_index {
                                     "F1 用法 · Tab 填入"
+                                } else if example.csv_data_start().is_some() {
+                                    "Shift+Tab 改参数 · Alt+Enter 换表格"
                                 } else if example.argument_start().is_some() {
                                     "Tab 填入 · Shift+Tab 改参数"
                                 } else {
@@ -4247,6 +4264,36 @@ mod tests {
                                 search.key_down(&event, window, cx);
                                 search.input.read(cx).text()
                             })
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            let prefix = "CSV: 截取列";
+                            search.fill_query(prefix, window, cx);
+                            search.refresh_results(prefix, window, cx);
+                            let mut invoke = |is_held| {
+                                search.key_down(
+                                    &KeyDownEvent {
+                                        keystroke: gpui::Keystroke::parse("alt-enter").unwrap(),
+                                        is_held,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                search.input.read(cx).text()
+                            };
+                            assert_eq!(invoke(true), prefix);
+                            assert!(invoke(false).starts_with(
+                                "CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]\n编号,文本"
+                            ));
+                            let replacement = "编号,文本\n001,北方茶";
+                            search.input.update(cx, |input, cx| {
+                                input.replace_text_in_range(None, replacement, window, cx);
+                            });
+                            assert_eq!(
+                                search.input.read(cx).text(),
+                                "CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]\n编号,文本\n001,北方茶"
+                            );
                         })
                         .unwrap();
                     let replace_example_arguments = reopened

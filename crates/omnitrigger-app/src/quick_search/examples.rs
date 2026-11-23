@@ -16,6 +16,17 @@ pub(super) struct Example {
 }
 
 impl Example {
+    pub(super) fn csv_data_start(&self) -> Option<usize> {
+        let (scope, term) = scoped_query(self.query)?;
+        if scope != Scope::Csv {
+            return None;
+        }
+        let (_, arguments) = term.split_once(char::is_whitespace)?;
+        let (_, data) = json_argument_and_tail::<Vec<serde::de::IgnoredAny>>(arguments)?;
+        (data.contains(['\r', '\n']) && !data.trim().is_empty())
+            .then_some(self.query.len() - data.len())
+    }
+
     pub(super) fn argument_start(&self) -> Option<usize> {
         let (prefix, input) = self.query.split_once([':', '：'])?;
         let scope = parse_scope(prefix)?;
@@ -4871,6 +4882,34 @@ pub(super) fn function_examples(query: &str) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_example_data_selection_preserves_array_options() {
+        for (query, expected) in [
+            (
+                "CSV: 选列名 [\"名称\"] 编号,名称\n001,茶",
+                Some("编号,名称\n001,茶"),
+            ),
+            (
+                "CSV: 去列 [1]\r\n 编号,值\r\n001,茶",
+                Some(" 编号,值\r\n001,茶"),
+            ),
+            ("CSV: 选列名 [\"名称\"]", None),
+            ("CSV: 选列名 [\"名称\"]\n名称", None),
+            ("CSV: 转置\n编号,名称\n001,茶", None),
+            ("文本: 逐行配对 [\"甲\"]\n茶\n米", None),
+        ] {
+            let example = Example {
+                icon: Icon::Terminal,
+                title: "",
+                query,
+            };
+            assert_eq!(
+                example.csv_data_start().map(|start| &query[start..]),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn shows_scoped_command_completions_only_before_arguments() {
