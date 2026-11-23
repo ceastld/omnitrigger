@@ -108,7 +108,8 @@ pub(super) fn visit_additive_terms<E: Copy>(
             '+' | '-'
                 if depth == 0
                     && index > start
-                    && !matches!(previous, '+' | '-' | '*' | '×' | '/' | '^' | 'e' | 'E') =>
+                    && !matches!(previous, '+' | '-' | '*' | '×' | '/' | '^')
+                    && !ends_with_decimal_exponent(&input[..index]) =>
             {
                 visit(&input[start..index])?;
                 start = index;
@@ -123,6 +124,20 @@ pub(super) fn visit_additive_terms<E: Copy>(
         return Err(invalid);
     }
     visit(&input[start..])
+}
+
+fn ends_with_decimal_exponent(before_sign: &str) -> bool {
+    let Some(before_exponent) = before_sign.trim_end().strip_suffix(['e', 'E']) else {
+        return false;
+    };
+    let mantissa = before_exponent
+        .rsplit(|character: char| !(character.is_ascii_alphanumeric() || character == '.'))
+        .next()
+        .unwrap_or_default();
+    mantissa.bytes().any(|byte| byte.is_ascii_digit())
+        && mantissa
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
 
 pub(super) fn split_top_level_commas(input: &str) -> impl Iterator<Item = &str> {

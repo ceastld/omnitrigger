@@ -7,6 +7,7 @@ use super::{
     bin_plot::BinPlot,
     box_plot::BoxPlot,
     calendar::calculate_date,
+    complex::calculate_complex,
     conversion::{calculate_circuit, convert_wave},
     correlation_plot::CorrelationPlot,
     csv_tools::{
@@ -451,6 +452,7 @@ fn run_pipeline_steps(
                 Scope::Tempo => calculate_tempo(&query).map_err(|cause| cause.message()),
                 Scope::Decibel => convert_decibels(&query).map_err(|cause| cause.message()),
                 Scope::Solid => calculate_solid(&query).map_err(|cause| cause.message()),
+                Scope::Complex => calculate_complex(&query).map_err(|cause| cause.message()),
                 Scope::Wave => convert_wave(&query).map_err(|cause| cause.message()),
                 Scope::Circuit => calculate_circuit(&query).map_err(|cause| cause.message()),
                 Scope::Equation => solve_equation(&query).map_err(|cause| cause.message()),
@@ -654,6 +656,23 @@ mod tests {
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn feeds_rational_cartesian_complex_results_into_later_steps() {
+        let commands = r#"[{"模板":"复数: 乘方 {结果} @ 2"},"复数: 共轭","复数: 模"] 3+4i"#;
+        assert_eq!(run_pipeline(commands).as_deref(), Ok("25"));
+        let trace = run_pipeline(&format!("步骤CSV {commands}")).unwrap();
+        assert!(trace.contains(",-7 + 24i"));
+        assert!(trace.contains(",-7 - 24i"));
+        assert!(trace.ends_with(",25"));
+        assert!(matches!(
+            run_pipeline(r#"[{"模板":"复数: 除法 {结果} @ 0"}] 3+4i"#),
+            Err(DataPipelineError::Step {
+                index: 1,
+                cause: "复数的除数不能为零",
+            })
+        ));
     }
 
     #[test]

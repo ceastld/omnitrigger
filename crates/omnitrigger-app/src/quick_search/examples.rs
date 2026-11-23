@@ -1192,6 +1192,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "串联复数的乘方、共轭和求模",
+        query: r#"处理: [{"模板":"复数: 乘方 {结果} @ 2"},"复数: 共轭","复数: 模"] 3+4i"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "串接方程系数和求根",
         query: r#"处理: ["方程: 由根","方程:"] 1/2,3/2,-2"#,
     },

@@ -1691,6 +1691,7 @@ mod tests {
             ("x/(2*3) = 1", "x = 6"),
             ("取系数 (1/3+1/6)*x^2 - x + 3/4", "1/2,-1,3/4"),
             ("coefficients 1e-3*x**2 + x*2 - 1", "1/1000,2,-1"),
+            ("coefficients 0x1e+x=0", "0,1,30"),
             ("取系数 2*x + 1 = x^1 + 2", "0,1,-1"),
         ] {
             assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
