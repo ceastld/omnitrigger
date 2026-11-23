@@ -944,6 +944,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "窗口: 状态=已最小化",
     },
     Example {
+        icon: Icon::Search,
+        title: "按正则表达式筛选窗口标题",
+        query: r"窗口: 标题正则=^报告[0-9]+",
+    },
+    Example {
         icon: Icon::Grid,
         title: "打开 Windows 的蓝牙设置",
         query: "系统设置: 蓝牙",
