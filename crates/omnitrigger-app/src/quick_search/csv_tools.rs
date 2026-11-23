@@ -70,6 +70,8 @@ pub(super) enum CsvError {
     UnclosedQuote,
     InvalidSeparator,
     DelimiterArguments,
+    UnknownDelimiter,
+    AmbiguousDelimiter,
     DifferentColumnCount,
     TooManyAddedCells,
     InvalidHeader,
@@ -182,6 +184,8 @@ impl CsvError {
             Self::UnclosedQuote => "字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
             Self::DelimiterArguments => "用 JSON 数组填写原分隔符和目标分隔符，例如 [\";\",\",\"]",
+            Self::UnknownDelimiter => "需要至少两条等宽记录。也可用 分隔符转换 指定原分隔符",
+            Self::AmbiguousDelimiter => "有多个可能的分隔符，请用 分隔符转换 指定一个",
             Self::DifferentColumnCount => "每行的列数须一致",
             Self::TooManyAddedCells => "每次最多补齐 16384 个空单元格，请缩小表格范围",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
@@ -712,6 +716,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             from: '\t',
             to: ',',
         },
+        "自动转csv" | "auto-csv" => return auto_convert_delimiter(input),
         "分隔符转换" | "convert-delimiter" => {
             let ([from, to], data) =
                 json_argument_and_data::<[char; 2]>(input, CsvError::DelimiterArguments)?;
@@ -4310,6 +4315,23 @@ struct CsvReadError {
     column: usize,
 }
 
+fn auto_convert_delimiter(input: &str) -> Result<String, CsvError> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    if input.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let mut candidates = [',', '\t', ';', '|']
+        .into_iter()
+        .filter(|&delimiter| input.contains(delimiter))
+        .filter_map(|delimiter| read_rows(input, delimiter).ok())
+        .filter(|rows| rows.len() >= 2 && rows[0].len() >= 2);
+    let rows = candidates.next().ok_or(CsvError::UnknownDelimiter)?;
+    if candidates.next().is_some() {
+        return Err(CsvError::AmbiguousDelimiter);
+    }
+    Ok(write_rows(&rows, ','))
+}
+
 fn read_rows(input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvError> {
     read_delimited_rows(input, delimiter, true).map_err(|error| error.kind)
 }
@@ -6991,6 +7013,35 @@ null"#
             (r#"选列名 ["a"] a,a"#, CsvError::AmbiguousColumnName),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn recognizes_a_unique_delimiter_with_uniform_quoted_records() {
+        for (input, expected) in [
+            (
+                "自动转CSV 编号;金额;备注\n001;1,50;\"茶;浓\"\n002;;\"甲\n乙\"",
+                "编号,金额,备注\r\n001,\"1,50\",茶;浓\r\n002,\"\",\"甲\n乙\"",
+            ),
+            (
+                "auto-csv \u{feff}编号\t名称\n001\t茶",
+                "编号,名称\r\n001,茶",
+            ),
+            ("自动转CSV 甲|乙\n1|2", "甲,乙\r\n1,2"),
+            ("自动转CSV 甲,乙\n1,2", "甲,乙\r\n1,2"),
+        ] {
+            assert_eq!(transform_csv(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            transform_csv("自动转CSV a,b;c\n1,2;3"),
+            Err(CsvError::AmbiguousDelimiter),
+        );
+        for input in ["自动转CSV a,b", "自动转CSV a\nb", "自动转CSV a;b\n1"] {
+            assert_eq!(
+                transform_csv(input),
+                Err(CsvError::UnknownDelimiter),
+                "{input}"
+            );
         }
     }
 
