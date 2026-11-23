@@ -5309,12 +5309,28 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
             })
             .collect()
     });
-    if let Some(index) = parse_scope(&search_key(query)).and_then(|scope| {
-        scopes
+    let key = search_key(query.trim());
+    let qualified = parse_scope(&key)
+        .map(|scope| (scope, ""))
+        .or_else(|| scoped_query(&key))
+        .or_else(|| {
+            let (name, term) = key.split_once(char::is_whitespace)?;
+            Some((parse_scope(name)?, term.trim()))
+        });
+    if let Some((scope, term)) = qualified {
+        if let Some(default) = scopes
             .iter()
             .position(|&candidate| candidate == Some(scope))
-    }) {
-        return vec![index];
+        {
+            if term.is_empty() {
+                return vec![default];
+            }
+            return matching_examples(term)
+                .into_iter()
+                .find(|&index| scopes[index] == Some(scope))
+                .into_iter()
+                .collect();
+        }
     }
     let mut seen = Vec::new();
     matching_examples(query)
@@ -5939,6 +5955,22 @@ mod tests {
             assert!(tool_operation_examples(scope, prefix).is_some());
             assert_eq!(tool_operation_examples(scope, with_argument), None);
         }
+    }
+
+    #[test]
+    fn narrows_the_tool_index_to_a_named_tool_and_its_matching_examples() {
+        for (query, expected) in [
+            ("circle: 切点", "圆: 切点 "),
+            ("vector 点积", "向量: 点积 "),
+            ("complex 由极坐标", "复数: 由极坐标 "),
+            ("ＣＳＶ　最近点", "CSV: 最近点 "),
+            ("matrix 乘方", "矩阵: 乘方 "),
+        ] {
+            let items = tool_index_examples(query);
+            assert_eq!(items.len(), 1, "{query}");
+            assert!(EXAMPLES[items[0]].query.starts_with(expected), "{query}");
+        }
+        assert!(tool_index_examples("circle 查无此工具用法").is_empty());
     }
 
     #[test]
