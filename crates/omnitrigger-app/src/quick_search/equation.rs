@@ -41,7 +41,7 @@ impl EquationError {
                 "输入 x² < 3x - 2，或先填写 >、>=、<、<= 中的一个，再填写 a, b, c"
             }
             Self::RootArguments => "填写两个有理数根，可再填非零的二次项系数",
-            Self::CurvePairArguments => "分别填写两条曲线的 a, b, c 三个系数，两组用分号或换行隔开",
+            Self::CurvePairArguments => "填写两条函数，用分号或换行隔开，例如 x²; 1",
             Self::ThreePointArguments => {
                 "填写三个横坐标互不相同的点，每个点写 x, y，各点用分号或换行隔开"
             }
@@ -287,7 +287,7 @@ fn quadratic_center(a: &BigRational, b: BigRational, c: BigRational) -> (BigRati
 }
 
 fn quadratic_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
-    let coefficients = coefficient_row(input)?;
+    let coefficients = function_coefficients(input)?;
     if coefficients[0].numer().sign() == Sign::NoSign {
         return Err(EquationError::NonQuadratic);
     }
@@ -384,7 +384,7 @@ fn quadratic_from_vertex(input: &str) -> Result<String, EquationError> {
 fn polynomial_tangent(input: &str) -> Result<String, EquationError> {
     let invalid = EquationError::TangentArguments;
     let (coefficients, point) = input.split_once('@').ok_or(invalid)?;
-    let [a, b, c] = coefficient_row(coefficients)?;
+    let [a, b, c] = function_coefficients(coefficients)?;
     let x = equation_value(point, invalid)?;
     let ax = &a * &x;
     let slope = &ax * BigInt::from(2u8) + b;
@@ -464,7 +464,7 @@ fn polynomial_bounds(
     let (coefficients, bounds) = input.split_once('@').ok_or(invalid)?;
     let (start, end) = bounds.split_once(['到', '至']).ok_or(invalid)?;
     Ok((
-        coefficient_row(coefficients)?,
+        function_coefficients(coefficients)?,
         [
             equation_value(start, invalid)?,
             equation_value(end, invalid)?,
@@ -494,9 +494,10 @@ fn polynomial_pair(input: &str) -> Result<[[BigRational; 3]; 2], EquationError> 
     let (first, second) = input
         .split_once([';', '；', '\n'])
         .ok_or(EquationError::CurvePairArguments)?;
-    let parse = |coefficients| match coefficient_row(coefficients) {
+    let parse = |coefficients: &str| match function_coefficients(coefficients) {
         Err(
             EquationError::Coefficients
+            | EquationError::ExpressionArguments
             | EquationError::Evaluation(FractionError::Invalid | FractionError::Incomplete),
         ) => Err(EquationError::CurvePairArguments),
         result => result,
@@ -580,7 +581,7 @@ fn polynomial_intersections(input: &str) -> Result<String, EquationError> {
 }
 
 fn polynomial_standard_form(input: &str) -> Result<String, EquationError> {
-    let coefficients = coefficient_row(input)?;
+    let coefficients = function_coefficients(input)?;
     let mut expression = String::new();
     for (coefficient, variable) in coefficients.into_iter().zip(["x²", "x", ""]) {
         let sign = coefficient.numer().sign();
@@ -794,6 +795,19 @@ pub(super) fn format_centered_roots(
     }
 }
 
+fn function_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
+    if let Some((output, expression)) = input.split_once('=') {
+        if !output.trim().eq_ignore_ascii_case("y") {
+            return Err(EquationError::ExpressionArguments);
+        }
+        return expanded_polynomial(expression, PolynomialForm::Quadratic);
+    }
+    if split_top_level_commas(input).nth(1).is_some() {
+        return coefficient_row(input);
+    }
+    expanded_polynomial(input, PolynomialForm::Quadratic)
+}
+
 fn coefficient_row(input: &str) -> Result<[BigRational; 3], EquationError> {
     let mut terms = split_top_level_commas(input);
     let (Some(a), Some(b), Some(c), None) =
@@ -912,6 +926,31 @@ fn parameter_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uses_function_expressions_in_the_exact_polynomial_tools() {
+        for (input, expected) in [
+            ("切线 x²/2 - x + 3/4 @ 2", "0,1,-5/4"),
+            ("定积分 y = x**2 @ 0 到 2", "8/3"),
+            (
+                "区间极值 y = -x² + 1 @ -1 到 1",
+                "最小值 0（x = -1、1）\n最大值 1（x = 0）",
+            ),
+            ("围成面积 y=x² ; 1", "4/3"),
+            ("标准式 Y = 2 + x - 1 + x", "y = 2x + 1"),
+            ("判别式 y = x**2 - 3*x + 2", "1"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            solve_equation("交点 y = x² ; y = 1"),
+            solve_equation("交点 1,0,0 ; 0,0,1"),
+        );
+        assert_eq!(
+            solve_equation("定积分 x = 1 @ 0 到 2"),
+            Err(EquationError::ExpressionArguments),
+        );
+    }
 
     #[test]
     fn solves_two_variable_systems_written_as_equations() {

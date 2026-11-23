@@ -36,10 +36,15 @@ impl Example {
             return (!data.is_empty()).then_some(self.query.len() - data.len());
         }
         let input = input.trim_start();
-        let (operation, arguments) = input.split_once(char::is_whitespace)?;
+        let operation_and_arguments = input.split_once(char::is_whitespace);
+        let operation = operation_and_arguments.map_or(input, |(operation, _)| operation);
         let named_operation = replaceable_tool_operations(scope)
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(operation));
+        if matches!(scope, Scope::Equation | Scope::LinearSystem) && !named_operation {
+            return (!input.is_empty()).then_some(self.query.len() - input.len());
+        }
+        let (_, arguments) = operation_and_arguments?;
         if !matches!(
             scope,
             Scope::Json
@@ -139,6 +144,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把二次函数系数写成标准式",
         query: "方程: 标准式 1/2,-1,3/4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用函数展开式直接求积分",
+        query: "方程: 定积分 y = x**2 @ 0 到 2",
     },
     Example {
         icon: Icon::Terminal,
@@ -4990,6 +5000,24 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 
 fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
     match scope {
+        Scope::Equation => &[
+            "不等式",
+            "顶点",
+            "配方",
+            "判别式",
+            "韦达",
+            "取系数",
+            "由根",
+            "交点",
+            "围成面积",
+            "标准式",
+            "过三点",
+            "由顶点",
+            "切线",
+            "定积分",
+            "区间极值",
+        ],
+        Scope::LinearSystem => &["通解"],
         Scope::Date => &[
             "列出",
             "格式化",
@@ -5108,6 +5136,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Tempo
         | Scope::Circuit
         | Scope::Solid
+        | Scope::Equation
+        | Scope::LinearSystem
             if !term.is_empty()
                 && replaceable_tool_operations(scope).iter().any(|operation| {
                     operation
@@ -5201,11 +5231,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
-        Scope::Equation
-            if !term.is_empty()
-                && ["不等式", "顶点", "配方", "判别式", "韦达"]
-                    .iter()
-                    .any(|operation| operation.starts_with(term)) => {}
         Scope::LinearFit
             if !term.is_empty()
                 && ["预测", "残差", "误差", "过原点"]
@@ -5464,6 +5489,53 @@ pub(super) fn function_examples(query: &str) -> Option<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_only_equation_inputs_and_suggests_named_operations() {
+        for (scope, typed, query, arguments) in [
+            (
+                Scope::Equation,
+                "切",
+                "方程: 切线 1/2,-1,3/4 @ 2",
+                "1/2,-1,3/4 @ 2",
+            ),
+            (
+                Scope::Equation,
+                "取",
+                "方程: 取系数 (1/3+1/6)*x^2 - x + 3/4",
+                "(1/3+1/6)*x^2 - x + 3/4",
+            ),
+            (
+                Scope::LinearSystem,
+                "通",
+                "联立: 通解 1,2,3; 2,4,6",
+                "1,2,3; 2,4,6",
+            ),
+            (
+                Scope::Equation,
+                "",
+                "方程: x**2 - 3*x + 2 = 0",
+                "x**2 - 3*x + 2 = 0",
+            ),
+            (
+                Scope::LinearSystem,
+                "",
+                "联立: x + y = 3; x - y = 1",
+                "x + y = 3; x - y = 1",
+            ),
+        ] {
+            let matches = tool_operation_examples(scope, typed).unwrap();
+            let example = matches
+                .into_iter()
+                .map(|index| &EXAMPLES[index])
+                .find(|example| example.query == query)
+                .expect(query);
+            let start = example.argument_start().unwrap();
+            assert_eq!(&query[start..], arguments);
+        }
+        assert!(tool_operation_examples(Scope::Equation, "切线 x²").is_none());
+        assert!(tool_operation_examples(Scope::LinearSystem, "通解 x").is_none());
+    }
 
     #[test]
     fn csv_example_data_selection_preserves_array_options() {
