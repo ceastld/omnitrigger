@@ -266,6 +266,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐步缩小步长并比较中心点两侧的函数值",
+        query: "方程: 两侧采样 sin(x)/x @ 0; 0.1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用 f(x) 记法计算指定坐标的函数值",
         query: "方程: 函数值 f(x) = cosd(x) @ 180,0,90",
     },
@@ -5459,6 +5464,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "搜索零点",
             "采样图",
             "函数值",
+            "两侧采样",
             "函数对照",
             "函数对照图",
             "二分求根",

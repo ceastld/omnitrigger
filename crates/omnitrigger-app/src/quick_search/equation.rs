@@ -23,6 +23,7 @@ const MAX_ROOT_CANDIDATES: usize = 64;
 const FUNCTION_PLOT_INTERVALS: u32 = 32;
 const MAX_FUNCTION_POINTS: u32 = 129;
 const MAX_FUNCTION_INPUTS: usize = 64;
+const APPROACH_SAMPLE_LAYERS: usize = 6;
 const MAX_COMPARED_FUNCTIONS: usize = 4;
 const BISECTION_ITERATIONS: usize = 128;
 const BISECTION_RESIDUAL_RATIO: f64 = 1e-8;
@@ -46,6 +47,8 @@ pub(super) enum EquationError {
     FunctionSampleArguments,
     FunctionSampleHasNoValues,
     FunctionValuesArguments,
+    FunctionApproachArguments,
+    FunctionApproachStep,
     FunctionComparisonArguments,
     FunctionComparisonPlotArguments,
     BisectionArguments,
@@ -97,6 +100,10 @@ impl EquationError {
             Self::FunctionValuesArguments => {
                 "填写带 x 的算式，用 @ 隔开 1 至 64 个以逗号分隔的横坐标"
             }
+            Self::FunctionApproachArguments => {
+                "填写函数、中心横坐标和可选正步长，例如 sin(x)/x @ 0; 0.1"
+            }
+            Self::FunctionApproachStep => "该步长下无法取到中心两侧的有限横坐标",
             Self::FunctionComparisonArguments => {
                 "填写 2 至 4 个算式的 JSON 数组，@ 后接横坐标，例如 [\"sin(x)\",\"cos(x)\"] @ 0,pi/2"
             }
@@ -173,6 +180,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "函数值" | "function-values" => {
                 return format_function_samples(&function_samples_for_inputs(arguments)?);
             }
+            "两侧采样" | "approach-samples" => return function_approach_samples(arguments),
             "函数对照" | "compare-functions" => return compare_function_values(arguments),
             "函数对照图" | "compare-function-plot" => {
                 return sample_function_comparison(arguments)?.csv();
@@ -873,6 +881,52 @@ impl FunctionComparison {
 
 fn function_sample_value(expression: &str, x: f64) -> Result<Option<f64>, EquationError> {
     sample_at_x(expression, x).map_err(EquationError::Approximation)
+}
+
+fn function_approach_samples(input: &str) -> Result<String, EquationError> {
+    let invalid = EquationError::FunctionApproachArguments;
+    let (expression, arguments) = split_function_arguments(input, invalid)?;
+    let (center, step) = arguments
+        .split_once(';')
+        .map_or((arguments, None), |(center, step)| (center, Some(step)));
+    let x = evaluate(center).map_err(EquationError::Approximation)?;
+    let mut step = match step {
+        Some(step) => evaluate(step).map_err(EquationError::Approximation)?,
+        None => x.abs().max(1.0) * 0.1,
+    };
+    if step <= 0.0 {
+        return Err(invalid);
+    }
+    let header = "步长,左横坐标,左值,右横坐标,右值";
+    let mut csv = String::from(header);
+    let display = |value| format_result(value).map_err(EquationError::Approximation);
+    for _ in 0..APPROACH_SAMPLE_LAYERS {
+        let [left, right] = [x - step, x + step];
+        if !left.is_finite() || !right.is_finite() || left == x || right == x {
+            break;
+        }
+        let left_value = function_sample_value(expression, left)?
+            .map(display)
+            .transpose()?
+            .unwrap_or_default();
+        let right_value = function_sample_value(expression, right)?
+            .map(display)
+            .transpose()?
+            .unwrap_or_default();
+        let row = [
+            display(step)?,
+            format_coordinate(left),
+            left_value,
+            format_coordinate(right),
+            right_value,
+        ];
+        append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), invalid)?;
+        step /= 10.0;
+    }
+    if csv == header {
+        return Err(EquationError::FunctionApproachStep);
+    }
+    Ok(csv)
 }
 
 enum SampledRootCandidate {
@@ -2462,6 +2516,23 @@ mod tests {
         assert_eq!(
             solve_equation(r#"函数对照 ["x","x**2"] @ 1,"#),
             Err(EquationError::FunctionComparisonArguments)
+        );
+    }
+
+    #[test]
+    fn samples_both_sides_of_a_coordinate_at_successively_smaller_steps() {
+        let csv = solve_equation("两侧采样 1/x @ 0; 0.1").unwrap();
+        assert_eq!(csv.lines().count(), 7);
+        assert_eq!(csv.lines().nth(1), Some("0.1,-0.1,-10,0.1,10"));
+        let left_missing = solve_equation("approach-samples sqrt(x) @ 0; 1").unwrap();
+        assert_eq!(left_missing.lines().nth(1), Some("1,-1,\"\",1,1"));
+        assert_eq!(
+            solve_equation("两侧采样 x @ 1e30; 1"),
+            Err(EquationError::FunctionApproachStep)
+        );
+        assert_eq!(
+            solve_equation("两侧采样 x @ 0; -1"),
+            Err(EquationError::FunctionApproachArguments)
         );
     }
 
