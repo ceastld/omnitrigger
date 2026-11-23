@@ -1,3 +1,5 @@
+use std::f64::consts::LN_10;
+
 use super::calculator::{evaluate, format_result, normalize, CalculationError};
 use super::operators::split_top_level_commas;
 
@@ -7,6 +9,8 @@ const MAX_COMBINED_LEVELS: usize = 128;
 pub(super) enum DecibelError {
     Arguments,
     LevelCount,
+    DifferenceArguments,
+    LevelOrder,
     NonPositiveRatio,
     OutOfRange,
     Evaluation(CalculationError),
@@ -17,6 +21,8 @@ impl DecibelError {
         match self {
             Self::Arguments => "填写分贝操作和数值，例如 功率比 100。按 F1 查看用法",
             Self::LevelCount => "用逗号分隔 2 至 128 个分贝值，例如 叠加 60 dB,60 dB",
+            Self::DifferenceArguments => "用 @ 分隔总分贝值和要扣除的分贝值",
+            Self::LevelOrder => "总分贝值须高于要扣除的分贝值",
             Self::NonPositiveRatio => "功率比和幅度比须大于零",
             Self::OutOfRange => "换算结果超出可表示的范围",
             Self::Evaluation(error) => error.message(),
@@ -36,6 +42,7 @@ pub(super) fn convert_decibels(query: &str) -> Result<String, DecibelError> {
         "转功率比" | "to-power-ratio" => (10.0, true),
         "转幅度比" | "to-amplitude-ratio" => (20.0, true),
         "叠加" | "功率叠加" | "power-sum" => return combine_levels(expression),
+        "功率差" | "power-difference" => return subtract_levels(expression),
         _ => return Err(DecibelError::Arguments),
     };
     let value = if to_ratio {
@@ -85,6 +92,28 @@ fn combine_levels(expression: &str) -> Result<String, DecibelError> {
     format_level(peak + 10.0 * relative_power.log10())
 }
 
+fn subtract_levels(expression: &str) -> Result<String, DecibelError> {
+    let (total, background) = expression
+        .split_once('@')
+        .filter(|(total, background)| !total.trim().is_empty() && !background.trim().is_empty())
+        .ok_or(DecibelError::DifferenceArguments)?;
+    let total = parse_level(total)?;
+    let background = parse_level(background)?;
+    if total <= background {
+        return Err(DecibelError::LevelOrder);
+    }
+    let gap = total - background;
+    let scale = LN_10 / 10.0;
+    let scaled_gap = gap * scale;
+    // 当两级很接近时，用 exp_m1 保留剩余功率的有效数字。
+    let log_fraction = if scaled_gap == 0.0 {
+        gap.ln() + scale.ln()
+    } else {
+        (-(-scaled_gap).exp_m1()).ln()
+    };
+    format_level(total + log_fraction / scale)
+}
+
 fn format_level(level: f64) -> Result<String, DecibelError> {
     let level = format_result(level).map_err(DecibelError::Evaluation)?;
     Ok(format!("{level} dB"))
@@ -126,6 +155,26 @@ mod tests {
             Err(DecibelError::OutOfRange)
         );
         assert_eq!(convert_decibels("混合 2"), Err(DecibelError::Arguments));
+    }
+
+    #[test]
+    fn subtracts_in_power_space_and_handles_nearly_equal_levels() {
+        for (query, expected) in [
+            ("功率差 70 dB @ 60 dB", 69.54242509439325),
+            ("POWER-DIFFERENCE 1e-15 dB @ 0 dB", -156.37784311300538),
+            ("功率差 4000 dB @ -4000 dB", 4000.0),
+        ] {
+            let output = convert_decibels(query).unwrap();
+            let level = output.strip_suffix(" dB").unwrap().parse::<f64>().unwrap();
+            assert!((level - expected).abs() < 1e-10, "{query}: {level}");
+        }
+        for query in ["功率差 60 @ 60", "功率差 59 @ 60"] {
+            assert_eq!(convert_decibels(query), Err(DecibelError::LevelOrder));
+        }
+        assert_eq!(
+            convert_decibels("功率差 60 dB @"),
+            Err(DecibelError::DifferenceArguments)
+        );
     }
 
     #[test]
