@@ -2272,6 +2272,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留词语匹配行和前后的文本",
+        query: "文本: 匹配上下文 [\"错误\",1,1] 准备\n请求\n错误 A\n恢复\n结束",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "排除含关键词的行",
         query: "文本: 排除行 \"错误\" 成功 A\n错误 B\n成功 C",
     },
@@ -2364,6 +2369,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "保留符合正则表达式的行",
         query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按正则提取匹配行及前后的文本",
+        query: "文本: 正则上下文 [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
     },
     Example {
         icon: Icon::Terminal,

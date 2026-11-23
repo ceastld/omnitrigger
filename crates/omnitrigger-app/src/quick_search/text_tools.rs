@@ -84,6 +84,7 @@ pub(super) enum TextError {
     InvalidNumberLine,
     InvalidLineEnding,
     EmptySearchText,
+    LineContextArguments,
     InvalidRegex,
     IncompleteRegexGroup,
     UnknownRegexGroup,
@@ -125,6 +126,7 @@ impl TextError {
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::EdgeLineCount => "填写正整数行数，例如 文本: 取末尾行 2",
             Self::InvalidLineStep => "填写起始行号和正整数步长，例如 文本: 间隔取行 2,3",
+            Self::LineContextArguments => "填写关键词、前置行数和后置行数，例如 [\"错误\",1,2]",
             Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
             Self::MissingLine => "指定行号超出了文本行数",
             Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
@@ -200,6 +202,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
+        "匹配上下文" | "context-lines" => return match_line_context(text, false),
+        "正则上下文" | "regex-context-lines" => return match_line_context(text, true),
         "共有行" | "行交集" | "intersect-lines" => {
             return compare_line_sets(text, LineSetOperation::Intersection);
         }
@@ -1053,6 +1057,59 @@ fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextErr
     Ok(select_lines(text, |line| {
         pattern.is_match(line) == keep_matches
     }))
+}
+
+fn match_line_context(input: &str, use_regex: bool) -> Result<String, TextError> {
+    let ((pattern, before, after), text) = json_argument_and_tail::<(String, usize, usize)>(input)
+        .ok_or(TextError::LineContextArguments)?;
+    if pattern.is_empty() {
+        return Err(TextError::EmptySearchText);
+    }
+    if pattern.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    if use_regex {
+        let regex = compile_regex(&pattern)?;
+        Ok(lines_around_matches(text, before, after, |line| {
+            regex.is_match(line)
+        }))
+    } else {
+        Ok(lines_around_matches(text, before, after, |line| {
+            line.contains(&pattern)
+        }))
+    }
+}
+
+fn lines_around_matches(
+    text: &str,
+    before: usize,
+    after: usize,
+    matches: impl Fn(&str) -> bool,
+) -> String {
+    // 两个迭代器都只向前扫描，重叠的上下文只输出一次。
+    let mut remaining = text.lines().enumerate().peekable();
+    let mut output = String::new();
+    let mut wrote_line = false;
+    for (index, line) in text.lines().enumerate() {
+        if !matches(line) {
+            continue;
+        }
+        let start = index.saturating_sub(before);
+        let end = index.saturating_add(after);
+        while let Some((row, line)) = remaining.next_if(|&(row, _)| row <= end) {
+            if row >= start {
+                if wrote_line {
+                    output.push('\n');
+                }
+                output.push_str(line);
+                wrote_line = true;
+            }
+        }
+    }
+    output
 }
 
 fn select_text_column(input: &str) -> Result<String, TextError> {
@@ -2467,6 +2524,34 @@ mod tests {
             transform_text(r#"保留行 "" 内容"#),
             Err(TextError::EmptySearchText)
         );
+    }
+
+    #[test]
+    fn includes_asymmetric_line_context_once_in_original_input_order() {
+        for (query, output) in [
+            (
+                "匹配上下文 [\"错误\",1,1] 启动\r\n错误 A\r\n重试\r\n错误 B\r\n恢复\r\n结束",
+                "启动\n错误 A\n重试\n错误 B\n恢复",
+            ),
+            (
+                "regex-context-lines [\"^WARN\",0,1] INFO 启动\nWARN 重试\n\nWARN 结束",
+                "WARN 重试\n\nWARN 结束",
+            ),
+            ("context-lines [\"x\",0,0] x\nX\ny\nlast x", "x\nlast x"),
+            ("context-lines [\"missing\",1,1] 无结果", ""),
+            ("context-lines [\"x\",8,8]\n\nx\n\\s", "\nx\n\\s"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(output), "{query}");
+        }
+        for (query, error) in [
+            ("匹配上下文 [\"x\",-1,0] x", TextError::LineContextArguments),
+            ("匹配上下文 [\"\",1,1] x", TextError::EmptySearchText),
+            ("正则上下文 [\"[\",1,1] x", TextError::InvalidRegex),
+        ] {
+            assert_eq!(transform_text(query), Err(error), "{query}");
+        }
+        let entire = format!("context-lines [\"x\",{0},{0}] a\nx\nz", usize::MAX);
+        assert_eq!(transform_text(&entire).as_deref(), Ok("a\nx\nz"));
     }
 
     #[test]
