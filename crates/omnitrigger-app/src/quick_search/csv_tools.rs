@@ -245,6 +245,7 @@ pub(super) enum CsvError {
     CoordinateDifferenceArguments,
     CoordinateDifferencePointCount,
     CoordinateDifferenceNoOverlap,
+    CoordinateCurveCrossingArguments,
     GroupSelectionArguments,
     SortFields,
     PivotColumns,
@@ -542,6 +543,9 @@ impl CsvError {
             }
             Self::CoordinateDifferencePointCount => "每条曲线都需要 2 至 64 个完整样点",
             Self::CoordinateDifferenceNoOverlap => "两条曲线的横坐标范围没有交集",
+            Self::CoordinateCurveCrossingArguments => {
+                "填写横坐标列和两条曲线的值列，例如 [\"时间\",\"实测\",\"基准\"]"
+            }
             Self::GroupSelectionArguments => {
                 "填写分组列、数值列和每组保留的正整数行数，例如 [[\"地区\"],\"金额\",2]"
             }
@@ -1136,8 +1140,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
         "曲线差值" | "curve-difference" | "曲线对比图" | "curve-comparison-plot" => {
-            return compare_coordinate_curves(input)?.to_csv()
+            let (curves, name) = read_coordinate_curve_comparison(input)?;
+            return curves.to_csv(&name);
         }
+        "曲线交点" | "curve-crossings" => return coordinate_curve_crossings(input),
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
@@ -5556,16 +5562,22 @@ fn coordinate_horizontal_crossings(input: &str) -> Result<String, CsvError> {
     )?;
     sort_distinct_coordinates(&mut table.samples)?;
 
-    let samples = &table.samples;
+    horizontal_crossings_csv(&table.samples, &target)
+}
+
+fn horizontal_crossings_csv(
+    samples: &[CoordinateSample],
+    target: &BigRational,
+) -> Result<String, CsvError> {
     let mut csv = String::from("起始横坐标,结束横坐标,类型");
     let mut index = 0;
     while let Some(sample) = samples.get(index) {
         let (x, y) = &sample.point;
-        let row = if *y == target {
+        let row = if y == target {
             let first = index;
             while samples
                 .get(index + 1)
-                .is_some_and(|next| next.point.1 == target)
+                .is_some_and(|next| next.point.1 == *target)
             {
                 index += 1;
             }
@@ -5580,7 +5592,7 @@ fn coordinate_horizontal_crossings(input: &str) -> Result<String, CsvError> {
                 kind.to_owned(),
             ])
         } else if let Some(next) = samples.get(index + 1) {
-            crossing_inside_segment(&sample.point, &next.point, &target)?
+            crossing_inside_segment(&sample.point, &next.point, target)?
                 .map(|x| [x.to_string(), x.to_string(), "交点".to_owned()])
         } else {
             None
@@ -5645,19 +5657,22 @@ fn collect_coordinate_samples(
     Ok(samples)
 }
 
-struct CoordinateCurveComparison {
-    headers: [String; 4],
-    samples: Vec<(BigRational, [BigRational; 2])>,
+struct AlignedCoordinateCurves {
+    headers: [String; 3],
+    samples: Vec<(BigRational, [BigRational; 3])>,
 }
 
-impl CoordinateCurveComparison {
-    fn to_csv(&self) -> Result<String, CsvError> {
+impl AlignedCoordinateCurves {
+    fn to_csv(&self, name: &str) -> Result<String, CsvError> {
         let mut csv = String::new();
         let limit = CsvError::ColumnComparisonTooLarge;
-        append_bounded_csv_row(&mut csv, self.headers.iter().map(String::as_str), limit)?;
-        for (x, [left_y, right_y]) in &self.samples {
-            let difference = left_y - right_y;
-            ensure_exact_size(&difference).map_err(|_| CsvError::ComputedNumberRange)?;
+        let headers = self
+            .headers
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(name));
+        append_bounded_csv_row(&mut csv, headers, limit)?;
+        for (x, [left_y, right_y, difference]) in &self.samples {
             let row = [
                 x.to_string(),
                 left_y.to_string(),
@@ -5669,9 +5684,9 @@ impl CoordinateCurveComparison {
         Ok(csv)
     }
 
-    fn into_chart(self) -> Result<(String, ScatterPlot), CsvError> {
-        let csv = self.to_csv()?;
-        let [x_name, left_name, right_name, _] = self.headers;
+    fn into_chart(self, name: &str) -> Result<(String, ScatterPlot), CsvError> {
+        let csv = self.to_csv(name)?;
+        let [x_name, left_name, right_name] = self.headers;
         let series = [left_name, right_name]
             .into_iter()
             .enumerate()
@@ -5690,21 +5705,32 @@ impl CoordinateCurveComparison {
     }
 }
 
-fn compare_coordinate_curves(input: &str) -> Result<CoordinateCurveComparison, CsvError> {
+fn read_coordinate_curve_comparison(
+    input: &str,
+) -> Result<(AlignedCoordinateCurves, String), CsvError> {
     let invalid = CsvError::CoordinateDifferenceArguments;
     let ((columns, name), data) =
         json_argument_and_data::<([ColumnReference; 3], String)>(input, invalid)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(invalid);
+    }
+    let curves = align_coordinate_curves(data, &columns, invalid)?;
+    if curves.headers.contains(&name) {
+        return Err(invalid);
+    }
+    Ok((curves, name))
+}
+
+fn align_coordinate_curves(
+    data: &str,
+    columns: &[ColumnReference; 3],
+    invalid: CsvError,
+) -> Result<AlignedCoordinateCurves, CsvError> {
     let data = data.strip_prefix('\u{feff}').unwrap_or(data);
     let rows = read_rows(data, ',')?;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_distinct_columns(header, &columns, invalid)?;
+    let columns = resolve_distinct_columns(header, columns, invalid)?;
     let [x, left_y, right_y] = [columns[0], columns[1], columns[2]];
-    if name.trim().is_empty()
-        || name.contains('\0')
-        || columns.iter().any(|&index| header[index] == name)
-    {
-        return Err(invalid);
-    }
     let point_count_error = CsvError::CoordinateDifferencePointCount;
     let mut left = collect_coordinate_samples(records, &[x, left_y], point_count_error)?;
     let mut right = collect_coordinate_samples(records, &[x, right_y], point_count_error)?;
@@ -5729,17 +5755,33 @@ fn compare_coordinate_curves(input: &str) -> Result<CoordinateCurveComparison, C
         header[x].clone(),
         header[left_y].clone(),
         header[right_y].clone(),
-        name,
     ];
     let samples = coordinates
         .into_iter()
         .map(|x| {
             let left_y = interpolate_coordinate_value(&left, x)?;
             let right_y = interpolate_coordinate_value(&right, x)?;
-            Ok((x.clone(), [left_y, right_y]))
+            let difference = &left_y - &right_y;
+            ensure_exact_size(&difference).map_err(|_| CsvError::ComputedNumberRange)?;
+            Ok((x.clone(), [left_y, right_y, difference]))
         })
         .collect::<Result<Vec<_>, CsvError>>()?;
-    Ok(CoordinateCurveComparison { headers, samples })
+    Ok(AlignedCoordinateCurves { headers, samples })
+}
+
+fn coordinate_curve_crossings(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateCurveCrossingArguments;
+    let (columns, data) = json_argument_and_data::<[ColumnReference; 3]>(input, invalid)?;
+    let difference_samples = align_coordinate_curves(data, &columns, invalid)?
+        .samples
+        .into_iter()
+        .enumerate()
+        .map(|(row_index, (x, [_, _, difference]))| CoordinateSample {
+            row_index,
+            point: (x, difference),
+        })
+        .collect::<Vec<_>>();
+    horizontal_crossings_csv(&difference_samples, &BigRational::default())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -5827,7 +5869,8 @@ pub(super) fn coordinate_line_chart(
     let (operation, input) = split_argument(query)?;
     if operation == "曲线对比图" || operation.eq_ignore_ascii_case("curve-comparison-plot") {
         return Some(
-            compare_coordinate_curves(input).and_then(CoordinateCurveComparison::into_chart),
+            read_coordinate_curve_comparison(input)
+                .and_then(|(curves, name)| curves.into_chart(&name)),
         );
     }
     let table = coordinate_line_table(operation, input)?;
@@ -7516,6 +7559,23 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn finds_intersections_and_overlaps_between_independently_sampled_curves() {
+        assert_eq!(
+            transform_csv("曲线交点 [1,2,3] x,a,b\n4,1,1\n0,0,0\n1,1,1\n2,2,\n3,0,1\n5,1,0")
+                .as_deref(),
+            Ok("起始横坐标,结束横坐标,类型\r\n0,1,重合区间\r\n5/2,5/2,交点\r\n4,4,交点")
+        );
+        assert_eq!(
+            transform_csv("curve-crossings [1,2,3] x,a,b\n0,0,1\n1,0,1").as_deref(),
+            Ok("起始横坐标,结束横坐标,类型")
+        );
+        assert_eq!(
+            transform_csv("曲线交点 [1,2,3] x,a,b\n0,0,\n1,2,2\n2,,3").as_deref(),
+            Ok("起始横坐标,结束横坐标,类型\r\n1,1,交点")
+        );
     }
 
     #[test]

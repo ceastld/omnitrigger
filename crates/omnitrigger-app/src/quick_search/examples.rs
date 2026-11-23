@@ -4833,6 +4833,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查询两条采样曲线的交点和重合区间",
+        query: "CSV: 曲线交点 [\"时间\",\"实测\",\"基准\"] 时间,实测,基准\n4,1,1\n0,0,0\n1,1,1\n2,2,\n3,0,1\n5,1,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按横坐标绘制 CSV 的累计梯形积分",
         query: "CSV: 梯形累计图 [\"时间\",\"高度\"] 时间,高度\n3,2\n0,-1\n2,\n1,0",
     },
@@ -5753,6 +5758,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "水平交点",
             "曲线差值",
             "曲线对比图",
+            "曲线交点",
             "梯形累计图",
             "曲线图",
             "残差图",
