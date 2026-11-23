@@ -3710,6 +3710,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "路径: 合法文件名 CON.报告?.txt",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "校验 Windows 文件名并显示长度",
+        query: "路径: 校验文件名 报告集.txt",
+    },
+    Example {
         icon: Icon::Layers,
         title: "把绝对路径转换为可复制的文件网址",
         query: r"路径: 转文件网址 C:\docs\report 2026.txt",

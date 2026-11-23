@@ -22,6 +22,9 @@ pub(super) enum PathError {
     ExtensionArguments,
     InvalidExtension,
     FilenameTooLong,
+    FilenameCharacters,
+    FilenameEnding,
+    ReservedFilename,
     MissingPart,
 }
 
@@ -47,6 +50,9 @@ impl PathError {
             Self::ExtensionArguments => "用 JSON 字符串数组填写路径和新扩展名",
             Self::InvalidExtension => "扩展名须为文件名后缀，可用空字符串删除",
             Self::FilenameTooLong => "文件名最多支持 255 个 UTF-16 单元",
+            Self::FilenameCharacters => "文件名含有 Windows 保留字符",
+            Self::FilenameEnding => "文件名末尾有空格或句点",
+            Self::ReservedFilename => "这是 Windows 的保留设备名",
             Self::MissingPart => "这条路径没有所选部分",
         }
     }
@@ -63,6 +69,7 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         "相对路径" | "relative" => return relative_path(input.trim()),
         "共同路径" | "common-path" => return common_path(input.trim()),
         "合法文件名" | "safe-filename" => return safe_filename(input.trim()),
+        "校验文件名" | "validate-filename" => return validate_filename(input.trim()),
         _ => {}
     }
     let input = strip_path_quotes(input.trim());
@@ -92,32 +99,57 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
 }
 
 fn safe_filename(input: &str) -> Result<String, PathError> {
+    let mut name = filename_text(input)?.replace(invalid_filename_character, "_");
+    name.truncate(name.trim_end_matches([' ', '.']).len());
+    if name.is_empty() || reserved_filename(&name) {
+        name.insert(0, '_');
+    }
+    if name.encode_utf16().take(MAX_FILENAME_UNITS + 1).count() > MAX_FILENAME_UNITS {
+        return Err(PathError::FilenameTooLong);
+    }
+    Ok(name)
+}
+
+fn validate_filename(input: &str) -> Result<String, PathError> {
+    let name = filename_text(input)?;
+    if name.chars().any(invalid_filename_character) {
+        return Err(PathError::FilenameCharacters);
+    }
+    if name.ends_with([' ', '.']) {
+        return Err(PathError::FilenameEnding);
+    }
+    if reserved_filename(name) {
+        return Err(PathError::ReservedFilename);
+    }
+    let units = name.encode_utf16().take(MAX_FILENAME_UNITS + 1).count();
+    if units > MAX_FILENAME_UNITS {
+        return Err(PathError::FilenameTooLong);
+    }
+    Ok(format!("文件名有效 · {units} 个 UTF-16 单元"))
+}
+
+fn filename_text(input: &str) -> Result<&str, PathError> {
     let input = input
         .strip_prefix('“')
         .and_then(|quoted| quoted.strip_suffix('”'))
         .unwrap_or_else(|| strip_path_quotes(input));
-    if input.is_empty() {
-        return Err(PathError::Incomplete);
-    }
-    let mut name: String = input
-        .chars()
-        .map(|character| {
-            if character < ' '
-                || matches!(
-                    character,
-                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
-                )
-            {
-                '_'
-            } else {
-                character
-            }
-        })
-        .collect();
-    name.truncate(name.trim_end_matches([' ', '.']).len());
+    (!input.is_empty())
+        .then_some(input)
+        .ok_or(PathError::Incomplete)
+}
+
+fn invalid_filename_character(character: char) -> bool {
+    character < ' '
+        || matches!(
+            character,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+        )
+}
+
+fn reserved_filename(name: &str) -> bool {
     let stem = name
         .split_once('.')
-        .map_or(name.as_str(), |(stem, _)| stem)
+        .map_or(name, |(stem, _)| stem)
         .trim_matches(' ')
         .to_ascii_uppercase();
     let numbered_device = stem
@@ -129,19 +161,11 @@ fn safe_filename(input: &str) -> Result<String, PathError> {
                 "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
             )
         });
-    if name.is_empty()
-        || numbered_device
+    numbered_device
         || matches!(
             stem.as_str(),
             "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
         )
-    {
-        name.insert(0, '_');
-    }
-    if name.encode_utf16().take(MAX_FILENAME_UNITS + 1).count() > MAX_FILENAME_UNITS {
-        return Err(PathError::FilenameTooLong);
-    }
-    Ok(name)
 }
 
 pub(super) fn file_url(path: &Path, is_directory: bool) -> Result<String, PathError> {
@@ -383,6 +407,37 @@ mod tests {
         assert_eq!(
             path_component(&format!("合法文件名 {}", "😀".repeat(128))),
             Err(PathError::FilenameTooLong)
+        );
+    }
+
+    #[test]
+    fn validates_single_windows_filenames_and_reports_why_a_name_fails() {
+        for (query, expected) in [
+            ("校验文件名 报告集.txt", Ok("文件名有效 · 7 个 UTF-16 单元")),
+            ("validate-filename .😀", Ok("文件名有效 · 3 个 UTF-16 单元")),
+            ("校验文件名 CON.txt", Err(PathError::ReservedFilename)),
+            (
+                "validate-filename LPT³.png",
+                Err(PathError::ReservedFilename),
+            ),
+            ("校验文件名 “报告集.txt ”", Err(PathError::FilenameEnding)),
+            ("校验文件名 ..", Err(PathError::FilenameEnding)),
+            ("校验文件名 原稿?.txt", Err(PathError::FilenameCharacters)),
+            (
+                "校验文件名 \"条\t目.txt\"",
+                Err(PathError::FilenameCharacters),
+            ),
+            ("校验文件名 \"\"", Err(PathError::Incomplete)),
+        ] {
+            assert_eq!(
+                path_component(query),
+                expected.map(str::to_owned),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            path_component(&format!("校验文件名 {}", "😀".repeat(128))),
+            Err(PathError::FilenameTooLong),
         );
     }
 
