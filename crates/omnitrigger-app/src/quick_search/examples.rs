@@ -2213,6 +2213,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用 NFKC 统一全角字母和圈号数字的写法",
+        query: "文本: Unicode规范化 NFKC ＡＢＣ①",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除终端日志中的 ANSI 颜色和样式",
         query: "文本: 去ANSI样式 \x1b[31m错误\x1b[0m \x1b[1m完成\x1b[m",
     },

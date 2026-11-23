@@ -14,6 +14,7 @@ use base64::{
 };
 use regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256, Sha512};
+use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
@@ -98,6 +99,7 @@ pub(super) enum TextError {
     InvalidHexUtf16Units,
     InvalidUtf16,
     InvalidCodePoint,
+    UnicodeNormalizationArguments,
     InvalidJsonString,
 }
 
@@ -148,6 +150,7 @@ impl TextError {
             }
             Self::InvalidUtf16 => "UTF-16 代理码元必须成对且顺序正确",
             Self::InvalidCodePoint => "输入以空格分隔的 Unicode 码位，例如 U+5317 U+4EAC",
+            Self::UnicodeNormalizationArguments => "填写 NFC、NFD、NFKC 或 NFKD，再输入文本",
             Self::InvalidJsonString => "请输入带双引号的 JSON 字符串",
         }
     }
@@ -196,6 +199,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行去前缀" | "strip-line-prefix" => return strip_line_decoration(text, true),
         "逐行去后缀" | "strip-line-suffix" => return strip_line_decoration(text, false),
         "逐行截取" | "slice-lines" => return slice_line_graphemes(text),
+        "unicode规范化" | "unicode-normalize" => return normalize_unicode(text),
         "取列" | "column" => return select_text_column(text),
         "取行" | "pick-lines" => return select_text_line_ranges(text, true),
         "取开头行" | "head-lines" => return take_edge_lines(text, false),
@@ -750,6 +754,25 @@ fn encode_code_points(text: &str) -> String {
         write!(encoded, "U+{:04X}", u32::from(character)).expect("写入 String 不会出错");
     }
     encoded
+}
+
+fn normalize_unicode(input: &str) -> Result<String, TextError> {
+    let (form, text) = input
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::UnicodeNormalizationArguments)?;
+    let text = text_payload(text)?;
+    let normalized: String = match form.to_ascii_uppercase().as_str() {
+        "NFC" => text.nfc().collect(),
+        "NFD" => text.nfd().collect(),
+        "NFKC" => text.nfkc().collect(),
+        "NFKD" => text.nfkd().collect(),
+        _ => return Err(TextError::UnicodeNormalizationArguments),
+    };
+    if normalized.len() > MAX_EXPANDED_TEXT_BYTES {
+        return Err(TextError::ResultTooLarge);
+    }
+    Ok(normalized)
 }
 
 fn codepoint_table(text: &str) -> Result<String, TextError> {
@@ -2427,6 +2450,24 @@ mod tests {
         assert_eq!(
             transform_text("码位解码 U+0061 U+0000"),
             Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn normalizes_unicode_in_all_four_standard_forms() {
+        for (query, expected) in [
+            ("Unicode规范化 NFC \" Cafe\u{301} \"", " Café "),
+            ("Unicode规范化 nfd Café", "Cafe\u{301}"),
+            ("unicode-normalize NFKC ＡＢＣ①", "ABC1"),
+            ("unicode-normalize NFKD Ａ①é", "A1e\u{301}"),
+            ("Unicode规范化 NFC ①", "①"),
+            ("Unicode规范化 NFC \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_text("Unicode规范化 UTF8 Café"),
+            Err(TextError::UnicodeNormalizationArguments),
         );
     }
 
