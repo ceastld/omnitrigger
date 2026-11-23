@@ -1,6 +1,7 @@
 use std::f64::consts::LN_10;
 
 use super::calculator::{evaluate, format_result, normalize, CalculationError};
+use super::duration::{elapsed_duration, DurationError};
 use super::operators::split_top_level_commas;
 
 const MAX_COMBINED_LEVELS: usize = 128;
@@ -11,6 +12,9 @@ pub(super) enum DecibelError {
     LevelCount,
     DifferenceArguments,
     LevelOrder,
+    WeightArguments,
+    NonPositiveDuration,
+    Duration(DurationError),
     NonPositiveRatio,
     OutOfRange,
     Evaluation(CalculationError),
@@ -23,6 +27,9 @@ impl DecibelError {
             Self::LevelCount => "用逗号分隔 2 至 128 个分贝值，例如 60 dB,70 dB",
             Self::DifferenceArguments => "用 @ 分隔总分贝值和要扣除的分贝值",
             Self::LevelOrder => "总分贝值须高于要扣除的分贝值",
+            Self::WeightArguments => "每项用 @ 分隔分贝值和时长，例如 60 dB @ 2秒",
+            Self::NonPositiveDuration => "每项时长须大于零",
+            Self::Duration(error) => error.message(),
             Self::NonPositiveRatio => "功率比和幅度比须大于零",
             Self::OutOfRange => "换算结果超出可表示的范围",
             Self::Evaluation(error) => error.message(),
@@ -30,9 +37,11 @@ impl DecibelError {
     }
 }
 
+#[derive(Clone, Copy)]
 enum LevelAggregation {
     Sum,
     Mean,
+    DurationMean,
 }
 
 pub(super) fn convert_decibels(query: &str) -> Result<String, DecibelError> {
@@ -51,6 +60,9 @@ pub(super) fn convert_decibels(query: &str) -> Result<String, DecibelError> {
         }
         "能量平均" | "energy-mean" | "energy-average" => {
             return aggregate_levels(expression, LevelAggregation::Mean);
+        }
+        "加权平均" | "duration-mean" => {
+            return aggregate_levels(expression, LevelAggregation::DurationMean);
         }
         "功率差" | "power-difference" => return subtract_levels(expression),
         _ => return Err(DecibelError::Arguments),
@@ -94,19 +106,42 @@ fn aggregate_levels(
     }
     let levels = levels
         .into_iter()
-        .map(parse_level)
+        .map(|entry| match aggregation {
+            LevelAggregation::DurationMean => level_with_duration(entry),
+            _ => Ok((parse_level(entry)?, 1.0)),
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    let peak = levels.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let peak = levels
+        .iter()
+        .map(|&(level, _)| level)
+        .fold(f64::NEG_INFINITY, f64::max);
     let divisor = match aggregation {
         LevelAggregation::Sum => 1.0,
-        LevelAggregation::Mean => levels.len() as f64,
+        LevelAggregation::Mean | LevelAggregation::DurationMean => {
+            levels.iter().map(|&(_, weight)| weight).sum()
+        }
     };
     // 以最大级为基准，避免将较大的分贝值直接转换为功率时溢出。
     let relative_power: f64 = levels
         .into_iter()
-        .map(|level| 10.0_f64.powf((level - peak) / 10.0))
+        .map(|(level, weight)| weight * 10.0_f64.powf((level - peak) / 10.0))
         .sum();
     format_level(peak + 10.0 * (relative_power / divisor).log10())
+}
+
+fn level_with_duration(input: &str) -> Result<(f64, f64), DecibelError> {
+    let (level, duration) = input
+        .split_once('@')
+        .filter(|(level, duration)| !level.trim().is_empty() && !duration.trim().is_empty())
+        .ok_or(DecibelError::WeightArguments)?;
+    let level = parse_level(level)?;
+    let nanos = elapsed_duration(duration.trim())
+        .map_err(DecibelError::Duration)?
+        .as_nanos();
+    if nanos == 0 {
+        return Err(DecibelError::NonPositiveDuration);
+    }
+    Ok((level, nanos as f64))
 }
 
 fn subtract_levels(expression: &str) -> Result<String, DecibelError> {
@@ -191,6 +226,28 @@ mod tests {
         assert_eq!(
             convert_decibels("功率差 60 dB @"),
             Err(DecibelError::DifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn averages_levels_weighted_by_positive_durations() {
+        for (query, expected) in [
+            ("加权平均 60 dB @ 2秒,70 dB @ 1秒", 66.02059991327963),
+            ("DURATION-MEAN 70 dB @ 1ns,60 dB @ 2ns", 66.02059991327963),
+            ("加权平均 60 dB @ 1秒,70 dB @ 1秒", 67.4036268949424),
+            ("加权平均 -20 dB @ 3分钟,-20 dB @ 2秒", -20.0),
+        ] {
+            let output = convert_decibels(query).unwrap();
+            let level = output.strip_suffix(" dB").unwrap().parse::<f64>().unwrap();
+            assert!((level - expected).abs() < 1e-10, "{query}: {level}");
+        }
+        assert_eq!(
+            convert_decibels("加权平均 60 dB @ 2s,70 dB"),
+            Err(DecibelError::WeightArguments)
+        );
+        assert_eq!(
+            convert_decibels("加权平均 60 dB @ 0ns,70 dB @ 1s"),
+            Err(DecibelError::NonPositiveDuration)
         );
     }
 

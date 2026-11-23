@@ -1534,6 +1534,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "分贝: 能量平均 60 dB,70 dB",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按持续时间加权计算分贝平均",
+        query: "分贝: 加权平均 60 dB @ 2秒,70 dB @ 1秒",
+    },
+    Example {
         icon: Icon::Layers,
         title: "按半径和高求圆柱的表面积与体积",
         query: "立体: 圆柱 3,5",
@@ -4756,6 +4761,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "叠加",
             "功率差",
             "能量平均",
+            "加权平均",
         ],
         Scope::Tempo => &["时长", "速度", "拍数"],
         Scope::Solid => &[
