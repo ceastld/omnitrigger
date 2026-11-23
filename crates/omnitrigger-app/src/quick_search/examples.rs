@@ -1006,6 +1006,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "窗口: 输出=进程统计",
     },
     Example {
+        icon: Icon::Grid,
+        title: "按进程统计窗口的最小化状态",
+        query: "窗口: 输出=进程状态统计",
+    },
+    Example {
         icon: Icon::Search,
         title: "按程序文件名排除窗口",
         query: "窗口: 排除进程=notepad.exe 报告",

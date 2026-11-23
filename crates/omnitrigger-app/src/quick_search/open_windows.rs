@@ -18,18 +18,61 @@ use super::{
 
 const MAX_WINDOW_EXPORT_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone, Copy)]
 enum WindowExport {
     Json,
     Csv { include_state: bool },
-    ProcessCounts,
+    ProcessCounts { include_state: bool },
 }
 
-#[derive(Serialize)]
+const WINDOW_EXPORTS: &[(&str, &str, WindowExport, &str)] = &[
+    ("JSON", "json", WindowExport::Json, "导出窗口列表"),
+    (
+        "CSV",
+        "csv",
+        WindowExport::Csv {
+            include_state: false,
+        },
+        "导出标题和程序文件名",
+    ),
+    (
+        "状态CSV",
+        "state-csv",
+        WindowExport::Csv {
+            include_state: true,
+        },
+        "在列表中附上最小化状态",
+    ),
+    (
+        "进程统计",
+        "process-counts",
+        WindowExport::ProcessCounts {
+            include_state: false,
+        },
+        "按程序统计窗口数",
+    ),
+    (
+        "进程状态统计",
+        "process-state-counts",
+        WindowExport::ProcessCounts {
+            include_state: true,
+        },
+        "按程序统计窗口总数和最小化状态",
+    ),
+];
+
+#[derive(Clone, Copy, Serialize)]
 struct WindowSummary<'a> {
     title: &'a str,
     process: Option<&'a str>,
     #[serde(skip_serializing)]
     minimized: bool,
+}
+
+struct ProcessWindowCount<'a> {
+    name: Option<&'a str>,
+    total: usize,
+    minimized: usize,
 }
 
 #[derive(Debug)]
@@ -194,30 +237,54 @@ impl OpenWindowsIndex {
     }
 
     pub(super) fn results(&self, query: &str) -> Results {
+        let (format, rest) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+        let (export, filter) = if let Some((_, value)) = format
+            .split_once(['=', '＝'])
+            .filter(|(name, _)| matches!(search_key(name).as_str(), "输出" | "output"))
+        {
+            let key = search_key(value);
+            if let Some((_, _, mode, _)) = WINDOW_EXPORTS.iter().find(|(name, alias, _, _)| {
+                name.eq_ignore_ascii_case(&key) || *alias == key.as_str()
+            }) {
+                (Some(*mode), rest.trim_start())
+            } else {
+                let prefix = &format[..format.len() - value.len()];
+                let tail = &query[format.len()..];
+                let suggestions: Vec<_> = WINDOW_EXPORTS
+                    .iter()
+                    .filter_map(|(name, alias, _, detail)| {
+                        let value = if name
+                            .get(..key.len())
+                            .is_some_and(|start| start.eq_ignore_ascii_case(&key))
+                        {
+                            *name
+                        } else if alias.starts_with(&key) {
+                            *alias
+                        } else {
+                            return None;
+                        };
+                        let expression = format!("窗口: {prefix}{value}{tail}");
+                        (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then(|| {
+                            InputSuggestion {
+                                expression,
+                                label: Some(value),
+                                result: (*detail).to_owned(),
+                            }
+                        })
+                    })
+                    .collect();
+                if !suggestions.is_empty() {
+                    return Results::FilterOptions(suggestions);
+                }
+                (None, query)
+            }
+        } else {
+            (None, query)
+        };
         let windows = match self {
             Self::Unloaded | Self::Loading => return Results::OpenWindowsLoading,
             Self::Unavailable(error) => return Results::OpenWindowsUnavailable(error.clone()),
             Self::Ready(windows) | Self::Refreshing(windows) => windows,
-        };
-        let (format, rest) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
-        let (export, filter) = match search_key(format).as_str() {
-            "输出=json" | "output=json" => (Some(WindowExport::Json), rest.trim_start()),
-            "输出=csv" | "output=csv" => (
-                Some(WindowExport::Csv {
-                    include_state: false,
-                }),
-                rest.trim_start(),
-            ),
-            "输出=状态csv" | "output=state-csv" => (
-                Some(WindowExport::Csv {
-                    include_state: true,
-                }),
-                rest.trim_start(),
-            ),
-            "输出=进程统计" | "output=process-counts" => {
-                (Some(WindowExport::ProcessCounts), rest.trim_start())
-            }
-            _ => (None, query),
         };
         let filter = match window_query(filter) {
             Ok(filter) => filter,
@@ -255,7 +322,7 @@ impl OpenWindowsIndex {
             })
             .collect();
         match filter.order {
-            Some(order) if !matches!(export, Some(WindowExport::ProcessCounts)) => {
+            Some(order) if !matches!(export, Some(WindowExport::ProcessCounts { .. })) => {
                 matches.sort_by(|(_, left), (_, right)| {
                     order.compare(
                         (&left.process_key, &left.title_key),
@@ -314,24 +381,48 @@ fn export_windows<'a>(
             }
             Results::text_value(Ok(csv))
         }
-        WindowExport::ProcessCounts => {
+        WindowExport::ProcessCounts { include_state } => {
             let mut counts = HashMap::new();
             for window in windows {
                 let key = window.process.map(str::to_lowercase);
-                let (_, count) = counts.entry(key).or_insert((window.process, 0usize));
-                *count += 1;
+                let group = counts.entry(key).or_insert(ProcessWindowCount {
+                    name: window.process,
+                    total: 0,
+                    minimized: 0,
+                });
+                group.total += 1;
+                group.minimized += usize::from(window.minimized);
             }
             let mut groups: Vec<_> = counts.into_iter().collect();
-            groups.sort_unstable_by(|(left, (_, left_count)), (right, (_, right_count))| {
-                right_count
-                    .cmp(left_count)
-                    .then_with(|| left.is_none().cmp(&right.is_none()))
-                    .then_with(|| left.cmp(right))
+            groups.sort_unstable_by(|(left_key, left), (right_key, right)| {
+                right
+                    .total
+                    .cmp(&left.total)
+                    .then_with(|| left_key.is_none().cmp(&right_key.is_none()))
+                    .then_with(|| left_key.cmp(right_key))
             });
-            let mut csv = String::from("程序文件名,窗口数");
-            for (_, (process, count)) in groups {
-                write!(csv, "\r\n{},{count}", csv_cell(process.unwrap_or_default()))
+            let mut csv = String::from(if include_state {
+                "程序文件名,窗口数,已最小化,未最小化"
+            } else {
+                "程序文件名,窗口数"
+            });
+            for (_, group) in groups {
+                write!(
+                    csv,
+                    "\r\n{},{}",
+                    csv_cell(group.name.unwrap_or_default()),
+                    group.total
+                )
+                .expect("写入 String 不会出错");
+                if include_state {
+                    write!(
+                        csv,
+                        ",{},{}",
+                        group.minimized,
+                        group.total - group.minimized
+                    )
                     .expect("写入 String 不会出错");
+                }
                 if csv.len() > MAX_WINDOW_EXPORT_BYTES {
                     return too_large();
                 }
@@ -491,12 +582,20 @@ mod tests {
             },
         ];
         assert!(matches!(
-            export_windows(WindowExport::ProcessCounts, windows.into_iter()),
+            export_windows(WindowExport::ProcessCounts { include_state: false }, windows.into_iter()),
             Results::Value(Ok(value)) if value.text == "程序文件名,窗口数\r\nNotepad.exe,2\r\ncode.exe,1\r\n\"\",1"
+        ));
+        assert!(matches!(
+            export_windows(WindowExport::ProcessCounts { include_state: true }, windows.into_iter()),
+            Results::Value(Ok(value)) if value.text == "程序文件名,窗口数,已最小化,未最小化\r\nNotepad.exe,2,1,1\r\ncode.exe,1,0,1\r\n\"\",1,0,1"
         ));
         assert!(matches!(
             OpenWindowsIndex::Ready(Vec::new()).results("输出＝进程统计　进程=notepad.exe 标题"),
             Results::Value(Ok(value)) if value.text == "程序文件名,窗口数"
+        ));
+        assert!(matches!(
+            OpenWindowsIndex::Ready(Vec::new()).results("output=process-state-counts 进程=notepad.exe"),
+            Results::Value(Ok(value)) if value.text == "程序文件名,窗口数,已最小化,未最小化"
         ));
     }
 
@@ -796,6 +895,24 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn completes_the_output_format_without_replacing_filters() {
+        let Results::FilterOptions(choices) = OpenWindowsIndex::Unloaded
+            .results(r#"输出＝进程状  进程="Example Tool.exe" 标题正则="^报告 Ａ""#)
+        else {
+            panic!("应返回导出格式补全");
+        };
+        assert_eq!(choices.len(), 1);
+        assert_eq!(
+            choices[0].expression,
+            r#"窗口: 输出＝进程状态统计  进程="Example Tool.exe" 标题正则="^报告 Ａ""#
+        );
+        assert!(matches!(
+            OpenWindowsIndex::Unloaded.results("输出="),
+            Results::FilterOptions(choices) if choices.len() == WINDOW_EXPORTS.len()
+        ));
     }
 
     #[test]
