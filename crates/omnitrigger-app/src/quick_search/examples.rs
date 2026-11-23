@@ -937,6 +937,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把上一步结果填进命令中指定的位置",
+        query: r#"处理: ["文本: 去空行",{"模板":"电路: 分压 {结果} @ 1 kΩ,2 kΩ"}] 12 V"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把节拍时长换成时分秒格式",
         query: r#"处理: ["节拍: 时长","时长:"] 120 BPM @ 3/2"#,
     },

@@ -31,6 +31,22 @@ const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
     "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时长、进制、音高、节拍、分贝、立体、波长、电路、分数或统计命令";
+const STEP_RESULT_SLOT: &str = "{结果}";
+const STEP_TEMPLATE_SYNTAX: &str = "模板的工具前缀之后须正好有一个 {结果}";
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PipelineStep {
+    Append(String),
+    Embed(StepTemplate),
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepTemplate {
+    #[serde(rename = "模板")]
+    command: String,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DataPipelineError {
@@ -121,7 +137,7 @@ pub(super) fn transform_data_pipeline(
     let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
     if mode == DataPipelineMode::ColumnCsv {
         let ((name, column, steps), source) =
-            json_argument_and_tail::<(String, ColumnReference, Vec<String>)>(input)
+            json_argument_and_tail::<(String, ColumnReference, Vec<PipelineStep>)>(input)
                 .ok_or(DataPipelineError::CsvColumnArguments)?;
         if name.trim().is_empty()
             || name.contains('\0')
@@ -142,7 +158,7 @@ pub(super) fn transform_data_pipeline(
         });
     }
     let (steps, source) =
-        json_argument_and_tail::<Vec<String>>(input).ok_or(DataPipelineError::Arguments)?;
+        json_argument_and_tail::<Vec<PipelineStep>>(input).ok_or(DataPipelineError::Arguments)?;
     if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len()) || source.trim().is_empty() {
         return Err(DataPipelineError::Arguments);
     }
@@ -189,7 +205,7 @@ pub(super) fn transform_data_pipeline(
 fn run_pipeline_json<'a>(
     values: impl IntoIterator<Item = (Option<String>, &'a RawValue)>,
     object: bool,
-    steps: &[String],
+    steps: &[PipelineStep],
     today: NaiveDate,
     remaining_work: &mut usize,
 ) -> Result<String, DataPipelineError> {
@@ -241,7 +257,7 @@ fn run_pipeline_json<'a>(
 }
 
 fn run_pipeline_rows(
-    steps: &[String],
+    steps: &[PipelineStep],
     source: &str,
     today: NaiveDate,
     csv: bool,
@@ -282,7 +298,7 @@ fn run_pipeline_rows(
 }
 
 fn run_pipeline_steps(
-    steps: &[String],
+    steps: &[PipelineStep],
     source: &str,
     today: NaiveDate,
     trace_steps: bool,
@@ -306,11 +322,27 @@ fn run_pipeline_steps(
                 cause,
             },
         };
-        if step.contains(['\r', '\n', '\0']) {
+        let (raw_step, embed) = match step {
+            PipelineStep::Append(command) => (command, false),
+            PipelineStep::Embed(template) => (&template.command, true),
+        };
+        if raw_step.contains(['\r', '\n', '\0']) {
             return Err(error(STEP_SYNTAX));
         }
-        let (scope, operation) = scoped_query(step.trim()).ok_or_else(|| error(STEP_SYNTAX))?;
-        let command = operation.split_whitespace().next().unwrap_or_default();
+        let (scope, operation) = scoped_query(raw_step.trim()).ok_or_else(|| error(STEP_SYNTAX))?;
+        let query = if embed {
+            let (before, after) = operation
+                .split_once(STEP_RESULT_SLOT)
+                .filter(|(_, after)| !after.contains(STEP_RESULT_SLOT))
+                .ok_or_else(|| error(STEP_TEMPLATE_SYNTAX))?;
+            Cow::Owned(format!("{before}{current}{after}"))
+        } else if operation.is_empty() {
+            Cow::Borrowed(current.as_ref())
+        } else {
+            Cow::Owned(format!("{operation}\n{current}"))
+        };
+        let command_text = if embed { query.as_ref() } else { operation };
+        let command = command_text.split_whitespace().next().unwrap_or_default();
         if command.is_empty()
             && !matches!(
                 scope,
@@ -329,11 +361,6 @@ fn run_pipeline_steps(
         if command == "依次处理" || command.eq_ignore_ascii_case("pipeline") {
             return Err(error("请把子步骤直接写在同一个列表中"));
         }
-        let query = if operation.is_empty() {
-            Cow::Borrowed(current.as_ref())
-        } else {
-            Cow::Owned(format!("{operation}\n{current}"))
-        };
         let output = match scope {
             Scope::TextTools => transform_text(&query).map_err(|cause| cause.message()),
             Scope::Csv => transform_csv(&query).map_err(|cause| cause.message()),
@@ -365,7 +392,7 @@ fn run_pipeline_steps(
             let number = index.to_string();
             append_bounded_csv_row(
                 trace,
-                [number.as_str(), step.as_str(), output.as_str()].into_iter(),
+                [number.as_str(), raw_step.as_str(), output.as_str()].into_iter(),
                 error("步骤CSV超过 1 MiB，请缩小数据范围"),
             )?;
         }
@@ -448,6 +475,37 @@ mod tests {
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn embeds_the_previous_value_at_one_explicit_position() {
+        for (input, expected) in [
+            (
+                r#"["文本: 去空行",{"模板":"电路: 分压 {结果} @ 1 kΩ,2 kΩ"}] 12 V"#,
+                "8 V",
+            ),
+            (
+                "逐行 [{\"模板\":\"分数: 计算 2*({结果})+1\"}] 3/4\n2",
+                "5/2\n5",
+            ),
+            (r#"["文本: 逐行加前缀 \"{结果}\""] 茶"#, "{结果}茶"),
+        ] {
+            assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
+        }
+        for step in ["分数: 计算 1", "分数: 计算 {结果} + {结果}"] {
+            let query = format!(r#"[{{"模板":"{step}"}}] 1"#);
+            assert_eq!(
+                run_pipeline(&query),
+                Err(DataPipelineError::Step {
+                    index: 1,
+                    cause: STEP_TEMPLATE_SYNTAX,
+                }),
+            );
+        }
+        assert!(matches!(
+            run_pipeline(r#"[{"模板":"文本: {结果}"}] 依次处理 ["大写"] tea"#),
+            Err(DataPipelineError::Step { index: 1, .. })
+        ));
     }
 
     #[test]
