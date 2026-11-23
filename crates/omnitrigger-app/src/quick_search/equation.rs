@@ -14,6 +14,7 @@ use super::plane::{parse_point, PointError};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
     Coefficients,
+    ExpressionArguments,
     RootArguments,
     CurvePairArguments,
     ThreePointArguments,
@@ -32,6 +33,9 @@ impl EquationError {
         match self {
             Self::Coefficients | Self::Evaluation(FractionError::Invalid) => {
                 "按 a, b, c 输入 ax² + bx + c = 0 的三个系数"
+            }
+            Self::ExpressionArguments => {
+                "输入由常数、x 和 x² 项组成的式子，例如 x**2 - 3*x + 2 = 0"
             }
             Self::InequalityArguments => "先填写 >、>=、< 或 <=，再填写 a, b, c",
             Self::RootArguments => "填写两个有理数根，可再填非零的二次项系数",
@@ -61,6 +65,10 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             "顶点" | "vertex" => return describe_quadratic(arguments.trim_start(), false),
             "判别式" | "discriminant" => return quadratic_discriminant(arguments.trim_start()),
             "韦达" | "vieta" => return quadratic_root_sum_and_product(arguments.trim_start()),
+            "取系数" | "coefficients" => {
+                let [a, b, c] = expanded_equation_coefficients(arguments)?;
+                return format_quadratic_coefficients(a, b, c);
+            }
             "由根" | "from-roots" => return quadratic_from_roots(arguments.trim_start()),
             "交点" | "intersections" => return polynomial_intersections(arguments.trim_start()),
             "围成面积" | "enclosed-area" => {
@@ -84,7 +92,11 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             _ => {}
         }
     }
-    let [a, b, c] = coefficient_row(&input)?;
+    let [a, b, c] = if input.contains('=') {
+        expanded_equation_coefficients(&input)?
+    } else {
+        coefficient_row(&input)?
+    };
     if a.numer().sign() == Sign::NoSign {
         if b.numer().sign() != Sign::NoSign {
             let root = -c / b;
@@ -100,6 +112,140 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
 
     let (center, distance_squared) = quadratic_center(&a, b, c);
     format_centered_roots(center, distance_squared, "x").map_err(EquationError::Evaluation)
+}
+
+fn expanded_equation_coefficients(input: &str) -> Result<[BigRational; 3], EquationError> {
+    let Some((left, right)) = input.split_once('=') else {
+        return expanded_polynomial(input);
+    };
+    let [a, b, c] = expanded_polynomial(left)?;
+    let [right_a, right_b, right_c] = expanded_polynomial(right)?;
+    let coefficients = [a - right_a, b - right_b, c - right_c];
+    for value in &coefficients {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    Ok(coefficients)
+}
+
+fn expanded_polynomial(input: &str) -> Result<[BigRational; 3], EquationError> {
+    let input = input.trim();
+    let mut coefficients = std::array::from_fn::<_, 3, _>(|_| BigRational::default());
+    let mut add_term = |term: &str| -> Result<(), EquationError> {
+        let (degree, coefficient) = expanded_polynomial_term(term.trim())?;
+        let value = &mut coefficients[2 - degree];
+        *value += coefficient;
+        ensure_exact_size(value).map_err(EquationError::Evaluation)
+    };
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut previous = '\0';
+    for (index, character) in input.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or(EquationError::ExpressionArguments)?
+            }
+            '+' | '-'
+                if depth == 0
+                    && index > start
+                    && !matches!(previous, '+' | '-' | '*' | '/' | '^' | 'e' | 'E') =>
+            {
+                add_term(&input[start..index])?;
+                start = index;
+            }
+            _ => {}
+        }
+        if !character.is_whitespace() {
+            previous = character;
+        }
+    }
+    if depth != 0 {
+        return Err(EquationError::ExpressionArguments);
+    }
+    add_term(&input[start..])?;
+    Ok(coefficients)
+}
+
+fn expanded_polynomial_term(term: &str) -> Result<(usize, BigRational), EquationError> {
+    let invalid = EquationError::ExpressionArguments;
+    let variable = term.rmatch_indices(['x', 'X']).find(|(index, _)| {
+        let tail = term[index + 1..].trim_start();
+        tail.is_empty() || tail.starts_with(['*', '/', '^', '²'])
+    });
+    let Some((index, _)) = variable else {
+        return equation_value(term, invalid).map(|constant| (0, constant));
+    };
+    let prefix = term[..index].trim_end();
+    let coefficient = if let Some(coefficient) = prefix.strip_suffix('*') {
+        let coefficient = coefficient.trim();
+        if matches!(coefficient, "" | "+" | "-") {
+            return Err(invalid);
+        }
+        coefficient
+    } else {
+        prefix
+    };
+    let value = match coefficient {
+        "" | "+" => BigRational::from_integer(1.into()),
+        "-" => BigRational::from_integer((-1).into()),
+        coefficient => equation_value(coefficient, invalid)?,
+    };
+    let tail = term[index + 1..].trim_start();
+    let (degree, tail) = if let Some(rest) = tail.strip_prefix('²') {
+        (2, rest)
+    } else if let Some(exponent) = tail.strip_prefix("**").or_else(|| tail.strip_prefix('^')) {
+        let (digit, rest) = exponent.trim_start().split_at_checked(1).ok_or(invalid)?;
+        let degree = match digit {
+            "0" => 0,
+            "1" => 1,
+            "2" => 2,
+            _ => return Err(invalid),
+        };
+        (degree, rest)
+    } else {
+        (1, tail)
+    };
+    let tail = tail.trim_start();
+    if tail.is_empty() {
+        return Ok((degree, value));
+    }
+    if tail.starts_with("**") {
+        return Err(invalid);
+    }
+    let (operator, scalar) = tail.split_at_checked(1).ok_or(invalid)?;
+    let scalar = scalar.trim();
+    let scalar = if scalar.starts_with('(') && scalar.ends_with(')') {
+        // The outer parentheses must span the entire operand.
+        let inner = &scalar[1..scalar.len() - 1];
+        let mut depth = 0i32;
+        for character in inner.chars() {
+            match character {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return Err(invalid);
+            }
+        }
+        equation_value(scalar, invalid)?
+    } else {
+        if scalar.contains('/') {
+            return Err(invalid);
+        }
+        super::fraction::parse_fraction_literal(scalar).map_err(|error| match error {
+            FractionError::Invalid | FractionError::Incomplete => invalid,
+            _ => EquationError::Evaluation(error),
+        })?
+    };
+    match operator {
+        "*" => Ok((degree, value * scalar)),
+        "/" if scalar.numer().sign() != Sign::NoSign => Ok((degree, value / scalar)),
+        "/" => Err(EquationError::Evaluation(FractionError::ZeroDenominator)),
+        _ => Err(invalid),
+    }
 }
 
 fn quadratic_center(a: &BigRational, b: BigRational, c: BigRational) -> (BigRational, BigRational) {
@@ -814,6 +960,38 @@ mod tests {
             solve_equation("过三点 1,2 ; 1,3 ; 2,4"),
             Err(EquationError::ThreePointArguments),
         );
+    }
+
+    #[test]
+    fn reads_expanded_equations_from_both_sides_with_exact_coefficients() {
+        for (input, expected) in [
+            ("x ** 2 - 3*x + 2 = 0", "x₁ = 1 · x₂ = 2"),
+            ("x² = 3*x - 2", "x₁ = 1 · x₂ = 2"),
+            ("X/2 + 1 = X", "x = 2"),
+            ("x/(2*3) = 1", "x = 6"),
+            ("取系数 (1/3+1/6)*x^2 - x + 3/4", "1/2,-1,3/4"),
+            ("coefficients 1e-3*x**2 + x*2 - 1", "1/1000,2,-1"),
+            ("取系数 2*x + 1 = x^1 + 2", "0,1,-1"),
+        ] {
+            assert_eq!(solve_equation(input).as_deref(), Ok(expected), "{input}");
+        }
+        for invalid in [
+            "x^3 = 1",
+            "(x + 1)*(x - 1) = 0",
+            "x² = 0 = 2",
+            "x² =",
+            "x/2*3 = 1",
+            "x/(2)*(3) = 1",
+            "x/2/3 = 1",
+            "x²**2 = 1",
+            "*x = 1",
+            "2/x = 1",
+        ] {
+            assert_eq!(
+                solve_equation(invalid),
+                Err(EquationError::ExpressionArguments)
+            );
+        }
     }
 
     #[test]

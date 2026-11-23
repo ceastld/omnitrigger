@@ -137,6 +137,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接求展开的二次方程",
+        query: "方程: x**2 - 3*x + 2 = 0",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "从展开式提取精确系数",
+        query: "方程: 取系数 (1/3+1/6)*x^2 - x + 3/4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "由三点求通过各点的函数系数",
         query: "方程: 过三点 0,3/4 ; 1/2,3/8 ; 2,3/4",
     },
