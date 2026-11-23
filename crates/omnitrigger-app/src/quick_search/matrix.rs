@@ -3,7 +3,9 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::equation::format_centered_roots;
-use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, format_exact_multiple, format_square_root, FractionError,
+};
 use super::operators::split_top_level_commas;
 
 const MAX_DIMENSION: usize = 8;
@@ -24,6 +26,7 @@ pub(super) enum MatrixError {
     PowerExponent,
     ConditionNorm,
     SolveDimensions,
+    GeneralSolutionDimensions,
     Singular,
     LeastSquaresRank,
     Evaluation(FractionError),
@@ -34,7 +37,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -46,6 +49,7 @@ impl MatrixError {
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
             Self::ConditionNorm => "填写 1 或 ∞，用 @ 隔开矩阵，例如 条件数 1 @ 2,0; 0,1/3",
             Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
+            Self::GeneralSolutionDimensions => "@ 右侧须为一列常数，行数与系数矩阵一致",
             Self::Singular => "系数矩阵不可逆，无法得到唯一解",
             Self::LeastSquaresRank => "系数矩阵的列线性相关，最小二乘解不唯一",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
@@ -123,6 +127,10 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "求解" | "solve" => {
             let (left, right) = parse_pair(input)?;
             solve(left, right).map(format_matrix)
+        }
+        "通解" | "general-solution" => {
+            let (left, right) = parse_pair(input)?;
+            general_solution(left, right)
         }
         "最小二乘" | "least-squares" => {
             let (left, right) = parse_pair(input)?;
@@ -422,6 +430,74 @@ fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
         .into_iter()
         .map(|mut row| row.split_off(dimension))
         .collect())
+}
+
+fn general_solution(mut coefficients: Matrix, constants: Matrix) -> Result<String, MatrixError> {
+    if coefficients.len() != constants.len() || constants[0].len() != 1 {
+        return Err(MatrixError::GeneralSolutionDimensions);
+    }
+    let width = coefficients[0].len();
+    for (row, rhs) in coefficients.iter_mut().zip(constants) {
+        row.extend(rhs);
+    }
+    let (reduced, pivots) = reduced_row_echelon(coefficients)?;
+    // 增广列是主元列时，至少有一行要求 0 等于非零常数。
+    if pivots.last() == Some(&width) {
+        return Ok("无解".to_owned());
+    }
+
+    const SUBSCRIPTS: [char; MAX_DIMENSION] = ['₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈'];
+    let free_variables: Vec<_> = (0..width)
+        .filter(|column| !pivots.contains(column))
+        .enumerate()
+        .map(|(index, column)| (column, format!("t{}", SUBSCRIPTS[index])))
+        .collect();
+    let mut expressions = vec![String::new(); width];
+    for (&pivot, row) in pivots.iter().zip(&reduced) {
+        let expression = &mut expressions[pivot];
+        if row[width].numer().sign() != Sign::NoSign {
+            expression.push_str(&row[width].to_string());
+        }
+        for (free, parameter) in &free_variables {
+            append_parameter(expression, -&row[*free], parameter);
+        }
+        if expression.is_empty() {
+            expression.push('0');
+        }
+    }
+    for (free, parameter) in &free_variables {
+        expressions[*free].clone_from(parameter);
+    }
+    let mut lines: Vec<_> = expressions
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| format!("x{} = {value}", SUBSCRIPTS[index]))
+        .collect();
+    if !free_variables.is_empty() {
+        let parameters: Vec<_> = free_variables
+            .into_iter()
+            .map(|(_, parameter)| parameter)
+            .collect();
+        lines.push(format!("{} 为任意实数", parameters.join("、")));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn append_parameter(expression: &mut String, coefficient: BigRational, parameter: &str) {
+    let sign = coefficient.numer().sign();
+    if sign == Sign::NoSign {
+        return;
+    }
+    let negative = sign == Sign::Minus;
+    let prefix = match (expression.is_empty(), negative) {
+        (true, true) => "-",
+        (true, false) => "",
+        (false, true) => " - ",
+        (false, false) => " + ",
+    };
+    expression.push_str(prefix);
+    let magnitude = if negative { -coefficient } else { coefficient };
+    expression.push_str(&format_exact_multiple(&magnitude, parameter));
 }
 
 fn least_squares(left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
@@ -783,6 +859,36 @@ mod tests {
         ] {
             assert_eq!(calculate_matrix(query), Err(expected));
         }
+    }
+
+    #[test]
+    fn finds_exact_general_solutions_for_rectangular_or_singular_systems() {
+        for (input, expected) in [
+            (
+                "通解 1,0,1; 0,1,0 @ 2; 1",
+                "x₁ = 2 - t₁\nx₂ = 1\nx₃ = t₁\nt₁ 为任意实数",
+            ),
+            (
+                "通解 1,2,3 @ 0",
+                "x₁ = -2t₁ - 3t₂\nx₂ = t₁\nx₃ = t₂\nt₁、t₂ 为任意实数",
+            ),
+            (
+                "通解 0,0; 0,0 @ 0; 0",
+                "x₁ = t₁\nx₂ = t₂\nt₁、t₂ 为任意实数",
+            ),
+            (
+                "通解 0,1; 0,2; 0,3 @ 1; 2; 3",
+                "x₁ = t₁\nx₂ = 1\nt₁ 为任意实数",
+            ),
+            ("general-solution 1/2,0; 0,3 @ 1/6; 2", "x₁ = 1/3\nx₂ = 2/3"),
+            ("通解 2,4; 1,2 @ 6; 4", "无解"),
+        ] {
+            assert_eq!(calculate_matrix(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            calculate_matrix("通解 1,0; 0,1 @ 1,2; 3,4"),
+            Err(MatrixError::GeneralSolutionDimensions)
+        );
     }
 
     #[test]

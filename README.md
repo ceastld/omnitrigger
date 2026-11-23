@@ -250,6 +250,7 @@
 - 输入 `矩阵: 行列式 0,2; 3,4` 得到 `-6`。用 `矩阵: 乘法 1,2; 3,4 @ 5,6; 7,8` 可求乘积，用 `转置` 可交换行列。逗号分隔元素，分号或换行分隔行，支持分数和精确算式，每个矩阵最多 8 行 8 列。 [MIT 行列式性质](https://ocw.mit.edu/courses/18-06sc-linear-algebra-fall-2011/5dd3f8ec0a398fd74264fef3fd591f81_MIT18_06SCF11_Ses2.5sum.pdf) [MIT 矩阵乘法](https://ocw.mit.edu/courses/18-065-matrix-methods-in-data-analysis-signal-processing-and-machine-learning-spring-2018/resources/lecture-2-multiplying-and-factoring-matrices/)
 - 输入 `矩阵: 乘方 1,1; 1,0 @ 5` 得到两行 `8, 5` 和 `5, 3`。方阵支持 -64 至 64 的整数次幂，零次幂为单位矩阵，负指数要求原矩阵可逆。结果保留精确分数。 [矩阵整数次幂规则](https://numpy.org/doc/stable/reference/generated/numpy.linalg.matrix_power.html)
 - 输入 `矩阵: 求解 2,1; 1,-1 @ 5; 1` 可解方程组，解列依次为 `2`、`1`。在 `@` 右侧也可以输入含多列的常数矩阵。用 `矩阵: 求逆 1,2; 3,4` 可得到逆矩阵。两种操作都保留精确分数，系数矩阵不可逆时会提示。
+- 输入 `矩阵: 通解 1,0,1; 0,1,0 @ 2; 1` 可求矩形或方阵线性系统的解。示例得到 `x₁ = 2 - t₁`、`x₂ = 1`、`x₃ = t₁`，其中 `t₁` 是任意实数。等号右侧填写与系数矩阵等行数的一列，矛盾的系统会显示无解。
 - 输入 `矩阵: 最小二乘 1,0; 1,1; 1,2 @ 1; 2; 2` 可得到系数 `7/6` 和 `1/2`。左右两侧须行数相同，右侧可以填写多列，左侧的列须线性独立。结果保留精确分数。 [MIT 最小二乘方程](https://www.ocw.mit.edu/courses/18-065-matrix-methods-in-data-analysis-signal-processing-and-machine-learning-spring-2018/resources/lecture-9-four-ways-to-solve-least-squares-problems/)
 - 输入 `矩阵: 秩 1,2,3; 2,4,6` 得到 `1`。支持方阵和矩形矩阵，使用精确分数进行消元。
 - 输入 `矩阵: 行最简形 0,2,3; 1,4,5; 2,8,10` 可得到三行 `1, 0, -1`、`0, 1, 3/2` 和 `0, 0, 0`。方阵和矩形矩阵都可使用，结果保留精确分数。

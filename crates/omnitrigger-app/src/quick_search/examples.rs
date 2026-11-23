@@ -686,6 +686,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 求解 2,1; 1,-1 @ 5; 1",
     },
     Example {
+        icon: Icon::Layers,
+        title: "求矩形矩阵对应线性系统的参数通解",
+        query: "矩阵: 通解 1,0,1; 0,1,0 @ 2; 1",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "用精确分数求矩阵的唯一最小二乘解",
         query: "矩阵: 最小二乘 1,0; 1,1; 1,2 @ 1; 2; 2",
@@ -5030,6 +5035,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "区间极值",
         ],
         Scope::LinearSystem => &["通解"],
+        Scope::Matrix => &["通解"],
         Scope::Date => &[
             "列出",
             "格式化",
@@ -5261,7 +5267,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Matrix
             if matches!(term, "乘方" | "特" | "特征" | "特征值")
                 || (!term.is_empty()
-                    && ["最小二乘", "1范数", "无穷范数", "条件数", "正定性"]
+                    && ["通解", "最小二乘", "1范数", "无穷范数", "条件数", "正定性"]
                         .iter()
                         .any(|op| op.starts_with(term))) => {}
         Scope::Statistics
