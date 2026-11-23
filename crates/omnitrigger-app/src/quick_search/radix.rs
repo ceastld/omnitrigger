@@ -6,6 +6,7 @@ use super::calculator::normalize;
 use super::conversion::ConversionError;
 
 const MAX_INTEGER_BITS: u64 = 8192;
+const MAX_SHEET_COLUMN: u32 = 16_384;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RadixError {
@@ -28,6 +29,7 @@ pub(super) enum RadixError {
     ReverseBitsArguments,
     ReverseBytesArguments,
     ReverseWidthExceeded,
+    SheetColumnArguments,
 }
 
 impl RadixError {
@@ -60,6 +62,7 @@ impl RadixError {
             Self::ReverseBytesArguments => {
                 "填写 8 至 8192 的 8 倍数位宽和非负整数，例如 字节倒序 32 @ 0x12345678"
             }
+            Self::SheetColumnArguments => "填写 A 至 XFD 的列字母，或 1 至 16384 的整数列号",
         }
     }
 }
@@ -174,6 +177,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "字节倒序" || operation.eq_ignore_ascii_case("reverse-bytes") {
         return reverse_bits_or_bytes(arguments, true);
     }
+    if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
+        return convert_sheet_column(arguments);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -186,6 +192,30 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     let source = arbitrary_base(source).ok_or(RadixError::Base)?;
     let target = arbitrary_base(target).ok_or(RadixError::Base)?;
     convert_radix_integer(integer, source, target)
+}
+
+fn convert_sheet_column(input: &str) -> Result<String, RadixError> {
+    let input = input.trim();
+    if (1..=3).contains(&input.len()) && input.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        let column = input.bytes().fold(0_u32, |column, letter| {
+            column * 26 + u32::from(letter.to_ascii_uppercase() - b'A' + 1)
+        });
+        return (column <= MAX_SHEET_COLUMN)
+            .then(|| column.to_string())
+            .ok_or(RadixError::SheetColumnArguments);
+    }
+    let mut column = input
+        .parse::<u32>()
+        .ok()
+        .filter(|column| (1..=MAX_SHEET_COLUMN).contains(column))
+        .ok_or(RadixError::SheetColumnArguments)?;
+    let mut letters = Vec::with_capacity(3);
+    while column > 0 {
+        column -= 1;
+        letters.push(char::from(b'A' + (column % 26) as u8));
+        column /= 26;
+    }
+    Ok(letters.into_iter().rev().collect())
 }
 
 pub(super) fn convert_radix_integer(
@@ -578,6 +608,31 @@ mod tests {
             assert_eq!(
                 convert_arbitrary_radix(query),
                 Err(RadixError::BitRangeArguments)
+            );
+        }
+    }
+
+    #[test]
+    fn converts_sheet_column_labels_and_numbers_at_carry_boundaries() {
+        for (query, expected) in [
+            ("表格列号 A", "1"),
+            ("表格列号 26", "Z"),
+            ("表格列号 27", "AA"),
+            ("表格列号 ｚｚ", "702"),
+            ("SHEET-COLUMN 703", "AAA"),
+            ("表格列号 xfd", "16384"),
+            ("表格列号 16384", "XFD"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for input in ["", "0", "-1", "16385", "XFE", "AB1", "AAAA", "a b"] {
+            assert_eq!(
+                convert_arbitrary_radix(&format!("表格列号 {input}")),
+                Err(RadixError::SheetColumnArguments),
             );
         }
     }

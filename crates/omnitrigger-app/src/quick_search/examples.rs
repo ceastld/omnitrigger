@@ -927,6 +927,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把工作表的列字母转换为列号",
+        query: "进制: 表格列号 AA",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -4280,6 +4285,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "循环右移",
                     "位倒序",
                     "字节倒序",
+                    "表格列号",
                 ]
                 .iter()
                 .any(|operation| operation.starts_with(term)) => {}
