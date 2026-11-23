@@ -71,6 +71,7 @@ pub(super) enum TextError {
     InvalidReplacementArguments,
     IncompleteTextArgument,
     InvalidTextArgument,
+    InvalidLineTemplate,
     IncompleteLineComparison,
     InvalidLineComparison,
     TooManyDiffLines,
@@ -124,6 +125,7 @@ impl TextError {
             Self::InvalidReplacementArguments => "查找内容和替换内容要加引号，并用空格分隔",
             Self::IncompleteTextArgument => "输入带引号的内容和原文",
             Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
+            Self::InvalidLineTemplate => "模板用 {行} 和 {序号} 填入内容，用 {{ 和 }} 输出花括号",
             Self::IncompleteLineComparison => "输入两组加引号的文本，组间用空格分开",
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
             Self::TooManyDiffLines => "逐行比较最多支持每组 512 行",
@@ -206,6 +208,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         }
         "逐行加前缀" | "prefix-lines" => return decorate_lines(text, true),
         "逐行加后缀" | "suffix-lines" => return decorate_lines(text, false),
+        "逐行模板" | "template-lines" => return apply_line_template(text),
         "逐行去前缀" | "strip-line-prefix" => return strip_line_decoration(text, true),
         "逐行去后缀" | "strip-line-suffix" => return strip_line_decoration(text, false),
         "逐行截取" | "slice-lines" => return slice_line_graphemes(text),
@@ -1072,6 +1075,75 @@ fn decorate_lines(input: &str, prepend: bool) -> Result<String, TextError> {
         result.push_str(prefix);
         result.push_str(line);
         result.push_str(suffix);
+    }
+    Ok(result)
+}
+
+#[derive(Clone, Copy)]
+enum LineTemplatePart<'a> {
+    Literal(&'a str),
+    Line,
+    Number,
+}
+
+fn apply_line_template(input: &str) -> Result<String, TextError> {
+    let (template, text) = quoted_text_argument(input)?;
+    let mut parts = Vec::new();
+    let mut rest = template.as_str();
+    while let Some(index) = rest.find(['{', '}']) {
+        let (literal, marker) = rest.split_at(index);
+        if !literal.is_empty() {
+            parts.push(LineTemplatePart::Literal(literal));
+        }
+        let (part, tail) = if let Some(tail) = marker.strip_prefix("{行}") {
+            (LineTemplatePart::Line, tail)
+        } else if let Some(tail) = marker.strip_prefix("{序号}") {
+            (LineTemplatePart::Number, tail)
+        } else if let Some(tail) = marker.strip_prefix("{{") {
+            (LineTemplatePart::Literal("{"), tail)
+        } else if let Some(tail) = marker.strip_prefix("}}") {
+            (LineTemplatePart::Literal("}"), tail)
+        } else {
+            return Err(TextError::InvalidLineTemplate);
+        };
+        parts.push(part);
+        rest = tail;
+    }
+    if !rest.is_empty() {
+        parts.push(LineTemplatePart::Literal(rest));
+    }
+    // 跳过空行中无输出的字段，让每次渲染迭代都消耗输出额度。
+    let blank_parts: Vec<_> = parts
+        .iter()
+        .copied()
+        .filter(|part| !matches!(part, LineTemplatePart::Line))
+        .collect();
+    let mut result = String::new();
+    let mut append = |chunk: &str| {
+        if result.len().saturating_add(chunk.len()) > MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::ResultTooLarge);
+        }
+        result.push_str(chunk);
+        Ok(())
+    };
+    for (index, line) in text.lines().enumerate() {
+        if index > 0 {
+            append("\n")?;
+        }
+        let active_parts = if line.is_empty() {
+            &blank_parts
+        } else {
+            &parts
+        };
+        let number = (index + 1).to_string();
+        for part in active_parts {
+            let chunk = match *part {
+                LineTemplatePart::Literal(literal) => literal,
+                LineTemplatePart::Line => line,
+                LineTemplatePart::Number => number.as_str(),
+            };
+            append(chunk)?;
+        }
     }
     Ok(result)
 }
@@ -1949,6 +2021,24 @@ mod tests {
                 Err(TextError::InvalidGraphemeRange)
             );
         }
+    }
+
+    #[test]
+    fn renders_each_line_with_its_number_and_literal_braces() {
+        let input = "逐行模板 \"{序号}. {{{行}}} | {行}\" \"苹果\r\n\r\n{序号}\"";
+        assert_eq!(
+            transform_text(input).as_deref(),
+            Ok("1. {苹果} | 苹果\n2. {} | \n3. {{序号}} | {序号}")
+        );
+        for query in ["逐行模板 \"{标题}\" 茶", "逐行模板 \"}\" 茶"] {
+            assert_eq!(transform_text(query), Err(TextError::InvalidLineTemplate));
+        }
+        let large = format!(
+            "逐行模板 \"{}{{行}}\" {}",
+            "x".repeat(1024),
+            "甲\n".repeat(1100)
+        );
+        assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
     }
 
     #[test]
