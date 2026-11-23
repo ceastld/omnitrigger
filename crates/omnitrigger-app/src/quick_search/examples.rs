@@ -4553,6 +4553,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 CSV 的原始字段按行列组合转成交叉表",
+        query: "CSV: 透视原值 [\"地区\",\"月份\",\"编号\"] 地区,月份,编号\n北,一月,001\n南,二月,待补\n北,二月,002",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 的多列展开为列名和内容",
         query: "CSV: 逆透视 [[\"地区\"],\"月份\",\"金额\"] 地区,一月,二月\n北,2.50,\n南,1/3,3",
     },
