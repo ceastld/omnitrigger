@@ -4584,6 +4584,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "比较多列顺序的斯皮尔曼秩相关，等值取平均名次",
+        query: "CSV: 秩相关矩阵 [\"次序\",\"评分\",\"反向\"] 次序,评分,反向\n0,0,2\n1,1.0,1\n2,1/1,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按总体方差统计 CSV 数值列",
         query: "CSV: 列总体 \"数值\" 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",
     },

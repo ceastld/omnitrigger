@@ -42,7 +42,7 @@ use super::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
         json_wildcard_values, JsonCellContent, JsonError,
     },
-    linear_fit::{LinearFitError, PairedSums, Point, MAX_POINTS},
+    linear_fit::{doubled_midranks, LinearFitError, PairedSums, Point, MAX_POINTS},
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
@@ -2073,13 +2073,16 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "协方差矩阵"
         | "covariance-matrix"
         | "总体协方差矩阵"
-        | "population-covariance-matrix" => {
+        | "population-covariance-matrix"
+        | "秩相关矩阵"
+        | "spearman-matrix" => {
             let (columns, data) = column_reference_arguments(input, CsvError::PairMatrixColumns)?;
             if !(2..=8).contains(&columns.len()) {
                 return Err(CsvError::PairMatrixColumns);
             }
             input = data;
             let statistic = match operation.as_str() {
+                "秩相关矩阵" | "spearman-matrix" => PairMatrixStatistic::Spearman,
                 "协方差矩阵" | "covariance-matrix" => {
                     PairMatrixStatistic::Covariance { sample: true }
                 }
@@ -5357,6 +5360,7 @@ fn numeric_column_profile(
 #[derive(Clone, Copy)]
 enum PairMatrixStatistic {
     Correlation,
+    Spearman,
     Covariance { sample: bool },
 }
 
@@ -5368,10 +5372,8 @@ fn column_pair_matrix(
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::PairMatrixColumns)?;
     let width = columns.len();
-    let mut sums: Vec<Vec<_>> = (0..width)
-        .map(|left| (left..width).map(|_| PairedSums::default()).collect())
-        .collect();
-    let mut complete_rows = 0usize;
+    let mut values_by_column = vec![Vec::new(); width];
+    let mut complete_rows = Vec::new();
     for (index, row) in records.iter().enumerate() {
         let cells: Vec<_> = columns.iter().map(|&column| row[column].trim()).collect();
         if cells.iter().any(|cell| cell.is_empty()) {
@@ -5381,30 +5383,36 @@ fn column_pair_matrix(
             row: index + 1,
             cause,
         };
-        let values = cells
-            .into_iter()
-            .map(|cell| parse_fraction_literal(cell).map_err(|error| at_row(error.message())))
-            .collect::<Result<Vec<_>, _>>()?;
-        complete_rows += 1;
-        if complete_rows > MAX_VALUES {
+        for (values, cell) in values_by_column.iter_mut().zip(cells) {
+            values.push(parse_fraction_literal(cell).map_err(|error| at_row(error.message()))?);
+        }
+        complete_rows.push(index + 1);
+        if complete_rows.len() > MAX_VALUES {
             return Err(CsvError::Statistics(StatisticsError::TooManyValues));
         }
-        for (left, pairs) in sums.iter_mut().enumerate() {
-            for (right, pair) in values[left..].iter().zip(pairs) {
-                pair.record(&values[left], right)
-                    .map_err(|error| at_row(error.message()))?;
-            }
-        }
     }
-    if complete_rows < 2 {
+    if complete_rows.len() < 2 {
         return Err(CsvError::PairMatrixRows);
     }
+    if matches!(statistic, PairMatrixStatistic::Spearman) {
+        for values in &mut values_by_column {
+            *values = doubled_midranks(values);
+        }
+    }
     let mut matrix = vec![vec![String::new(); width]; width];
-    for (left, pairs) in sums.into_iter().enumerate() {
-        for (offset, pair) in pairs.into_iter().enumerate() {
-            let right = left + offset;
+    for (left, x) in values_by_column.iter().enumerate() {
+        for (right, y) in values_by_column.iter().enumerate().skip(left) {
+            let mut pair = PairedSums::default();
+            for ((x, y), &row) in x.iter().zip(y).zip(&complete_rows) {
+                pair.record(x, y).map_err(|error| CsvError::DataRowValue {
+                    row,
+                    cause: error.message(),
+                })?;
+            }
             let value = match statistic {
-                PairMatrixStatistic::Correlation => pair.correlation(),
+                PairMatrixStatistic::Correlation | PairMatrixStatistic::Spearman => {
+                    pair.correlation()
+                }
                 PairMatrixStatistic::Covariance { sample } => pair
                     .covariance(sample)
                     .map(|covariance| covariance.to_string()),
@@ -7730,6 +7738,25 @@ mod tests {
             transform_csv("离群列 [\"离群\",1] 金额\n1\n待定"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn calculates_spearman_matrix_with_average_ranks_for_numerical_ties() {
+        let data = "x,y,z,固定\n0,0,2,5\n1,1.0,1,5\n2,1/1,0,5\n8,,9,6";
+        assert_eq!(
+            transform_csv(&format!(r#"秩相关矩阵 ["x",2,"z","固定"] {data}"#)).as_deref(),
+            Ok(concat!(
+                "列,x,y,z,固定\r\n",
+                "x,1,√(3/4),-1,\"\"\r\n",
+                "y,√(3/4),1,-√(3/4),\"\"\r\n",
+                "z,-1,-√(3/4),1,\"\"\r\n",
+                "固定,\"\",\"\",\"\",\"\"",
+            ))
+        );
+        assert_eq!(
+            transform_csv("spearman-matrix [2,1] x,y\n0,50\n1,100\n2,500").as_deref(),
+            Ok("列,y,x\r\ny,1,1\r\nx,1,1")
+        );
     }
 
     #[test]

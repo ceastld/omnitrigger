@@ -726,7 +726,7 @@ pub(super) fn calculate_kendall_correlation(points: &str) -> Result<String, Line
     Ok(format_signed_square_root(&squared, score.sign()))
 }
 
-fn doubled_midranks(values: &[BigRational]) -> Vec<BigRational> {
+pub(super) fn doubled_midranks(values: &[BigRational]) -> Vec<BigRational> {
     let mut indices = (0..values.len()).collect::<Vec<_>>();
     indices.sort_unstable_by(|&a, &b| values[a].cmp(&values[b]));
     let mut ranks = vec![BigRational::default(); values.len()];
