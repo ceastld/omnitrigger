@@ -85,7 +85,7 @@ use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex, RecentApplications};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use batch::{batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError};
-use calculator::{calculate, looks_like_calculation, CalculationError};
+use calculator::{calculate, calculate_with_answer, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, parse_complete_date, DateError};
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
@@ -1229,7 +1229,7 @@ impl Results {
         }
         let is_date = looks_like_date_query(query);
         if !is_date && looks_like_calculation(query) {
-            let result = calculate(query);
+            let result = calculate_with_answer(query, recent.calculations.latest_number());
             let examples = match result {
                 Err(CalculationError::Incomplete | CalculationError::Invalid) => {
                     function_examples(query)
@@ -6074,6 +6074,28 @@ mod tests {
             Results::Value(Ok(ResultValue { text, kind: ValueKind::Color(0x3a86ffff) }))
                 if text == "rgb(58, 134, 255)"
         ));
+    }
+
+    #[test]
+    fn substitutes_the_latest_confirmed_numeric_answer_in_calculator_queries() {
+        let index = SearchIndex::default();
+        assert!(matches!(
+            index.results("ans+1"),
+            Results::Value(Err(ValueError::Calculation(
+                CalculationError::MissingAnswer
+            )))
+        ));
+        index.recent.calculations.record("2**10", "1024");
+        let preview = index.results("ＡＮＳ / 2");
+        assert_eq!(preview.refillable_text(), Some("512"));
+        assert_eq!(index.results("ans ** 2").refillable_text(), Some("1048576"));
+        index.recent.calculations.record("分数: 计算 1/3", "1/3");
+        index
+            .recent
+            .calculations
+            .record("精确结果", "多行输出\n根一");
+        assert_eq!(index.results("max(0, ans*3)").refillable_text(), Some("1"));
+        assert_eq!(for_query("12+3", &[]).refillable_text(), Some("15"));
     }
 
     #[test]

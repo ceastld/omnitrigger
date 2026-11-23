@@ -11,6 +11,7 @@ pub(super) const MAX_SAFE_INTEGER: u128 = (1 << 53) - 1;
 pub(super) enum CalculationError {
     Incomplete,
     Invalid,
+    MissingAnswer,
     DivisionByZero,
     FunctionDomain,
     OutOfRange,
@@ -22,6 +23,7 @@ impl CalculationError {
         match self {
             Self::Incomplete => "算式未完成",
             Self::Invalid => "无法识别算式",
+            Self::MissingAnswer => "先复制一个计算结果，或按 Tab 确认结果后使用 ans",
             Self::DivisionByZero => "不能除以零",
             Self::FunctionDomain => "参数超出函数定义域",
             Self::OutOfRange => "结果超出计算范围",
@@ -46,6 +48,11 @@ fn looks_like_expression(query: &str) -> bool {
     }
     let (name, tail) = split_name(query);
     let tail = tail.trim_start();
+    if name.eq_ignore_ascii_case("ans") {
+        return tail.is_empty()
+            || Operator::prefix(tail).is_some()
+            || tail.starts_with(is_superscript);
+    }
     match named_value(name) {
         Some(NamedValue::Constant(_)) => {
             tail.is_empty() || Operator::prefix(tail).is_some() || tail.starts_with(is_superscript)
@@ -61,16 +68,29 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
     format_result(evaluate(query)?)
 }
 
+pub(super) fn calculate_with_answer(
+    query: &str,
+    answer: Option<f64>,
+) -> Result<String, CalculationError> {
+    format_result(evaluate_with_variables(
+        query,
+        Variables {
+            answer,
+            ..Variables::default()
+        },
+    )?)
+}
+
 pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
-    evaluate_with_coordinates(query, Coordinates::default())
+    evaluate_with_variables(query, Variables::default())
 }
 
 pub(super) fn evaluate_at_x(query: &str, x: f64) -> Result<f64, CalculationError> {
-    evaluate_with_coordinates(
+    evaluate_with_variables(
         query,
-        Coordinates {
+        Variables {
             x: Some(x),
-            y: None,
+            ..Variables::default()
         },
     )
 }
@@ -84,7 +104,14 @@ pub(super) fn sample_at_coordinates(
     x: f64,
     y: Option<f64>,
 ) -> Result<Option<f64>, CalculationError> {
-    match evaluate_with_coordinates(query, Coordinates { x: Some(x), y }) {
+    match evaluate_with_variables(
+        query,
+        Variables {
+            x: Some(x),
+            y,
+            ..Variables::default()
+        },
+    ) {
         Ok(value) => Ok(Some(value)),
         Err(
             CalculationError::DivisionByZero
@@ -96,35 +123,33 @@ pub(super) fn sample_at_coordinates(
 }
 
 #[derive(Clone, Copy, Default)]
-struct Coordinates {
+struct Variables {
     x: Option<f64>,
     y: Option<f64>,
+    answer: Option<f64>,
 }
 
-fn evaluate_with_coordinates(
-    query: &str,
-    coordinates: Coordinates,
-) -> Result<f64, CalculationError> {
+fn evaluate_with_variables(query: &str, variables: Variables) -> Result<f64, CalculationError> {
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(CalculationError::TooLong);
     }
 
     let normalized = normalize(query);
     let input = normalized.trim();
-    evaluate_expression(input.strip_prefix('=').unwrap_or(input).trim(), coordinates)
+    evaluate_expression(input.strip_prefix('=').unwrap_or(input).trim(), variables)
 }
 
-fn evaluate_expression(input: &str, coordinates: Coordinates) -> Result<f64, CalculationError> {
+fn evaluate_expression(input: &str, variables: Variables) -> Result<f64, CalculationError> {
     if let Some((mode, base, rate)) = percentage_operands(input) {
-        let rate = evaluate_expression(rate, coordinates)?;
-        return finite(mode.apply(evaluate_expression(base, coordinates)?, rate));
+        let rate = evaluate_expression(rate, variables)?;
+        return finite(mode.apply(evaluate_expression(base, variables)?, rate));
     }
     if let Some(rate) = percentage_literal(input) {
         return Ok(rate);
     }
     let mut parser = Parser {
         rest: input,
-        coordinates,
+        variables,
     };
     let value = parser.expression(0)?;
     if !parser.rest.trim().is_empty() {
@@ -145,7 +170,7 @@ fn percentage_literal(input: &str) -> Option<f64> {
     }
     let mut parser = Parser {
         rest: digits,
-        coordinates: Coordinates::default(),
+        variables: Variables::default(),
     };
     let value = parser.number().ok()?;
     parser.rest.is_empty().then_some(sign * value / 100.)
@@ -208,7 +233,7 @@ pub(super) fn format_round_trip(value: f64) -> String {
 
 struct Parser<'a> {
     rest: &'a str,
-    coordinates: Coordinates,
+    variables: Variables,
 }
 
 fn superscript_digit(character: char) -> Option<usize> {
@@ -334,9 +359,16 @@ impl Parser<'_> {
     fn named(&mut self) -> Result<f64, CalculationError> {
         let (name, rest) = split_name(self.rest);
         self.rest = rest;
+        if name.eq_ignore_ascii_case("ans") {
+            return finite(
+                self.variables
+                    .answer
+                    .ok_or(CalculationError::MissingAnswer)?,
+            );
+        }
         let coordinate = match name {
-            "x" | "X" => self.coordinates.x,
-            "y" | "Y" => self.coordinates.y,
+            "x" | "X" => self.variables.x,
+            "y" | "Y" => self.variables.y,
             _ => None,
         };
         if let Some(value) = coordinate {

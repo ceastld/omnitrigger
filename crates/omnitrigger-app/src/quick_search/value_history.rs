@@ -25,6 +25,13 @@ impl RecentValues {
         items.truncate(HISTORY_LIMIT);
     }
 
+    pub(super) fn latest_number(&self) -> Option<f64> {
+        self.0
+            .borrow()
+            .iter()
+            .find_map(|item| super::calculator::evaluate(&item.result).ok())
+    }
+
     pub(super) fn matching(&self, query: &str) -> Vec<InputSuggestion> {
         if query.trim().is_empty() {
             return self.0.borrow().clone();
