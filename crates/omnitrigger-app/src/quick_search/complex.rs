@@ -7,7 +7,7 @@ use super::{
         calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root,
         FractionError,
     },
-    operators::split_top_level_commas,
+    operators::{split_top_level_commas, visit_additive_terms},
 };
 
 const MAX_POWER: u32 = 1024;
@@ -25,9 +25,9 @@ pub(super) enum ComplexError {
 impl ComplexError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Incomplete => "填写实部和虚部，两组复数用 @ 隔开",
+            Self::Incomplete => "填写复数，两组复数用 @ 隔开",
             Self::Operation => "可用加法、减法、乘法、除法、模、共轭、乘方和平方根",
-            Self::Components => "每个复数按实部、虚部填写，两个部分用逗号隔开",
+            Self::Components => "填写 a,b 或 a+bi 形式的复数，例如 3,4 或 3+4i",
             Self::Exponent => "在 @ 后填写 −1024 至 1024 的整数指数",
             Self::ZeroDivisor => "复数的除数不能为零",
             Self::Evaluation(error) => error.message(),
@@ -181,13 +181,46 @@ fn square_roots(value: [BigRational; 2]) -> Result<String, ComplexError> {
 
 fn components(input: &str) -> Result<[BigRational; 2], ComplexError> {
     let mut terms = split_top_level_commas(input);
-    let (Some(real), Some(imaginary), None) = (terms.next(), terms.next(), terms.next()) else {
-        return Err(ComplexError::Components);
-    };
-    Ok([
-        calculate_fraction(real).map_err(ComplexError::Evaluation)?,
-        calculate_fraction(imaginary).map_err(ComplexError::Evaluation)?,
-    ])
+    match (terms.next(), terms.next(), terms.next()) {
+        (Some(real), Some(imaginary), None) => Ok([
+            calculate_fraction(real).map_err(ComplexError::Evaluation)?,
+            calculate_fraction(imaginary).map_err(ComplexError::Evaluation)?,
+        ]),
+        (Some(expression), None, None) if !expression.trim().is_empty() => {
+            parse_complex_expression(expression)
+        }
+        _ => Err(ComplexError::Components),
+    }
+}
+
+fn parse_complex_expression(input: &str) -> Result<[BigRational; 2], ComplexError> {
+    let [mut real, mut imaginary] = [BigRational::default(), BigRational::default()];
+    visit_additive_terms(input, ComplexError::Components, |term| {
+        let term = term.trim();
+        let (value, amount) = if let Some(coefficient) = term.strip_suffix(['i', 'I']) {
+            (&mut imaginary, parse_imaginary_coefficient(coefficient)?)
+        } else {
+            (
+                &mut real,
+                calculate_fraction(term).map_err(ComplexError::Evaluation)?,
+            )
+        };
+        *value += amount;
+        ensure_exact_size(value).map_err(ComplexError::Evaluation)
+    })?;
+    Ok([real, imaginary])
+}
+
+fn parse_imaginary_coefficient(input: &str) -> Result<BigRational, ComplexError> {
+    let input = input.trim();
+    match input {
+        "" | "+" => Ok(BigRational::from_integer(1.into())),
+        "-" => Ok(BigRational::from_integer((-1).into())),
+        _ => {
+            let scalar = input.strip_suffix(['*', '×']).unwrap_or(input);
+            calculate_fraction(scalar).map_err(ComplexError::Evaluation)
+        }
+    }
 }
 
 fn bounded_components(values: [BigRational; 2]) -> Result<[BigRational; 2], ComplexError> {
@@ -261,6 +294,24 @@ mod tests {
         ] {
             assert_eq!(calculate_complex(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn accepts_cartesian_complex_input_and_can_reuse_formatted_rational_results() {
+        for (query, expected) in [
+            ("平方根 3 + 4i", "±(2 + i)"),
+            ("乘法 (1/2)i @ 1 - i", "1/2 + (1/2)i"),
+            ("共轭 1e-3 - 2e-4i", "1/1000 + (1/5000)i"),
+            ("加法 1 + i - i @ 1/2", "3/2"),
+            ("模 -2*I", "2"),
+            ("乘方 3+4i @ 2", "-7 + 24i"),
+        ] {
+            assert_eq!(calculate_complex(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_complex("模 (3 + 4i"),
+            Err(ComplexError::Components)
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use super::fraction::{
     format_square_root, FractionError,
 };
 use super::matrix::{general_solution, MatrixError, MAX_DIMENSION};
-use super::operators::{split_top_level_commas, NumberComparison};
+use super::operators::{split_top_level_commas, visit_additive_terms, NumberComparison};
 use super::plane::{parse_point, PointError};
 use super::scatter_plot::ScatterPlot;
 
@@ -231,9 +231,8 @@ fn parse_polynomial<const N: usize>(
     form: PolynomialForm,
     allow_product_terms: bool,
 ) -> Result<[BigRational; N], EquationError> {
-    let input = input.trim();
     let mut coefficients = std::array::from_fn::<_, N, _>(|_| BigRational::default());
-    let mut add_term = |term: &str| -> Result<(), EquationError> {
+    let add_term = |term: &str| -> Result<(), EquationError> {
         let term = term.trim();
         match expanded_polynomial_term(term, form) {
             Ok((index, coefficient)) => {
@@ -257,35 +256,7 @@ fn parse_polynomial<const N: usize>(
             Err(error) => Err(error),
         }
     };
-    let mut depth = 0usize;
-    let mut start = 0;
-    let mut previous = '\0';
-    for (index, character) in input.char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth
-                    .checked_sub(1)
-                    .ok_or(EquationError::ExpressionArguments)?
-            }
-            '+' | '-'
-                if depth == 0
-                    && index > start
-                    && !matches!(previous, '+' | '-' | '*' | '×' | '/' | '^' | 'e' | 'E') =>
-            {
-                add_term(&input[start..index])?;
-                start = index;
-            }
-            _ => {}
-        }
-        if !character.is_whitespace() {
-            previous = character;
-        }
-    }
-    if depth != 0 {
-        return Err(EquationError::ExpressionArguments);
-    }
-    add_term(&input[start..])?;
+    visit_additive_terms(input, EquationError::ExpressionArguments, add_term)?;
     Ok(coefficients)
 }
 

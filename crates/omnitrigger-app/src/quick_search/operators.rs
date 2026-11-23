@@ -92,6 +92,39 @@ pub(super) fn select_index_ranges(
     Ok(selected)
 }
 
+pub(super) fn visit_additive_terms<E: Copy>(
+    input: &str,
+    invalid: E,
+    mut visit: impl FnMut(&str) -> Result<(), E>,
+) -> Result<(), E> {
+    let input = input.trim();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut previous = '\0';
+    for (index, character) in input.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1).ok_or(invalid)?,
+            '+' | '-'
+                if depth == 0
+                    && index > start
+                    && !matches!(previous, '+' | '-' | '*' | '×' | '/' | '^' | 'e' | 'E') =>
+            {
+                visit(&input[start..index])?;
+                start = index;
+            }
+            _ => {}
+        }
+        if !character.is_whitespace() {
+            previous = character;
+        }
+    }
+    if depth != 0 {
+        return Err(invalid);
+    }
+    visit(&input[start..])
+}
+
 pub(super) fn split_top_level_commas(input: &str) -> impl Iterator<Item = &str> {
     let mut depth = 0usize;
     input.split(move |ch| {
