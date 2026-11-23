@@ -64,7 +64,7 @@ mod wheel_slots;
 mod wheels;
 mod windows_settings;
 
-use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
+use std::{cell::RefCell, io::Read, path::Path, rc::Rc, sync::Arc};
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
@@ -1571,6 +1571,49 @@ enum ResultSaveState {
     },
 }
 
+enum InputFileLoadState {
+    Ready,
+    InProgress,
+    Failed(String),
+}
+
+fn accepts_input_file(query: &str) -> bool {
+    matches!(
+        scoped_query(query.trim_start()),
+        Some((
+            Scope::Csv | Scope::Json | Scope::Toml | Scope::TextTools | Scope::DataPipeline,
+            _
+        ))
+    )
+}
+
+fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String> {
+    let read_error = |error: std::io::Error| format!("无法读取输入文件：{error}");
+    if !path.metadata().map_err(read_error)?.is_file() {
+        return Err("请选择一个普通文本文件".to_owned());
+    }
+    let max_bytes = character_limit * 4 + "\u{feff}".len();
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(read_error)?
+        .take((max_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(read_error)?;
+    let too_long = || format!("文件内容超过可插入的 {character_limit} 字符");
+    if bytes.len() > max_bytes {
+        return Err(too_long());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| "文件须为 UTF-8 文本".to_owned())?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    if text.contains('\0') {
+        return Err("文件须为 UTF-8 文本".to_owned());
+    }
+    if text.chars().count() > character_limit {
+        return Err(too_long());
+    }
+    Ok(text.to_owned())
+}
+
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
@@ -1586,6 +1629,7 @@ pub(super) struct QuickSearch {
     input_before_bookmarks: Option<String>,
     result_refill: Option<ResultRefill>,
     result_save: ResultSaveState,
+    input_file_load: InputFileLoadState,
     previous_input: String,
     bookmark_limit_reached: bool,
     bookmark_save_error: Option<String>,
@@ -1654,6 +1698,9 @@ impl QuickSearch {
             if matches!(&this.result_save, ResultSaveState::Finished { query: saved, .. } if saved != &query) {
                 this.result_save = ResultSaveState::Ready;
             }
+            if matches!(this.input_file_load, InputFileLoadState::Failed(_)) {
+                this.input_file_load = InputFileLoadState::Ready;
+            }
             this.bookmark_limit_reached = false;
             this.bookmark_save_error = None;
             if !query.trim().is_empty() {
@@ -1679,7 +1726,7 @@ impl QuickSearch {
                 this.was_active = true;
                 window.focus(&this.input.focus_handle(cx));
                 cx.notify();
-            } else if this.was_active && !matches!(this.result_save, ResultSaveState::InProgress) {
+            } else if this.was_active && !this.file_operation_in_progress() {
                 window.remove_window();
             }
         });
@@ -1700,6 +1747,7 @@ impl QuickSearch {
             input_before_bookmarks: None,
             result_refill: None,
             result_save: ResultSaveState::Ready,
+            input_file_load: InputFileLoadState::Ready,
             previous_input,
             bookmark_limit_reached: false,
             bookmark_save_error: None,
@@ -2056,8 +2104,78 @@ impl QuickSearch {
         }
     }
 
+    fn file_operation_in_progress(&self) -> bool {
+        matches!(self.result_save, ResultSaveState::InProgress)
+            || matches!(self.input_file_load, InputFileLoadState::InProgress)
+    }
+
+    fn load_input_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        let query = input.text();
+        if self.file_operation_in_progress()
+            || self.bookmark_name_edit.is_some()
+            || input.is_composing()
+            || !accepts_input_file(&query)
+        {
+            return;
+        }
+        let selection = input.selection();
+        let retained =
+            query[..selection.start].chars().count() + query[selection.end..].chars().count();
+        let character_limit = INPUT_CHARACTER_LIMIT.saturating_sub(retained);
+        self.input_file_load = InputFileLoadState::InProgress;
+        let picker = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("载入 UTF-8 文本到快速搜索".into()),
+        });
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let loaded = async {
+                let paths = picker
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                let Some(path) = paths.and_then(|mut paths| paths.pop()) else {
+                    return Ok(None);
+                };
+                cx.background_executor()
+                    .spawn(async move { read_input_file(&path, character_limit) })
+                    .await
+                    .map(Some)
+            }
+            .await;
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    let input = this.input.read(cx);
+                    this.input_file_load = if this.bookmark_name_edit.is_some()
+                        || input.is_composing()
+                        || input.text() != query
+                        || input.selection() != selection
+                    {
+                        InputFileLoadState::Ready
+                    } else {
+                        match loaded {
+                            Ok(Some(text)) => {
+                                this.input.update(cx, |input, cx| {
+                                    input.replace_text_in_range(None, &text, window, cx);
+                                });
+                                InputFileLoadState::Ready
+                            }
+                            Ok(None) => InputFileLoadState::Ready,
+                            Err(error) => InputFileLoadState::Failed(error),
+                        }
+                    };
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
     fn save_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.result_save, ResultSaveState::InProgress) {
+        if self.file_operation_in_progress() {
             return;
         }
         let Results::Value(Ok(result)) = &self.results else {
@@ -2443,6 +2561,15 @@ impl QuickSearch {
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "r" {
                 if !event.is_held {
                     self.toggle_calculation_history(window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1
+                && keystroke.modifiers.control
+                && keystroke.key == "o"
+                && accepts_input_file(&self.input.read(cx).text())
+            {
+                if !event.is_held {
+                    self.load_input_file(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
@@ -3526,6 +3653,32 @@ impl Render for QuickSearch {
                                 })),
                         )
                     })
+                    .when(!naming_bookmark && accepts_input_file(&query), |header| {
+                        let (label, hint) = match &self.input_file_load {
+                            InputFileLoadState::Ready => {
+                                ("载入 Ctrl+O", "在光标处插入 UTF-8 文件内容")
+                            }
+                            InputFileLoadState::InProgress => {
+                                ("正在载入", "正在选择或读取输入文件")
+                            }
+                            InputFileLoadState::Failed(error) => ("载入失败", error.as_str()),
+                        };
+                        header.child(
+                            button(
+                                label,
+                                label,
+                                Tone::Ghost,
+                                !self.file_operation_in_progress(),
+                            )
+                            .h(px(24.))
+                            .tooltip(theme::text_tooltip(hint.to_owned().into()))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.load_input_file(window, cx);
+                                },
+                            )),
+                        )
+                    })
                     .when_some(refill_action, |header, label| {
                         header.child(
                             button("refill-quick-search-result", label, Tone::Ghost, true)
@@ -3560,12 +3713,19 @@ impl Render for QuickSearch {
                             } => ("保存失败", error.clone().into(), true),
                         };
                         header.child(
-                            button(label, label, Tone::Ghost, enabled)
-                                .h(px(24.))
-                                .tooltip(theme::text_tooltip(hint))
-                                .on_click(cx.listener(|this, _, window, cx| {
+                            button(
+                                label,
+                                label,
+                                Tone::Ghost,
+                                enabled && !self.file_operation_in_progress(),
+                            )
+                            .h(px(24.))
+                            .tooltip(theme::text_tooltip(hint))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
                                     this.save_result(window, cx);
-                                })),
+                                },
+                            )),
                         )
                     })
                     .child(
@@ -5723,6 +5883,20 @@ mod tests {
         let alias = for_query("tools: ＶＥＣＴＯＲ", &[]);
         assert_eq!(alias.suggested_input(0), Some("向量: 点积 1,2,3; 4,5,6"));
         assert_eq!(alias.suggested_input(1), None);
+    }
+
+    #[test]
+    fn reads_bounded_utf8_files_without_changing_line_breaks_or_truncating() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("输入.csv");
+        std::fs::write(&file, "\u{feff}甲,😀\r\n乙,3").unwrap();
+        assert_eq!(read_input_file(&file, 8).as_deref(), Ok("甲,😀\r\n乙,3"));
+        assert!(read_input_file(&file, 7).is_err());
+        std::fs::write(&file, [0xffu8]).unwrap();
+        assert!(read_input_file(&file, 8).is_err());
+        std::fs::write(&file, b"a\0b").unwrap();
+        assert!(read_input_file(&file, 8).is_err());
+        assert!(read_input_file(dir.path(), 8).is_err());
     }
 
     #[test]

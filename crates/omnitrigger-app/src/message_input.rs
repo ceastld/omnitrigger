@@ -160,7 +160,7 @@ impl MessageInput {
         cx.notify();
     }
 
-    fn selection(&self) -> Range<usize> {
+    pub(super) fn selection(&self) -> Range<usize> {
         self.anchor.min(self.head)..self.anchor.max(self.head)
     }
 
