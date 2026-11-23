@@ -212,6 +212,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求穿过曲线上指定点并垂直于切线的直线",
+        query: "方程: 法线 x² @ 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求二次函数在给定区间上的精确定积分",
         query: "方程: 定积分 1/2,-1,3/4 @ 0 到 2",
     },
@@ -5271,6 +5276,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "过三点",
             "由顶点",
             "切线",
+            "法线",
             "定积分",
             "区间极值",
         ],

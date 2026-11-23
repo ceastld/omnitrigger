@@ -26,6 +26,7 @@ pub(super) enum EquationError {
     ThreePointArguments,
     VertexFormArguments,
     TangentArguments,
+    NormalLineArguments,
     IntegralArguments,
     ExtremaArguments,
     InequalityArguments,
@@ -57,6 +58,7 @@ impl EquationError {
             }
             Self::VertexFormArguments => "按顶点横坐标、顶点纵坐标、二次项系数的顺序填写",
             Self::TangentArguments => "填写函数系数和切点横坐标，例如 1,0,0 @ 2",
+            Self::NormalLineArguments => "填写函数和法线经过的横坐标，例如 x² @ 2",
             Self::IntegralArguments => "填写函数系数和积分起止点，例如 1,0,0 @ 0 到 1",
             Self::ExtremaArguments => "填写函数系数和闭区间的两个端点，例如 1,0,0 @ -1 到 1",
             Self::NonQuadratic => "二次项系数 a 须非零",
@@ -102,6 +104,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
             }
             "由顶点" | "from-vertex" => return quadratic_from_vertex(arguments.trim_start()),
             "切线" | "tangent" => return polynomial_tangent(arguments.trim_start()),
+            "法线" | "normal-line" => return polynomial_normal_line(arguments.trim_start()),
             "定积分" | "integral" => return polynomial_integral(arguments.trim_start()),
             "求导" | "differentiate" => return polynomial_derivative(arguments.trim_start()),
             "原函数" | "antiderivative" => {
@@ -486,14 +489,34 @@ fn quadratic_from_vertex(input: &str) -> Result<String, EquationError> {
 }
 
 fn polynomial_tangent(input: &str) -> Result<String, EquationError> {
-    let invalid = EquationError::TangentArguments;
-    let (coefficients, point) = input.split_once('@').ok_or(invalid)?;
-    let [a, b, c] = function_coefficients(coefficients)?;
-    let x = equation_value(point, invalid)?;
+    let ([a, b, c], x) = function_and_x(input, EquationError::TangentArguments)?;
     let ax = &a * &x;
     let slope = &ax * BigInt::from(2u8) + b;
     let intercept = c - ax * x;
     format_quadratic_coefficients(BigRational::default(), slope, intercept)
+}
+
+fn polynomial_normal_line(input: &str) -> Result<String, EquationError> {
+    let ([a, b, c], x) = function_and_x(input, EquationError::NormalLineArguments)?;
+    let derivative = &a * &x * BigInt::from(2u8) + &b;
+    if derivative.numer().sign() == Sign::NoSign {
+        return Ok(format!("x = {x}"));
+    }
+    let slope = -derivative.recip();
+    let intercept = polynomial_value(&a, &b, &c, &x)? - &slope * x;
+    let expression =
+        format_polynomial_terms([BigRational::default(), slope, intercept], ["x²", "x", ""])?;
+    Ok(format!("y = {expression}"))
+}
+
+fn function_and_x(
+    input: &str,
+    invalid: EquationError,
+) -> Result<([BigRational; 3], BigRational), EquationError> {
+    let (function, point) = input.split_once('@').ok_or(invalid)?;
+    let coefficients = function_coefficients(function)?;
+    let x = equation_value(point, invalid)?;
+    Ok((coefficients, x))
 }
 
 fn polynomial_integral(input: &str) -> Result<String, EquationError> {
@@ -1440,6 +1463,22 @@ mod tests {
         assert_eq!(
             solve_equation(&format!("展开 {factors}")).as_deref(),
             Ok("y = 2x² - 5x + 2")
+        );
+    }
+
+    #[test]
+    fn finds_exact_normal_lines_including_vertical_normals() {
+        for (query, expected) in [
+            ("法线 x² @ 2", "y = -x/4 + 9/2"),
+            ("法线 y = (x-1/2)**2 @ 1/2", "x = 1/2"),
+            ("normal-line 0,-2,3 @ 1", "y = x/2 + 1/2"),
+            ("法线 3 @ -5/2", "x = -5/2"),
+        ] {
+            assert_eq!(solve_equation(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            solve_equation("法线 x²"),
+            Err(EquationError::NormalLineArguments)
         );
     }
 
