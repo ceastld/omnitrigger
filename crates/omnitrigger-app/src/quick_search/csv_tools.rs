@@ -26,6 +26,7 @@ use super::statistics::{
 };
 use super::{
     bin_plot::BinPlot,
+    box_plot::BoxPlot,
     calculator::normalize,
     calendar::{
         parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
@@ -50,7 +51,8 @@ use super::{
     radix::{convert_radix_fraction, convert_radix_integer},
     scatter_plot::ScatterPlot,
     statistics::{
-        median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
+        median_sorted_values, plot_box_unweighted, report_box_unweighted, summarize_unweighted,
+        RunningTotals, StatisticsError, MAX_VALUES,
     },
     text_tools::{
         compare_natural, compile_regex, grapheme_common_substring, grapheme_edit_distance,
@@ -190,6 +192,7 @@ pub(super) enum CsvError {
     SignificantColumnsTooLarge,
     StatisticsColumn,
     ColumnBinsArguments,
+    ColumnBoxArguments,
     PairMatrixColumns,
     PairMatrixRows,
     StatisticsOutputTooLarge,
@@ -413,6 +416,7 @@ impl CsvError {
             Self::SignificantColumnsTooLarge => "有效数字列结果超过 1 MiB，请缩小表格范围",
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
             Self::ColumnBinsArguments => "填写列名或列号和边界，例如 [\"金额\",\"0,1/2,2\"]",
+            Self::ColumnBoxArguments => "填写一个列号或带双引号的列名，例如 \"金额\"",
             Self::PairMatrixColumns => "填写 2 至 8 个不同的列名或列号，例如 [\"温度\",2]",
             Self::PairMatrixRows => "所选列至少需要两行坐标完整的数值",
             Self::StatisticsOutputTooLarge => "统计结果超过 1 MiB，请缩小表格范围",
@@ -750,6 +754,7 @@ enum Operation {
         sample: bool,
     },
     ColumnBins(ColumnReference, Vec<BigRational>),
+    ColumnBoxSummary(ColumnReference),
     NumericProfile(Vec<ColumnReference>),
     GroupNumericProfile {
         columns: Vec<ColumnReference>,
@@ -2073,6 +2078,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ColumnBins(column, edges)
         }
+        "列箱线摘要" | "column-box-summary" | "列箱线图" | "column-box-plot" => {
+            let (column, data) = single_column_argument(input, CsvError::ColumnBoxArguments)?;
+            input = data;
+            Operation::ColumnBoxSummary(column)
+        }
         "数值列摘要" | "numeric-profile" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
@@ -2575,6 +2585,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         Operation::ColumnBins(column, edges) => {
             report_binned_unweighted(numeric_column_values(&rows, column)?, &edges)
+                .map_err(csv_column_statistics_error)
+        }
+        Operation::ColumnBoxSummary(column) => {
+            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+            let column = column.resolve(header)?;
+            validate_column_width(&[column], header.len())?;
+            report_box_unweighted(column_box_observations(records, column)?)
                 .map_err(csv_column_statistics_error)
         }
         Operation::NumericProfile(columns) => numeric_column_profile(&rows, &columns),
@@ -5261,6 +5278,48 @@ pub(super) fn build_column_bin_plot(input: &str) -> Result<(String, BinPlot), Cs
     let (csv, plot) =
         plot_binned_unweighted(values, &edges).map_err(csv_column_statistics_error)?;
     Ok((csv, plot.with_label(header[column].clone())))
+}
+
+pub(super) fn column_box_plot_arguments(query: &str) -> Option<&str> {
+    let (operation, rest) = split_argument(query)?;
+    (operation == "列箱线图" || operation.eq_ignore_ascii_case("column-box-plot")).then_some(rest)
+}
+
+pub(super) fn build_column_box_plot(input: &str) -> Result<(String, BoxPlot), CsvError> {
+    let (column, data) = single_column_argument(input, CsvError::ColumnBoxArguments)?;
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    let rows = read_rows(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let column = column.resolve(header)?;
+    validate_column_width(&[column], header.len())?;
+    let (text, plot) = plot_box_unweighted(column_box_observations(records, column)?)
+        .map_err(csv_column_statistics_error)?;
+    Ok((text, plot.with_label(header[column].clone())))
+}
+
+fn column_box_observations(
+    records: &[Vec<String>],
+    column: usize,
+) -> Result<Vec<BigRational>, CsvError> {
+    let mut values = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let text = record[column].trim();
+        if text.is_empty() {
+            continue;
+        }
+        let value = parse_fraction_literal(text).map_err(|error| CsvError::DataRowValue {
+            row: index + 1,
+            cause: error.message(),
+        })?;
+        if values.len() == MAX_VALUES {
+            return Err(CsvError::Statistics(StatisticsError::TooManyValues));
+        }
+        values.push(value);
+    }
+    Ok(values)
 }
 
 fn numeric_column_values(

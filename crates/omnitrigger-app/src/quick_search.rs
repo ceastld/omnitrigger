@@ -1049,6 +1049,15 @@ impl Results {
                         Self::plot_value(
                             csv_tools::build_scatter_plot(arguments).map_err(ValueError::Csv),
                         )
+                    } else if let Some(arguments) = csv_tools::column_box_plot_arguments(term) {
+                        Self::Value(
+                            csv_tools::build_column_box_plot(arguments)
+                                .map(|(text, plot)| ResultValue {
+                                    text,
+                                    kind: ValueKind::BoxPlot(plot),
+                                })
+                                .map_err(ValueError::Csv),
+                        )
                     } else if let Some(arguments) = csv_tools::column_bin_plot_arguments(term) {
                         Self::Value(
                             csv_tools::build_column_bin_plot(arguments)
@@ -4035,6 +4044,26 @@ mod tests {
                 kind: ValueKind::Text,
                 ..
             }))
+        ));
+    }
+
+    #[test]
+    fn named_csv_box_plot_ignores_missing_values_and_keeps_an_exact_summary() {
+        let data = "编号,金额\nA,1\nB,2\nC,\nD,3\nE,4\nF,8";
+        let results = for_query(&format!(r#"CSV: 列箱线图 "金额" {data}"#), &[]);
+        let expected = calculate_statistics("箱线摘要 1,2,3,4,8").unwrap();
+        assert!(matches!(
+            &results,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::BoxPlot(_),
+                ..
+            }))
+        ));
+        assert_eq!(results.refillable_text(), Some(expected.as_str()));
+        assert_eq!(transform_csv(&format!("列箱线摘要 2 {data}")), Ok(expected));
+        assert!(matches!(
+            transform_csv("列箱线摘要 2 编号,金额\nA,\nB,待定"),
+            Err(CsvError::DataRowValue { row: 2, .. })
         ));
     }
 

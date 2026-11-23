@@ -1243,7 +1243,28 @@ pub(super) fn box_plot_arguments(input: &str) -> Option<&str> {
 
 pub(super) fn calculate_box_plot(input: &str) -> Result<(String, BoxPlot), StatisticsError> {
     let input = normalize(input);
-    let (mut values, count) = read_observations(input.trim())?;
+    let (values, count) = read_observations(input.trim())?;
+    prepare_box_plot(values, count)
+}
+
+pub(super) fn report_box_unweighted(values: Vec<BigRational>) -> Result<String, StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    report_quantiles(values, count, QuantileReport::BoxSummary)
+}
+
+pub(super) fn plot_box_unweighted(
+    values: Vec<BigRational>,
+) -> Result<(String, BoxPlot), StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    prepare_box_plot(values, count)
+}
+
+fn prepare_box_plot(
+    mut values: Vec<(BigRational, u64)>,
+    count: u64,
+) -> Result<(String, BoxPlot), StatisticsError> {
     values.sort_by(|(left, _), (right, _)| left.cmp(right));
     let (lower, upper) = quartile_bounds(&values, count)?;
     let middle = interpolate_quantile(&values, count, &BigRational::new(1.into(), 2.into()))?;

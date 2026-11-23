@@ -14,6 +14,7 @@ pub(super) struct BoxPlot {
     outlier_count: u64,
     extremes: [String; 2],
     quartile_values: [String; 3],
+    label: Option<String>,
 }
 
 impl BoxPlot {
@@ -32,16 +33,34 @@ impl BoxPlot {
             outlier_count: outliers.values().sum(),
             extremes: [min.to_string(), max.to_string()],
             quartile_values: quartiles.map(ToString::to_string),
+            label: None,
         }
     }
 
+    pub(super) fn with_label(mut self, label: String) -> Self {
+        self.label = (!label.trim().is_empty()).then_some(label);
+        self
+    }
+
     pub(super) fn legend(&self) -> Div {
+        let count = format!("离群观测 {} 个", self.outlier_count);
+        let title = match &self.label {
+            Some(name) => format!("{name} · {count}"),
+            None => count,
+        };
         div()
+            .min_w_0()
             .flex()
             .items_center()
             .gap(px(7.))
-            .child(div().size(px(6.)).rounded(px(3.)).bg(rgb(theme::ACCENT_2)))
-            .child(format!("离群观测 {} 个", self.outlier_count))
+            .child(
+                div()
+                    .size(px(6.))
+                    .flex_none()
+                    .rounded(px(3.))
+                    .bg(rgb(theme::ACCENT_2)),
+            )
+            .child(div().min_w_0().truncate().child(title))
     }
 
     pub(super) fn render(&self) -> Div {

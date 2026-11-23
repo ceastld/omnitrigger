@@ -11,8 +11,9 @@ use super::{
     correlation_plot::CorrelationPlot,
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, build_column_bin_plot,
-        build_correlation_plot, build_scatter_plot, column_bin_plot_arguments,
-        correlation_plot_arguments, scatter_arguments, transform_csv, ColumnReference, CsvError,
+        build_column_box_plot, build_correlation_plot, build_scatter_plot,
+        column_bin_plot_arguments, column_box_plot_arguments, correlation_plot_arguments,
+        scatter_arguments, transform_csv, ColumnReference, CsvError,
     },
     decibel::convert_decibels,
     duration::convert_duration,
@@ -493,6 +494,13 @@ fn prepare_pipeline_chart(
                 column_bin_plot_arguments(query).map(|input| {
                     build_column_bin_plot(input)
                         .map(|(text, plot)| (text, PipelineChart::Bins(plot)))
+                        .map_err(|error| error.message())
+                })
+            })
+            .or_else(|| {
+                column_box_plot_arguments(query).map(|input| {
+                    build_column_box_plot(input)
+                        .map(|(text, plot)| (text, PipelineChart::BoxPlot(plot)))
                         .map_err(|error| error.message())
                 })
             })
