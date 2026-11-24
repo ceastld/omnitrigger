@@ -850,6 +850,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "表格查看二项分布的恰好、至多和至少概率",
+        query: "统计: 二项概率表 3,1/3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算在指定试验中首次成功的概率",
         query: "统计: 几何概率 3,25%",
     },
@@ -6396,6 +6401,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if !term.is_empty()
                 && [
                     "二项概率",
+                    "二项概率表",
                     "二项累计",
                     "二项至少",
                     "几何概率",

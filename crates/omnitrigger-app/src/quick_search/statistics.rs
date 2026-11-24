@@ -40,6 +40,8 @@ pub(super) enum StatisticsError {
     InvalidBinEdges,
     CumulativeThreshold,
     BinomialArguments,
+    BinomialTableArguments,
+    ProbabilityTableTooLarge,
     GeometricArguments,
     HypergeometricArguments,
     InvalidContingencyTable,
@@ -77,6 +79,10 @@ impl StatisticsError {
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
             Self::CumulativeThreshold => "用 @ 隔开阈值和观测值，例如 2 @ 1,2,2,3",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
+            Self::BinomialTableArguments => {
+                "用逗号填写试验次数和单次成功概率，例如 3,1/3，最多 128 次试验"
+            }
+            Self::ProbabilityTableTooLarge => "概率表超过 CSV 输出上限",
             Self::GeometricArguments => {
                 "用逗号填写试验次数和单次成功概率，例如 3,25%。次数为 1 至 1024，概率须大于零"
             }
@@ -277,6 +283,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
         "二项概率" | "binomial" => return binomial_probability(values, BinomialEvent::Exactly),
+        "二项概率表" | "binomial-table" => return binomial_csv(values),
         "二项累计" | "binomial-cdf" => {
             return binomial_probability(values, BinomialEvent::AtMost)
         }
@@ -836,6 +843,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
                 | "frequency-csv"
                 | "加权分位表"
                 | "weighted-quantiles-csv"
+                | "二项概率表"
+                | "binomial-table"
                 | "累计分布"
                 | "cumulative-distribution"
                 | "ecdf"
@@ -1411,11 +1420,7 @@ fn binomial_probability(input: &str, event: BinomialEvent) -> Result<String, Sta
     else {
         return Err(StatisticsError::BinomialArguments);
     };
-    let trials = trials
-        .parse::<u32>()
-        .ok()
-        .filter(|&trials| trials <= MAX_BINOMIAL_TRIALS)
-        .ok_or(StatisticsError::BinomialArguments)?;
+    let trials = binomial_trial_count(trials, StatisticsError::BinomialArguments)?;
     let successes = successes
         .parse::<u32>()
         .ok()
@@ -1439,25 +1444,85 @@ fn binomial_probability(input: &str, event: BinomialEvent) -> Result<String, Sta
     if probability.numer().sign() == Sign::NoSign {
         return Ok(u8::from(cumulative || successes == 0).to_string());
     }
+    let (denominator, mut masses) = binomial_masses(trials, &probability)?;
+    let successes = successes as usize;
+    let numerator = if cumulative {
+        masses.take(successes + 1).sum()
+    } else {
+        masses.nth(successes).expect("成功次数不超过试验次数")
+    };
+    Ok(BigRational::new(numerator, denominator).to_string())
+}
+
+fn binomial_trial_count(input: &str, invalid: StatisticsError) -> Result<u32, StatisticsError> {
+    input
+        .parse::<u32>()
+        .ok()
+        .filter(|&trials| trials <= MAX_BINOMIAL_TRIALS)
+        .ok_or(invalid)
+}
+
+fn binomial_masses(
+    trials: u32,
+    probability: &BigRational,
+) -> Result<(BigInt, impl Iterator<Item = BigInt> + '_), StatisticsError> {
     let failures = probability.denom() - probability.numer();
-    let no_success = rational_power(
-        one - &probability,
-        BigRational::from_integer(BigInt::from(trials)),
-    )
-    .map_err(StatisticsError::Evaluation)?;
-    // 每项公用单次概率分母的 n 次幂，可对分子做整数递推。
-    let mut mass = no_success.numer().clone();
-    let mut sum = mass.clone();
-    for count in 0..successes {
-        let numerator = mass * probability.numer() * BigInt::from(trials - count);
-        let divisor = &failures * BigInt::from(count + 1);
-        mass = numerator / divisor;
-        if cumulative {
-            sum += &mass;
+    let certain = failures.sign() == Sign::NoSign;
+    let (mut mass, denominator) = if certain {
+        (BigInt::default(), BigInt::from(1u8))
+    } else {
+        let one = BigRational::from_integer(BigInt::from(1u8));
+        let no_success = rational_power(
+            one - probability,
+            BigRational::from_integer(BigInt::from(trials)),
+        )
+        .map_err(StatisticsError::Evaluation)?;
+        (no_success.numer().clone(), no_success.denom().clone())
+    };
+    // 各项概率共用单次概率分母的 n 次幂，可对分子做整数递推。
+    let numerators = (0..=trials).map(move |count| {
+        if certain {
+            return BigInt::from(u8::from(count == trials));
         }
+        let here = mass.clone();
+        if count < trials {
+            let numerator = &mass * probability.numer() * BigInt::from(trials - count);
+            let divisor = &failures * BigInt::from(count + 1);
+            mass = numerator / divisor;
+        }
+        here
+    });
+    Ok((denominator, numerators))
+}
+
+fn binomial_csv(input: &str) -> Result<String, StatisticsError> {
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(trials), Some(probability), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(StatisticsError::BinomialTableArguments);
+    };
+    let trials = binomial_trial_count(trials, StatisticsError::BinomialTableArguments)?;
+    let probability = parse_probability(probability)?;
+    let (denominator, masses) = binomial_masses(trials, &probability)?;
+    let mut cumulative = BigInt::default();
+    let mut output = String::from("成功次数,恰好概率,至多概率,至少概率");
+    let format_probability =
+        |numerator| BigRational::new(numerator, denominator.clone()).to_string();
+    for (count, mass) in masses.enumerate() {
+        let at_least = format_probability(&denominator - &cumulative);
+        cumulative += &mass;
+        let row = [
+            count.to_string(),
+            format_probability(mass),
+            format_probability(cumulative.clone()),
+            at_least,
+        ];
+        append_bounded_csv_row(
+            &mut output,
+            row.iter().map(String::as_str),
+            StatisticsError::ProbabilityTableTooLarge,
+        )?;
     }
-    let numerator = if cumulative { sum } else { mass };
-    Ok(BigRational::new(numerator, no_success.denom().clone()).to_string())
+    Ok(output)
 }
 
 fn geometric_probability(input: &str, cumulative: bool) -> Result<String, StatisticsError> {
@@ -1942,6 +2007,28 @@ mod tests {
         assert_eq!(
             calculate_statistics("几何概率 1,2"),
             Err(StatisticsError::InvalidProbability),
+        );
+    }
+
+    #[test]
+    fn lists_exact_binomial_masses_and_inclusive_tails() {
+        let header = "成功次数,恰好概率,至多概率,至少概率";
+        for (query, rows) in [
+            (
+                "二项概率表 3,1/3",
+                "0,8/27,8/27,1\r\n1,4/9,20/27,19/27\r\n2,2/9,26/27,7/27\r\n3,1/27,1,1/27",
+            ),
+            ("二项概率表 1,100%", "0,0,0,1\r\n1,1,1,1"),
+            ("binomial-table 2,0", "0,1,1,1\r\n1,0,1,0\r\n2,0,1,0"),
+            ("二项概率表 0,100%", "0,1,1,1"),
+        ] {
+            let expected = format!("{header}\r\n{rows}");
+            assert_eq!(calculate_statistics(query), Ok(expected.clone()));
+            assert_eq!(statistics_csv_report(query).unwrap(), Ok(expected));
+        }
+        assert_eq!(
+            calculate_statistics("二项概率表 129,1/3"),
+            Err(StatisticsError::BinomialTableArguments)
         );
     }
 
