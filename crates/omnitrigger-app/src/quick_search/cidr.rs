@@ -10,6 +10,7 @@ use super::{
 };
 
 const MAX_SUBNETS: u32 = 128;
+const MAX_SET_NETWORKS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CidrError {
@@ -23,6 +24,8 @@ pub(super) enum CidrError {
     TooManySubnets,
     LookupArguments,
     ReportTooLarge,
+    NetworkSetArguments,
+    NetworkSetTooLarge,
 }
 
 impl CidrError {
@@ -40,6 +43,10 @@ impl CidrError {
                 "用 JSON 数组填写候选网段，再用逗号、空格或换行分隔要查找的 IP 地址"
             }
             Self::ReportTooLarge => "网段归属表超过 CSV 输出上限",
+            Self::NetworkSetArguments => {
+                "填写两组网段，例如 [[\"192.0.2.0/24\"],[\"192.0.2.128/25\"]]"
+            }
+            Self::NetworkSetTooLarge => "交集或差集最多输入和输出各 4096 个网段",
         }
     }
 }
@@ -160,6 +167,12 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
             "子网" | "subnets" => return split_subnets(range),
             "排除" | "exclude" => return exclude_network(range),
             "合并" | "collapse" => return collapse_networks(range),
+            "交集" | "intersect" => {
+                return compare_network_sets(range, NetworkSetOperation::Intersect)
+            }
+            "差集" | "subtract" => {
+                return compare_network_sets(range, NetworkSetOperation::Subtract)
+            }
             _ => {}
         }
     }
@@ -278,37 +291,145 @@ fn exclude_network(input: &str) -> Result<String, CidrError> {
 }
 
 fn collapse_networks(input: &str) -> Result<String, CidrError> {
-    let mut intervals = Vec::new();
-    for network in input
-        .split(|character: char| character == ',' || character.is_whitespace())
-        .filter(|network| !network.is_empty())
-    {
-        let (address, prefix) = parse_network(network)?;
-        let width = address_width(address);
-        let mask = host_mask(width - prefix);
-        intervals.push((width, bits(address) & !mask, bits(address) | mask));
-    }
+    let intervals = merge_network_intervals(
+        input
+            .split(|character: char| character == ',' || character.is_whitespace())
+            .filter(|network| !network.is_empty()),
+    )?;
     if intervals.is_empty() {
         return Err(CidrError::Incomplete);
     }
-    intervals.sort_unstable();
-    let mut merged: Vec<(u32, u128, u128)> = Vec::new();
-    for (width, first, last) in intervals {
-        if let Some((_, _, previous_last)) = merged
-            .last_mut()
-            .filter(|current| width == current.0 && first <= current.2.saturating_add(1))
-        {
-            *previous_last = (*previous_last).max(last);
-            continue;
-        }
-        merged.push((width, first, last));
-    }
-
     let mut networks = Vec::new();
-    for (width, first, last) in merged {
+    for NetworkInterval { width, first, last } in intervals {
         append_network_range(&mut networks, width, first, last);
     }
     Ok(networks.join("\n"))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NetworkInterval {
+    width: u32,
+    first: u128,
+    last: u128,
+}
+
+fn merge_network_intervals<'a>(
+    networks: impl Iterator<Item = &'a str>,
+) -> Result<Vec<NetworkInterval>, CidrError> {
+    let mut intervals = Vec::new();
+    for network in networks {
+        let (address, prefix) = parse_network(network)?;
+        let width = address_width(address);
+        let mask = host_mask(width - prefix);
+        intervals.push(NetworkInterval {
+            width,
+            first: bits(address) & !mask,
+            last: bits(address) | mask,
+        });
+    }
+    intervals.sort_unstable();
+    let mut merged: Vec<NetworkInterval> = Vec::new();
+    for interval in intervals {
+        if let Some(previous) = merged.last_mut().filter(|previous| {
+            previous.width == interval.width && interval.first <= previous.last.saturating_add(1)
+        }) {
+            previous.last = previous.last.max(interval.last);
+        } else {
+            merged.push(interval);
+        }
+    }
+    Ok(merged)
+}
+
+enum NetworkSetOperation {
+    Intersect,
+    Subtract,
+}
+
+fn compare_network_sets(input: &str, operation: NetworkSetOperation) -> Result<String, CidrError> {
+    let [left, right]: [Vec<String>; 2] =
+        serde_json::from_str(input).map_err(|_| CidrError::NetworkSetArguments)?;
+    if left.len() + right.len() > MAX_SET_NETWORKS {
+        return Err(CidrError::NetworkSetTooLarge);
+    }
+    let left = merge_network_intervals(left.iter().map(String::as_str))?;
+    let right = merge_network_intervals(right.iter().map(String::as_str))?;
+    let intervals = match operation {
+        NetworkSetOperation::Intersect => intersect_network_intervals(&left, &right),
+        NetworkSetOperation::Subtract => subtract_network_intervals(left, &right),
+    };
+    let mut networks = Vec::new();
+    for NetworkInterval { width, first, last } in intervals {
+        append_network_range(&mut networks, width, first, last);
+        if networks.len() > MAX_SET_NETWORKS {
+            return Err(CidrError::NetworkSetTooLarge);
+        }
+    }
+    if networks.is_empty() {
+        return Ok(match operation {
+            NetworkSetOperation::Intersect => "无重叠网段",
+            NetworkSetOperation::Subtract => "无剩余网段",
+        }
+        .to_owned());
+    }
+    Ok(networks.join("\n"))
+}
+
+fn intersect_network_intervals(
+    left: &[NetworkInterval],
+    right: &[NetworkInterval],
+) -> Vec<NetworkInterval> {
+    let (mut left_index, mut right_index) = (0, 0);
+    let mut result = Vec::new();
+    while let (Some(a), Some(b)) = (left.get(left_index), right.get(right_index)) {
+        let (width, first) = (a.width, a.first).max((b.width, b.first));
+        let (last_width, last) = (a.width, a.last).min((b.width, b.last));
+        if width == last_width && first <= last {
+            result.push(NetworkInterval { width, first, last });
+        }
+        if (a.width, a.last) <= (b.width, b.last) {
+            left_index += 1;
+        } else {
+            right_index += 1;
+        }
+    }
+    result
+}
+
+fn subtract_network_intervals(
+    left: Vec<NetworkInterval>,
+    right: &[NetworkInterval],
+) -> Vec<NetworkInterval> {
+    let mut right = right.iter().peekable();
+    let mut result = Vec::new();
+    for mut remaining in left {
+        loop {
+            let Some(excluded) = right.peek() else {
+                result.push(remaining);
+                break;
+            };
+            if (excluded.width, excluded.last) < (remaining.width, remaining.first) {
+                right.next();
+                continue;
+            }
+            if (excluded.width, excluded.first) > (remaining.width, remaining.last) {
+                result.push(remaining);
+                break;
+            }
+            if remaining.first < excluded.first {
+                result.push(NetworkInterval {
+                    last: excluded.first - 1,
+                    ..remaining
+                });
+            }
+            if excluded.last >= remaining.last {
+                break;
+            }
+            remaining.first = excluded.last + 1;
+            right.next();
+        }
+    }
+    result
 }
 
 fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
@@ -378,6 +499,57 @@ mod tests {
         }
         assert_eq!(calculate_cidr("合并 192.0.2.1/33"), Err(CidrError::Prefix));
         assert_eq!(calculate_cidr("合并 ,"), Err(CidrError::Incomplete));
+    }
+
+    #[test]
+    fn compares_sets_of_networks_without_enumerating_addresses() {
+        const LISTS: &str = r#"[["192.0.2.0/24","2001:db8::/63"],["192.0.2.0/26","192.0.2.128/25","2001:db8:0:1::/64"]]"#;
+        for (query, expected) in [
+            (
+                format!("交集 {LISTS}"),
+                "192.0.2.0/26\n192.0.2.128/25\n2001:db8:0:1::/64",
+            ),
+            (format!("差集 {LISTS}"), "192.0.2.64/26\n2001:db8::/64"),
+            (
+                r#"intersect [["0.0.0.0/0"],["::/0"]]"#.to_owned(),
+                "无重叠网段",
+            ),
+            (
+                r#"subtract [["192.0.2.0/26","192.0.2.128/26","192.0.3.0/24"],["192.0.2.0/24"]]"#.to_owned(),
+                "192.0.3.0/24",
+            ),
+            (
+                r#"差集 [["255.255.255.255/32","ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"],["::/0"]]"#.to_owned(),
+                "255.255.255.255/32",
+            ),
+            (r#"差集 [["::/0"],[]]"#.to_owned(), "::/0"),
+            (r#"差集 [["::/0"],["::/0"]]"#.to_owned(), "无剩余网段"),
+            (r#"交集 [[],["::/0"]]"#.to_owned(), "无重叠网段"),
+        ] {
+            assert_eq!(calculate_cidr(&query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_cidr("交集 []"),
+            Err(CidrError::NetworkSetArguments)
+        );
+        assert_eq!(
+            calculate_cidr(r#"差集 [["::/129"],[]]"#),
+            Err(CidrError::Prefix)
+        );
+    }
+
+    #[test]
+    fn rejects_network_sets_with_too_many_inputs_or_output_prefixes() {
+        let all = vec!["::/0".to_owned()];
+        let massive = vec!["::1/128".to_owned(); MAX_SET_NETWORKS];
+        let sparse: Vec<_> = (0..48).map(|prefix| format!("{prefix:x}::1/128")).collect();
+        for excluded in [massive, sparse] {
+            let query = serde_json::to_string(&[&all, &excluded]).unwrap();
+            assert_eq!(
+                calculate_cidr(&format!("差集 {query}")),
+                Err(CidrError::NetworkSetTooLarge)
+            );
+        }
     }
 
     #[test]
