@@ -1121,13 +1121,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     if let Some(table) = coordinate_line_table(operation, input) {
         return table?.to_csv();
     }
+    if let Some(delimiter) = table_preview_delimiter(operation) {
+        return read_preview_output(input, delimiter).map(|(text, _)| text);
+    }
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
-        "表格预览" | "table-preview" => {
-            read_table_for_preview(input)?;
-            return Ok(input.to_owned());
-        }
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
         "函数近似筛选" | "filter-function-near" => return filter_near_function_rows(input),
@@ -1217,10 +1216,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "转tsv" | "tsv" => Operation::ConvertDelimiter {
             from: ',',
             to: '\t',
-        },
-        "从tsv" | "from-tsv" => Operation::ConvertDelimiter {
-            from: '\t',
-            to: ',',
         },
         "自动转csv" | "auto-csv" => return auto_convert_delimiter(input),
         "分隔符转换" | "convert-delimiter" => {
@@ -6796,26 +6791,49 @@ fn order_records<'a>(
     Ok(ordered)
 }
 
-pub(super) fn table_preview_arguments(query: &str) -> Option<&str> {
+pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePreview), CsvError>> {
     let (operation, data) = split_argument(query)?;
-    (operation == "表格预览" || operation.eq_ignore_ascii_case("table-preview")).then_some(data)
+    let delimiter = table_preview_delimiter(operation)?;
+    Some(
+        read_preview_output(data, delimiter)
+            .map(|(text, rows)| (text, TablePreview::from_rows(rows))),
+    )
 }
 
-pub(super) fn build_table_preview(input: &str) -> Result<(String, TablePreview), CsvError> {
-    let table = parse_table_preview(input)?;
-    Ok((input.to_owned(), table))
+fn table_preview_delimiter(operation: &str) -> Option<char> {
+    if operation == "表格预览" || operation.eq_ignore_ascii_case("table-preview") {
+        Some(',')
+    } else if operation.eq_ignore_ascii_case("从tsv") || operation.eq_ignore_ascii_case("from-tsv")
+    {
+        Some('\t')
+    } else {
+        None
+    }
+}
+
+fn read_preview_output(
+    input: &str,
+    delimiter: char,
+) -> Result<(String, Vec<Vec<String>>), CsvError> {
+    let rows = read_table_for_preview(input, delimiter)?;
+    let text = if delimiter == ',' {
+        input.to_owned()
+    } else {
+        write_rows(&rows, ',')
+    };
+    Ok((text, rows))
 }
 
 pub(super) fn parse_table_preview(input: &str) -> Result<TablePreview, CsvError> {
-    read_table_for_preview(input).map(TablePreview::from_rows)
+    read_table_for_preview(input, ',').map(TablePreview::from_rows)
 }
 
-fn read_table_for_preview(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+fn read_table_for_preview(input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvError> {
     let data = input.strip_prefix('\u{feff}').unwrap_or(input);
     if data.is_empty() {
         return Err(CsvError::MissingInput);
     }
-    read_rows(data, ',')
+    read_rows(data, delimiter)
 }
 
 pub(super) fn csv_count_chart(query: &str) -> Option<Result<(String, BinPlot), CsvError>> {

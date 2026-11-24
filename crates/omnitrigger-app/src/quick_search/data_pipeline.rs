@@ -12,8 +12,8 @@ use super::{
     correlation_plot::CorrelationPlot,
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, build_column_box_plot,
-        build_correlation_plot, build_scatter_plot, build_table_preview, column_box_plot_arguments,
-        correlation_plot_arguments, csv_count_chart, scatter_arguments, table_preview_arguments,
+        build_correlation_plot, build_scatter_plot, column_box_plot_arguments,
+        correlation_plot_arguments, csv_count_chart, csv_table_preview, scatter_arguments,
         transform_csv, ColumnReference, CsvError,
     },
     decibel::convert_decibels,
@@ -505,9 +505,9 @@ fn prepare_pipeline_preview(
     csv_error: &impl Fn(CsvError) -> DataPipelineError,
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
-        Scope::Csv => table_preview_arguments(query)
-            .map(|input| {
-                build_table_preview(input)
+        Scope::Csv => csv_table_preview(query)
+            .map(|result| {
+                result
                     .map(|(text, table)| (text, PipelinePreview::Table(table)))
                     .map_err(csv_error)
             })

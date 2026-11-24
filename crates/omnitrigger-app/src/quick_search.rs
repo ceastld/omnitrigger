@@ -1057,9 +1057,9 @@ impl Results {
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 Scope::Toml => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
                 Scope::Csv => {
-                    if let Some(arguments) = csv_tools::table_preview_arguments(term) {
+                    if let Some(result) = csv_tools::csv_table_preview(term) {
                         Self::Value(
-                            csv_tools::build_table_preview(arguments)
+                            result
                                 .map(|(text, table)| ResultValue {
                                     text,
                                     kind: ValueKind::Table(table),
@@ -4616,6 +4616,32 @@ mod tests {
         assert!(error.contains("保存搜索结果失败"));
         assert_eq!(std::fs::read_to_string(existing).unwrap(), "原始数据");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn previews_spreadsheet_paste_as_csv_with_the_same_quoted_cell_values() {
+        let data = "编号\t备注\r\n001\t\"茶,咖啡\"\r\n002\t\"带\r\n换行\"";
+        let expected = "编号,备注\r\n001,\"茶,咖啡\"\r\n002,\"带\r\n换行\"";
+        for query in [
+            format!("CSV: 从TSV {data}"),
+            format!("CSV: FROM-TSV {data}"),
+            format!("处理: [\"CSV: 从TSV\"] {data}"),
+        ] {
+            let result = for_query(&query, &[]);
+            assert!(
+                matches!(
+                    &result,
+                    Results::Value(Ok(value)) if matches!(&value.kind, ValueKind::Table(_))
+                ),
+                "{query}"
+            );
+            assert_eq!(result.refillable_text(), Some(expected), "{query}");
+        }
+        let query = format!("处理: [\"CSV: 从TSV\",\"CSV: 选列 1\"] {data}");
+        assert_eq!(
+            for_query(&query, &[]).refillable_text(),
+            Some("编号\r\n001\r\n002")
+        );
     }
 
     #[test]
