@@ -668,6 +668,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 频数表 3,1/2,0.5,3,5",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "在表格中查看次数和精确频率",
+        query: "统计: 频数CSV 3,1/2,0.5,3,5",
+    },
+    Example {
         icon: Icon::Layers,
         title: "找出出现次数最多的数值",
         query: "统计: 众数 3,1/2,0.5,3,5",
@@ -6066,6 +6071,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
         ],
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
         Scope::Statistics => &[
+            "频数CSV",
             "加权平均",
             "加权分位数",
             "加权累积分布",

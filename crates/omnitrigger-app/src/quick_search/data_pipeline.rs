@@ -37,7 +37,7 @@ use super::{
     statistics::{
         bin_plot_arguments, box_plot_arguments, calculate_bin_plot, calculate_box_plot,
         calculate_statistics, cumulative_plot_arguments, plot_cumulative_distribution,
-        weighted_distribution_report,
+        statistics_csv_report,
     },
     table_preview::TablePreview,
     tempo::calculate_tempo,
@@ -659,7 +659,7 @@ fn prepare_pipeline_preview(
                 })
             })
             .or_else(|| {
-                weighted_distribution_report(query).map(|report| {
+                statistics_csv_report(query).map(|report| {
                     report_preview(report.map_err(|cause| cause.message()), error, csv_error)
                 })
             }),

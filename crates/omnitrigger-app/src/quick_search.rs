@@ -1228,15 +1228,8 @@ impl Results {
                     }
                 }
                 Scope::Statistics => {
-                    if let Some(result) = statistics::weighted_distribution_report(term) {
-                        Self::Value(result.map_err(ValueError::Statistics).and_then(|text| {
-                            let table =
-                                csv_tools::parse_table_preview(&text).map_err(ValueError::Csv)?;
-                            Ok(ResultValue {
-                                text,
-                                kind: ValueKind::Table(table),
-                            })
-                        }))
+                    if let Some(result) = statistics::statistics_csv_report(term) {
+                        Self::table_value(result.map_err(ValueError::Statistics))
                     } else if let Some(values) = statistics::cumulative_plot_arguments(term) {
                         Self::plot_value(
                             statistics::plot_cumulative_distribution(values)
@@ -4851,6 +4844,50 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn previews_statistics_csv_reports_directly_and_as_pipeline_outputs() {
+        for (operation, values, expected) in [
+            (
+                "频数CSV",
+                "3,1/2,0.5,3,5",
+                "值,次数,频率\r\n1/2,2,2/5\r\n3,2,2/5\r\n5,1,1/5",
+            ),
+            (
+                "FREQUENCY-CSV",
+                "频数 1@2,3@1",
+                "值,次数,频率\r\n1,2,2/3\r\n3,1,1/3",
+            ),
+            (
+                "累计分布",
+                "1,1,3",
+                "值,累计次数,累计频率\r\n1,2,2/3\r\n3,3,1",
+            ),
+            (
+                "分箱",
+                "0,2 @ -1,0,2",
+                "下界,上界,次数,频率\r\n-∞,0,1,1/3\r\n0,2,1,1/3\r\n2,+∞,1,1/3",
+            ),
+        ] {
+            for query in [
+                format!("统计: {operation} {values}"),
+                format!(r#"处理: ["统计: {operation}"] {values}"#),
+            ] {
+                let results = for_query(&query, &[]);
+                assert!(
+                    matches!(
+                        &results,
+                        Results::Value(Ok(ResultValue {
+                            kind: ValueKind::Table(_),
+                            ..
+                        }))
+                    ),
+                    "{query}"
+                );
+                assert_eq!(results.refillable_text(), Some(expected), "{query}");
+            }
+        }
     }
 
     #[test]

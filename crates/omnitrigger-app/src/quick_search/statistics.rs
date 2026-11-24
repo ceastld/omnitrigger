@@ -136,6 +136,7 @@ enum StatisticsOperation {
 #[derive(Clone, Copy)]
 enum FrequencyReport {
     Table,
+    Csv,
     Cumulative,
     Mode,
 }
@@ -157,6 +158,10 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         ),
         "频数表" | "frequency-table" => (
             StatisticsOperation::Frequencies(FrequencyReport::Table),
+            values.trim(),
+        ),
+        "频数csv" | "frequency-csv" => (
+            StatisticsOperation::Frequencies(FrequencyReport::Csv),
             values.trim(),
         ),
         "累计分布"
@@ -714,10 +719,21 @@ fn is_weighted_distribution_operation(operation: &str) -> bool {
     operation == "加权累积分布" || operation.eq_ignore_ascii_case("weighted-cdf")
 }
 
-pub(super) fn weighted_distribution_report(query: &str) -> Option<Result<String, StatisticsError>> {
-    let (operation, values) = operation_and_arguments(query.trim());
-    is_weighted_distribution_operation(&normalize(operation))
-        .then(|| weighted_cumulative_csv(normalize(values).trim()))
+pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, StatisticsError>> {
+    let (operation, _) = operation_and_arguments(query.trim());
+    let operation = normalize(operation).to_ascii_lowercase();
+    (is_weighted_distribution_operation(&operation)
+        || matches!(
+            operation.as_str(),
+            "频数csv"
+                | "frequency-csv"
+                | "累计分布"
+                | "cumulative-distribution"
+                | "ecdf"
+                | "分箱"
+                | "histogram"
+        ))
+    .then(|| calculate_statistics(query))
 }
 
 fn weighted_cumulative_csv(input: &str) -> Result<String, StatisticsError> {
@@ -787,13 +803,18 @@ fn report_frequencies(
     if matches!(report, FrequencyReport::Cumulative) {
         return cumulative_csv(&frequencies, count);
     }
-    std::iter::once("值\t次数\t频率".to_owned())
+    let (header, delimiter, newline) = if matches!(report, FrequencyReport::Csv) {
+        ("值,次数,频率", ',', "\r\n")
+    } else {
+        ("值\t次数\t频率", '\t', "\n")
+    };
+    std::iter::once(header.to_owned())
         .chain(frequencies.into_iter().map(|(value, repetitions)| {
             let share = BigRational::new(repetitions.into(), count.into());
-            format!("{value}\t{repetitions}\t{share}")
+            format!("{value}{delimiter}{repetitions}{delimiter}{share}")
         }))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join(newline)
 }
 
 fn frequency_groups(values: Vec<(BigRational, u64)>) -> BTreeMap<BigRational, u64> {
