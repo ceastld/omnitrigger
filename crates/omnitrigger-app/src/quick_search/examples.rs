@@ -900,6 +900,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算首次成功至少需要指定次数的概率",
+        query: "统计: 几何至少 3,25%",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "找出达到累计成功概率的最少试验次数",
+        query: "统计: 几何分位点 25%,90%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算首次成功所需试验次数的期望和方差",
         query: "统计: 几何摘要 25%",
     },
@@ -6571,6 +6581,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "二项至少",
                     "几何概率",
                     "几何累计",
+                    "几何至少",
+                    "几何分位点",
                     "几何摘要",
                     "超几何概率",
                     "超几何概率表",

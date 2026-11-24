@@ -46,11 +46,13 @@ pub(super) enum StatisticsError {
     NegativeBinomialArguments,
     NegativeBinomialSummaryArguments,
     NegativeBinomialQuantileArguments,
-    NegativeBinomialQuantileUnbounded,
+    WaitingQuantileUnbounded,
     NegativeBinomialQuantileLimit,
     ProbabilityTableTooLarge,
     GeometricArguments,
     GeometricSummaryArguments,
+    GeometricQuantileArguments,
+    GeometricQuantileLimit,
     HypergeometricArguments,
     HypergeometricDistributionArguments,
     HypergeometricQuantileArguments,
@@ -105,13 +107,17 @@ impl StatisticsError {
             Self::NegativeBinomialQuantileArguments => {
                 "依次填写目标成功次数、单次成功概率和目标累计概率，例如 3,50%,75%"
             }
-            Self::NegativeBinomialQuantileUnbounded => "单次成功概率小于 1 时，有限次试验的累计概率达不到 100%",
+            Self::WaitingQuantileUnbounded => "单次成功概率小于 1 时，有限次试验的累计概率达不到 100%",
             Self::NegativeBinomialQuantileLimit => "128 次试验内达不到给定累计概率",
             Self::ProbabilityTableTooLarge => "概率表超过 CSV 输出上限",
             Self::GeometricArguments => {
                 "用逗号填写试验次数和单次成功概率，例如 3,25%。次数为 1 至 1024，概率须大于零"
             }
             Self::GeometricSummaryArguments => "填写大于零的单次成功概率，例如 25%",
+            Self::GeometricQuantileArguments => {
+                "用逗号填写单次成功概率和目标累计概率，例如 25%,90%。单次成功概率须大于零"
+            }
+            Self::GeometricQuantileLimit => "1024 次试验内达不到给定累计概率",
             Self::HypergeometricArguments => {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
             }
@@ -342,9 +348,17 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "负二项分位点" | "negative-binomial-quantile" => {
             return negative_binomial_quantile(values)
         }
-        "几何概率" | "geometric" => return geometric_probability(values, false),
-        "几何累计" | "geometric-cdf" => return geometric_probability(values, true),
+        "几何概率" | "geometric" => {
+            return geometric_probability(values, DiscreteEvent::Exactly)
+        }
+        "几何累计" | "geometric-cdf" => {
+            return geometric_probability(values, DiscreteEvent::AtMost)
+        }
+        "几何至少" | "geometric-at-least" => {
+            return geometric_probability(values, DiscreteEvent::AtLeast)
+        }
         "几何摘要" | "geometric-summary" => return geometric_summary(values),
+        "几何分位点" | "geometric-quantile" => return geometric_quantile(values),
         "超几何概率" | "hypergeometric" => {
             return hypergeometric_probability(values, DiscreteEvent::Exactly)
         }
@@ -1598,7 +1612,7 @@ fn negative_binomial_quantile(input: &str) -> Result<String, StatisticsError> {
         return Ok(target.to_string());
     }
     if level == one {
-        return Err(StatisticsError::NegativeBinomialQuantileUnbounded);
+        return Err(StatisticsError::WaitingQuantileUnbounded);
     }
     let failures = &one - &probability;
     let mut mass = rational_power(probability, BigRational::from_integer(target.into()))
@@ -1789,7 +1803,7 @@ fn probability_csv(
     Ok(output)
 }
 
-fn geometric_probability(input: &str, cumulative: bool) -> Result<String, StatisticsError> {
+fn geometric_probability(input: &str, event: DiscreteEvent) -> Result<String, StatisticsError> {
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(trials), Some(probability), None) = (terms.next(), terms.next(), terms.next()) else {
         return Err(StatisticsError::GeometricArguments);
@@ -1799,24 +1813,56 @@ fn geometric_probability(input: &str, cumulative: bool) -> Result<String, Statis
         .ok()
         .filter(|trials| (1..=MAX_GEOMETRIC_TRIALS).contains(trials))
         .ok_or(StatisticsError::GeometricArguments)?;
-    let probability = parse_probability(probability)?;
-    if probability.numer().sign() == Sign::NoSign {
-        return Err(StatisticsError::GeometricArguments);
-    }
+    let probability = positive_trial_probability(probability, StatisticsError::GeometricArguments)?;
 
     let one = BigRational::from_integer(BigInt::from(1u8));
-    let failures = if cumulative { trials } else { trials - 1 };
+    let failures = match event {
+        DiscreteEvent::AtMost => trials,
+        DiscreteEvent::Exactly | DiscreteEvent::AtLeast => trials - 1,
+    };
     let all_fail = rational_power(
         &one - &probability,
         BigRational::from_integer(BigInt::from(failures)),
     )
     .map_err(StatisticsError::Evaluation)?;
-    let result = if cumulative {
-        one - all_fail
-    } else {
-        all_fail * probability
+    let result = match event {
+        DiscreteEvent::Exactly => all_fail * probability,
+        DiscreteEvent::AtMost => one - all_fail,
+        DiscreteEvent::AtLeast => all_fail,
     };
     Ok(bounded(result)?.to_string())
+}
+
+fn geometric_quantile(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::GeometricQuantileArguments;
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(probability), Some(level), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(invalid);
+    };
+    let probability = positive_trial_probability(probability, invalid)?;
+    let level = parse_probability(level)?;
+    let one = BigRational::from_integer(1.into());
+    if probability == one || level.numer().sign() == Sign::NoSign {
+        return Ok("1".to_owned());
+    }
+    if level == one {
+        return Err(StatisticsError::WaitingQuantileUnbounded);
+    }
+
+    let failure = &one - probability;
+    let maximum_failure = &one - level;
+    let mut all_fail = one;
+    for trials in 1..=MAX_GEOMETRIC_TRIALS {
+        // 既约分数的正整数幂仍然既约，按次数累乘时可以直接比较。
+        all_fail = bounded(BigRational::new_raw(
+            all_fail.numer() * failure.numer(),
+            all_fail.denom() * failure.denom(),
+        ))?;
+        if all_fail <= maximum_failure {
+            return Ok(trials.to_string());
+        }
+    }
+    Err(StatisticsError::GeometricQuantileLimit)
 }
 
 fn geometric_summary(input: &str) -> Result<String, StatisticsError> {
@@ -2361,6 +2407,9 @@ mod tests {
         for (input, expected) in [
             ("几何概率 3,25%", "9/64"),
             ("几何累计 3,1/4", "37/64"),
+            ("几何至少 3,25%", "9/16"),
+            ("GEOMETRIC-AT-LEAST 1,100%", "1"),
+            ("几何至少 2,100%", "0"),
             ("GEOMETRIC 1,1", "1"),
             ("几何概率 2,1", "0"),
             ("GEOMETRIC-CDF 1024,1", "1"),
@@ -2388,6 +2437,45 @@ mod tests {
             calculate_statistics("几何概率 1,2"),
             Err(StatisticsError::InvalidProbability),
         );
+    }
+
+    #[test]
+    fn finds_the_first_trial_reaching_the_exact_geometric_quantile() {
+        for (input, expected) in [
+            ("几何分位点 25%,90%", "9"),
+            ("GEOMETRIC-QUANTILE 50%,7/8", "3"),
+            ("几何分位点 50%,7/8+1/1000000", "4"),
+            ("几何分位点 25%,0", "1"),
+            ("几何分位点 100%,100%", "1"),
+            ("几何分位点 1/2,1-1/2^1024", "1024"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for (input, error) in [
+            (
+                "几何分位点 25%,100%",
+                StatisticsError::WaitingQuantileUnbounded,
+            ),
+            (
+                "几何分位点 1/128,9999/10000",
+                StatisticsError::GeometricQuantileLimit,
+            ),
+            (
+                "几何分位点 0,90%",
+                StatisticsError::GeometricQuantileArguments,
+            ),
+            (
+                "几何分位点 25%,90%,1",
+                StatisticsError::GeometricQuantileArguments,
+            ),
+            ("几何分位点 25%,110%", StatisticsError::InvalidProbability),
+        ] {
+            assert_eq!(calculate_statistics(input), Err(error), "{input}");
+        }
     }
 
     #[test]
@@ -2435,7 +2523,7 @@ mod tests {
         for (query, error) in [
             (
                 "负二项分位点 3,50%,100%",
-                StatisticsError::NegativeBinomialQuantileUnbounded,
+                StatisticsError::WaitingQuantileUnbounded,
             ),
             (
                 "负二项分位点 1,1/1000,50%",
