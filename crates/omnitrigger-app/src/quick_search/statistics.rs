@@ -643,6 +643,10 @@ impl WeightedMean {
         }
         bounded(self.total_value / self.total_weight).map(|value| value.to_string())
     }
+
+    pub(super) fn total_weight(&self) -> &BigRational {
+        &self.total_weight
+    }
 }
 
 fn weighted_variance(input: &str) -> Result<BigRational, StatisticsError> {

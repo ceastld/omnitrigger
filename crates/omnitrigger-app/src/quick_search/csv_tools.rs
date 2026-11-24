@@ -275,6 +275,7 @@ pub(super) enum CsvError {
     PivotTooLarge,
     EmptyStatisticsColumn,
     WeightedMeanArguments,
+    WeightedGroupArguments,
     Statistics(StatisticsError),
     Serialization,
     JsonNumericCells,
@@ -607,6 +608,7 @@ impl CsvError {
             Self::PivotTooLarge => "透视表结果超过 1 MiB，请缩小数据范围",
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
             Self::WeightedMeanArguments => "依次填写数值列和权重列，例如 [\"成绩\",\"权重\"]",
+            Self::WeightedGroupArguments => "依次填写分组列、数值列和权重列，例如 [[\"地区\"],\"成绩\",\"权重\"]",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
             Self::JsonNumericCells => "所选列须为 JSON 数字或空白，例如 1.50 或 2e0",
@@ -6930,6 +6932,9 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "命中位置" || operation.eq_ignore_ascii_case("keyword-positions") {
         return Some(csv_keyword_positions(input));
     }
+    if operation == "分组加权平均" || operation.eq_ignore_ascii_case("group-weighted-mean") {
+        return Some(csv_grouped_weighted_mean(input));
+    }
     let sorts = [
         ("排序", "sort-columns", false, false),
         ("降序", "sort-columns-desc", true, false),
@@ -7362,29 +7367,93 @@ fn csv_weighted_mean(input: &str) -> Result<String, CsvError> {
         json_argument_and_data::<[ColumnReference; 2]>(input, CsvError::WeightedMeanArguments)?;
     let rows = read_table_for_preview(data, ',')?;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let value = value.resolve(header)?;
-    let weight = weight.resolve(header)?;
-    validate_column_width(&[value, weight], header.len())?;
+    let [value, weight] = resolve_weighted_columns(header, [value, weight])?;
 
     let mut mean = WeightedMean::default();
     for (index, row) in records.iter().enumerate() {
-        let value = &row[value];
-        let weight = &row[weight];
-        if value.trim().is_empty() || weight.trim().is_empty() {
-            continue;
-        }
-        parse_weighted_pair(value, &normalize(weight))
-            .and_then(|pair| mean.record(pair))
-            .map_err(|error| CsvError::DataRowValue {
-                row: index + 1,
-                cause: if error == StatisticsError::InvalidWeight {
-                    "权重须为非负数"
-                } else {
-                    error.message()
-                },
-            })?;
+        record_weighted_csv_row(&mut mean, &row[value], &row[weight], index + 1)?;
     }
     mean.finish().map_err(CsvError::Statistics)
+}
+
+fn resolve_weighted_columns(
+    header: &[String],
+    [value, weight]: [ColumnReference; 2],
+) -> Result<[usize; 2], CsvError> {
+    let columns = [value.resolve(header)?, weight.resolve(header)?];
+    validate_column_width(&columns, header.len())?;
+    Ok(columns)
+}
+
+fn record_weighted_csv_row(
+    mean: &mut WeightedMean,
+    value: &str,
+    weight: &str,
+    row: usize,
+) -> Result<(), CsvError> {
+    if value.trim().is_empty() || weight.trim().is_empty() {
+        return Ok(());
+    }
+    parse_weighted_pair(value, &normalize(weight))
+        .and_then(|pair| mean.record(pair))
+        .map_err(|error| CsvError::DataRowValue {
+            row,
+            cause: if error == StatisticsError::InvalidWeight {
+                "权重须为非负数"
+            } else {
+                error.message()
+            },
+        })
+}
+
+fn csv_grouped_weighted_mean(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let ((groups, value, weight), data) = json_argument_and_data::<(
+        Vec<ColumnReference>,
+        ColumnReference,
+        ColumnReference,
+    )>(input, CsvError::WeightedGroupArguments)?;
+    if groups.is_empty() {
+        return Err(CsvError::WeightedGroupArguments);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let grouped_by = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let [value, weight] = resolve_weighted_columns(header, [value, weight])?;
+
+    let mut groups = HashMap::<Vec<&str>, (usize, WeightedMean)>::new();
+    for (index, row) in records.iter().enumerate() {
+        let (_, mean) = groups
+            .entry(column_key(row, &grouped_by))
+            .or_insert_with(|| (index, WeightedMean::default()));
+        record_weighted_csv_row(mean, &row[value], &row[weight], index + 1)?;
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_unstable_by_key(|(_, (index, _))| *index);
+    let headings = grouped_by
+        .iter()
+        .map(|&index| header[index].clone())
+        .chain(["权重合计".to_owned(), "加权平均".to_owned()])
+        .collect::<Vec<_>>();
+    let mut csv = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(&mut csv, headings.iter().map(String::as_str), limit)?;
+    let mut result = vec![headings];
+    for (keys, (_, mean)) in groups {
+        let total = mean.total_weight().to_string();
+        let value = match mean.finish() {
+            Ok(value) => value,
+            Err(StatisticsError::ZeroTotalWeight) => String::new(),
+            Err(error) => return Err(CsvError::Statistics(error)),
+        };
+        let row = keys
+            .into_iter()
+            .map(str::to_owned)
+            .chain([total, value])
+            .collect::<Vec<_>>();
+        append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), limit)?;
+        result.push(row);
+    }
+    Ok((csv, result))
 }
 
 fn numeric_column_profile(
@@ -10779,6 +10848,25 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("搜索行 \"\" {data}")),
             Ok(write_rows(&rows, ','))
+        );
+    }
+
+    #[test]
+    fn previews_weighted_means_in_first_group_order_and_leaves_zero_means_blank() {
+        let data = "区域,成绩,权重\n\"南,一部\",80,30%\n北,12,2\n\"南,一部\",90,70%\n东,6,0\n东,,3";
+        let query = format!(r#"分组加权平均 [["区域"],"成绩","权重"] {data}"#);
+        let expected = "区域,权重合计,加权平均\r\n\"南,一部\",1,87\r\n北,2,12\r\n东,0,\"\"";
+        let (text, table) = csv_table_preview(&query).unwrap().unwrap();
+        assert_eq!(text, expected);
+        assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        assert_eq!(table.row_pages(), 1);
+        assert!(matches!(
+            transform_csv("group-weighted-mean [[1],2,3] 地区,值,权重\n南,1,2\n北,2,坏"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+        assert_eq!(
+            transform_csv("分组加权平均 [[],2,3] 地区,值,权重"),
+            Err(CsvError::WeightedGroupArguments)
         );
     }
 
