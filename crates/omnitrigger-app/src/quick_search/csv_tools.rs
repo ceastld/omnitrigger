@@ -958,11 +958,6 @@ enum Operation {
         target: String,
         limit: usize,
     },
-    SortByColumns {
-        columns: Vec<ColumnReference>,
-        descending: bool,
-        numeric: bool,
-    },
     SortWithOrders(Vec<(ColumnReference, FieldSortOrder)>),
     SortByTimestamps(Vec<ColumnReference>, bool),
 }
@@ -2497,23 +2492,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let descending = matches!(operation.as_str(), "时间戳降序" | "sort-timestamps-desc");
             Operation::SortByTimestamps(columns, descending)
         }
-        "排序" | "sort-columns" | "降序" | "sort-columns-desc" | "数值排序" | "sort-numeric"
-        | "数值降序" | "sort-numeric-desc" => {
-            let (columns, data) =
-                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
-            input = data;
-            Operation::SortByColumns {
-                columns,
-                descending: matches!(
-                    operation.as_str(),
-                    "降序" | "sort-columns-desc" | "数值降序" | "sort-numeric-desc"
-                ),
-                numeric: matches!(
-                    operation.as_str(),
-                    "数值排序" | "sort-numeric" | "数值降序" | "sort-numeric-desc"
-                ),
-            }
-        }
         _ => return Err(CsvError::UnknownOperation),
     };
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
@@ -2987,11 +2965,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             target,
             limit,
         } => nearest_point_rows(&rows, labels, &coordinates, &target, limit),
-        Operation::SortByColumns {
-            columns,
-            descending,
-            numeric,
-        } => sort_by_columns(&rows, &columns, descending, numeric),
         Operation::SortWithOrders(rules) => sort_with_orders(&rows, rules),
         Operation::SortByTimestamps(columns, descending) => {
             sort_by_timestamps(&rows, &columns, descending)
@@ -6854,16 +6827,18 @@ fn unpivot(
     Ok(output)
 }
 
-fn sort_by_columns(
-    rows: &[Vec<String>],
-    columns: &[ColumnReference],
+fn sort_csv_for_preview(
+    input: &str,
     descending: bool,
     numeric: bool,
-) -> Result<String, CsvError> {
-    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
-    let ordered = order_records(records.iter(), &columns, descending, numeric)?;
-    Ok(write_rows(std::iter::once(header).chain(ordered), ','))
+) -> Result<CsvPreviewData, CsvError> {
+    let (columns, data) = column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+    let mut records = read_table_for_preview(data, ',')?.into_iter();
+    let header = records.next().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(&header, &columns, CsvError::NamedColumnArguments)?;
+    let ordered = order_records(records, &columns, descending, numeric)?;
+    let rows: Vec<_> = std::iter::once(header).chain(ordered).collect();
+    Ok((write_rows(&rows, ','), rows))
 }
 
 fn sort_by_timestamps(
@@ -6931,12 +6906,12 @@ fn sort_with_orders(
     Ok(write_rows(std::iter::once(header).chain(ordered), ','))
 }
 
-fn order_records<'a>(
-    records: impl Iterator<Item = &'a Vec<String>>,
+fn order_records<Row: AsRef<[String]>>(
+    records: impl Iterator<Item = Row>,
     columns: &[usize],
     descending: bool,
     numeric: bool,
-) -> Result<Vec<&'a Vec<String>>, CsvError> {
+) -> Result<Vec<Row>, CsvError> {
     let direction = |order: Ordering| {
         if descending {
             order.reverse()
@@ -6950,7 +6925,8 @@ fn order_records<'a>(
                 let key = columns
                     .iter()
                     .map(|&column| {
-                        parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber)
+                        parse_fraction_literal(&row.as_ref()[column])
+                            .map_err(|_| CsvError::InvalidNumber)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((key, row))
@@ -6963,7 +6939,7 @@ fn order_records<'a>(
         ordered.sort_by(|left, right| {
             let order = columns
                 .iter()
-                .map(|&column| compare_natural(&left[column], &right[column]))
+                .map(|&column| compare_natural(&left.as_ref()[column], &right.as_ref()[column]))
                 .find(|order| !order.is_eq())
                 .unwrap_or(Ordering::Equal);
             direction(order)
@@ -6989,6 +6965,18 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     }
     if operation == "命中位置" || operation.eq_ignore_ascii_case("keyword-positions") {
         return Some(csv_keyword_positions(input));
+    }
+    let sorts = [
+        ("排序", "sort-columns", false, false),
+        ("降序", "sort-columns-desc", true, false),
+        ("数值排序", "sort-numeric", false, true),
+        ("数值降序", "sort-numeric-desc", true, true),
+    ];
+    if let Some((_, _, descending, numeric)) = sorts
+        .into_iter()
+        .find(|(name, alias, _, _)| operation == *name || operation.eq_ignore_ascii_case(alias))
+    {
+        return Some(sort_csv_for_preview(input, descending, numeric));
     }
     table_preview_delimiter(operation).map(|delimiter| read_preview_output(input, delimiter))
 }
@@ -10618,6 +10606,27 @@ mod tests {
             transform_csv("keyword-positions \"茶\" 地区,备注\n南区,米").as_deref(),
             Ok("数据行号,列号,列名,关键词,内容")
         );
+    }
+
+    #[test]
+    fn shows_csv_sorting_results_as_tables_with_exact_values_and_stable_ties() {
+        let data = "标记,价格\n文件10,3/2\n文件2,1.50\n文件3,2";
+        for (operation, expected) in [
+            (
+                "排序 [\"标记\"]",
+                "标记,价格\r\n文件2,1.50\r\n文件3,2\r\n文件10,3/2",
+            ),
+            (
+                "SORT-NUMERIC-DESC 2",
+                "标记,价格\r\n文件3,2\r\n文件10,3/2\r\n文件2,1.50",
+            ),
+        ] {
+            let query = format!("{operation} {data}");
+            let (csv, preview) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(csv, expected);
+            assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+            assert_eq!(preview.row_pages(), 1);
+        }
     }
 
     #[test]
