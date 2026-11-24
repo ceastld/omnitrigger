@@ -1420,6 +1420,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "逐行把时长换算成精确分数",
+        query: "批量换算: 精确时长 1秒 to min\nPT1M30S to h\n-0.25秒 to min",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "导出每行时长的原输入和精确换算结果",
+        query: "批量换算: 精确时长对照 1秒 to min\n23:45 到 01:15 to d\n1ns to s",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "逐行换算时间戳和带时区的日期时间",
         query: "批量换算: 时间戳 1700000000 to Asia/Shanghai\n1970-01-01T08:00:00+08:00",
     },
@@ -6509,6 +6519,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && [
                     "对照",
                     "时长对照",
+                    "精确时长",
+                    "精确时长对照",
                     "时间戳对照",
                     "路径对照",
                     "网址对照",

@@ -107,7 +107,7 @@ use conversion::{
 use csv_tools::{transform_csv, CsvError};
 use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelinePreview};
 use decibel::{convert_decibels, DecibelError};
-use duration::{convert_duration, is_clock_duration, DurationError};
+use duration::{convert_duration, convert_exact_duration, is_clock_duration, DurationError};
 use equation::{solve_equation_output, solve_linear_system, EquationError, EquationOutput};
 use examples::{
     example_help_query, function_examples, matching_examples, tool_index_examples,
@@ -885,6 +885,20 @@ impl Results {
                     } else if let Some(arguments) = batch_arguments(term, "时长", "duration") {
                         Self::text_value(
                             map_batch_lines(arguments, convert_duration)
+                                .map_err(ValueError::BatchDuration),
+                        )
+                    } else if let Some(arguments) =
+                        batch_arguments(term, "精确时长对照", "exact-duration-csv")
+                    {
+                        Self::table_value(
+                            map_batch_csv(arguments, "输入", convert_exact_duration)
+                                .map_err(ValueError::BatchDuration),
+                        )
+                    } else if let Some(arguments) =
+                        batch_arguments(term, "精确时长", "exact-duration")
+                    {
+                        Self::text_value(
+                            map_batch_lines(arguments, convert_exact_duration)
                                 .map_err(ValueError::BatchDuration),
                         )
                     } else if let Some(arguments) =
@@ -4527,6 +4541,35 @@ mod tests {
     }
 
     #[test]
+    fn converts_each_batch_duration_to_an_exact_fraction_and_preserves_input_rows() {
+        assert!(matches!(
+            for_query("批量换算: 精确时长 1秒 to min\nPT1M30S TO H\n-0.25秒 to min", &[]),
+            Results::Value(Ok(value)) if value.text == "1/60 min\n1/40 h\n-1/240 min"
+        ));
+        let report = "批量换算: 精确时长对照 1秒 to min\n23:45 到 01:15 to d\n1ns to s";
+        assert!(matches!(
+            for_query(report, &[]),
+            Results::Value(Ok(value)) if value.text == concat!(
+                "输入,结果\r\n",
+                "1秒 to min,1/60 min\r\n",
+                "23:45 到 01:15 to d,1/16 d\r\n",
+                "1ns to s,1/1000000000 s"
+            )
+        ));
+        assert!(matches!(
+            for_query("批量换算: exact-duration-csv 1秒 to min\n\n1秒 to ISO", &[]),
+            Results::Value(Err(ValueError::BatchDuration(BatchError::Row {
+                line: 3,
+                cause: DurationError::ExactUnitArguments,
+            })))
+        ));
+        assert_eq!(
+            for_query("批量换算: 精确时长对", &[]).suggested_input(0),
+            Some(report)
+        );
+    }
+
+    #[test]
     fn exports_timestamp_queries_and_results_with_one_batch_reference_time() {
         assert!(matches!(
             for_query(
@@ -7293,6 +7336,8 @@ mod tests {
                     "时长: 降序 02:40,PT2M,00:55,02:00",
                     "批量换算: 时长 01:30 to s\nPT1M30S to min\n1天2.5秒 to iso",
                     "批量换算: 时长对照 扣除休息 23:45 到 01:15 | 30分钟\n08:00 到 10:15 to min",
+                    "批量换算: 精确时长 1秒 to min\nPT1M30S to h\n-0.25秒 to min",
+                    "批量换算: 精确时长对照 1秒 to min\n23:45 到 01:15 to d\n1ns to s",
                 r#"处理: ["节拍: 时长","时长:"] 120 BPM @ 3/2"#,
                     "节拍: 时长 120 BPM @ 3/2",
                     "时间戳: 逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York",

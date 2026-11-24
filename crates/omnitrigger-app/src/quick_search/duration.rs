@@ -78,13 +78,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     if matches!(operation, "精确换算" | "exact") {
         let invalid = DurationError::ExactUnitArguments;
         let (_, arguments) = input.split_once(char::is_whitespace).ok_or(invalid)?;
-        let (value, target) = split_conversion(arguments).ok_or(invalid)?;
-        let (symbol, divisor, _) = numeric_duration_unit(target).ok_or(invalid)?;
-        let nanos = bounded_duration_value(value.trim())?;
-        return Ok(format!(
-            "{} {symbol}",
-            exact_duration_number(nanos, divisor)
-        ));
+        return format_exact_duration(arguments);
     }
     let (input, output) = match split_conversion(input) {
         Some((source, output)) => (source, Some(output)),
@@ -536,6 +530,21 @@ fn numeric_duration_unit(output: &str) -> Option<(&'static str, u128, Option<usi
 
 fn exact_duration_number(nanos: i128, divisor: u128) -> BigRational {
     BigRational::new(nanos.into(), divisor.into())
+}
+
+pub(super) fn convert_exact_duration(query: &str) -> Result<String, DurationError> {
+    format_exact_duration(normalize(query).to_ascii_lowercase().trim())
+}
+
+fn format_exact_duration(arguments: &str) -> Result<String, DurationError> {
+    let invalid = DurationError::ExactUnitArguments;
+    let (value, target) = split_conversion(arguments).ok_or(invalid)?;
+    let (symbol, divisor, _) = numeric_duration_unit(target).ok_or(invalid)?;
+    let nanos = bounded_duration_value(value.trim())?;
+    Ok(format!(
+        "{} {symbol}",
+        exact_duration_number(nanos, divisor)
+    ))
 }
 
 pub(super) fn exact_duration_converter(
