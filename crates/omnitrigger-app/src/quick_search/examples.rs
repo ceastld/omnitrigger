@@ -865,6 +865,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算第几次试验达到目标成功数的概率",
+        query: "统计: 负二项概率 3,5,50%",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算指定次数内达到成功目标的概率",
+        query: "统计: 负二项累计 3,5,50%",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算达到成功目标至少需要指定次数的概率",
+        query: "统计: 负二项至少 3,5,50%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算在指定试验中首次成功的概率",
         query: "统计: 几何概率 3,25%",
     },
@@ -6537,6 +6552,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "二项概率表",
                     "二项分位点",
                     "二项摘要",
+                    "负二项概率",
+                    "负二项累计",
+                    "负二项至少",
                     "二项累计",
                     "二项至少",
                     "几何概率",

@@ -43,6 +43,7 @@ pub(super) enum StatisticsError {
     BinomialArguments,
     BinomialDistributionArguments,
     BinomialQuantileArguments,
+    NegativeBinomialArguments,
     ProbabilityTableTooLarge,
     GeometricArguments,
     GeometricSummaryArguments,
@@ -90,6 +91,9 @@ impl StatisticsError {
             }
             Self::BinomialQuantileArguments => {
                 "依次填写试验次数、单次成功概率和目标累计概率，例如 3,1/3,75%"
+            }
+            Self::NegativeBinomialArguments => {
+                "依次填写目标成功次数、试验总次数和单次成功概率，例如 3,5,50%。次数为 1 至 128，概率须大于零"
             }
             Self::ProbabilityTableTooLarge => "概率表超过 CSV 输出上限",
             Self::GeometricArguments => {
@@ -310,6 +314,15 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "二项至少" | "binomial-at-least" => {
             return binomial_probability(values, DiscreteEvent::AtLeast)
+        }
+        "负二项概率" | "negative-binomial" => {
+            return negative_binomial_probability(values, DiscreteEvent::Exactly)
+        }
+        "负二项累计" | "negative-binomial-cdf" => {
+            return negative_binomial_probability(values, DiscreteEvent::AtMost)
+        }
+        "负二项至少" | "negative-binomial-at-least" => {
+            return negative_binomial_probability(values, DiscreteEvent::AtLeast)
         }
         "几何概率" | "geometric" => return geometric_probability(values, false),
         "几何累计" | "geometric-cdf" => return geometric_probability(values, true),
@@ -1462,6 +1475,16 @@ fn binomial_probability(input: &str, event: DiscreteEvent) -> Result<String, Sta
         .filter(|&successes| successes <= trials)
         .ok_or(StatisticsError::BinomialArguments)?;
     let probability = parse_probability(probability)?;
+    binomial_event_probability(trials, successes, probability, event)
+        .map(|result| result.to_string())
+}
+
+fn binomial_event_probability(
+    trials: u32,
+    successes: u32,
+    probability: BigRational,
+    event: DiscreteEvent,
+) -> Result<BigRational, StatisticsError> {
     let one = BigRational::from_integer(BigInt::from(1u8));
     // 至少成功 k 次等价于至多失败 n-k 次。
     let (successes, probability) = if matches!(event, DiscreteEvent::AtLeast) {
@@ -1471,13 +1494,21 @@ fn binomial_probability(input: &str, event: DiscreteEvent) -> Result<String, Sta
     };
     let cumulative = !matches!(event, DiscreteEvent::Exactly);
     if (cumulative && successes == trials) || trials == 0 {
-        return Ok("1".to_owned());
+        return Ok(one);
     }
     if probability == one {
-        return Ok(u8::from(successes == trials).to_string());
+        return Ok(if successes == trials {
+            one
+        } else {
+            BigRational::default()
+        });
     }
     if probability.numer().sign() == Sign::NoSign {
-        return Ok(u8::from(cumulative || successes == 0).to_string());
+        return Ok(if cumulative || successes == 0 {
+            one
+        } else {
+            BigRational::default()
+        });
     }
     let (denominator, mut masses) = binomial_masses(trials, &probability)?;
     let successes = successes as usize;
@@ -1486,7 +1517,43 @@ fn binomial_probability(input: &str, event: DiscreteEvent) -> Result<String, Sta
     } else {
         masses.nth(successes).expect("成功次数不超过试验次数")
     };
-    Ok(BigRational::new(numerator, denominator).to_string())
+    Ok(BigRational::new(numerator, denominator))
+}
+
+fn negative_binomial_probability(
+    input: &str,
+    event: DiscreteEvent,
+) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::NegativeBinomialArguments;
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(target), Some(trials), Some(probability), None) =
+        (terms.next(), terms.next(), terms.next(), terms.next())
+    else {
+        return Err(invalid);
+    };
+    let target = binomial_trial_count(target, invalid)?;
+    let trials = binomial_trial_count(trials, invalid)?;
+    let probability = parse_probability(probability)?;
+    if target == 0 || trials == 0 || probability.numer().sign() == Sign::NoSign {
+        return Err(invalid);
+    }
+    if trials < target {
+        return Ok(u8::from(matches!(event, DiscreteEvent::AtLeast)).to_string());
+    }
+    // 第 n 次达到目标，需要前 n-1 次恰好少成功一次，且第 n 次成功。
+    let result = match event {
+        DiscreteEvent::Exactly => {
+            binomial_event_probability(trials - 1, target - 1, probability.clone(), event)?
+                * probability
+        }
+        DiscreteEvent::AtMost => {
+            binomial_event_probability(trials, target, probability, DiscreteEvent::AtLeast)?
+        }
+        DiscreteEvent::AtLeast => {
+            binomial_event_probability(trials - 1, target - 1, probability, DiscreteEvent::AtMost)?
+        }
+    };
+    Ok(bounded(result)?.to_string())
 }
 
 fn binomial_trial_count(input: &str, invalid: StatisticsError) -> Result<u32, StatisticsError> {
@@ -2253,6 +2320,44 @@ mod tests {
             calculate_statistics("二项概率表 129,1/3"),
             Err(StatisticsError::BinomialDistributionArguments)
         );
+    }
+
+    #[test]
+    fn computes_exact_probabilities_for_the_trial_of_a_target_success() {
+        for (query, expected) in [
+            ("负二项概率 3,5,50%", "3/16"),
+            ("负二项累计 3,5,50%", "1/2"),
+            ("负二项至少 3,5,50%", "11/16"),
+            ("negative-binomial 1,3,25%", "9/64"),
+            ("negative-binomial-cdf 1,3,25%", "37/64"),
+            ("negative-binomial-at-least 1,3,25%", "9/16"),
+            ("负二项概率 3,2,1/2", "0"),
+            ("负二项累计 3,2,1/2", "0"),
+            ("负二项至少 3,2,1/2", "1"),
+            ("负二项概率 3,3,100%", "1"),
+            ("负二项至少 3,4,100%", "0"),
+            (
+                "负二项概率 128,128,50%",
+                "1/340282366920938463463374607431768211456",
+            ),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "负二项概率 0,1,1/2",
+            "负二项概率 1,0,1/2",
+            "负二项概率 1,129,1/2",
+            "负二项概率 1,3,0",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::NegativeBinomialArguments)
+            );
+        }
     }
 
     #[test]
