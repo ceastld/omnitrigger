@@ -5458,6 +5458,45 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_csv_object_example_data_selection(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        const QUERY: &str = "CSV: 搜索行";
+        const PREFIX: &str = "CSV: 搜索行 {\"词\":[\"茶\"],\"列\":[\"备注\"]} ";
+        search.fill_query(QUERY, window, cx);
+        search.refresh_results(QUERY, window, cx);
+        let Results::Help(examples) = &search.results else {
+            panic!("应展示 CSV 搜索行示例");
+        };
+        search.selected = examples
+            .iter()
+            .position(|&index| EXAMPLES[index].query.starts_with(PREFIX))
+            .expect("应提供按列搜索的对象参数示例");
+        let shortcut = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("alt-enter").unwrap(),
+            is_held: false,
+        };
+        search.key_down(&shortcut, window, cx);
+        let input = search.input.read(cx);
+        let example = input.text();
+        assert!(example.starts_with(PREFIX));
+        assert_eq!(input.selection(), PREFIX.len()..example.len());
+        const REPLACEMENT: &str = "区域,备注,货品\r\n西区,茶叶,纸\r\n北区,水,茶";
+        search.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, REPLACEMENT, window, cx);
+        });
+        let query = search.input.read(cx).text();
+        assert_eq!(query, format!("{PREFIX}{REPLACEMENT}"));
+        search.refresh_results(&query, window, cx);
+        assert_eq!(
+            search.results.refillable_text(),
+            Some("区域,备注,货品\r\n西区,茶叶,纸")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_result_refill(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -6049,6 +6088,7 @@ mod tests {
                     reopened.update(cx, verify_result_refill).unwrap();
                     reopened.update(cx, verify_table_paging).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
+                    reopened.update(cx, verify_csv_object_example_data_selection).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             let prefix = "处理:";

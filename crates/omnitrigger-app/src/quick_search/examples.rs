@@ -22,9 +22,12 @@ impl Example {
             return None;
         }
         let (_, arguments) = term.split_once(char::is_whitespace)?;
-        let (_, data) = json_argument_and_tail::<Vec<serde::de::IgnoredAny>>(arguments)?;
-        (data.contains(['\r', '\n']) && !data.trim().is_empty())
-            .then_some(self.query.len() - data.len())
+        let (options, data) =
+            json_argument_and_tail::<Box<serde_json::value::RawValue>>(arguments)?;
+        (options.get().starts_with(['[', '{'])
+            && data.contains(['\r', '\n'])
+            && !data.trim().is_empty())
+        .then_some(self.query.len() - data.len())
     }
 
     pub(super) fn argument_start(&self) -> Option<usize> {
@@ -6401,7 +6404,7 @@ mod tests {
     }
 
     #[test]
-    fn csv_example_data_selection_preserves_array_options() {
+    fn csv_example_data_selection_preserves_array_and_object_options() {
         for (query, expected) in [
             (
                 "CSV: 选列名 [\"名称\"] 编号,名称\n001,茶",
@@ -6411,8 +6414,17 @@ mod tests {
                 "CSV: 去列 [1]\r\n 编号,值\r\n001,茶",
                 Some(" 编号,值\r\n001,茶"),
             ),
+            (
+                "CSV: 搜索行 {\"词\":[\"茶\"],\"列\":[\"备注\"]} 区域,备注\n南区,茶",
+                Some("区域,备注\n南区,茶"),
+            ),
+            (
+                "CSV: 命中位置 {\"词\":[\"茶\"],\"列\":[2]}\r\n 编号,备注\r\n002,绿茶",
+                Some(" 编号,备注\r\n002,绿茶"),
+            ),
             ("CSV: 选列名 [\"名称\"]", None),
             ("CSV: 选列名 [\"名称\"]\n名称", None),
+            ("CSV: 选列 1 名称,值\n茶,2", None),
             ("CSV: 转置\n编号,名称\n001,茶", None),
             ("文本: 逐行配对 [\"甲\"]\n茶\n米", None),
         ] {
