@@ -49,6 +49,7 @@ pub(super) enum RadixError {
     ReverseWidthExceeded,
     GrayCodeArguments,
     GrayCodeWidthExceeded,
+    BitComparisonArguments,
     SheetColumnArguments,
     RomanArguments,
     RomanRange,
@@ -81,6 +82,7 @@ impl RadixError {
             Self::GrayCodeArguments => {
                 "填写非负整数，可加位宽，例如 格雷码 8 @ 10 或 读格雷码 0b1111"
             }
+            Self::BitComparisonArguments => "用逗号分隔两个非负整数，例如 0xA5,0xAD",
             Self::WriteBitsArguments => {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
             }
@@ -214,6 +216,12 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     }
     if operation == "读格雷码" || operation.eq_ignore_ascii_case("read-gray-code") {
         return convert_gray_code(arguments, true);
+    }
+    if operation == "汉明距离" || operation.eq_ignore_ascii_case("hamming-distance") {
+        return compare_bits(arguments, false);
+    }
+    if operation == "位比对" || operation.eq_ignore_ascii_case("compare-bits") {
+        return compare_bits(arguments, true);
     }
     if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
         return convert_sheet_column(arguments);
@@ -491,6 +499,29 @@ fn convert_gray_code(input: &str, decode: bool) -> Result<String, RadixError> {
     Ok(format!("0b{gray:0>width$b}", width = width as usize))
 }
 
+fn compare_bits(input: &str, show_positions: bool) -> Result<String, RadixError> {
+    let invalid = RadixError::BitComparisonArguments;
+    let (left, right) = input.split_once(',').ok_or(invalid)?;
+    if left.trim().is_empty() || right.trim().is_empty() {
+        return Err(invalid);
+    }
+    let differences = unsigned_bit_value(left, invalid)? ^ unsigned_bit_value(right, invalid)?;
+    let count = differences.count_ones();
+    if !show_positions {
+        return Ok(count.to_string());
+    }
+    let positions = if count == 0 {
+        "无".to_owned()
+    } else {
+        (0..differences.bits())
+            .filter(|&index| differences.bit(index))
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    Ok(format!("不同位数 {count}\n不同位号 {positions}"))
+}
+
 fn bit_width(input: &str, error: RadixError) -> Result<u64, RadixError> {
     input
         .trim()
@@ -697,6 +728,37 @@ mod tests {
         assert_eq!(encoded, format!("0b1{}", "0".repeat(8191)));
         let decoded = convert_arbitrary_radix(&format!("读格雷码 {encoded}")).unwrap();
         assert_eq!(decoded, bit_mask(8192).to_string());
+    }
+
+    #[test]
+    fn counts_and_locates_differing_bits_across_integer_bases() {
+        for (query, expected) in [
+            ("汉明距离 0b1010,0b1100", "2"),
+            ("HAMMING-DISTANCE 0xA5,0o255", "1"),
+            ("位比对 0xA5,0xAD", "不同位数 1\n不同位号 3"),
+            ("COMPARE-BITS 1,0x100", "不同位数 2\n不同位号 0,8"),
+            ("位比对 0x00FF,255", "不同位数 0\n不同位号 无"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["位比对 -1,2", "汉明距离 1", "位比对 1,"] {
+            assert_eq!(
+                convert_arbitrary_radix(query),
+                Err(RadixError::BitComparisonArguments)
+            );
+        }
+        assert_eq!(
+            convert_arbitrary_radix(&format!("汉明距离 0,0x{}", "f".repeat(2048))).as_deref(),
+            Ok("8192"),
+        );
+        assert_eq!(
+            convert_arbitrary_radix(&format!("位比对 0,0x8{}", "0".repeat(2047))).as_deref(),
+            Ok("不同位数 1\n不同位号 8191"),
+        );
     }
 
     #[test]

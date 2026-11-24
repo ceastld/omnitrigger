@@ -1845,6 +1845,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计两个整数相差的二进制位数",
+        query: "进制: 汉明距离 0b1010,0b1100",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "列出两个整数中发生变化的位号",
+        query: "进制: 位比对 0xA5,0xAD",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在指定位宽内按字节倒序",
         query: "进制: 字节倒序 32 @ 0x12345678",
     },
@@ -6428,6 +6438,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "字节倒序",
             "格雷码",
             "读格雷码",
+            "汉明距离",
+            "位比对",
             "表格列号",
             "罗马数字",
             "小数",
