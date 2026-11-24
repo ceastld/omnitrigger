@@ -2601,6 +2601,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按当地日期查看两个时刻之间的实际时长",
+        query: "时间戳: 逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查看某年时区偏移变更",
         query: "时间戳: 偏移变更 2026 America/New_York",
     },
@@ -6420,6 +6425,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "时区CSV",
                     "时区候选",
                     "日区间",
+                    "逐日时长",
                     "偏移变更",
                     "每日同刻",
                     "序列",

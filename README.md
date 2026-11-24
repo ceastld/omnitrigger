@@ -1034,6 +1034,7 @@
 - 输入 `时间戳: 时区候选 2026-11-01 01:30 America/New_York` 可按实际时间先后查看回拨时的两个时刻，偏移分别为 `-04:00` 和 `-05:00`。每行都可用作带偏移的时间戳输入。只有一次的钟表时刻输出一行，跳过的钟表时刻会显示提示。 [Jiff 的重复时刻处理](https://docs.rs/jiff/latest/jiff/tz/struct.AmbiguousTimestamp.html)
 - 用 `时间戳: 日区间 2026-03-08 America/New_York` 可查该日期对应的 UTC 范围与实际时长，示例为 `05:00Z` 至次日 `04:00Z`，共 23 小时。起点计入区间、终点排除。接受地区时区、`UTC` 或固定偏移。区间分开时各占一行，整个日期被跳过时只返回表头。 [Jiff 时区偏移转换](https://docs.rs/jiff/latest/jiff/tz/struct.TimeZone.html#method.following)
 - `时间戳: 日区间` 也接受两个当地日期，例如 `2026-03-07 到 2026-03-09 America/New_York`。两端日期都计入，示例涵盖纽约春季切换，合计 71 小时。
+- 用 `时间戳: 逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York` 可按当地日期汇总实际经过时间。三个日期分别为 10、23、10 小时。起点计入，终点排除。支持地区时区、`UTC` 或固定偏移，结果保留纳秒，最多输出 128 个当地日期。
 - 输入 `时间戳: 偏移变更 2026 America/New_York` 可列出指定 UTC 年份的时区偏移变化，包含生效的 UTC 时刻、变更前后的偏移和当地钟表移动的时长。固定偏移或当年全年使用同一偏移时只返回表头。 [Jiff 的时区过渡数据](https://docs.rs/jiff/latest/jiff/tz/struct.TimeZone.html#method.following)
 - 用 `时间戳: 每日同刻 2026-03-07 02:30 America/New_York @ 3` 可查连续三天当地 02:30 分别对应的 UTC 时间。支持 1 至 128 天。当地钟表跳过的时刻标记为“跳过”，回拨后重复的时刻显示两行。 [Jiff 的重复时刻处理](https://docs.rs/jiff/latest/jiff/tz/struct.AmbiguousTimestamp.html)
 - 时区偏移可精确到秒。把历史查询的结果作为输入，例如 `时间戳: 1900-01-01T00:09:21.123+00:09:21 to UTC`，可还原为 `1900-01-01T00:00:00.123Z`。结果中的毫秒一并保留。

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{
     DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveTime, SecondsFormat, TimeDelta,
     Timelike, Utc,
@@ -18,6 +20,7 @@ use super::duration::{
 
 const MAX_TARGET_ZONES: usize = 8;
 const MAX_SERIES_TIMESTAMPS: usize = 128;
+const MAX_DAILY_DURATION_ROWS: usize = 128;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
@@ -28,6 +31,8 @@ pub(super) enum TimestampError {
     ZoneTableArguments,
     ZoneCandidateArguments,
     CivilDayArguments,
+    DailyDurationArguments,
+    TooManyDurationDays,
     OffsetChangesArguments,
     DailyClockArguments,
     InvalidSourceZone,
@@ -56,6 +61,8 @@ impl TimestampError {
                 "填写当地日期、时间和地区时区，例如 2026-11-01 01:30 America/New_York"
             }
             Self::CivilDayArguments => "填写完整日期或顺序正确的日期范围，以及明确时区",
+            Self::DailyDurationArguments => "用“到”分隔起止时刻，起点须在终点之前或相同，再用 to 指定时区",
+            Self::TooManyDurationDays => "逐日时长最多输出 128 个当地日期",
             Self::OffsetChangesArguments => "填写四位年份和明确时区，例如 2026 America/New_York",
             Self::DailyClockArguments => "填写当地起始时刻、明确时区和 1 至 128 天，例如 2026-03-07 02:30 America/New_York @ 3",
             Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
@@ -171,6 +178,7 @@ pub(super) fn is_offset_timestamp(text: &str) -> bool {
 enum TimestampReport {
     Zones,
     CivilDays,
+    DailyDurations,
     OffsetChanges,
     DailyClock,
 }
@@ -180,6 +188,7 @@ impl TimestampReport {
         match operation.to_ascii_lowercase().as_str() {
             "时区csv" | "zone-csv" => Some(Self::Zones),
             "日区间" | "day-intervals" => Some(Self::CivilDays),
+            "逐日时长" | "daily-durations" => Some(Self::DailyDurations),
             "偏移变更" | "offset-changes" => Some(Self::OffsetChanges),
             "每日同刻" | "daily-clock" => Some(Self::DailyClock),
             _ => None,
@@ -210,6 +219,7 @@ fn convert_timestamp_with_local(
     }
     let table = match TimestampReport::from_operation(operation) {
         Some(TimestampReport::CivilDays) => return civil_day_intervals(argument),
+        Some(TimestampReport::DailyDurations) => return daily_durations(argument, now),
         Some(TimestampReport::OffsetChanges) => return timezone_offset_changes(argument),
         Some(TimestampReport::DailyClock) => return daily_clock_series(argument),
         Some(TimestampReport::Zones) => true,
@@ -683,19 +693,77 @@ fn unix_nanos(time: DateTime<Utc>) -> i128 {
 fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
     let (input, output) =
         split_conversion(input).map_or((input, None), |(input, output)| (input, Some(output)));
-    let (start, end) = input
-        .split_once(['到', '至'])
-        .ok_or(TimestampError::IntervalEndpoints)?;
+    let (start, end) = interval_nanos(input, now, TimestampError::IntervalEndpoints)?;
+    format_timestamp_delta(end - start, output)
+}
+
+fn interval_nanos(
+    input: &str,
+    now: DateTime<Utc>,
+    invalid: TimestampError,
+) -> Result<(i128, i128), TimestampError> {
+    let (start, end) = input.split_once(['到', '至']).ok_or(invalid)?;
     let timeline_nanos = |value: &str| {
         let value = value.trim();
         if value.is_empty() {
-            return Err(TimestampError::IntervalEndpoints);
+            return Err(invalid);
         }
         interval_endpoint(value, Some(now)).map(unix_nanos)
     };
-    let start = timeline_nanos(start)?;
-    let end = timeline_nanos(end)?;
-    format_timestamp_delta(end - start, output)
+    Ok((timeline_nanos(start)?, timeline_nanos(end)?))
+}
+
+fn daily_durations(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
+    const SECONDS_PER_DAY: i128 = 86_400;
+    const NANOS_PER_DAY: i128 = SECONDS_PER_DAY * NANOS_PER_SECOND as i128;
+    let invalid = TimestampError::DailyDurationArguments;
+    let (input, zone) = split_conversion(input).ok_or(invalid)?;
+    let zone = explicit_timezone(zone, invalid)?;
+    let (start, end) = interval_nanos(input, now, invalid)?;
+    if end < start {
+        return Err(invalid);
+    }
+    let mut output = String::from("当地日期,时长");
+    if start == end {
+        return Ok(output);
+    }
+    let timestamp =
+        |nanos| Timestamp::from_nanosecond(nanos).map_err(|_| TimestampError::OutOfRange);
+    let first = timestamp(start)?;
+    let last = timestamp(end)?;
+    let mut totals = BTreeMap::<i128, u128>::new();
+    let mut offset_start = first;
+    let mut cursor = start;
+    // 先沿 UTC 时间线按偏移变化切分，再在固定偏移的各段内按当地午夜切分。
+    for offset_end in zone
+        .following(first)
+        .map(|transition| transition.timestamp())
+        .take_while(|transition| *transition < last)
+        .chain(std::iter::once(last))
+    {
+        let next_transition = offset_end.as_nanosecond();
+        let offset = i128::from(zone.to_offset(offset_start).seconds()) * NANOS_PER_SECOND as i128;
+        while cursor < next_transition {
+            let day = (cursor + offset).div_euclid(NANOS_PER_DAY);
+            let midnight = (day + 1) * NANOS_PER_DAY - offset;
+            let stop = next_transition.min(midnight);
+            *totals.entry(day).or_default() += (stop - cursor) as u128;
+            if totals.len() > MAX_DAILY_DURATION_ROWS {
+                return Err(TimestampError::TooManyDurationDays);
+            }
+            cursor = stop;
+        }
+        offset_start = offset_end;
+    }
+    for (day, nanos) in totals {
+        let midnight = DateTime::from_timestamp((day * SECONDS_PER_DAY) as i64, 0)
+            .ok_or(TimestampError::OutOfRange)?;
+        ensure_four_digit_year(midnight.year())?;
+        let date = midnight.date_naive();
+        let duration = format_clock_duration(nanos, "");
+        output.push_str(&format!("\r\n{date},{duration}"));
+    }
+    Ok(output)
 }
 
 pub(super) fn timestamp_clock_difference(start: &str, end: &str) -> Result<String, TimestampError> {
@@ -1076,6 +1144,44 @@ mod tests {
         assert_eq!(
             convert_timestamp("日区间 2026-03-09 至 2026-03-07 UTC", DateTime::UNIX_EPOCH),
             Err(TimestampError::CivilDayArguments),
+        );
+    }
+
+    #[test]
+    fn splits_elapsed_time_by_local_date_even_across_offset_changes_and_midnight() {
+        for (query, rows) in [
+            (
+                "逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York",
+                "\r\n2026-03-07,10:00:00\r\n2026-03-08,23:00:00\r\n2026-03-09,10:00:00",
+            ),
+            (
+                "daily-durations 2026-11-01T00:00:00-04:00 至 2026-11-02T00:00:00-05:00 to America/New_York",
+                "\r\n2026-11-01,25:00:00",
+            ),
+            (
+                "逐日时长 2011-12-29T23:00:00-10:00 到 2011-12-31T01:00:00+14:00 to Pacific/Apia",
+                "\r\n2011-12-29,01:00:00\r\n2011-12-31,01:00:00",
+            ),
+            (
+                "逐日时长 -1ns 到 1ns to UTC",
+                "\r\n1969-12-31,00:00:00.000000001\r\n1970-01-01,00:00:00.000000001",
+            ),
+            ("逐日时长 0 到 0 to UTC+8", ""),
+        ] {
+            assert!(is_timestamp_report(query));
+            let expected = format!("当地日期,时长{rows}");
+            assert_eq!(convert_timestamp(query, DateTime::UNIX_EPOCH), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_timestamp("逐日时长 1 到 0 to UTC", DateTime::UNIX_EPOCH),
+            Err(TimestampError::DailyDurationArguments)
+        );
+        assert_eq!(
+            convert_timestamp(
+                "逐日时长 0 到 2026-01-01T00:00:00Z to UTC",
+                DateTime::UNIX_EPOCH
+            ),
+            Err(TimestampError::TooManyDurationDays)
         );
     }
 
