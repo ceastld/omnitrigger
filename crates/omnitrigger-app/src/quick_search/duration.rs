@@ -24,6 +24,7 @@ pub(super) enum DurationError {
     InvalidBreakArguments,
     BreakOutOfRange,
     InvalidUnit,
+    ExactUnitArguments,
     OutOfRange,
     Precision,
     DivisionByZero,
@@ -48,6 +49,9 @@ impl DurationError {
             }
             Self::BreakOutOfRange => "休息时长须在零和区间总时长之间",
             Self::InvalidUnit => "请选择 s、ms、µs、ns、min、h、d 或 iso",
+            Self::ExactUnitArguments => {
+                "填写时长和数值单位，例如 1秒 to min，支持 s、ms、µs、ns、min、h 和 d"
+            }
             Self::OutOfRange => "时长超出可转换范围",
             Self::Precision => "时长最小可精确到 1 纳秒",
             Self::DivisionByZero => "时长不能除以零",
@@ -71,6 +75,17 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         return sort_durations(values, matches!(operation, "降序" | "sort-desc"));
     }
     let input = input.trim();
+    if matches!(operation, "精确换算" | "exact") {
+        let invalid = DurationError::ExactUnitArguments;
+        let (_, arguments) = input.split_once(char::is_whitespace).ok_or(invalid)?;
+        let (value, target) = split_conversion(arguments).ok_or(invalid)?;
+        let (symbol, divisor, _) = numeric_duration_unit(target).ok_or(invalid)?;
+        let nanos = bounded_duration_value(value.trim())?;
+        return Ok(format!(
+            "{} {symbol}",
+            exact_duration_number(nanos, divisor)
+        ));
+    }
     let (input, output) = match split_conversion(input) {
         Some((source, output)) => (source, Some(output)),
         None => (input, None),
@@ -487,18 +502,15 @@ pub(super) fn format_duration_unit(
     sign: &str,
     output: &str,
 ) -> Result<String, DurationError> {
-    let (symbol, divisor, digits) = match output.trim() {
-        "" => return Err(DurationError::Incomplete),
-        "s" | "秒" => ("s", NANOS_PER_SECOND, Some(9)),
-        "ms" | "毫秒" => ("ms", 1_000_000, Some(6)),
-        "us" | "µs" | "μs" | "微秒" => ("µs", 1_000, Some(3)),
-        "ns" | "纳秒" => ("ns", 1, Some(0)),
-        "min" | "m" | "分" | "分钟" => ("min", 60 * NANOS_PER_SECOND, None),
-        "h" | "时" | "小时" => ("h", 3_600 * NANOS_PER_SECOND, None),
-        "d" | "天" => ("d", NANOS_PER_DAY, None),
-        "iso" | "iso8601" => return Ok(format_iso_duration(nanos, sign)),
-        _ => return Err(DurationError::InvalidUnit),
-    };
+    let output = output.trim();
+    if output.is_empty() {
+        return Err(DurationError::Incomplete);
+    }
+    if matches!(output, "iso" | "iso8601") {
+        return Ok(format_iso_duration(nanos, sign));
+    }
+    let (symbol, divisor, digits) =
+        numeric_duration_unit(output).ok_or(DurationError::InvalidUnit)?;
     let amount = if let Some(digits) = digits {
         let whole = nanos / divisor;
         let suffix = fraction_suffix(nanos % divisor, digits);
@@ -507,6 +519,34 @@ pub(super) fn format_duration_unit(
         format_result(nanos as f64 / divisor as f64).map_err(|_| DurationError::OutOfRange)?
     };
     Ok(format!("{sign}{amount} {symbol}"))
+}
+
+fn numeric_duration_unit(output: &str) -> Option<(&'static str, u128, Option<usize>)> {
+    Some(match output.trim() {
+        "s" | "秒" => ("s", NANOS_PER_SECOND, Some(9)),
+        "ms" | "毫秒" => ("ms", 1_000_000, Some(6)),
+        "us" | "µs" | "μs" | "微秒" => ("µs", 1_000, Some(3)),
+        "ns" | "纳秒" => ("ns", 1, Some(0)),
+        "min" | "m" | "分" | "分钟" => ("min", 60 * NANOS_PER_SECOND, None),
+        "h" | "时" | "小时" => ("h", 3_600 * NANOS_PER_SECOND, None),
+        "d" | "天" => ("d", NANOS_PER_DAY, None),
+        _ => return None,
+    })
+}
+
+fn exact_duration_number(nanos: i128, divisor: u128) -> BigRational {
+    BigRational::new(nanos.into(), divisor.into())
+}
+
+pub(super) fn exact_duration_converter(
+    target: &str,
+) -> Result<impl Fn(&str) -> Result<String, DurationError>, DurationError> {
+    let (_, divisor, _) = numeric_duration_unit(&normalize(target).to_ascii_lowercase())
+        .ok_or(DurationError::ExactUnitArguments)?;
+    Ok(move |input: &str| {
+        let nanos = duration_nanoseconds(input)?;
+        Ok(exact_duration_number(nanos, divisor).to_string())
+    })
 }
 
 fn format_iso_duration(nanos: u128, sign: &str) -> String {
@@ -1050,6 +1090,24 @@ mod tests {
             ("8 到 9", DurationError::InvalidClockTime),
         ] {
             assert_eq!(convert_duration(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn converts_signed_and_cross_midnight_durations_without_float_rounding() {
+        for (query, expected) in [
+            ("精确换算 1秒 to min", "1/60 min"),
+            ("exact -1ns to s", "-1/1000000000 s"),
+            ("精确换算 23:45 到 01:15 to d", "1/16 d"),
+            ("精确换算 1小时30分 to h", "3/2 h"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["精确换算 1秒", "精确换算 1秒 to ISO"] {
+            assert_eq!(
+                convert_duration(query),
+                Err(DurationError::ExactUnitArguments)
+            );
         }
     }
 

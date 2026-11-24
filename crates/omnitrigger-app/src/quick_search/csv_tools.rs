@@ -42,7 +42,8 @@ use super::{
     conversion::{exact_data_converter, ConversionError},
     correlation_plot::{CorrelationCell, CorrelationPlot},
     duration::{
-        duration_nanoseconds, elapsed_clock_interval, format_clock_duration, DurationError,
+        duration_nanoseconds, elapsed_clock_interval, exact_duration_converter,
+        format_clock_duration, DurationError,
     },
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, format_significant_digits,
@@ -139,6 +140,7 @@ pub(super) enum CsvError {
     ClockDifferenceColumnArguments,
     TimestampDifferenceColumnArguments,
     TimestampZoneColumnArguments,
+    DurationNumberColumnArguments,
     CidrColumnArguments,
     CidrLookup(CidrError),
     DateOffsetColumnArguments,
@@ -375,6 +377,9 @@ impl CsvError {
             }
             Self::TimestampZoneColumnArguments => {
                 "填写新列名、来源列和目标时区，例如 [\"标准时间\",\"时间\",\"UTC\"]"
+            }
+            Self::DurationNumberColumnArguments => {
+                "填写新列名、时长列和目标单位，例如 [\"分钟\",\"时长\",\"min\"]"
             }
             Self::CidrColumnArguments => "填写新列名、地址列和网段列表。网段名称列使用 [网段,名称] 列表",
             Self::CidrLookup(error) => error.message(),
@@ -1909,6 +1914,21 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 )?;
             input = data;
             Operation::DateDifferenceColumn(name, start, end)
+        }
+        "时长数值列" | "duration-number-column" => {
+            let invalid = CsvError::DurationNumberColumnArguments;
+            let ((name, source, target), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(input, invalid)?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(invalid);
+            }
+            let convert = exact_duration_converter(&target).map_err(|_| invalid)?;
+            return append_transformed_csv_column(data, &name, source, |row, value| {
+                convert(value).map_err(|error| CsvError::DataRowValue {
+                    row,
+                    cause: error.message(),
+                })
+            });
         }
         "时区换算列" | "timestamp-zone-column" => {
             let invalid = CsvError::TimestampZoneColumnArguments;
@@ -7141,6 +7161,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-numeric-column"
             | "分组时长合计"
             | "group-duration-sum"
+            | "时长数值列"
+            | "duration-number-column"
             | "网段归属列"
             | "cidr-column"
             | "网段名称列"
@@ -12980,6 +13002,22 @@ null"#
         assert_eq!(
             transform_csv("分组最大 1 2 地区,金额\n北,无"),
             Err(CsvError::InvalidNumber)
+        );
+    }
+
+    #[test]
+    fn converts_csv_duration_cells_to_exact_numbers_usable_in_later_steps() {
+        let query = "时长数值列 [\"分钟\",\"时长\",\"min\"] 编号,时长\n001,1秒\n002,PT30S\n003,-0.25秒\n004,";
+        let result = "编号,时长,分钟\r\n001,1秒,1/60\r\n002,PT30S,1/2\r\n003,-0.25秒,-1/240\r\n004,\"\",\"\"";
+        assert_eq!(transform_csv(query).as_deref(), Ok(result));
+        assert_eq!(csv_table_preview(query).unwrap().unwrap().0, result);
+        assert!(matches!(
+            transform_csv("duration-number-column [\"分钟\",1,\"min\"] 时长\n1秒\n无效"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+        assert_eq!(
+            transform_csv("时长数值列 [\"分钟\",1,\"iso\"] 时长"),
+            Err(CsvError::DurationNumberColumnArguments)
         );
     }
 

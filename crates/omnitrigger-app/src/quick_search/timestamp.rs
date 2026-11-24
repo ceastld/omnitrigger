@@ -315,6 +315,7 @@ fn convert_timestamp_with_local(
             | DurationError::InvalidBreakArguments
             | DurationError::BreakOutOfRange
             | DurationError::InvalidUnit
+            | DurationError::ExactUnitArguments
             | DurationError::InvalidFrequency
             | DurationError::InvalidScaleFactor
             | DurationError::InvalidRoundingArguments

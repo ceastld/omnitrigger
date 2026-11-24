@@ -1900,6 +1900,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "用分数精确换算时长单位",
+        query: "时长: 精确换算 1秒 to min",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "读取 ISO 日时长",
         query: "时长: P1DT2.5S",
     },
@@ -4711,6 +4716,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 分组时长合计 [\"人员\"] \"时长\" 人员,时长\n北,01:30\n南,PT45S\n北,30.25秒\n空,\n南,-15秒\n负,-1ns",
     },
     Example {
+        icon: Icon::Clock,
+        title: "按目标单位给表格追加精确时长数值",
+        query: "CSV: 时长数值列 [\"分钟\",\"时长\",\"min\"] 编号,时长\n001,1秒\n002,PT30S\n003,-0.25秒",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按地址在 CSV 中追加最长匹配网段",
         query: "CSV: 网段归属列 [\"网段\",\"地址\",[\"192.0.2.0/24\",\"192.0.2.128/25\",\"2001:db8::/32\"]] 编号,地址\n001,192.0.2.190\n002,2001:db8::7\n003,192.0.3.1",
@@ -6266,6 +6276,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "小数",
         ],
         Scope::Duration => &[
+            "精确换算",
             "合计",
             "平均",
             "频数平均",
