@@ -80,6 +80,7 @@ pub(super) enum JsonError {
     FilterConditions,
     SortFields,
     UniquePaths,
+    LineUniquePaths,
     ExpectedScalar,
     ExpectedNumber,
     GroupStatisticsPaths,
@@ -159,6 +160,7 @@ impl JsonError {
                 "填写 1 至 8 个 [路径,排序方式]，方式可为文本升序、文本降序、数值升序或数值降序"
             }
             Self::UniquePaths => "填写 2 至 8 个不同路径，例如 [\"/地区\",\"/月份\"]",
+            Self::LineUniquePaths => "填写 1 至 8 个不同路径，例如 [\"/编号\"]",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
             Self::GroupStatisticsPaths => {
@@ -299,7 +301,14 @@ pub(super) fn result_format(query: &str, output: &str) -> Option<JsonResultForma
 fn is_json_lines_output(operation: &str) -> bool {
     matches!(
         operation,
-        "展开数组" | "to-jsonl" | "行筛选" | "filter-jsonl" | "行任一筛选" | "filter-any-jsonl"
+        "展开数组"
+            | "to-jsonl"
+            | "行筛选"
+            | "filter-jsonl"
+            | "行任一筛选"
+            | "filter-any-jsonl"
+            | "行路径去重"
+            | "unique-jsonl-by-pointers"
     )
 }
 
@@ -341,6 +350,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
             return filter_json_conditions(source, false, ConditionRecords::Lines)
         }
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
+        "行路径去重" | "unique-jsonl-by-pointers" => return deduplicate_json_lines(source),
         "多路径去重" | "unique-by-pointers" => return match_json_by_pointers(source, false),
         "多路径查重复" | "duplicates-by-pointers" => {
             return match_json_by_pointers(source, true)
@@ -1116,19 +1126,22 @@ fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
     })
 }
 
-fn distinct_json_paths_and_source(query: &str) -> Result<(Vec<Vec<String>>, &str), JsonError> {
-    let (input, source) = json_value_and_source(query, JsonError::UniquePaths)?;
-    let pointers =
-        serde_json::from_str::<Vec<String>>(input.get()).map_err(|_| JsonError::UniquePaths)?;
-    if !(2..=MAX_UNIQUE_PATHS).contains(&pointers.len()) {
-        return Err(JsonError::UniquePaths);
+fn distinct_json_paths_and_source(
+    query: &str,
+    minimum: usize,
+    invalid: JsonError,
+) -> Result<(Vec<Vec<String>>, &str), JsonError> {
+    let (input, source) = json_value_and_source(query, invalid)?;
+    let pointers = serde_json::from_str::<Vec<String>>(input.get()).map_err(|_| invalid)?;
+    if !(minimum..=MAX_UNIQUE_PATHS).contains(&pointers.len()) {
+        return Err(invalid);
     }
     let mut distinct = HashSet::new();
     let paths = pointers
         .iter()
         .map(|pointer| {
             if !distinct.insert(pointer) {
-                return Err(JsonError::UniquePaths);
+                return Err(invalid);
             }
             pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()
         })
@@ -1136,17 +1149,31 @@ fn distinct_json_paths_and_source(query: &str) -> Result<(Vec<Vec<String>>, &str
     Ok((paths, source))
 }
 
+fn json_scalar_key(item: &RawValue, paths: &[Vec<String>]) -> Result<Vec<JsonScalar>, JsonError> {
+    paths
+        .iter()
+        .map(|path| {
+            let value = select_pointer_keys(item, path)?;
+            json_scalar(value)?.ok_or(JsonError::ExpectedScalar)
+        })
+        .collect()
+}
+
+fn deduplicate_json_lines(query: &str) -> Result<String, JsonError> {
+    let (paths, source) = distinct_json_paths_and_source(query, 1, JsonError::LineUniquePaths)?;
+    let mut seen = HashSet::new();
+    let mut retained = Vec::new();
+    for item in read_json_lines(source)? {
+        if seen.insert(json_scalar_key(item, &paths)?) {
+            retained.push(item.get());
+        }
+    }
+    Ok(retained.join("\n"))
+}
+
 fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, JsonError> {
-    let (paths, source) = distinct_json_paths_and_source(query)?;
-    let key_for = |item: &RawValue| {
-        paths
-            .iter()
-            .map(|path| {
-                let value = select_pointer_keys(item, path)?;
-                json_scalar(value)?.ok_or(JsonError::ExpectedScalar)
-            })
-            .collect::<Result<Vec<_>, _>>()
-    };
+    let (paths, source) = distinct_json_paths_and_source(query, 2, JsonError::UniquePaths)?;
+    let key_for = |item: &RawValue| json_scalar_key(item, &paths);
     let items = read_json_array(source)?;
     if !duplicates_only {
         let mut seen = HashSet::new();
@@ -1252,7 +1279,7 @@ fn write_json_groups_from_query<'a, Group: serde::Serialize>(
 ) -> Result<String, JsonError> {
     let multiple_paths = query.trim_start().starts_with('[');
     let groups = if multiple_paths {
-        let (paths, source) = distinct_json_paths_and_source(query)?;
+        let (paths, source) = distinct_json_paths_and_source(query, 2, JsonError::UniquePaths)?;
         collect_json_groups_by(
             read_json_array(source)?,
             |item| {
@@ -3715,6 +3742,36 @@ mod tests {
         );
         assert_eq!(
             transform_json(r#"多路径查重复 ["/a","/b"] [{"a":1,"b":2},{"a":1}]"#),
+            Err(JsonError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn deduplicates_json_lines_by_one_or_more_exact_paths_preserving_first_records() {
+        let source = [
+            r#"{"订单":{"id":"001"},"件数":1.00,"状态":"首次"}"#,
+            r#"{"订单":{"id":"001"},"件数":1e0,"状态":"重复"}"#,
+            r#"{"订单":{"id":"001"},"件数":"1","状态":"字符串"}"#,
+            r#"{"订单":{"id":"002"},"件数":1,"状态":"另一订单"}"#,
+        ];
+        let input = source.join("\r\n");
+        let query = format!("行路径去重 [\"/订单/id\",\"/件数\"]\n{input}");
+        let output = [source[0], source[2], source[3]].join("\n");
+        assert_eq!(transform_json(&query), Ok(output.clone()));
+        assert!(matches!(
+            result_format(&query, &output),
+            Some(JsonResultFormat::JsonLines)
+        ));
+        assert_eq!(
+            transform_json(&format!("unique-jsonl-by-pointers [\"/订单/id\"] {input}")),
+            Ok([source[0], source[3]].join("\n"))
+        );
+        assert_eq!(
+            transform_json("行路径去重 [] 1"),
+            Err(JsonError::LineUniquePaths)
+        );
+        assert_eq!(
+            transform_json(&format!("{query}\n{{\"订单\":{{\"id\":\"003\"}}}}")),
             Err(JsonError::MissingValue)
         );
     }
