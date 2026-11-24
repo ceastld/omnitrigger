@@ -4957,6 +4957,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查找指定列包含任一关键词的记录",
+        query: "CSV: 搜索任一 {\"词\":[\"north\",\"茶\"],\"列\":[\"地区\",\"商品\"]} 编号,地区,商品,备注\n001,ＮＯＲＴＨ,咖啡,茶\n002,南,绿茶,米\n003,南,咖啡,茶\n004,North,茶,冰",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "排除指定列含有任一关键词的记录",
+        query: "CSV: 排除关键词 {\"词\":[\"north\",\"茶\"],\"列\":[\"地区\",\"商品\"]} 编号,地区,商品,备注\n001,ＮＯＲＴＨ,咖啡,茶\n002,南,绿茶,米\n003,南,咖啡,茶\n004,North,茶,冰",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查找关键词在表格中的行号、列号和原文",
         query: "CSV: 命中位置 [\"north\",\"茶\"] 区域,备注\nＮｏｒｔｈ,茶 North\n南区,米",
     },

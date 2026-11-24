@@ -1128,8 +1128,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     if let Some(table) = coordinate_line_table(operation, input) {
         return table?.to_csv();
     }
-    if is_csv_row_search(operation) {
-        return search_csv_rows(input, false).map(|matches| write_rows(&matches.rows, ','));
+    if let Some(mode) = CsvKeywordMatch::from_operation(operation) {
+        return search_csv_rows(input, mode, false).map(|matches| write_rows(&matches.rows, ','));
     }
     if let Some(result) = csv_preview_output(operation, input) {
         return result.map(|(text, _)| text);
@@ -7011,8 +7011,8 @@ fn order_records<Row: AsRef<[String]>>(
 
 pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePreview), CsvError>> {
     let (operation, data) = split_argument(query)?;
-    if is_csv_row_search(operation) {
-        return Some(search_csv_rows(data, true).map(|matches| {
+    if let Some(mode) = CsvKeywordMatch::from_operation(operation) {
+        return Some(search_csv_rows(data, mode, true).map(|matches| {
             let text = write_rows(&matches.rows, ',');
             let table =
                 TablePreview::from_rows(matches.rows).with_highlighted_cells(matches.highlighted);
@@ -7269,8 +7269,21 @@ fn csv_keyword_key(text: &str) -> String {
         .collect()
 }
 
-fn is_csv_row_search(operation: &str) -> bool {
-    operation == "搜索行" || operation.eq_ignore_ascii_case("search-rows")
+enum CsvKeywordMatch {
+    All,
+    Any,
+    None,
+}
+
+impl CsvKeywordMatch {
+    fn from_operation(operation: &str) -> Option<Self> {
+        match operation.to_ascii_lowercase().as_str() {
+            "搜索行" | "search-rows" => Some(Self::All),
+            "搜索任一" | "search-any-rows" => Some(Self::Any),
+            "排除关键词" | "exclude-keywords" => Some(Self::None),
+            _ => None,
+        }
+    }
 }
 
 struct CsvRowMatches {
@@ -7278,7 +7291,11 @@ struct CsvRowMatches {
     highlighted: Vec<(usize, usize)>,
 }
 
-fn search_csv_rows(input: &str, highlight: bool) -> Result<CsvRowMatches, CsvError> {
+fn search_csv_rows(
+    input: &str,
+    mode: CsvKeywordMatch,
+    highlight: bool,
+) -> Result<CsvRowMatches, CsvError> {
     let CsvKeywordQuery {
         keywords,
         columns,
@@ -7303,13 +7320,17 @@ fn search_csv_rows(input: &str, highlight: bool) -> Result<CsvRowMatches, CsvErr
             .iter()
             .map(|&index| csv_keyword_key(&row[index]))
             .collect();
-        if !keywords
-            .iter()
-            .all(|word| cells.iter().any(|cell| cell.contains(word.key.as_str())))
-        {
+        let contains =
+            |word: &CsvKeyword| cells.iter().any(|cell| cell.contains(word.key.as_str()));
+        let keep = match mode {
+            CsvKeywordMatch::All => keywords.iter().all(contains),
+            CsvKeywordMatch::Any => keywords.iter().any(contains),
+            CsvKeywordMatch::None => !keywords.iter().any(contains),
+        };
+        if !keep {
             continue;
         }
-        if highlight {
+        if highlight && !matches!(mode, CsvKeywordMatch::None) {
             let row_index = matches.rows.len();
             matches
                 .highlighted
@@ -11112,6 +11133,40 @@ mod tests {
             .unwrap();
         assert_eq!(preview.first_match_column_page(), None);
         assert_eq!(preview.row_pages(), 0);
+    }
+
+    #[test]
+    fn searches_for_any_or_excludes_all_keywords_in_selected_columns() {
+        let data = "编号,地区,商品,备注\n001,ＮＯＲＴＨ,咖啡,茶\n002,南,绿茶,米\n003,南,咖啡,茶\n004,North,茶,冰";
+        let words = r#"{"词":["north","茶"],"列":["地区","商品"]}"#;
+        let header = "编号,地区,商品,备注";
+        for (operation, rows) in [
+            ("搜索行", "\r\n004,North,茶,冰"),
+            (
+                "搜索任一",
+                "\r\n001,ＮＯＲＴＨ,咖啡,茶\r\n002,南,绿茶,米\r\n004,North,茶,冰",
+            ),
+            ("EXCLUDE-KEYWORDS", "\r\n003,南,咖啡,茶"),
+        ] {
+            let query = format!("{operation} {words} {data}");
+            let (text, _) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(text, format!("{header}{rows}"));
+            assert_eq!(transform_csv(&query).as_deref(), Ok(text.as_str()));
+        }
+        let (_, searched) = csv_table_preview(&format!("search-any-rows {words} {data}"))
+            .unwrap()
+            .unwrap();
+        assert!(searched.is_cell_highlighted(1, 1));
+        assert!(searched.is_cell_highlighted(2, 2));
+        assert!(!searched.is_cell_highlighted(1, 3));
+        let (_, excluded) = csv_table_preview(&format!("排除关键词 {words} {data}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(excluded.first_match_column_page(), None);
+        assert_eq!(
+            transform_csv("排除关键词 \"\" 编号,备注\n001,茶").as_deref(),
+            Ok("编号,备注\r\n001,茶")
+        );
     }
 
     #[test]
