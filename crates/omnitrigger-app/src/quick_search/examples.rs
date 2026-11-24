@@ -855,6 +855,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求二项分布达到目标累计概率的最小成功数",
+        query: "统计: 二项分位点 3,1/3,75%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算在指定试验中首次成功的概率",
         query: "统计: 几何概率 3,25%",
     },
@@ -892,6 +897,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "计算不放回抽取至少命中指定次数的概率",
         query: "统计: 超几何至少 10,4,3,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求不放回抽取达到目标累计概率的最小命中数",
+        query: "统计: 超几何分位点 10,4,3,90%",
     },
     Example {
         icon: Icon::Terminal,
@@ -6427,6 +6437,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && [
                     "二项概率",
                     "二项概率表",
+                    "二项分位点",
                     "二项累计",
                     "二项至少",
                     "几何概率",
@@ -6435,6 +6446,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "超几何概率表",
                     "超几何累计",
                     "超几何至少",
+                    "超几何分位点",
                     "独立性卡方",
                     "期望频数",
                     "箱线摘要",
