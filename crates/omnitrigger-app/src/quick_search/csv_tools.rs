@@ -28,7 +28,10 @@ use super::statistics::{
 use super::{
     bin_plot::BinPlot,
     box_plot::BoxPlot,
-    calculator::{evaluate, format_result, normalize, sample_at_coordinates, QUERY_LIMIT},
+    calculator::{
+        evaluate, format_result, narrow_ascii_graphic, normalize, sample_at_coordinates,
+        QUERY_LIMIT,
+    },
     calendar::{
         parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
         workday_exceptions_from_dates, SpreadsheetDateSystem,
@@ -185,6 +188,7 @@ pub(super) enum CsvError {
     InvalidColumnValue,
     InvalidNumberFilter,
     FilterConditions,
+    SearchRowKeywords,
     Regex(TextError),
     ColumnOutOfRange,
     InvalidNumber,
@@ -477,6 +481,7 @@ impl CsvError {
                 "填写 1 至 16 个 [列,比较方式,\"值\"]，例如 [[\"状态\",\"文本=\",\"完成\"],[2,\">=\",\"3/2\"]]"
             }
             Self::Regex(error) => error.message(),
+            Self::SearchRowKeywords => "填写 1 至 16 个非空关键词，例如 [\"茶\",\"华东\"]",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::NumericIssuesTooLarge => "数值列检查结果超过 1 MiB，请缩小表格范围",
@@ -1129,8 +1134,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     if let Some(table) = coordinate_line_table(operation, input) {
         return table?.to_csv();
     }
-    if let Some(delimiter) = table_preview_delimiter(operation) {
-        return read_preview_output(input, delimiter).map(|(text, _)| text);
+    if let Some(result) = csv_preview_output(operation, input) {
+        return result.map(|(text, _)| text);
     }
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
@@ -6968,11 +6973,45 @@ fn order_records<'a>(
 
 pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePreview), CsvError>> {
     let (operation, data) = split_argument(query)?;
-    let delimiter = table_preview_delimiter(operation)?;
     Some(
-        read_preview_output(data, delimiter)
+        csv_preview_output(operation, data)?
             .map(|(text, rows)| (text, TablePreview::from_rows(rows))),
     )
+}
+
+type CsvPreviewData = (String, Vec<Vec<String>>);
+
+fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewData, CsvError>> {
+    if operation == "搜索行" || operation.eq_ignore_ascii_case("search-rows") {
+        return Some(search_csv_rows(input).map(|rows| (write_rows(&rows, ','), rows)));
+    }
+    table_preview_delimiter(operation).map(|delimiter| read_preview_output(input, delimiter))
+}
+
+fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+    let invalid = CsvError::SearchRowKeywords;
+    let (keywords, data) = json_argument_and_data::<Vec<String>>(input, invalid)?;
+    if !(1..=MAX_FILTER_CONDITIONS).contains(&keywords.len())
+        || keywords.iter().any(|word| word.trim().is_empty())
+    {
+        return Err(invalid);
+    }
+    let fold = |text: &str| {
+        text.chars()
+            .map(|ch| narrow_ascii_graphic(ch).to_ascii_lowercase())
+            .collect::<String>()
+    };
+    let keywords: Vec<_> = keywords.iter().map(|word| fold(word)).collect();
+    let mut rows = read_table_for_preview(data, ',')?.into_iter();
+    let header = rows.next().ok_or(CsvError::MissingInput)?;
+    Ok(std::iter::once(header)
+        .chain(rows.filter(|row| {
+            let cells: Vec<_> = row.iter().map(|cell| fold(cell)).collect();
+            keywords
+                .iter()
+                .all(|word| cells.iter().any(|cell| cell.contains(word.as_str())))
+        }))
+        .collect())
 }
 
 fn table_preview_delimiter(operation: &str) -> Option<char> {
@@ -6986,10 +7025,7 @@ fn table_preview_delimiter(operation: &str) -> Option<char> {
     }
 }
 
-fn read_preview_output(
-    input: &str,
-    delimiter: char,
-) -> Result<(String, Vec<Vec<String>>), CsvError> {
+fn read_preview_output(input: &str, delimiter: char) -> Result<CsvPreviewData, CsvError> {
     let rows = read_table_for_preview(input, delimiter)?;
     let text = if delimiter == ',' {
         input.to_owned()
@@ -10411,6 +10447,26 @@ mod tests {
         assert_eq!(
             transform_csv(r#"筛选 3 "值" a,b"#),
             Err(CsvError::ColumnOutOfRange)
+        );
+    }
+
+    #[test]
+    fn finds_rows_containing_all_keywords_across_cells_and_previews_selected_records() {
+        let data = "编号,区域,品名\n001,North,绿茶\n002,South,绿茶\n003,North,咖啡\n004,ＮＯＲＴＨ,\"茶,咖啡\"";
+        let query = format!("搜索行 [\"ｎｏｒｔｈ\",\"茶\"] {data}");
+        let expected = "编号,区域,品名\r\n001,North,绿茶\r\n004,ＮＯＲＴＨ,\"茶,咖啡\"";
+        assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        let (text, preview) = csv_table_preview(&query).unwrap().unwrap();
+        assert_eq!(text, expected);
+        assert_eq!(preview.row_pages(), 1);
+        assert_eq!(preview.column_pages(), 1);
+        assert_eq!(
+            transform_csv(&format!("SEARCH-ROWS [\"North绿茶\"] {data}")).as_deref(),
+            Ok("编号,区域,品名")
+        );
+        assert_eq!(
+            transform_csv(&format!("搜索行 [\" \"] {data}")),
+            Err(CsvError::SearchRowKeywords)
         );
     }
 
