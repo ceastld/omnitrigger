@@ -2817,7 +2817,7 @@ impl QuickSearch {
                     cx.stop_propagation();
                 }
             } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "enter" {
-                if self.select_example_suffix(Example::csv_data_start, event.is_held, window, cx)
+                if self.select_example_suffix(Example::data_start, event.is_held, window, cx)
                     || (!event.is_held && self.reveal_selected_file(window, cx))
                 {
                     cx.stop_propagation();
@@ -3159,8 +3159,8 @@ impl QuickSearch {
                             .when(index == self.selected, |row| {
                                 let hint = if tool_index {
                                     "F1 用法 · Tab 填入"
-                                } else if example.csv_data_start().is_some() {
-                                    "Shift+Tab 改参数 · Alt+Enter 换表格"
+                                } else if example.data_start().is_some() {
+                                    "Shift+Tab 改参数 · Alt+Enter 换数据"
                                 } else if example.argument_start().is_some() {
                                     "Tab 填入 · Shift+Tab 改参数"
                                 } else {
@@ -5654,42 +5654,51 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    fn verify_csv_object_example_data_selection(
+    fn verify_example_data_selection(
         search: &mut QuickSearch,
         window: &mut Window,
         cx: &mut Context<QuickSearch>,
     ) {
-        const QUERY: &str = "CSV: 搜索行";
-        const PREFIX: &str = "CSV: 搜索行 {\"词\":[\"茶\"],\"列\":[\"备注\"]} ";
-        search.fill_query(QUERY, window, cx);
-        search.refresh_results(QUERY, window, cx);
-        let Results::Help(examples) = &search.results else {
-            panic!("应展示 CSV 搜索行示例");
-        };
-        search.selected = examples
-            .iter()
-            .position(|&index| EXAMPLES[index].query.starts_with(PREFIX))
-            .expect("应提供按列搜索的对象参数示例");
         let shortcut = KeyDownEvent {
             keystroke: gpui::Keystroke::parse("alt-enter").unwrap(),
             is_held: false,
         };
-        search.key_down(&shortcut, window, cx);
-        let input = search.input.read(cx);
-        let example = input.text();
-        assert!(example.starts_with(PREFIX));
-        assert_eq!(input.selection(), PREFIX.len()..example.len());
-        const REPLACEMENT: &str = "区域,备注,货品\r\n西区,茶叶,纸\r\n北区,水,茶";
-        search.input.update(cx, |input, cx| {
-            input.replace_text_in_range(None, REPLACEMENT, window, cx);
-        });
-        let query = search.input.read(cx).text();
-        assert_eq!(query, format!("{PREFIX}{REPLACEMENT}"));
-        search.refresh_results(&query, window, cx);
-        assert_eq!(
-            search.results.refillable_text(),
-            Some("区域,备注,货品\r\n西区,茶叶,纸")
-        );
+        for (command, prefix, replacement, expected) in [
+            (
+                "CSV: 搜索行",
+                "CSV: 搜索行 {\"词\":[\"茶\"],\"列\":[\"备注\"]} ",
+                "区域,备注,货品\r\n西区,茶叶,纸\r\n北区,水,茶",
+                "区域,备注,货品\r\n西区,茶叶,纸",
+            ),
+            (
+                "JSON: 路径转CSV",
+                "JSON: 路径转CSV [\"/订单/商品\",\"/订单/金额\"] ",
+                r#"[{"订单":{"商品":"甲,乙","金额":0.50}}]"#,
+                "/订单/商品,/订单/金额\r\n\"甲,乙\",0.50",
+            ),
+        ] {
+            search.fill_query(command, window, cx);
+            search.refresh_results(command, window, cx);
+            let Results::Help(examples) = &search.results else {
+                panic!("应展示 {command} 示例");
+            };
+            search.selected = examples
+                .iter()
+                .position(|&index| EXAMPLES[index].query.starts_with(prefix))
+                .expect("应提供可替换数据的示例");
+            search.key_down(&shortcut, window, cx);
+            let input = search.input.read(cx);
+            let example = input.text();
+            assert!(example.starts_with(prefix));
+            assert_eq!(input.selection(), prefix.len()..example.len());
+            search.input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, replacement, window, cx);
+            });
+            let query = search.input.read(cx).text();
+            assert_eq!(query, format!("{prefix}{replacement}"));
+            search.refresh_results(&query, window, cx);
+            assert_eq!(search.results.refillable_text(), Some(expected));
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -6284,7 +6293,7 @@ mod tests {
                     reopened.update(cx, verify_result_refill).unwrap();
                     reopened.update(cx, verify_table_paging).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
-                    reopened.update(cx, verify_csv_object_example_data_selection).unwrap();
+                    reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             let prefix = "处理:";

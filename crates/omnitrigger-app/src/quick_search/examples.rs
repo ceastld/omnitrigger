@@ -16,18 +16,42 @@ pub(super) struct Example {
 }
 
 impl Example {
-    pub(super) fn csv_data_start(&self) -> Option<usize> {
+    pub(super) fn data_start(&self) -> Option<usize> {
         let (scope, term) = scoped_query(self.query)?;
-        if scope != Scope::Csv {
+        if !matches!(scope, Scope::Csv | Scope::Json) {
             return None;
         }
-        let (_, arguments) = term.split_once(char::is_whitespace)?;
+        let (operation, arguments) = term.split_once(char::is_whitespace)?;
+        if scope == Scope::Json
+            && !matches!(
+                operation.to_ascii_lowercase().as_str(),
+                "路径转csv"
+                    | "pointers-to-csv"
+                    | "多条件筛选"
+                    | "filter-all"
+                    | "任一条件筛选"
+                    | "filter-any"
+                    | "选键"
+                    | "pick-keys"
+                    | "改键"
+                    | "rename-key"
+                    | "去键"
+                    | "remove-keys"
+            )
+        {
+            return None;
+        }
         let (options, data) =
             json_argument_and_tail::<Box<serde_json::value::RawValue>>(arguments)?;
-        (options.get().starts_with(['[', '{'])
-            && data.contains(['\r', '\n'])
-            && !data.trim().is_empty())
-        .then_some(self.query.len() - data.len())
+        if !options.get().starts_with(['[', '{']) {
+            return None;
+        }
+        let has_data = if scope == Scope::Json {
+            serde_json::from_str::<&serde_json::value::RawValue>(data).is_ok()
+        } else {
+            data.contains(['\r', '\n']) && !data.trim().is_empty()
+        };
+        has_data.then_some(self.query.len() - data.len())
     }
 
     pub(super) fn argument_start(&self) -> Option<usize> {
@@ -6472,16 +6496,23 @@ mod tests {
             ("CSV: 选列 1 名称,值\n茶,2", None),
             ("CSV: 转置\n编号,名称\n001,茶", None),
             ("文本: 逐行配对 [\"甲\"]\n茶\n米", None),
+            (
+                r#"JSON: 路径转CSV ["/金额"] [{"金额":1.50}]"#,
+                Some(r#"[{"金额":1.50}]"#),
+            ),
+            (
+                r#"JSON: 多条件筛选 [["/x","=",1]] [{"x":1},{"x":2}]"#,
+                Some(r#"[{"x":1},{"x":2}]"#),
+            ),
+            (r#"JSON: 路径转CSV ["/x"] ["#, None),
+            (r#"JSON: 对比 [1] [2]"#, None),
         ] {
             let example = Example {
                 icon: Icon::Terminal,
                 title: "",
                 query,
             };
-            assert_eq!(
-                example.csv_data_start().map(|start| &query[start..]),
-                expected
-            );
+            assert_eq!(example.data_start().map(|start| &query[start..]), expected);
         }
     }
 
