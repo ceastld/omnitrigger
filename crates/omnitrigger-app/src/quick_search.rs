@@ -1643,15 +1643,40 @@ fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String
     if bytes.len() > max_bytes {
         return Err(too_long());
     }
-    let text = std::str::from_utf8(&bytes).map_err(|_| "文件须为 UTF-8 文本".to_owned())?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let encoding_error = || "文件须为 UTF-8 文本或带 BOM 的 UTF-16 文本".to_owned();
+    let text = match bytes.as_slice() {
+        [0xff, 0xfe, payload @ ..] | [0xfe, 0xff, payload @ ..] => {
+            let units = payload.chunks_exact(2);
+            if !units.remainder().is_empty() {
+                return Err(encoding_error());
+            }
+            let little_endian = bytes[0] == 0xff;
+            let units = units.map(|unit| {
+                let encoded = [unit[0], unit[1]];
+                if little_endian {
+                    u16::from_le_bytes(encoded)
+                } else {
+                    u16::from_be_bytes(encoded)
+                }
+            });
+            char::decode_utf16(units)
+                .collect::<Result<String, _>>()
+                .map_err(|_| encoding_error())?
+        }
+        _ => {
+            let payload = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&bytes);
+            std::str::from_utf8(payload)
+                .map_err(|_| encoding_error())?
+                .to_owned()
+        }
+    };
     if text.contains('\0') {
-        return Err("文件须为 UTF-8 文本".to_owned());
+        return Err(encoding_error());
     }
     if text.chars().count() > character_limit {
         return Err(too_long());
     }
-    Ok(text.to_owned())
+    Ok(text)
 }
 
 pub(super) struct QuickSearch {
@@ -2171,7 +2196,7 @@ impl QuickSearch {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("载入 UTF-8 文本到快速搜索".into()),
+            prompt: Some("载入文本到快速搜索".into()),
         });
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -3810,7 +3835,7 @@ impl Render for QuickSearch {
                     .when(!naming_bookmark && accepts_input_file(&query), |header| {
                         let (label, hint) = match &self.input_file_load {
                             InputFileLoadState::Ready => {
-                                ("载入", "Ctrl+O 在光标处插入 UTF-8 文件内容")
+                                ("载入", "Ctrl+O 在光标处插入 UTF-8 或 UTF-16 文本")
                             }
                             InputFileLoadState::InProgress => {
                                 ("正在载入", "正在选择或读取输入文件")
@@ -6158,6 +6183,33 @@ mod tests {
         std::fs::write(&file, b"a\0b").unwrap();
         assert!(read_input_file(&file, 8).is_err());
         assert!(read_input_file(dir.path(), 8).is_err());
+    }
+
+    #[test]
+    fn loads_both_utf16_byte_orders_without_replacing_invalid_code_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("电子表格.tsv");
+        let text = "甲\t😀\r\n乙\t3";
+        for (bom, encode) in [
+            ([0xff, 0xfe], u16::to_le_bytes as fn(u16) -> [u8; 2]),
+            ([0xfe, 0xff], u16::to_be_bytes),
+        ] {
+            let bytes: Vec<_> = bom
+                .into_iter()
+                .chain(text.encode_utf16().flat_map(encode))
+                .collect();
+            std::fs::write(&file, bytes).unwrap();
+            assert_eq!(read_input_file(&file, 8).as_deref(), Ok(text));
+            assert!(read_input_file(&file, 7).unwrap_err().contains("7 字符"));
+        }
+        for invalid in [
+            &[0xff, 0xfe, 0x00][..],
+            &[0xff, 0xfe, 0x00, 0xd8][..],
+            &[0xfe, 0xff, 0x00, 0x00][..],
+        ] {
+            std::fs::write(&file, invalid).unwrap();
+            assert!(read_input_file(&file, 8).unwrap_err().contains("UTF-16"));
+        }
     }
 
     #[test]
