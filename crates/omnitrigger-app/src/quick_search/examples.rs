@@ -35,6 +35,8 @@ impl Example {
                     | "jsonl-pointers-to-csv"
                     | "行分组统计csv"
                     | "jsonl-group-statistics-csv"
+                    | "行分组中位数csv"
+                    | "jsonl-group-median-csv"
                     | "行筛选"
                     | "filter-jsonl"
                     | "行任一筛选"
@@ -64,6 +66,8 @@ impl Example {
                 | "jsonl-pointers-to-csv"
                 | "行分组统计csv"
                 | "jsonl-group-statistics-csv"
+                | "行分组中位数csv"
+                | "jsonl-group-median-csv"
                 | "行筛选"
                 | "filter-jsonl"
                 | "行任一筛选"
@@ -4038,6 +4042,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "计算每组逐行 JSON 记录的精确合计和平均",
         query: "JSON: 行分组统计CSV [\"/组\",\"/金额\"]\n{\"组\":1.00,\"金额\":1.50}\n{\"组\":\"北\",\"金额\":2}\n{\"组\":1e0,\"金额\":0.75}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算逐行 JSON 各组的精确中位数",
+        query: "JSON: 行分组中位数CSV [\"/组\",\"/金额\"]\n{\"组\":1.00,\"金额\":1.50}\n{\"组\":\"北\",\"金额\":4}\n{\"组\":1e0,\"金额\":2}\n{\"组\":\"北\",\"金额\":1}\n{\"组\":\"北\",\"金额\":9}",
     },
     Example {
         icon: Icon::Terminal,

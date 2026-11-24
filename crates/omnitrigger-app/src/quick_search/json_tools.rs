@@ -184,6 +184,7 @@ enum JsonCsvOperation {
     LinePaths,
     LineGroupCounts,
     LineGroupSummaries,
+    LineGroupMedians,
     ValidateLines,
     Differences,
     Leaves,
@@ -201,6 +202,7 @@ impl JsonCsvOperation {
             "行路径转csv" | "jsonl-pointers-to-csv" => Some(Self::LinePaths),
             "行分组计数csv" | "jsonl-group-counts-csv" => Some(Self::LineGroupCounts),
             "行分组统计csv" | "jsonl-group-statistics-csv" => Some(Self::LineGroupSummaries),
+            "行分组中位数csv" | "jsonl-group-median-csv" => Some(Self::LineGroupMedians),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "对比csv" | "diff-csv" => Some(Self::Differences),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
@@ -221,6 +223,7 @@ impl JsonCsvOperation {
             | Self::LinePaths
             | Self::LineGroupCounts
             | Self::LineGroupSummaries
+            | Self::LineGroupMedians
             | Self::ValidateLines
             | Self::Differences
             | Self::Leaves
@@ -242,6 +245,7 @@ impl JsonCsvOperation {
             Self::LinePaths => json_paths_to_csv(source, read_json_lines),
             Self::LineGroupCounts => count_json_line_groups_csv(source),
             Self::LineGroupSummaries => summarize_json_line_groups_csv(source),
+            Self::LineGroupMedians => median_json_line_groups_csv(source),
             Self::ValidateLines => validate_json_lines_csv(source),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
             Self::Leaves => {
@@ -1372,42 +1376,21 @@ fn json_group_number(value: &RawValue) -> Result<BigRational, JsonError> {
     parse_fraction_literal(value).map_err(|_| JsonError::GroupStatisticsRange)
 }
 
-fn median_json_groups(query: &str) -> Result<String, JsonError> {
-    #[derive(serde::Serialize)]
-    struct Median<'a> {
-        #[serde(rename = "值")]
-        value: &'a RawValue,
-        #[serde(rename = "中位数")]
-        median: String,
-    }
+#[derive(serde::Serialize)]
+struct JsonGroupMedian<'a> {
+    #[serde(rename = "值")]
+    value: &'a RawValue,
+    #[serde(skip)]
+    count: usize,
+    #[serde(rename = "中位数")]
+    median: String,
+}
 
-    let (pointers, source) = strings_and_source(query, JsonError::GroupStatisticsPaths)?;
-    let [group, amount] = pointers.as_slice() else {
-        return Err(JsonError::GroupStatisticsPaths);
-    };
-    let amount_keys = pointer_keys(amount)?.collect::<Result<Vec<_>, _>>()?;
-    let groups = collect_json_groups(
-        group,
-        source,
-        read_json_array,
-        |value| (value, Vec::new()),
-        |(_, numbers), item| {
-            if numbers.len() == MAX_VALUES {
-                return Err(JsonError::GroupStatisticsLimit);
-            }
-            numbers.push(json_group_number(select_pointer_keys(item, &amount_keys)?)?);
-            Ok(())
-        },
-    )?;
+fn median_json_groups(query: &str) -> Result<String, JsonError> {
     let mut output = String::from("[");
-    for (index, (value, mut numbers)) in groups.into_iter().enumerate() {
-        numbers.sort_unstable();
-        let median = median_sorted_values(&numbers).map_err(|_| JsonError::GroupStatisticsRange)?;
-        let item = serde_json::to_string(&Median {
-            value,
-            median: median.to_string(),
-        })
-        .expect("有效 JSON 值和字符串可以序列化");
+    for (index, group) in json_group_medians(query, read_json_array)?.enumerate() {
+        let group = group?;
+        let item = serde_json::to_string(&group).expect("有效 JSON 值和字符串可以序列化");
         let separator = if index == 0 { "" } else { "," };
         if output.len() + separator.len() + item.len() + 1 > MAX_PRETTY_BYTES {
             return Err(JsonError::ObjectOutputTooLarge);
@@ -1417,6 +1400,58 @@ fn median_json_groups(query: &str) -> Result<String, JsonError> {
     }
     output.push(']');
     Ok(output)
+}
+
+fn median_json_line_groups_csv(query: &str) -> Result<String, JsonError> {
+    let mut output = String::from("值,类型,计数,中位数");
+    for group in json_group_medians(query, read_json_lines)? {
+        let group = group?;
+        append_bounded_csv_row(
+            &mut output,
+            [
+                group.value.get(),
+                json_type_name(group.value),
+                group.count.to_string().as_str(),
+                &group.median,
+            ]
+            .into_iter(),
+            JsonError::CsvOutputTooLarge,
+        )?;
+    }
+    Ok(output)
+}
+
+fn json_group_medians(
+    query: &str,
+    read_items: fn(&str) -> Result<Vec<&RawValue>, JsonError>,
+) -> Result<impl Iterator<Item = Result<JsonGroupMedian<'_>, JsonError>>, JsonError> {
+    let (pointers, source) = strings_and_source(query, JsonError::GroupStatisticsPaths)?;
+    let [group, amount] = pointers.as_slice() else {
+        return Err(JsonError::GroupStatisticsPaths);
+    };
+    let amount_keys = pointer_keys(amount)?.collect::<Result<Vec<_>, _>>()?;
+    let groups = collect_json_groups(
+        group,
+        source,
+        read_items,
+        |value| (value, Vec::new()),
+        |(_, numbers), item| {
+            if numbers.len() == MAX_VALUES {
+                return Err(JsonError::GroupStatisticsLimit);
+            }
+            numbers.push(json_group_number(select_pointer_keys(item, &amount_keys)?)?);
+            Ok(())
+        },
+    )?;
+    Ok(groups.into_iter().map(|(value, mut numbers)| {
+        numbers.sort_unstable();
+        let median = median_sorted_values(&numbers).map_err(|_| JsonError::GroupStatisticsRange)?;
+        Ok(JsonGroupMedian {
+            value,
+            count: numbers.len(),
+            median: median.to_string(),
+        })
+    }))
 }
 
 fn collect_json_groups<'a, Group>(
@@ -3681,6 +3716,20 @@ mod tests {
         assert_eq!(
             transform_json(r#"多路径查重复 ["/a","/b"] [{"a":1,"b":2},{"a":1}]"#),
             Err(JsonError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn computes_exact_json_line_group_medians_for_even_and_odd_groups() {
+        let source = "{\"组\":1.00,\"金额\":1.50}\r\n{\"组\":\"北\",\"金额\":4}\r\n{\"组\":1e0,\"金额\":2}\r\n{\"组\":\"北\",\"金额\":1}\r\n{\"组\":\"北\",\"金额\":9}";
+        let query = format!("行分组中位数CSV [\"/组\",\"/金额\"]\n{source}");
+        let expected = "值,类型,计数,中位数\r\n1.00,number,2,7/4\r\n\"\"\"北\"\"\",string,3,4";
+        assert_eq!(transform_json(&query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(&query).unwrap().as_deref(), Ok(expected));
+        let too_many = vec![r#"{"组":1,"金额":1}"#; MAX_VALUES + 1].join("\n");
+        assert_eq!(
+            transform_json(&format!("行分组中位数CSV [\"/组\",\"/金额\"]\n{too_many}")),
+            Err(JsonError::GroupStatisticsLimit)
         );
     }
 
