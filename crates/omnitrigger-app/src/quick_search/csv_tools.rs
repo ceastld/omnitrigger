@@ -5079,8 +5079,7 @@ fn contiguous_group_column(
         return Err(CsvError::GroupCountColumnArguments);
     }
     let groups = resolve_distinct_columns(header, groups, CsvError::GroupCountColumnArguments)?;
-    let mut values = records
-        .chunk_by(|left, right| groups.iter().all(|&column| left[column] == right[column]))
+    let mut values = contiguous_csv_groups(records, &groups)
         .enumerate()
         .flat_map(|(index, group)| {
             let length = group.len();
@@ -5094,6 +5093,13 @@ fn contiguous_group_column(
         let value = values.next().expect("每条记录均对应一个段内数值");
         Ok(value.to_string())
     })
+}
+
+fn contiguous_csv_groups<'a>(
+    records: &'a [Vec<String>],
+    groups: &'a [usize],
+) -> impl Iterator<Item = &'a [Vec<String>]> + 'a {
+    records.chunk_by(move |left, right| groups.iter().all(|&column| left[column] == right[column]))
 }
 
 pub(super) fn append_transformed_csv_column<E: Copy + From<CsvError>>(
@@ -7311,6 +7317,9 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "分组分位表" || operation.eq_ignore_ascii_case("group-quantiles") {
         return Some(csv_grouped_quantiles(input));
     }
+    if operation == "连续段摘要" || operation.eq_ignore_ascii_case("run-summary") {
+        return Some(csv_run_summary(input));
+    }
     if operation == "分组加权频数" || operation.eq_ignore_ascii_case("group-weighted-frequency")
     {
         return Some(csv_grouped_weighted_frequency(input));
@@ -7964,6 +7973,40 @@ fn csv_grouped_quantiles(input: &str) -> Result<CsvPreviewData, CsvError> {
                 limit,
             )?;
         }
+    }
+    let rows = read_table_for_preview(&csv, ',')?;
+    Ok((csv, rows))
+}
+
+fn csv_run_summary(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let invalid = CsvError::NamedColumnArguments;
+    let (groups, data) = json_argument_and_data::<Vec<ColumnReference>>(input, invalid)?;
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let groups = resolve_distinct_columns(header, &groups, invalid)?;
+
+    let mut csv = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(
+        &mut csv,
+        std::iter::once("段号")
+            .chain(groups.iter().map(|&index| header[index].as_str()))
+            .chain(["起始数据行", "末尾数据行", "记录数"]),
+        limit,
+    )?;
+    let mut last = 0;
+    for (index, run) in contiguous_csv_groups(records, &groups).enumerate() {
+        let number = (index + 1).to_string();
+        let first = (last + 1).to_string();
+        last += run.len();
+        let [last_row, length] = [last.to_string(), run.len().to_string()];
+        append_bounded_csv_row(
+            &mut csv,
+            std::iter::once(number.as_str())
+                .chain(groups.iter().map(|&column| run[0][column].as_str()))
+                .chain([first.as_str(), last_row.as_str(), length.as_str()]),
+            limit,
+        )?;
     }
     let rows = read_table_for_preview(&csv, ',')?;
     Ok((csv, rows))
@@ -12828,6 +12871,23 @@ null"#
             transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:00"),
             Err(CsvError::DataRowValue { row: 1, .. })
         ));
+    }
+
+    #[test]
+    fn summarizes_one_based_boundaries_of_consecutive_csv_records() {
+        let query = "连续段摘要 [\"设备\",2] 设备,状态,记录\nA,开,\"甲\n乙\"\nA,开,丙\nB,开,丁\nA,开,戊\nA,,末\nA,,落";
+        let expected = "段号,设备,状态,起始数据行,末尾数据行,记录数\r\n1,A,开,1,2,2\r\n2,B,开,3,3,1\r\n3,A,开,4,4,1\r\n4,A,\"\",5,6,2";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(query).expect("连续段摘要可预览").unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv("RUN-SUMMARY [] 编号\n001\n002").as_deref(),
+            Ok("段号,起始数据行,末尾数据行,记录数\r\n1,1,2,2"),
+        );
+        assert_eq!(
+            transform_csv("连续段摘要 [1] 部门").as_deref(),
+            Ok("段号,部门,起始数据行,末尾数据行,记录数"),
+        );
     }
 
     #[test]
