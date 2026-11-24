@@ -4843,6 +4843,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把指定区间内的纵坐标升降幅度相加",
+        query: "CSV: 曲线变差 [[\"时间\",\"高度\"],[\"1/2\",\"5/2\"]] 时间,高度\n3,0\n1,2\n2,\n0,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将间距不等的完整样点重采样到等距坐标",
         query: "CSV: 等距插值 [[\"时间\",\"高度\"],5] 时间,高度\n3,3\n0,0\n2,\n1,2",
     },
@@ -5800,6 +5805,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "分段直线",
             "曲线极值",
             "曲线截取",
+            "曲线变差",
             "等距插值",
             "水平交点",
             "曲线差值",

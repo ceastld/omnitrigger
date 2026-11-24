@@ -246,6 +246,7 @@ pub(super) enum CsvError {
     CoordinateResampleArguments,
     CoordinateExtremaPointCount,
     CoordinateClipPointCount,
+    CoordinateVariationPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     CoordinateDifferenceArguments,
@@ -548,6 +549,7 @@ impl CsvError {
             }
             Self::CoordinateExtremaPointCount => "曲线极值需要 2 至 64 个完整样点",
             Self::CoordinateClipPointCount => "曲线截取需要 2 至 64 个完整样点",
+            Self::CoordinateVariationPointCount => "曲线变差需要 2 至 64 个完整样点",
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
@@ -1161,6 +1163,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "分段直线" | "linear-segments" => return coordinate_linear_segments(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
+        "曲线变差" | "curve-total-variation" => return coordinate_total_variation(input),
         "曲线截取" | "clip-curve" => {
             let mut table = read_coordinate_interval(input, CsvError::CoordinateClipPointCount)?;
             sort_distinct_coordinates(&mut table.samples)?;
@@ -5954,6 +5957,19 @@ fn read_coordinate_interval(
     Ok(table)
 }
 
+fn coordinate_total_variation(input: &str) -> Result<String, CsvError> {
+    let mut table = read_coordinate_interval(input, CsvError::CoordinateVariationPointCount)?;
+    sort_distinct_coordinates(&mut table.samples)?;
+    let mut total = BigRational::default();
+    for pair in table.samples.windows(2) {
+        let left = &pair[0].point.1;
+        let right = &pair[1].point.1;
+        total += left.max(right) - left.min(right);
+        ensure_exact_size(&total).map_err(|_| CsvError::ComputedNumberRange)?;
+    }
+    Ok(total.to_string())
+}
+
 fn coordinate_extrema(input: &str) -> Result<String, CsvError> {
     let mut table = read_coordinate_interval(input, CsvError::CoordinateExtremaPointCount)?;
     sort_distinct_coordinates(&mut table.samples)?;
@@ -7850,6 +7866,23 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
             Err(CsvError::CoordinateDifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn sums_height_changes_without_cancelling_opposite_directions() {
+        let data = "x,y\n3,0\n1,2\n2,\n0,-1";
+        assert_eq!(
+            transform_csv(&format!("曲线变差 [[1,2],[\"1/2\",\"5/2\"]] {data}")).as_deref(),
+            Ok("3")
+        );
+        assert_eq!(
+            transform_csv(&format!("curve-total-variation [1,2] {data}")).as_deref(),
+            Ok("5")
+        );
+        assert_eq!(
+            transform_csv("曲线变差 [1,2] x,y\n-1,2\n1,2").as_deref(),
+            Ok("0")
         );
     }
 
