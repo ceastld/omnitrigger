@@ -1520,6 +1520,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按匹配的 IP 网段筛选地址归属表",
+        query: r#"处理: ["网段: 归属CSV [\"192.0.2.0/24\",\"192.0.2.128/25\"]","CSV: 搜索行 \"192.0.2.128/25\""] 192.0.2.190,192.0.2.1"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "提取 CSV 数值列并计算中位数",
         query: "处理: [\"CSV: 选列 2\",\"文本: 间隔取行 2,1\",\"统计: 分位数 50%\"] 名称,金额\n茶,1/2\n咖啡,5/2\n豆浆,3/2",
     },

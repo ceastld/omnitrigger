@@ -7,6 +7,7 @@ use super::{
     bin_plot::BinPlot,
     box_plot::BoxPlot,
     calendar::{calculate_date, is_date_report},
+    cidr::{calculate_cidr, cidr_csv_report},
     complex::calculate_complex,
     conversion::{calculate_circuit, convert_wave},
     correlation_plot::CorrelationPlot,
@@ -50,7 +51,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、时长、进制、音高、节拍、分贝、立体、波长、电路、方程、联立、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、网段、时长、进制、音高、节拍、分贝、立体、波长、电路、方程、联立、分数或统计命令";
 const STEP_RESULT_SLOT: &str = "{结果}";
 const STEP_TEMPLATE_SYNTAX: &str = "模板的工具前缀之后须正好有一个 {结果}";
 
@@ -472,6 +473,7 @@ fn run_pipeline_steps(
                 scope,
                 Scope::Date
                     | Scope::Timestamp
+                    | Scope::Cidr
                     | Scope::Duration
                     | Scope::Radix
                     | Scope::Pitch
@@ -519,6 +521,7 @@ fn run_pipeline_steps(
                 Scope::Timestamp => {
                     convert_timestamp(&query, now.to_utc()).map_err(|cause| cause.message())
                 }
+                Scope::Cidr => calculate_cidr(&query).map_err(|cause| cause.message()),
                 Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
                 Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
                 Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
@@ -583,6 +586,9 @@ fn prepare_pipeline_preview(
             let report = convert_timestamp(query, now.to_utc()).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))
         }
+        Scope::Cidr => cidr_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
         Scope::Csv => csv_table_preview(query)
             .map(|result| {
                 result
@@ -737,6 +743,34 @@ mod tests {
             "时区,时间\r\nUTC,2024-02-19T07:30:00Z\r\n+08:00,2024-02-19T15:30:00+08:00"
         );
         assert!(matches!(preview, Some(PipelinePreview::Table(table)) if table.row_pages() == 1));
+    }
+
+    #[test]
+    fn runs_network_math_and_passes_longest_prefix_reports_to_other_steps() {
+        let now = DateTime::parse_from_rfc3339("2024-02-18T23:30:00-08:00").unwrap();
+        let query = r#"["网段: 归属CSV [\"192.0.2.0/24\",\"192.0.2.128/25\"]"] 192.0.2.190,192.0.2.1,192.0.3.1"#;
+        let (text, preview) = transform_data_pipeline(query, now).unwrap();
+        assert_eq!(
+            text,
+            "地址,匹配网段\r\n192.0.2.190,192.0.2.128/25\r\n192.0.2.1,192.0.2.0/24\r\n192.0.3.1,\"\""
+        );
+        assert!(matches!(preview, Some(PipelinePreview::Table(table)) if table.row_pages() == 1));
+        assert_eq!(
+            run_pipeline(r#"["网段: 归属CSV [\"192.0.2.0/24\",\"192.0.2.128/25\"]","CSV: 搜索行 \"192.0.2.128/25\""] 192.0.2.190,192.0.2.1"#).as_deref(),
+            Ok("地址,匹配网段\r\n192.0.2.190,192.0.2.128/25")
+        );
+        assert_eq!(
+            run_pipeline("[\"文本: 去空行\",\"网段: 合并\"] 192.0.2.0/25\n\n192.0.2.128/25")
+                .as_deref(),
+            Ok("192.0.2.0/24")
+        );
+        assert!(run_pipeline(r#"["网段:"] 192.0.2.0/28"#)
+            .unwrap()
+            .starts_with("网段 192.0.2.0/28\n"));
+        assert!(matches!(
+            run_pipeline(r#"["文本: 去空行","网段: 合并"] ::/129"#),
+            Err(DataPipelineError::Step { index: 2, .. })
+        ));
     }
 
     #[test]
