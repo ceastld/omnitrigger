@@ -4896,6 +4896,8 @@ mod tests {
             r#"行数组转CSV ["名称","金额"] [["茶,咖啡",1.50],["梨",null]]"#,
             r#"路径转CSV ["/订单/金额"] [{"订单":{"金额":1.50}},{"订单":{}}]"#,
             r#"LEAVES-CSV {"金额":[1.20e+2,null],"备注":"甲,乙"}"#,
+            r#"找键CSV "金额" {"金额":1.50,"a/b":{"金额":null},"订单":[{"金额":2}]}"#,
+            r#"FIND-VALUE-CSV 1.5 {"甲":1.50,"乙":1.5e0,"丙":"1.5"}"#,
         ] {
             let expected = transform_json(term).unwrap();
             let direct = for_query(&format!("JSON: {term}"), &[]);
@@ -4920,6 +4922,27 @@ mod tests {
             Results::Value(Ok(ResultValue { text, kind: ValueKind::Text }))
                 if text == "1,2\r\n3,4"
         ));
+    }
+
+    #[test]
+    fn exports_matching_json_paths_with_exact_raw_values() {
+        assert_eq!(
+            transform_json(r#"找值CSV 1.5 {"甲":1.50,"乙":1.5e0,"丙":"1.5"}"#).as_deref(),
+            Ok("指针,类型,原值\r\n/甲,number,1.50\r\n/乙,number,1.5e0")
+        );
+        assert_eq!(
+            transform_json(r#"find-key-csv "金额" {"金额":1.50,"a/b":{"金额":null},"订单":[{"金额":2}]}"#)
+                .as_deref(),
+            Ok("指针,类型,原值\r\n/金额,number,1.50\r\n/a~1b/金额,null,null\r\n/订单/0/金额,number,2")
+        );
+        assert_eq!(
+            transform_json(r#"找键CSV "缺失" {"金额":1}"#).as_deref(),
+            Ok("指针,类型,原值")
+        );
+        assert_eq!(
+            transform_json(r#"找键CSV "\u0000" {"\u0000":1}"#),
+            Err(JsonError::CsvNullCharacter)
+        );
     }
 
     #[test]

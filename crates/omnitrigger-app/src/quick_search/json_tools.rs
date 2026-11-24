@@ -179,6 +179,8 @@ enum JsonCsvOperation {
     RowsWithHeaders,
     Paths,
     Leaves,
+    Keys,
+    Values,
 }
 
 impl JsonCsvOperation {
@@ -188,6 +190,8 @@ impl JsonCsvOperation {
             "行数组转csv" | "rows-to-csv" => Some(Self::RowsWithHeaders),
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
+            "找键csv" | "find-key-csv" => Some(Self::Keys),
+            "找值csv" | "find-value-csv" => Some(Self::Values),
             _ => None,
         }
     }
@@ -197,7 +201,7 @@ impl JsonCsvOperation {
             Self::Convert => source
                 .strip_prefix('[')
                 .is_some_and(|rows| rows.trim_start().starts_with('{')),
-            Self::RowsWithHeaders | Self::Paths | Self::Leaves => true,
+            Self::RowsWithHeaders | Self::Paths | Self::Leaves | Self::Keys | Self::Values => true,
         }
     }
 
@@ -206,7 +210,11 @@ impl JsonCsvOperation {
             Self::Convert => json_to_csv(source),
             Self::RowsWithHeaders => json_array_rows_with_headers(source),
             Self::Paths => json_paths_to_csv(source),
-            Self::Leaves => write_json_pointer_results(source, PointerResultMode::Csv),
+            Self::Leaves => {
+                write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
+            }
+            Self::Keys => find_json_keys(source, PointerOutput::Csv),
+            Self::Values => find_json_values(source, PointerOutput::Csv),
         }
     }
 }
@@ -274,14 +282,22 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
         "列指针" | "列路径" | "list-pointers" => {
-            return write_json_pointer_results(source, PointerResultMode::Leaves)
+            return write_json_pointer_results(
+                source,
+                PointerSelection::Leaves,
+                PointerOutput::Paths,
+            )
         }
-        "找键" | "find-key" => return find_json_key_paths(source),
-        "找值" | "find-value" => return find_json_value_paths(source),
+        "找键" | "find-key" => return find_json_keys(source, PointerOutput::Paths),
+        "找值" | "find-value" => return find_json_values(source, PointerOutput::Paths),
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
         "展平" | "flatten" => {
-            return write_json_pointer_results(source, PointerResultMode::Flattened)
+            return write_json_pointer_results(
+                source,
+                PointerSelection::Leaves,
+                PointerOutput::Flattened,
+            )
         }
         "改键" | "rename-key" => return rename_json_key(source),
         "改值" | "replace" => return write_json_value(source, false),
@@ -2117,37 +2133,43 @@ fn append_pointer_key(pointer: &mut String, key: &str) {
     }
 }
 
-fn find_json_key_paths(query: &str) -> Result<String, JsonError> {
+fn find_json_keys(query: &str, output: PointerOutput) -> Result<String, JsonError> {
     let (key, source) = json_value_and_source(query, JsonError::KeySearchArguments)?;
     let key =
         serde_json::from_str::<String>(key.get()).map_err(|_| JsonError::KeySearchArguments)?;
-    write_json_pointer_results(source, PointerResultMode::Key(&key))
+    write_json_pointer_results(source, PointerSelection::Key(&key), output)
 }
 
-fn find_json_value_paths(query: &str) -> Result<String, JsonError> {
+fn find_json_values(query: &str, output: PointerOutput) -> Result<String, JsonError> {
     let (value, source) = json_value_and_source(query, JsonError::ValueSearchArguments)?;
     let scalar = json_scalar(value)?.ok_or(JsonError::ValueSearchArguments)?;
-    write_json_pointer_results(source, PointerResultMode::Value(&scalar))
+    write_json_pointer_results(source, PointerSelection::Value(&scalar), output)
 }
 
 #[derive(Clone, Copy)]
-enum PointerResultMode<'a> {
+enum PointerSelection<'a> {
     Leaves,
-    Flattened,
-    Csv,
     Key(&'a str),
     Value(&'a JsonScalar),
 }
 
+#[derive(Clone, Copy)]
+enum PointerOutput {
+    Paths,
+    Flattened,
+    Csv,
+}
+
 fn write_json_pointer_results(
     source: &str,
-    mode: PointerResultMode<'_>,
+    selection: PointerSelection<'_>,
+    output: PointerOutput,
 ) -> Result<String, JsonError> {
-    let include_values = matches!(mode, PointerResultMode::Flattened);
-    let (opening, closing, size_error) = match mode {
-        PointerResultMode::Flattened => ("{", Some('}'), JsonError::FlattenedObjectTooLarge),
-        PointerResultMode::Csv => ("指针,类型,原值", None, JsonError::CsvOutputTooLarge),
-        _ => ("[", Some(']'), JsonError::PointerListTooLarge),
+    let include_values = matches!(output, PointerOutput::Flattened);
+    let (opening, closing, size_error) = match output {
+        PointerOutput::Flattened => ("{", Some('}'), JsonError::FlattenedObjectTooLarge),
+        PointerOutput::Csv => ("指针,类型,原值", None, JsonError::CsvOutputTooLarge),
+        PointerOutput::Paths => ("[", Some(']'), JsonError::PointerListTooLarge),
     };
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let mut pending = vec![(root, None::<(usize, String)>, false)];
@@ -2169,22 +2191,20 @@ fn write_json_pointer_results(
                 .collect(),
             _ => Vec::new(),
         };
-        let emit = match mode {
-            PointerResultMode::Leaves | PointerResultMode::Flattened | PointerResultMode::Csv => {
-                children.is_empty()
-            }
-            PointerResultMode::Key(_) => matches_key,
-            PointerResultMode::Value(expected) => json_scalar(value)?.as_ref() == Some(expected),
+        let emit = match selection {
+            PointerSelection::Leaves => children.is_empty(),
+            PointerSelection::Key(_) => matches_key,
+            PointerSelection::Value(expected) => json_scalar(value)?.as_ref() == Some(expected),
         };
         for (key, child) in children.into_iter().rev() {
             let matches_key = kind == b'{'
-                && matches!(mode, PointerResultMode::Key(expected) if expected == key.as_str());
+                && matches!(selection, PointerSelection::Key(expected) if expected == key.as_str());
             pending.push((child, Some((path.len(), key)), matches_key));
         }
         if !emit {
             continue;
         }
-        if matches!(mode, PointerResultMode::Csv) {
+        if matches!(output, PointerOutput::Csv) {
             if path.contains('\0') {
                 return Err(JsonError::CsvNullCharacter);
             }
@@ -2878,7 +2898,9 @@ mod tests {
     #[test]
     fn enumerates_resolvable_leaf_pointers_in_document_order() {
         let source = r#"{"商品":[{"a/b":9007199254740993},{"~":null},[]],"":"", "a\nb":{}}"#;
-        let listed = write_json_pointer_results(source, PointerResultMode::Leaves).unwrap();
+        let listed =
+            write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Paths)
+                .unwrap();
         assert_eq!(
             listed,
             r#"["/商品/0/a~1b","/商品/1/~0","/商品/2","/","/a\nb"]"#
@@ -2896,16 +2918,21 @@ mod tests {
         }
         for source in ["[]", "{}", "23", "null"] {
             assert_eq!(
-                write_json_pointer_results(source, PointerResultMode::Leaves).as_deref(),
+                write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Paths)
+                    .as_deref(),
                 Ok(r#"[""]"#)
             );
         }
         assert_eq!(
-            write_json_pointer_results(r#"{"a":{"x":1,"\u0078":2}}"#, PointerResultMode::Leaves),
+            write_json_pointer_results(
+                r#"{"a":{"x":1,"\u0078":2}}"#,
+                PointerSelection::Leaves,
+                PointerOutput::Paths
+            ),
             Err(JsonError::DuplicateKey)
         );
         assert_eq!(
-            write_json_pointer_results("[1,]", PointerResultMode::Leaves),
+            write_json_pointer_results("[1,]", PointerSelection::Leaves, PointerOutput::Paths),
             Err(JsonError::Invalid)
         );
     }
@@ -3529,20 +3556,21 @@ mod tests {
         let depth = 256;
         let nested = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
         assert_eq!(
-            write_json_pointer_results(&nested, PointerResultMode::Leaves).unwrap(),
+            write_json_pointer_results(&nested, PointerSelection::Leaves, PointerOutput::Paths)
+                .unwrap(),
             format!(r#"["{}"]"#, "/0".repeat(depth))
         );
         let wide = format!(r#"{{"{}":[{}0]}}"#, "x".repeat(1500), "0,".repeat(849));
         assert_eq!(
-            write_json_pointer_results(&wide, PointerResultMode::Leaves),
+            write_json_pointer_results(&wide, PointerSelection::Leaves, PointerOutput::Paths),
             Err(JsonError::PointerListTooLarge)
         );
         assert_eq!(
-            write_json_pointer_results(&wide, PointerResultMode::Flattened),
+            write_json_pointer_results(&wide, PointerSelection::Leaves, PointerOutput::Flattened),
             Err(JsonError::FlattenedObjectTooLarge)
         );
         assert_eq!(
-            write_json_pointer_results(&wide, PointerResultMode::Csv),
+            write_json_pointer_results(&wide, PointerSelection::Leaves, PointerOutput::Csv),
             Err(JsonError::CsvOutputTooLarge)
         );
     }

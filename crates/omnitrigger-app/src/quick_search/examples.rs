@@ -3981,6 +3981,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在表格中查看精确匹配的 JSON 数值",
+        query: r#"JSON: 找值CSV 1.5 {"金额":[1.50,"1.5",1.5e0]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在表格中查看匹配键名的路径和原值",
+        query: r#"JSON: 找键CSV "金额" {"金额":1.50,"订单":[{"金额":2}]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位 JSON 中同一对象内重复的键",
         query: r#"JSON: 重复键 {"订单":[{"价格":1,"价格":2},{"价格":3}]}"#,
     },
