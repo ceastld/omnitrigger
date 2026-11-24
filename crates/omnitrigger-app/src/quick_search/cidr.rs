@@ -32,6 +32,9 @@ pub(super) enum CidrError {
     AddressOutsideNetwork,
     NetworkOffsetArguments,
     NetworkOffsetOutsideRange,
+    SubnetPositionArguments,
+    SubnetOrdinal,
+    SubnetOutsideParent,
 }
 
 impl CidrError {
@@ -61,6 +64,11 @@ impl CidrError {
                 "用逗号分隔网段与有符号整数偏移，例如 192.0.2.137/26,-2"
             }
             Self::NetworkOffsetOutsideRange => "偏移后的网段超出该 IP 版本的地址范围",
+            Self::SubnetPositionArguments => {
+                "用逗号分隔父网段与子网，例如 192.0.2.0/24,/26,2 或 192.0.2.0/24,192.0.2.64/26"
+            }
+            Self::SubnetOrdinal => "子网序号从 1 开始，并须在划分后的子网数之内",
+            Self::SubnetOutsideParent => "子网须完全位于父网段内",
         }
     }
 }
@@ -284,6 +292,8 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
             "取地址" | "nth-address" => return network_address_position(range, true),
             "地址序号" | "address-position" => return network_address_position(range, false),
             "偏移" | "offset" => return offset_network(range),
+            "取子网" | "nth-subnet" => return nth_subnet(range),
+            "子网序号" | "subnet-position" => return subnet_position(range),
             "交集" | "intersect" => {
                 return compare_network_sets(range, NetworkSetOperation::Intersect)
             }
@@ -361,8 +371,7 @@ fn split_subnets(input: &str) -> Result<String, CidrError> {
         .ok_or(CidrError::Incomplete)?;
     let (address, prefix) = parse_network(network)?;
     let width = address_width(address);
-    let target = target.trim();
-    let child = prefix_length(target.strip_prefix('/').unwrap_or(target), width)?;
+    let child = child_prefix_length(target, width)?;
     let extra = child.checked_sub(prefix).ok_or(CidrError::ChildPrefix)?;
     let count = 1u32
         .checked_shl(extra)
@@ -376,6 +385,57 @@ fn split_subnets(input: &str) -> Result<String, CidrError> {
         subnets.push(format!("{}/{child}", as_address(first + offset, width)));
     }
     Ok(subnets.join("\n"))
+}
+
+fn child_prefix_length(target: &str, width: u32) -> Result<u32, CidrError> {
+    let target = target.trim();
+    prefix_length(target.strip_prefix('/').unwrap_or(target), width)
+}
+
+fn nth_subnet(input: &str) -> Result<String, CidrError> {
+    let invalid = CidrError::SubnetPositionArguments;
+    let (parent, arguments) = input.split_once(',').ok_or(invalid)?;
+    let (prefix, ordinal) = arguments.split_once(',').ok_or(invalid)?;
+    let (parent, parent_prefix) = parse_network(parent)?;
+    let width = address_width(parent);
+    let prefix = child_prefix_length(prefix, width)?;
+    let extra = prefix
+        .checked_sub(parent_prefix)
+        .ok_or(CidrError::ChildPrefix)?;
+    let ordinal = parse_one_based_offset(ordinal.trim(), CidrError::SubnetOrdinal)?;
+    if ordinal > host_mask(extra) {
+        return Err(CidrError::SubnetOrdinal);
+    }
+    let first = bits(parent) & !host_mask(width - parent_prefix);
+    // IPv6 /0 划分为 /0 时只有原网段，序号对应的偏移为零。
+    let offset = ordinal.checked_shl(width - prefix).unwrap_or(0);
+    Ok(format!("{}/{prefix}", as_address(first | offset, width)))
+}
+
+fn subnet_position(input: &str) -> Result<String, CidrError> {
+    let (parent, child) = input
+        .split_once(',')
+        .ok_or(CidrError::SubnetPositionArguments)?;
+    let (parent, parent_prefix) = parse_network(parent)?;
+    let (child, child_prefix) = parse_network(child)?;
+    let width = address_width(parent);
+    if address_width(child) != width {
+        return Err(CidrError::DifferentFamilies);
+    }
+    if child_prefix < parent_prefix {
+        return Err(CidrError::ChildPrefix);
+    }
+    let parent_mask = !host_mask(width - parent_prefix);
+    let first = bits(parent) & parent_mask;
+    let child_host_bits = width - child_prefix;
+    let child_start = bits(child) & !host_mask(child_host_bits);
+    if child_start & parent_mask != first {
+        return Err(CidrError::SubnetOutsideParent);
+    }
+    let offset = (child_start - first)
+        .checked_shr(child_host_bits)
+        .unwrap_or(0);
+    Ok((BigUint::from(offset) + 1u8).to_string())
 }
 
 fn exclude_network(input: &str) -> Result<String, CidrError> {
@@ -570,17 +630,7 @@ fn network_address_position(input: &str, find_address: bool) -> Result<String, C
     let first = bits(address) & !mask;
     let value = value.trim();
     if find_address {
-        let digits = value.trim_start_matches('0');
-        if digits.is_empty()
-            || digits.len() > 39
-            || !digits.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err(CidrError::AddressOrdinal);
-        }
-        let ordinal = digits
-            .parse::<BigUint>()
-            .map_err(|_| CidrError::AddressOrdinal)?;
-        let offset = u128::try_from(ordinal - 1u8).map_err(|_| CidrError::AddressOrdinal)?;
+        let offset = parse_one_based_offset(value, CidrError::AddressOrdinal)?;
         if offset > mask {
             return Err(CidrError::AddressOrdinal);
         }
@@ -594,6 +644,15 @@ fn network_address_position(input: &str, find_address: bool) -> Result<String, C
         return Err(CidrError::AddressOutsideNetwork);
     }
     Ok((BigUint::from(bits(member) - first) + 1u8).to_string())
+}
+
+fn parse_one_based_offset(value: &str, invalid: CidrError) -> Result<u128, CidrError> {
+    let digits = value.trim_start_matches('0');
+    if digits.is_empty() || digits.len() > 39 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid);
+    }
+    let ordinal = digits.parse::<BigUint>().map_err(|_| invalid)?;
+    u128::try_from(ordinal - 1u8).map_err(|_| invalid)
 }
 
 fn offset_network(input: &str) -> Result<String, CidrError> {
@@ -759,6 +818,49 @@ mod tests {
                 Err(CidrError::NetworkOffsetArguments),
                 "{query}"
             );
+        }
+    }
+
+    #[test]
+    fn gets_and_inverts_subnet_indexes_without_enumerating_the_partition() {
+        for (query, expected) in [
+            ("取子网 192.0.2.137/26,/28,3", "192.0.2.160/28"),
+            ("子网序号 192.0.2.137/26,192.0.2.167/28", "3"),
+            (
+                "NTH-SUBNET 2001:db8::1/32,64,4294967296",
+                "2001:db8:ffff:ffff::/64",
+            ),
+            (
+                "SUBNET-POSITION 2001:db8::/32,2001:db8:ffff:ffff::/64",
+                "4294967296",
+            ),
+            (
+                "取子网 ::/0,/128,340282366920938463463374607431768211456",
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            ),
+            (
+                "子网序号 ::/0,ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+                "340282366920938463463374607431768211456",
+            ),
+            ("取子网 ::/0,/0,1", "::/0"),
+            ("子网序号 ::/0,2001:db8::/0", "1"),
+        ] {
+            assert_eq!(calculate_cidr(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("取子网 192.0.2.0/24,/26,5", CidrError::SubnetOrdinal),
+            ("取子网 192.0.2.0/24,/26,0", CidrError::SubnetOrdinal),
+            ("取子网 192.0.2.0/24,/20,1", CidrError::ChildPrefix),
+            (
+                "子网序号 192.0.2.0/24,192.0.3.0/26",
+                CidrError::SubnetOutsideParent,
+            ),
+            (
+                "子网序号 192.0.2.0/24,2001:db8::/64",
+                CidrError::DifferentFamilies,
+            ),
+        ] {
+            assert_eq!(calculate_cidr(query), Err(error), "{query}");
         }
     }
 

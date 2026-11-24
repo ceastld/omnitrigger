@@ -2515,6 +2515,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接取出父网段中的第几个子网",
+        query: "网段: 取子网 192.0.2.137/26,/28,3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看子网在同前缀划分中的序号",
+        query: "网段: 子网序号 192.0.2.137/26,192.0.2.167/28",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求覆盖地址区间的最小网段",
         query: "网段: 覆盖 192.0.2.1 至 192.0.2.6",
     },
@@ -6589,6 +6599,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "取地址",
                     "地址序号",
                     "偏移",
+                    "取子网",
+                    "子网序号",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
