@@ -245,6 +245,7 @@ pub(super) enum CsvError {
     CoordinateInterpolationRange,
     CoordinateResampleArguments,
     CoordinateExtremaPointCount,
+    CoordinateClipPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     CoordinateDifferenceArguments,
@@ -546,6 +547,7 @@ impl CsvError {
                 "填写两个坐标列和 2 至 64 个采样点，例如 [[\"时间\",\"高度\"],5]"
             }
             Self::CoordinateExtremaPointCount => "曲线极值需要 2 至 64 个完整样点",
+            Self::CoordinateClipPointCount => "曲线截取需要 2 至 64 个完整样点",
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
@@ -1159,6 +1161,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "分段直线" | "linear-segments" => return coordinate_linear_segments(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
+        "曲线截取" | "clip-curve" => {
+            let mut table = read_coordinate_interval(input, CsvError::CoordinateClipPointCount)?;
+            sort_distinct_coordinates(&mut table.samples)?;
+            return table.to_csv();
+        }
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
         "曲线差值" | "curve-difference" | "曲线对比图" | "curve-comparison-plot" => {
             let (curves, name) = read_coordinate_curve_comparison(input)?;
@@ -7843,6 +7850,26 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
             Err(CsvError::CoordinateDifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn keeps_original_knots_and_adds_only_exact_clipped_endpoints() {
+        let data = "x,y\n3,3\n1,2\n2,\n0,0";
+        assert_eq!(
+            transform_csv(&format!(
+                "曲线截取 [[\"x\",\"y\"],[\"1/2\",\"5/2\"]] {data}"
+            ))
+            .as_deref(),
+            Ok("x,y\r\n1/2,1\r\n1,2\r\n5/2,11/4")
+        );
+        assert_eq!(
+            transform_csv(&format!("clip-curve [[1,2],[1,3]] {data}")).as_deref(),
+            Ok("x,y\r\n1,2\r\n3,3")
+        );
+        assert_eq!(
+            transform_csv(&format!("曲线截取 [[1,2],[0,5]] {data}")),
+            Err(CsvError::TrapezoidIntervalRange)
         );
     }
 
