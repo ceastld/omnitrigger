@@ -372,6 +372,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             return poisson_probability(values, DiscreteEvent::AtLeast)
         }
         "泊松摘要" | "poisson-summary" => return poisson_summary(values),
+        "泊松概率表" | "poisson-table" => return poisson_probability_csv(values),
         "超几何概率" | "hypergeometric" => {
             return hypergeometric_probability(values, DiscreteEvent::Exactly)
         }
@@ -936,6 +937,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
                 | "weighted-quantiles-csv"
                 | "二项概率表"
                 | "binomial-table"
+                | "泊松概率表"
+                | "poisson-table"
                 | "超几何概率表"
                 | "hypergeometric-table"
                 | "累计分布"
@@ -1905,7 +1908,7 @@ fn poisson_summary(input: &str) -> Result<String, StatisticsError> {
     summarize_probability_distribution(rate.clone(), rate)
 }
 
-fn poisson_probability(input: &str, event: DiscreteEvent) -> Result<String, StatisticsError> {
+fn poisson_arguments(input: &str) -> Result<(u32, BigRational), StatisticsError> {
     let invalid = StatisticsError::PoissonArguments;
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(count), Some(rate), None) = (terms.next(), terms.next(), terms.next()) else {
@@ -1916,7 +1919,11 @@ fn poisson_probability(input: &str, event: DiscreteEvent) -> Result<String, Stat
         .ok()
         .filter(|&count| count <= MAX_POISSON_COUNT)
         .ok_or(invalid)?;
-    let rate = poisson_rate(rate)?;
+    Ok((count, poisson_rate(rate)?))
+}
+
+fn poisson_probability(input: &str, event: DiscreteEvent) -> Result<String, StatisticsError> {
+    let (count, rate) = poisson_arguments(input)?;
     let cumulative = !matches!(event, DiscreteEvent::Exactly);
     let complement = matches!(event, DiscreteEvent::AtLeast);
     let last = if complement {
@@ -1938,25 +1945,61 @@ fn poisson_probability(input: &str, event: DiscreteEvent) -> Result<String, Stat
         }
     }
     let coefficient = if cumulative { sum } else { term };
+    Ok(format_poisson_probability(&rate, &coefficient, complement))
+}
+
+fn format_poisson_probability(
+    rate: &BigRational,
+    coefficient: &BigRational,
+    complement: bool,
+) -> String {
+    if coefficient.numer().sign() == Sign::NoSign {
+        return if complement { "1" } else { "0" }.to_owned();
+    }
     if rate.numer().sign() == Sign::NoSign {
-        return Ok(if complement {
-            one - coefficient
+        return if complement {
+            (BigRational::from_integer(1.into()) - coefficient).to_string()
         } else {
-            coefficient
-        }
-        .to_string());
+            coefficient.to_string()
+        };
     }
     let exponential = format!("e^(-{rate})");
-    let probability = if coefficient == one {
+    let probability = if coefficient.numer() == coefficient.denom() {
         exponential
     } else {
         format!("{coefficient} * {exponential}")
     };
-    Ok(if complement {
+    if complement {
         format!("1 - {probability}")
     } else {
         probability
-    })
+    }
+}
+
+fn poisson_probability_csv(input: &str) -> Result<String, StatisticsError> {
+    let (last, rate) = poisson_arguments(input)?;
+    let mut mass = BigRational::from_integer(1.into());
+    let mut cumulative = BigRational::default();
+    let mut csv = String::from("事件次数,恰好概率,至多概率,至少概率");
+    for count in 0..=last {
+        let at_least = format_poisson_probability(&rate, &cumulative, true);
+        cumulative = bounded(cumulative + &mass)?;
+        let columns = [
+            count.to_string(),
+            format_poisson_probability(&rate, &mass, false),
+            format_poisson_probability(&rate, &cumulative, false),
+            at_least,
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            columns.iter().map(String::as_str),
+            StatisticsError::ProbabilityTableTooLarge,
+        )?;
+        if count < last {
+            mass = bounded(mass * &rate / BigInt::from(count + 1))?;
+        }
+    }
+    Ok(csv)
 }
 
 fn hypergeometric_probability(
@@ -2549,6 +2592,34 @@ mod tests {
         ] {
             assert_eq!(calculate_statistics(input), Err(error), "{input}");
         }
+    }
+
+    #[test]
+    fn lists_poisson_mass_and_inclusive_tails_through_the_requested_count() {
+        let query = "泊松概率表 2,2";
+        let expected = concat!(
+            "事件次数,恰好概率,至多概率,至少概率\r\n",
+            "0,e^(-2),e^(-2),1\r\n",
+            "1,2 * e^(-2),3 * e^(-2),1 - e^(-2)\r\n",
+            "2,2 * e^(-2),5 * e^(-2),1 - 3 * e^(-2)",
+        );
+        assert_eq!(calculate_statistics(query).as_deref(), Ok(expected));
+        assert_eq!(
+            statistics_csv_report(query).unwrap().as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            calculate_statistics("POISSON-TABLE 1,0").as_deref(),
+            Ok("事件次数,恰好概率,至多概率,至少概率\r\n0,1,1,1\r\n1,0,1,0"),
+        );
+        assert_eq!(
+            calculate_statistics("泊松概率表 0,1/2").as_deref(),
+            Ok("事件次数,恰好概率,至多概率,至少概率\r\n0,e^(-1/2),e^(-1/2),1"),
+        );
+        assert_eq!(
+            calculate_statistics("泊松概率表 129,2"),
+            Err(StatisticsError::PoissonArguments),
+        );
     }
 
     #[test]
