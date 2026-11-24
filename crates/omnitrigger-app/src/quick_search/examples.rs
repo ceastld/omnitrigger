@@ -2425,6 +2425,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查询地址归属并显示匹配网段的名称",
+        query: r#"网段: 归属CSV [["192.0.2.0/24","办公"],["192.0.2.128/25","实验室, Ａ"]] 192.0.2.190,192.0.2.1,192.0.3.1"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求覆盖地址区间的最小网段",
         query: "网段: 覆盖 192.0.2.1 至 192.0.2.6",
     },

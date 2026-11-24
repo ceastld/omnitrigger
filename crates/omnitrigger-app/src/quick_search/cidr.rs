@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -23,6 +23,7 @@ pub(super) enum CidrError {
     OutsideNetwork,
     TooManySubnets,
     LookupArguments,
+    ConflictingNetworkNames,
     ReportTooLarge,
     NetworkSetArguments,
     NetworkSetTooLarge,
@@ -40,8 +41,9 @@ impl CidrError {
             Self::OutsideNetwork => "要排除的网段须完全位于原网段内",
             Self::TooManySubnets => "每次最多列出 128 个子网，请减小前缀差",
             Self::LookupArguments => {
-                "用 JSON 数组填写候选网段，再用逗号、空格或换行分隔要查找的 IP 地址"
+                "用 JSON 数组填写候选网段或 [网段,名称]，再列出要查找的 IP 地址"
             }
+            Self::ConflictingNetworkNames => "同一网段填了不同名称，请核对候选网段",
             Self::ReportTooLarge => "网段归属表超过 CSV 输出上限",
             Self::NetworkSetArguments => {
                 "填写两组网段，例如 [[\"192.0.2.0/24\"],[\"192.0.2.128/25\"]]"
@@ -106,50 +108,90 @@ fn host_mask(host_bits: u32) -> u128 {
 pub(super) fn cidr_csv_report(query: &str) -> Option<Result<String, CidrError>> {
     let (operation, data) = query.split_once(char::is_whitespace)?;
     match operation.to_ascii_lowercase().as_str() {
-        "归属csv" | "longest-prefix-csv" => Some(longest_prefix_report(&normalize(data))),
+        "归属csv" | "longest-prefix-csv" => Some(longest_prefix_report(data)),
         _ => None,
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum LookupNetworks {
+    Unnamed(Vec<String>),
+    Named(Vec<[String; 2]>),
+}
+
 fn longest_prefix_report(input: &str) -> Result<String, CidrError> {
-    let (networks, addresses) =
-        json_argument_and_tail::<Vec<String>>(input).ok_or(CidrError::LookupArguments)?;
-    if networks.is_empty() {
-        return Err(CidrError::LookupArguments);
-    }
-    let mut candidates = HashSet::new();
-    for network in networks {
-        let (address, prefix) = parse_network(&network)?;
+    let normalized;
+    let (networks, addresses) = match json_argument_and_tail::<LookupNetworks>(input) {
+        Some(arguments) => arguments,
+        None => {
+            // 兼容只含网段的旧写法，同时保留新写法中的原始名称。
+            normalized = normalize(input);
+            let (networks, addresses) = json_argument_and_tail::<Vec<String>>(&normalized)
+                .ok_or(CidrError::LookupArguments)?;
+            (LookupNetworks::Unnamed(networks), addresses)
+        }
+    };
+    let mut candidates = HashMap::<_, &str>::new();
+    let prefix_key = |network: &str| -> Result<_, CidrError> {
+        let (address, prefix) = parse_network(&normalize(network))?;
         let width = address_width(address);
         let first = bits(address) & !host_mask(width - prefix);
-        candidates.insert((width, prefix, first));
+        Ok((width, prefix, first))
+    };
+    let with_names = match &networks {
+        LookupNetworks::Unnamed(networks) => {
+            for network in networks {
+                candidates.insert(prefix_key(network)?, "");
+            }
+            false
+        }
+        LookupNetworks::Named(networks) => {
+            for [network, name] in networks {
+                if candidates
+                    .insert(prefix_key(network)?, name.as_str())
+                    .is_some_and(|previous| previous != name.as_str())
+                {
+                    return Err(CidrError::ConflictingNetworkNames);
+                }
+            }
+            true
+        }
+    };
+    if candidates.is_empty() {
+        return Err(CidrError::LookupArguments);
     }
-    const HEADERS: &str = "地址,匹配网段";
-    let mut output = String::from(HEADERS);
-    for address in addresses
+    let (headings, columns) = if with_names {
+        ("地址,匹配网段,名称", 3)
+    } else {
+        ("地址,匹配网段", 2)
+    };
+    let mut output = String::from(headings);
+    for address in normalize(addresses)
         .split(|character: char| character == ',' || character.is_whitespace())
         .filter(|address| !address.is_empty())
     {
         let address = address.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
         let width = address_width(address);
         let address_bits = bits(address);
-        let network = (0..=width)
+        let (network, name) = (0..=width)
             .rev()
             .find_map(|prefix| {
                 let first = address_bits & !host_mask(width - prefix);
                 candidates
-                    .contains(&(width, prefix, first))
-                    .then(|| format!("{}/{prefix}", as_address(first, width)))
+                    .get(&(width, prefix, first))
+                    .map(|&name| (format!("{}/{prefix}", as_address(first, width)), name))
             })
             .unwrap_or_default();
         let address = address.to_string();
+        let fields = [address.as_str(), network.as_str(), name];
         append_bounded_csv_row(
             &mut output,
-            [address.as_str(), network.as_str()].into_iter(),
+            fields[..columns].iter().copied(),
             CidrError::ReportTooLarge,
         )?;
     }
-    if output.len() == HEADERS.len() {
+    if output.len() == headings.len() {
         return Err(CidrError::LookupArguments);
     }
     Ok(output)
@@ -478,6 +520,23 @@ fn append_network_range(networks: &mut Vec<String>, width: u32, mut cursor: u128
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_longest_prefix_matches_preserving_original_name_content() {
+        let input = r#"归属CSV [["192.0.2.0/24","办公"],["192.0.2.150/25","实验室, Ａ"],["2001:db8::/32","IPv6"]] 192.0.2.190,192.0.2.1,192.0.3.1,2001:db8::7"#;
+        let expected = "地址,匹配网段,名称\r\n192.0.2.190,192.0.2.128/25,\"实验室, Ａ\"\r\n192.0.2.1,192.0.2.0/24,办公\r\n192.0.3.1,\"\",\"\"\r\n2001:db8::7,2001:db8::/32,IPv6";
+        assert_eq!(calculate_cidr(input).as_deref(), Ok(expected));
+        assert_eq!(
+            calculate_cidr(
+                r#"归属CSV [["192.0.2.0/24","办公"],["192.0.2.1/24","实验室"]] 192.0.2.1"#
+            ),
+            Err(CidrError::ConflictingNetworkNames)
+        );
+        assert_eq!(
+            calculate_cidr("归属CSV ［＂１９２.０.２.０/24＂］ １９２.０.２.１").as_deref(),
+            Ok("地址,匹配网段\r\n192.0.2.1,192.0.2.0/24")
+        );
+    }
 
     #[test]
     fn collapses_overlapping_and_adjacent_networks_without_covering_gaps() {
