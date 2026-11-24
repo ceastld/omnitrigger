@@ -14,7 +14,14 @@ pub(super) fn batch_arguments<'a>(query: &'a str, name: &str, alias: &str) -> Op
     (operation == name || operation.eq_ignore_ascii_case(alias)).then_some(arguments)
 }
 
-pub(super) fn map_tool_batch(query: &str) -> Option<Result<String, BatchError<&'static str>>> {
+pub(super) enum BatchToolOutput {
+    Lines(String),
+    Csv(String),
+}
+
+pub(super) fn map_tool_batch(
+    query: &str,
+) -> Option<Result<BatchToolOutput, BatchError<&'static str>>> {
     let (operation, input) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
     let operation = operation.to_ascii_lowercase();
     let csv_operation = operation
@@ -29,9 +36,9 @@ pub(super) fn map_tool_batch(query: &str) -> Option<Result<String, BatchError<&'
             _ => return None,
         };
     Some(if csv_operation.is_some() {
-        map_batch_csv(input, "输入", convert)
+        map_batch_csv(input, "输入", convert).map(BatchToolOutput::Csv)
     } else {
-        map_batch_lines(input, convert)
+        map_batch_lines(input, convert).map(BatchToolOutput::Lines)
     })
 }
 

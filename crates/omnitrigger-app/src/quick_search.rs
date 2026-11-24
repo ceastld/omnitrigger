@@ -84,7 +84,9 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex, RecentApplications};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
-use batch::{batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError};
+use batch::{
+    batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError, BatchToolOutput,
+};
 use calculator::{calculate, calculate_with_answer, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, parse_complete_date, DateError};
 use cidr::{calculate_cidr, CidrError};
@@ -808,14 +810,14 @@ impl Results {
                         )
                     } else if let Some(arguments) = batch_arguments(term, "分数对照", "exact-csv")
                     {
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "算式", |query| {
                                 calculate_fraction(query).map(|value| value.to_string())
                             })
                             .map_err(ValueError::BatchFraction),
                         )
                     } else if let Some(arguments) = batch_arguments(term, "对照", "csv") {
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "算式", calculate)
                                 .map_err(ValueError::BatchCalculation),
                         )
@@ -828,13 +830,13 @@ impl Results {
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::BatchConversion => {
                     if let Some(arguments) = batch_arguments(term, "对照", "csv") {
-                        Self::text_value(
+                        Self::table_value(
                             convert_batch_csv(arguments).map_err(ValueError::BatchConversion),
                         )
                     } else if let Some(arguments) =
                         batch_arguments(term, "时长对照", "duration-csv")
                     {
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "输入", convert_duration)
                                 .map_err(ValueError::BatchDuration),
                         )
@@ -847,7 +849,7 @@ impl Results {
                         batch_arguments(term, "时间戳对照", "timestamp-csv")
                     {
                         let now = chrono::Utc::now();
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "输入", |line| convert_timestamp(line, now))
                                 .map_err(ValueError::BatchTimestamp),
                         )
@@ -860,7 +862,7 @@ impl Results {
                         )
                     } else if let Some(arguments) = batch_arguments(term, "路径对照", "path-csv")
                     {
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "输入", path_component)
                                 .map_err(ValueError::BatchPath),
                         )
@@ -871,7 +873,7 @@ impl Results {
                         )
                     } else if let Some(arguments) = batch_arguments(term, "网址对照", "url-csv")
                     {
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "输入", convert_url_component)
                                 .map_err(ValueError::BatchUrl),
                         )
@@ -882,7 +884,7 @@ impl Results {
                         )
                     } else if let Some(arguments) = batch_arguments(term, "颜色对照", "color-csv")
                     {
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "输入", convert_color_to_hex)
                                 .map_err(ValueError::BatchColor),
                         )
@@ -894,7 +896,7 @@ impl Results {
                     } else if let Some(arguments) = batch_arguments(term, "日期对照", "date-csv")
                     {
                         let today = chrono::Local::now().date_naive();
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "输入", |line| calculate_date(line, today))
                                 .map_err(ValueError::BatchDate),
                         )
@@ -906,12 +908,16 @@ impl Results {
                         )
                     } else if let Some(arguments) = batch_arguments(term, "进制对照", "radix-csv")
                     {
-                        Self::text_value(
+                        Self::table_value(
                             map_batch_csv(arguments, "输入", convert_arbitrary_radix)
                                 .map_err(ValueError::BatchRadix),
                         )
                     } else if let Some(result) = map_tool_batch(term) {
-                        Self::text_value(result.map_err(ValueError::BatchTool))
+                        match result {
+                            Ok(BatchToolOutput::Lines(text)) => Self::text_value(Ok(text)),
+                            Ok(BatchToolOutput::Csv(text)) => Self::table_value(Ok(text)),
+                            Err(error) => Self::Value(Err(ValueError::BatchTool(error))),
+                        }
                     } else {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
                     }
@@ -1338,6 +1344,16 @@ impl Results {
         Self::Value(result.map(|(text, plot)| ResultValue {
             text,
             kind: ValueKind::Scatter(plot),
+        }))
+    }
+
+    fn table_value(result: Result<String, ValueError>) -> Self {
+        Self::Value(result.and_then(|text| {
+            let table = csv_tools::parse_table_preview(&text).map_err(ValueError::Csv)?;
+            Ok(ResultValue {
+                text,
+                kind: ValueKind::Table(table),
+            })
         }))
     }
 
@@ -3947,6 +3963,42 @@ mod tests {
                 line: 2,
                 cause: FractionError::ZeroDenominator,
             })))
+        ));
+    }
+
+    #[test]
+    fn batch_comparisons_keep_verbatim_csv_and_preview_it_in_columns() {
+        for (query, expected) in [
+            (
+                "批量计算: 对照 avg(1,3)\n2**10",
+                "算式,结果\r\n\"avg(1,3)\",2\r\n2**10,1024",
+            ),
+            (
+                "批量换算: 进制对照 字节序 16 @ 258",
+                "输入,结果\r\n字节序 16 @ 258,\"大端 01 02\n小端 02 01\"",
+            ),
+            (
+                "批量换算: 节拍对照 时长 120 BPM @ 3/2",
+                "输入,结果\r\n时长 120 BPM @ 3/2,750 ms",
+            ),
+        ] {
+            let result = for_query(query, &[]);
+            assert!(
+                matches!(
+                    &result,
+                    Results::Value(Ok(value)) if matches!(&value.kind, ValueKind::Table(_))
+                ),
+                "{query}"
+            );
+            assert!(result.value_preview_expandable());
+            assert_eq!(result.refillable_text(), Some(expected), "{query}");
+        }
+        assert!(matches!(
+            for_query("批量换算: 节拍 时长 120 BPM @ 3/2", &[]),
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Text,
+                ..
+            }))
         ));
     }
 
