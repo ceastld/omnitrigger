@@ -323,7 +323,7 @@ impl CsvError {
             Self::JoinColumns => "两侧连接列须具有相同列数，每一侧至少一列，列不可重复",
             Self::JoinTooLarge => "表格合并结果超过 1 MiB，请缩小表格范围",
             Self::ColumnComparisonArguments => {
-                "填写键列和对比列，例如 [[\"编号\"],\"金额\"]，再输入包含原表和新表的 JSON 字符串数组"
+                "填写键列与一个或多个对比列，例如 [[\"编号\"],[\"状态\",\"金额\"]]，再填写原表和新表"
             }
             Self::DuplicateComparisonKey => "对比列需要每张表中的键组合各出现一次",
             Self::ColumnComparisonTooLarge => "表格对比结果超过 1 MiB，请缩小表格范围",
@@ -3039,37 +3039,50 @@ fn read_csv_pair(data: &str, invalid: CsvError) -> Result<[Vec<Vec<String>>; 2],
     ])
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ComparisonColumns {
+    One(ColumnReference),
+    Multiple(Vec<ColumnReference>),
+}
+
 fn compare_csv_column(input: &str, numeric: bool) -> Result<String, CsvError> {
-    let ((key_columns, column), data) = json_argument_and_data::<(
+    let ((key_columns, selection), data) = json_argument_and_data::<(
         Vec<ColumnReference>,
-        ColumnReference,
+        ComparisonColumns,
     )>(input, CsvError::ColumnComparisonArguments)?;
-    if key_columns.is_empty() {
+    let (columns, label_columns) = match selection {
+        ComparisonColumns::One(column) => (vec![column], false),
+        ComparisonColumns::Multiple(columns) => (columns, true),
+    };
+    if key_columns.is_empty() || columns.is_empty() {
         return Err(CsvError::ColumnComparisonArguments);
     }
     let [old, new] = read_csv_pair(data, CsvError::ColumnComparisonArguments)?;
     let (old_header, old_rows) = old.split_first().ok_or(CsvError::MissingInput)?;
     let (new_header, new_rows) = new.split_first().ok_or(CsvError::MissingInput)?;
-    let old_keys = resolve_distinct_columns(
-        old_header,
-        &key_columns,
-        CsvError::ColumnComparisonArguments,
-    )?;
-    let new_keys = resolve_distinct_columns(
-        new_header,
-        &key_columns,
-        CsvError::ColumnComparisonArguments,
-    )?;
-    let old_column = column.resolve(old_header)?;
-    let new_column = column.resolve(new_header)?;
-    validate_column_width(&[old_column], old_header.len())?;
-    validate_column_width(&[new_column], new_header.len())?;
+    let resolve = |header: &[String], columns: &[ColumnReference]| {
+        resolve_distinct_columns(header, columns, CsvError::ColumnComparisonArguments)
+    };
+    let old_keys = resolve(old_header, &key_columns)?;
+    let new_keys = resolve(new_header, &key_columns)?;
+    let old_columns = resolve(old_header, &columns)?;
+    let new_columns = resolve(new_header, &columns)?;
+    let column_labels: Vec<_> = old_columns
+        .iter()
+        .map(|&index| label_columns.then_some(old_header[index].as_str()))
+        .collect();
     let mut new_values = HashMap::new();
     for row in new_rows {
         let key = column_key(row, &new_keys);
-        let value = row[new_column].as_str();
-        let comparable = comparable_column_value(value, numeric)?;
-        if new_values.insert(key, (value, comparable)).is_some() {
+        let values = new_columns
+            .iter()
+            .map(|&column| {
+                let value = row[column].as_str();
+                comparable_column_value(value, numeric).map(|normalized| (value, normalized))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if new_values.insert(key, values).is_some() {
             return Err(CsvError::DuplicateComparisonKey);
         }
     }
@@ -3077,14 +3090,14 @@ fn compare_csv_column(input: &str, numeric: bool) -> Result<String, CsvError> {
     let key_labels: Vec<_> = (1..=key_columns.len())
         .map(|index| format!("键{index}"))
         .collect();
-    let too_large = CsvError::ColumnComparisonTooLarge;
     append_bounded_csv_row(
         &mut output,
         key_labels
             .iter()
             .map(String::as_str)
+            .chain(label_columns.then_some("列"))
             .chain(["变更", "原值", "新值"]),
-        too_large,
+        CsvError::ColumnComparisonTooLarge,
     )?;
     let mut old_seen = HashSet::new();
     for row in old_rows {
@@ -3092,30 +3105,45 @@ fn compare_csv_column(input: &str, numeric: bool) -> Result<String, CsvError> {
         if !old_seen.insert(key.clone()) {
             return Err(CsvError::DuplicateComparisonKey);
         }
-        let old_value = row[old_column].as_str();
-        let comparable = comparable_column_value(old_value, numeric)?;
-        let (change, new_value) = match new_values.remove(&key) {
-            Some((_, new_comparable)) if new_comparable == comparable => continue,
-            Some((new_value, _)) => ("修改", new_value),
-            None => ("删除", ""),
-        };
-        append_bounded_csv_row(
-            &mut output,
-            key.into_iter().chain([change, old_value, new_value]),
-            too_large,
-        )?;
-    }
-    for row in new_rows {
-        let key = column_key(row, &new_keys);
-        if let Some((new_value, _)) = new_values.remove(&key) {
-            append_bounded_csv_row(
+        let replacement = new_values.remove(&key);
+        for (position, (&column, &label)) in old_columns.iter().zip(&column_labels).enumerate() {
+            let old_value = row[column].as_str();
+            let comparable = comparable_column_value(old_value, numeric)?;
+            let (change, new_value) = match replacement.as_ref().map(|values| &values[position]) {
+                Some((_, new_comparable)) if *new_comparable == comparable => continue,
+                Some((new_value, _)) => ("修改", *new_value),
+                None => ("删除", ""),
+            };
+            write_column_comparison_change(
                 &mut output,
-                key.into_iter().chain(["新增", "", new_value]),
-                too_large,
+                &key,
+                label,
+                [change, old_value, new_value],
             )?;
         }
     }
+    for row in new_rows {
+        let key = column_key(row, &new_keys);
+        if let Some(values) = new_values.remove(&key) {
+            for ((value, _), &label) in values.into_iter().zip(&column_labels) {
+                write_column_comparison_change(&mut output, &key, label, ["新增", "", value])?;
+            }
+        }
+    }
     Ok(output)
+}
+
+fn write_column_comparison_change(
+    output: &mut String,
+    key: &[&str],
+    column: Option<&str>,
+    cells: [&str; 3],
+) -> Result<(), CsvError> {
+    append_bounded_csv_row(
+        output,
+        key.iter().copied().chain(column).chain(cells),
+        CsvError::ColumnComparisonTooLarge,
+    )
 }
 
 fn comparable_column_value(value: &str, numeric: bool) -> Result<Cow<'_, str>, CsvError> {
@@ -6961,6 +6989,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "keep-invalid-rows"
             | "规则统计"
             | "rule-summary"
+            | "对比列"
+            | "compare-column"
+            | "数值对比列"
+            | "compare-numeric-column"
     ) {
         return Some(transform_csv_operation(operation, data).and_then(|text| {
             let table = parse_table_preview(&text)?;
@@ -9763,6 +9795,31 @@ mod tests {
                 Err(CsvError::InvalidNumber)
             );
         }
+    }
+
+    #[test]
+    fn compares_multiple_columns_by_key_in_requested_order_and_preserves_report_text() {
+        let query = r#"对比列 [["编号"],["状态","金额"]] ["编号,状态,金额\n001,草稿,1.50\n002,完成,3","金额,编号,状态\n1.5,001,完成\n4,003,待办"]"#;
+        let expected = concat!(
+            "键1,列,变更,原值,新值\r\n",
+            "001,状态,修改,草稿,完成\r\n",
+            "001,金额,修改,1.50,1.5\r\n",
+            "002,状态,删除,完成,\"\"\r\n",
+            "002,金额,删除,3,\"\"\r\n",
+            "003,状态,新增,\"\",待办\r\n",
+            "003,金额,新增,\"\",4",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (preview, _) = csv_table_preview(query).unwrap().unwrap();
+        assert_eq!(preview, expected);
+        assert_eq!(
+            transform_csv(r#"数值对比列 [["编号"],["金额","数量"]] ["编号,金额,数量\n001,1.50,2\n002,0.50,1","数量,编号,金额\n3,001,3/2\n1,002,1/2"]"#).as_deref(),
+            Ok("键1,列,变更,原值,新值\r\n001,数量,修改,2,3"),
+        );
+        assert_eq!(
+            transform_csv(r#"对比列 [[1],["金额",2]] ["编号,金额","编号,金额"]"#),
+            Err(CsvError::ColumnComparisonArguments)
+        );
     }
 
     #[test]
