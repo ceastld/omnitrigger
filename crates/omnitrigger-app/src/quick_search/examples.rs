@@ -880,6 +880,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "表格查看不放回抽取的精确命中概率",
+        query: "统计: 超几何概率表 10,4,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算列联表的皮尔逊卡方和自由度",
         query: "统计: 独立性卡方 1,2; 3,4",
     },
@@ -6407,6 +6412,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "几何概率",
                     "几何累计",
                     "超几何概率",
+                    "超几何概率表",
                     "独立性卡方",
                     "期望频数",
                     "箱线摘要",
