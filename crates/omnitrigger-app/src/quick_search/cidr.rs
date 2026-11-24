@@ -44,7 +44,7 @@ impl CidrError {
                 "用 JSON 数组填写候选网段或 [网段,名称]，再列出要查找的 IP 地址"
             }
             Self::ConflictingNetworkNames => "同一网段填了不同名称，请核对候选网段",
-            Self::ReportTooLarge => "网段归属表超过 CSV 输出上限",
+            Self::ReportTooLarge => "网段表格超过 CSV 输出上限",
             Self::NetworkSetArguments => {
                 "填写两组网段，例如 [[\"192.0.2.0/24\"],[\"192.0.2.128/25\"]]"
             }
@@ -109,6 +109,7 @@ pub(super) fn cidr_csv_report(query: &str) -> Option<Result<String, CidrError>> 
     let (operation, data) = query.split_once(char::is_whitespace)?;
     match operation.to_ascii_lowercase().as_str() {
         "归属csv" | "longest-prefix-csv" => Some(longest_prefix_report(data)),
+        "清单csv" | "networks-csv" => Some(network_inventory(&normalize(data))),
         _ => None,
     }
 }
@@ -182,6 +183,44 @@ impl LongestPrefixLookup {
     }
 }
 
+fn network_inventory(input: &str) -> Result<String, CidrError> {
+    const HEADERS: &str = "网段,版本,起始地址,结束地址,地址数";
+    let mut output = String::from(HEADERS);
+    for network in network_tokens(input) {
+        let (address, prefix) = parse_network(network)?;
+        let width = address_width(address);
+        let host_bits = width - prefix;
+        let mask = host_mask(host_bits);
+        let first = as_address(bits(address) & !mask, width).to_string();
+        let last = as_address(bits(address) | mask, width).to_string();
+        let network = format!("{first}/{prefix}");
+        let version = if address.is_ipv4() { "IPv4" } else { "IPv6" };
+        let count = (BigUint::from(1u8) << host_bits).to_string();
+        append_bounded_csv_row(
+            &mut output,
+            [
+                network.as_str(),
+                version,
+                first.as_str(),
+                last.as_str(),
+                count.as_str(),
+            ]
+            .into_iter(),
+            CidrError::ReportTooLarge,
+        )?;
+    }
+    if output.len() == HEADERS.len() {
+        return Err(CidrError::Incomplete);
+    }
+    Ok(output)
+}
+
+fn network_tokens(input: &str) -> impl Iterator<Item = &str> {
+    input
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|value| !value.is_empty())
+}
+
 fn longest_prefix_report(input: &str) -> Result<String, CidrError> {
     let normalized;
     let (networks, addresses) = match json_argument_and_tail::<LookupNetworks>(input) {
@@ -201,10 +240,7 @@ fn longest_prefix_report(input: &str) -> Result<String, CidrError> {
         ("地址,匹配网段", 2)
     };
     let mut output = String::from(headings);
-    for address in normalize(addresses)
-        .split(|character: char| character == ',' || character.is_whitespace())
-        .filter(|address| !address.is_empty())
-    {
+    for address in network_tokens(&normalize(addresses)) {
         let address = address.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
         let (network, name) = lookup.find(address).unwrap_or_default();
         let address = address.to_string();
@@ -357,11 +393,7 @@ fn exclude_network(input: &str) -> Result<String, CidrError> {
 }
 
 fn collapse_networks(input: &str) -> Result<String, CidrError> {
-    let intervals = merge_network_intervals(
-        input
-            .split(|character: char| character == ',' || character.is_whitespace())
-            .filter(|network| !network.is_empty()),
-    )?;
+    let intervals = merge_network_intervals(network_tokens(input))?;
     if intervals.is_empty() {
         return Err(CidrError::Incomplete);
     }
@@ -544,6 +576,25 @@ fn append_network_range(networks: &mut Vec<String>, width: u32, mut cursor: u128
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_network_boundaries_and_exact_address_counts_in_input_order() {
+        let query = "清单CSV 192.0.2.190/25,2001:db8::/126\r\n192.0.2.1/255.255.255.0 ::/0";
+        let expected = concat!(
+            "网段,版本,起始地址,结束地址,地址数\r\n",
+            "192.0.2.128/25,IPv4,192.0.2.128,192.0.2.255,128\r\n",
+            "2001:db8::/126,IPv6,2001:db8::,2001:db8::3,4\r\n",
+            "192.0.2.0/24,IPv4,192.0.2.0,192.0.2.255,256\r\n",
+            "::/0,IPv6,::,ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff,340282366920938463463374607431768211456",
+        );
+        assert_eq!(calculate_cidr(query).as_deref(), Ok(expected));
+        assert_eq!(cidr_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(calculate_cidr("清单CSV ,"), Err(CidrError::Incomplete));
+        assert_eq!(
+            calculate_cidr("networks-csv 192.0.2.1/33"),
+            Err(CidrError::Prefix)
+        );
+    }
 
     #[test]
     fn labels_longest_prefix_matches_preserving_original_name_content() {

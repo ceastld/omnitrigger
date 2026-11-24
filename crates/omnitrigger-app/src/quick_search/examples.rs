@@ -2435,6 +2435,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看多个网段的起止地址与精确地址数",
+        query: "网段: 清单CSV 192.0.2.190/25,2001:db8::/126",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求覆盖地址区间的最小网段",
         query: "网段: 覆盖 192.0.2.1 至 192.0.2.6",
     },
@@ -6475,7 +6480,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Cidr
             if !term.is_empty()
-                && ["子网", "排除", "归属CSV", "合并", "交集", "差集"]
+                && ["子网", "排除", "归属CSV", "清单CSV", "合并", "交集", "差集"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Matrix
