@@ -768,9 +768,14 @@ fn daily_durations(input: &str, now: DateTime<Utc>) -> Result<String, TimestampE
 }
 
 pub(super) fn timestamp_clock_difference(start: &str, end: &str) -> Result<String, TimestampError> {
-    let start = unix_nanos(absolute_timestamp(start)?);
-    let end = unix_nanos(absolute_timestamp(end)?);
-    format_timestamp_delta(end - start, None)
+    format_absolute_elapsed(absolute_timestamp(start)?, absolute_timestamp(end)?)
+}
+
+pub(super) fn format_absolute_elapsed(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<String, TimestampError> {
+    format_timestamp_delta(unix_nanos(end) - unix_nanos(start), None)
 }
 
 pub(super) fn absolute_timestamp(source: &str) -> Result<DateTime<Utc>, TimestampError> {

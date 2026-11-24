@@ -70,7 +70,10 @@ use super::{
         newline_pattern, regex_group_index, replace_literal_matches, replace_regex_matches,
         GraphemeRange, TextError, TextLengthUnit, UnicodeForm, MAX_TEXT_COMPARISON_WORK,
     },
-    timestamp::{absolute_timestamp, timestamp_clock_difference, timestamp_zone_converter},
+    timestamp::{
+        absolute_timestamp, format_absolute_elapsed, timestamp_clock_difference,
+        timestamp_zone_converter,
+    },
     url_encoding::url_parameter_values,
     vector::squared_euclidean_distance,
 };
@@ -142,6 +145,7 @@ pub(super) enum CsvError {
     DateDifferenceColumnArguments,
     ClockDifferenceColumnArguments,
     TimestampDifferenceColumnArguments,
+    GroupTimestampDifferenceColumnArguments,
     TimestampZoneColumnArguments,
     DurationNumberColumnArguments,
     CidrColumnArguments,
@@ -381,6 +385,9 @@ impl CsvError {
             }
             Self::TimestampDifferenceColumnArguments => {
                 "填写新列名、开始时间戳列和结束时间戳列，例如 [\"时长\",\"开始\",\"结束\"]"
+            }
+            Self::GroupTimestampDifferenceColumnArguments => {
+                "填写新列名、时间戳列和分组列，例如 [\"间隔\",\"时刻\",[\"设备\"]]"
             }
             Self::TimestampZoneColumnArguments => {
                 "填写新列名、来源列和目标时区，例如 [\"标准时间\",\"时间\",\"UTC\"]"
@@ -1969,6 +1976,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 )?;
             input = data;
             Operation::TimestampDifferenceColumn(name, start, end)
+        }
+        "组内时间戳差列" | "group-timestamp-difference-column" => {
+            return append_group_timestamp_differences(input)
         }
         "时刻差列" | "clock-difference-column" => {
             let ((name, start, end), data) =
@@ -4562,6 +4572,38 @@ fn append_cidr_column(input: &str, use_name: bool) -> Result<String, CsvError> {
             .find(address)
             .map(|(prefix, name)| if use_name { name.to_owned() } else { prefix })
             .unwrap_or_default())
+    })
+}
+
+fn append_group_timestamp_differences(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::GroupTimestampDifferenceColumnArguments;
+    let ((name, source, groups), data) =
+        json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(input, invalid)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(invalid);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let mut last = HashMap::new();
+    let mut row_number = 0;
+    write_appended_column(header, records, &name, |row| {
+        row_number += 1;
+        let cell = row[source].trim();
+        if cell.is_empty() {
+            return Ok(String::new());
+        }
+        let at_row = |cause| CsvError::DataRowValue {
+            row: row_number,
+            cause,
+        };
+        let current = absolute_timestamp(cell).map_err(|error| at_row(error.message()))?;
+        let Some(previous) = last.insert(column_key(row, &groups), current) else {
+            return Ok(String::new());
+        };
+        format_absolute_elapsed(previous, current).map_err(|error| at_row(error.message()))
     })
 }
 
@@ -7217,6 +7259,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "group-duration-sum"
             | "时长数值列"
             | "duration-number-column"
+            | "组内时间戳差列"
+            | "group-timestamp-difference-column"
             | "网段归属列"
             | "cidr-column"
             | "网段名称列"
@@ -12556,6 +12600,33 @@ null"#
                 Err(CsvError::DataRowValue { row: 2, .. })
             ));
         }
+    }
+
+    #[test]
+    fn appends_signed_elapsed_times_since_each_groups_previous_valid_timestamp() {
+        let query = "组内时间戳差列 [\"间隔\",\"时刻\",[\"设备\"]] 设备,时刻\nA,2026-03-08T01:30:00-05:00\nB,2ns\nA,\nA,2026-03-08T03:30:00-04:00\nB,1ns";
+        let expected = concat!(
+            "设备,时刻,间隔\r\n",
+            "A,2026-03-08T01:30:00-05:00,\"\"\r\n",
+            "B,2ns,\"\"\r\n",
+            "A,\"\",\"\"\r\n",
+            "A,2026-03-08T03:30:00-04:00,01:00:00\r\n",
+            "B,1ns,-00:00:00.000000001",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(query).expect("时长列应可预览").unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv(
+                "GROUP-TIMESTAMP-DIFFERENCE-COLUMN [\"间隔\",2,[]] 设备,时刻\nA,1s\nB,1s\nC,4s"
+            )
+            .as_deref(),
+            Ok("设备,时刻,间隔\r\nA,1s,\"\"\r\nB,1s,00:00:00\r\nC,4s,00:00:03"),
+        );
+        assert!(matches!(
+            transform_csv("组内时间戳差列 [\"间隔\",2,[1]] 设备,时刻\nA,1s\nB,\nA,2026-11-01 01:30 America/New_York"),
+            Err(CsvError::DataRowValue { row: 3, .. }),
+        ));
     }
 
     #[test]
