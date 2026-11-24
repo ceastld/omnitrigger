@@ -239,6 +239,7 @@ pub(super) enum CsvError {
     CoordinateWindowPointCount,
     CoordinateInterpolationArguments,
     CoordinateInterpolationPointCount,
+    CoordinateSlopePointCount,
     CoordinateDuplicateX,
     CoordinateInterpolationRange,
     CoordinateResampleArguments,
@@ -536,6 +537,7 @@ impl CsvError {
                 "填写两个坐标列和 1 至 64 个数值横坐标，例如 [[\"时间\",\"高度\"],[\"1/2\",2]]"
             }
             Self::CoordinateInterpolationPointCount => "线性插值需要 2 至 64 行同时含 x 和 y 的数据",
+            Self::CoordinateSlopePointCount => "曲线斜率需要 2 至 64 个完整样点",
             Self::CoordinateDuplicateX => "完整样点的横坐标须互不相同",
             Self::CoordinateInterpolationRange => "查询横坐标须在完整样点的范围内",
             Self::CoordinateResampleArguments => {
@@ -1151,6 +1153,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return append_coordinate_window_measure(input, CoordinateWindowMeasure::Integral)
         }
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
+        "曲线斜率" | "curve-slopes" => return coordinate_slopes(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
@@ -5478,25 +5481,29 @@ fn read_coordinate_table(
     Ok(CsvCoordinates { headers, samples })
 }
 
-fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
+fn read_coordinate_queries(
+    input: &str,
+    point_count_error: CsvError,
+) -> Result<(CsvCoordinates, Vec<Box<RawValue>>), CsvError> {
     let invalid = CsvError::CoordinateInterpolationArguments;
     let ((columns, coordinates), data) =
         json_argument_and_data::<([ColumnReference; 2], Vec<Box<RawValue>>)>(input, invalid)?;
     if coordinates.is_empty() || coordinates.len() > MAX_POINTS {
         return Err(invalid);
     }
-    let mut table = read_coordinate_table(
-        data,
-        &columns,
-        invalid,
-        CsvError::CoordinateInterpolationPointCount,
-    )?;
+    let mut table = read_coordinate_table(data, &columns, invalid, point_count_error)?;
     sort_distinct_coordinates(&mut table.samples)?;
+    Ok((table, coordinates))
+}
+
+fn interpolate_coordinate_table(input: &str) -> Result<String, CsvError> {
+    let (mut table, coordinates) =
+        read_coordinate_queries(input, CsvError::CoordinateInterpolationPointCount)?;
     let samples = coordinates
         .iter()
         .enumerate()
         .map(|(row_index, raw)| {
-            let x = coordinate_argument(raw, invalid)?;
+            let x = coordinate_argument(raw, CsvError::CoordinateInterpolationArguments)?;
             let y = interpolate_coordinate_value(&table.samples, &x)?;
             Ok(CoordinateSample {
                 row_index,
@@ -5556,6 +5563,37 @@ fn interpolate_coordinate_value(
         }
         Err(_) => Err(CsvError::CoordinateInterpolationRange),
     }
+}
+
+fn coordinate_slopes(input: &str) -> Result<String, CsvError> {
+    let (table, coordinates) = read_coordinate_queries(input, CsvError::CoordinateSlopePointCount)?;
+    let samples = &table.samples;
+    let format_slope = |segment: Option<usize>| -> Result<String, CsvError> {
+        let Some(index) = segment else {
+            return Ok(String::new());
+        };
+        coordinate_secant_slope(&samples[index].point, &samples[index + 1].point)
+            .map(|value| value.to_string())
+    };
+    let mut csv = String::from("横坐标,左侧斜率,右侧斜率");
+    for raw in coordinates {
+        let x = coordinate_argument(&raw, CsvError::CoordinateInterpolationArguments)?;
+        let [left, right] = match samples.binary_search_by(|sample| sample.point.0.cmp(&x)) {
+            Ok(index) => [
+                index.checked_sub(1),
+                (index + 1 < samples.len()).then_some(index),
+            ],
+            Err(index) if index > 0 && index < samples.len() => [Some(index - 1); 2],
+            Err(_) => return Err(CsvError::CoordinateInterpolationRange),
+        };
+        let row = [x.to_string(), format_slope(left)?, format_slope(right)?];
+        append_bounded_csv_row(
+            &mut csv,
+            row.iter().map(String::as_str),
+            CsvError::StatisticsOutputTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn coordinate_argument(raw: &RawValue, invalid: CsvError) -> Result<BigRational, CsvError> {
@@ -6080,16 +6118,22 @@ fn fill_secant_slopes(
 ) -> Result<(), CsvError> {
     samples.sort_unstable_by(|left, right| left.point.0.cmp(&right.point.0));
     for pair in samples.windows(2) {
-        let (left, first) = &pair[0].point;
-        let (right, last) = &pair[1].point;
-        if left == right {
+        if pair[0].point.0 == pair[1].point.0 {
             return Err(CsvError::SecantDuplicateX);
         }
-        let slope = (last - first) / (right - left);
-        ensure_exact_size(&slope).map_err(|_| CsvError::ComputedNumberRange)?;
+        let slope = coordinate_secant_slope(&pair[0].point, &pair[1].point)?;
         cells[pair[1].row_index] = slope.to_string();
     }
     Ok(())
+}
+
+fn coordinate_secant_slope(
+    (left_x, left_y): &Point,
+    (right_x, right_y): &Point,
+) -> Result<BigRational, CsvError> {
+    let slope = (right_y - left_y) / (right_x - left_x);
+    ensure_exact_size(&slope).map_err(|_| CsvError::ComputedNumberRange)?;
+    Ok(slope)
 }
 
 fn integrate_trapezoid_samples(
@@ -7919,6 +7963,19 @@ mod tests {
         assert_eq!(
             transform_csv("水平交点 [[1,2],0] x,y\n1/2,0\n0.50,1"),
             Err(CsvError::CoordinateDuplicateX)
+        );
+    }
+
+    #[test]
+    fn reports_exact_one_sided_slopes_at_knots_and_within_line_segments() {
+        let data = "x,y\n3,3\n0,0\n2,\n1,2";
+        assert_eq!(
+            transform_csv(&format!("曲线斜率 [[1,2],[0,\"1/2\",1,3]] {data}")).as_deref(),
+            Ok("横坐标,左侧斜率,右侧斜率\r\n0,\"\",2\r\n1/2,2,2\r\n1,2,1/2\r\n3,1/2,\"\"")
+        );
+        assert_eq!(
+            transform_csv(&format!("curve-slopes [[1,2],[4]] {data}")),
+            Err(CsvError::CoordinateInterpolationRange)
         );
     }
 

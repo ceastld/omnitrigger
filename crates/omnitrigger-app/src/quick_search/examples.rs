@@ -4823,6 +4823,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查询分段直线在指定横坐标两侧的精确斜率",
+        query: "CSV: 曲线斜率 [[\"时间\",\"高度\"],[0,\"1/2\",1,3]] 时间,高度\n3,3\n0,0\n2,\n1,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查找指定区间内的曲线极值和连续平坦段",
         query: "CSV: 曲线极值 [[\"时间\",\"高度\"],[\"1/2\",3]] 时间,高度\n4,2\n2,2\n0,0\n3,1\n1,2",
     },
@@ -5781,6 +5786,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "时间窗平均列",
             "时间窗积分列",
             "线性插值",
+            "曲线斜率",
             "曲线极值",
             "等距插值",
             "水平交点",
