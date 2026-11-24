@@ -5523,6 +5523,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "按主机统计逐行填写的网址",
+        query: "URL: 主机统计CSV https://EXAMPLE.invalid/a\nhttps://example.invalid:8443/b\nhttp://api.example.invalid/c",
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "按协议、主机和端口统计网址的源",
+        query: "URL: 源统计CSV https://EXAMPLE.invalid:443/a\nhttps://example.invalid/b\nhttps://example.invalid:8443/c\nhttp://example.invalid/d",
+    },
+    Example {
+        icon: Icon::Browser,
         title: "判断两个完整网址是否同源",
         query: "URL: 同源 [\"HTTPS://EXAMPLE.invalid:443/a?x=1\",\"https://example.invalid/b#p\"]",
     },

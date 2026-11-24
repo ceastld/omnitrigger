@@ -665,6 +665,9 @@ impl ValueError {
             Self::Fraction(error) => error.message(),
             Self::Equation(error) => error.message(),
             Self::Percentage(error) => error.message(),
+            Self::UrlEncoding(error @ UrlEncodingError::InvalidWebAddressRow { row }) => {
+                return format!("第 {row} 行 · {}", error.message()).into();
+            }
             Self::UrlEncoding(error) => error.message(),
             Self::Vector(error) => error.message(),
             Self::Matrix(error) => error.message(),
@@ -1276,9 +1279,12 @@ impl Results {
                 Scope::Intervals => {
                     Self::text_value(calculate_intervals(term).map_err(ValueError::Intervals))
                 }
-                Scope::UrlEncoding => {
-                    Self::text_value(convert_url_component(term).map_err(ValueError::UrlEncoding))
-                }
+                Scope::UrlEncoding => match url_encoding::url_csv_report(term) {
+                    Some(report) => Self::table_value(report.map_err(ValueError::UrlEncoding)),
+                    None => Self::text_value(
+                        convert_url_component(term).map_err(ValueError::UrlEncoding),
+                    ),
+                },
                 Scope::Vector => {
                     Self::text_value(calculate_vector(term).map_err(ValueError::Vector))
                 }

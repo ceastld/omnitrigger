@@ -1,11 +1,14 @@
 use std::{
     borrow::Cow,
+    cmp::Reverse,
     collections::{BTreeMap, HashSet},
 };
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::de::DeserializeOwned;
 use url::{Origin, Position, Url};
+
+use super::{csv_tools::append_bounded_csv_row, text_tools::newline_pattern};
 
 const URL_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -47,6 +50,8 @@ pub(super) enum UrlEncodingError {
     InvalidPathSegments,
     InvalidFragmentArgument,
     MissingFragment,
+    InvalidWebAddressRow { row: usize },
+    ReportTooLarge,
 }
 
 impl UrlEncodingError {
@@ -82,11 +87,16 @@ impl UrlEncodingError {
             }
             Self::InvalidFragmentArgument => "用双引号填写锚点文字，再输入完整 URL",
             Self::MissingFragment => "该 URL 没有 # 锚点",
+            Self::InvalidWebAddressRow { .. } => "每个非空行须填写一个完整的 HTTP 或 HTTPS 网址",
+            Self::ReportTooLarge => "网址统计结果超过 CSV 上限",
         }
     }
 }
 
 pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingError> {
+    if let Some(report) = url_csv_report(input) {
+        return report;
+    }
     let (operation, value) = input
         .split_once(char::is_whitespace)
         .ok_or(UrlEncodingError::Incomplete)?;
@@ -151,6 +161,66 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "文件路径" | "file-path" => decode_file_path(value),
         _ => Err(UrlEncodingError::InvalidOperation),
     }
+}
+
+#[derive(Clone, Copy)]
+enum UrlGroupBy {
+    Host,
+    Origin,
+}
+
+pub(super) fn url_csv_report(input: &str) -> Option<Result<String, UrlEncodingError>> {
+    let (operation, value) = input.split_once(char::is_whitespace)?;
+    let by = match operation.to_ascii_lowercase().as_str() {
+        "主机统计csv" | "host-counts-csv" => UrlGroupBy::Host,
+        "源统计csv" | "origin-counts-csv" => UrlGroupBy::Origin,
+        _ => return None,
+    };
+    let value = input[operation.len()..]
+        .strip_prefix("\r\n")
+        .unwrap_or(value);
+    Some(group_web_addresses(value, by))
+}
+
+fn group_web_addresses(source: &str, by: UrlGroupBy) -> Result<String, UrlEncodingError> {
+    let mut counts = BTreeMap::new();
+    for (index, line) in newline_pattern().split(source).enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let invalid = UrlEncodingError::InvalidWebAddressRow { row: index + 1 };
+        let (_, authority) = line.split_once("://").ok_or(invalid)?;
+        if authority.starts_with(['/', '\\', '?', '#']) || line.chars().any(char::is_whitespace) {
+            return Err(invalid);
+        }
+        let url = Url::parse(line).map_err(|_| invalid)?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(invalid);
+        }
+        let name = match by {
+            UrlGroupBy::Host => url.host_str().ok_or(invalid)?.to_owned(),
+            UrlGroupBy::Origin => url.origin().ascii_serialization(),
+        };
+        *counts.entry(name).or_insert(0usize) += 1;
+    }
+    if counts.is_empty() {
+        return Err(UrlEncodingError::Incomplete);
+    }
+    let mut entries: Vec<_> = counts.into_iter().collect();
+    entries.sort_by_key(|(_, count)| Reverse(*count));
+    let mut result = match by {
+        UrlGroupBy::Host => String::from("主机,次数"),
+        UrlGroupBy::Origin => String::from("源,次数"),
+    };
+    for (name, count) in entries {
+        append_bounded_csv_row(
+            &mut result,
+            [name.as_str(), count.to_string().as_str()].into_iter(),
+            UrlEncodingError::ReportTooLarge,
+        )?;
+    }
+    Ok(result)
 }
 
 fn network_origin(input: &str) -> Result<Origin, UrlEncodingError> {
@@ -648,6 +718,33 @@ fn encode_parameters(input: &str) -> Result<String, UrlEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_normalized_web_hosts_and_origins_and_reports_the_original_bad_line() {
+        let input = "HTTPS://EXAMPLE.invalid:443/a\r\n\r\nhttps://example.invalid/b\nhttp://example.invalid/c\rhttps://example.invalid:8443/d\nhttps://api.example.invalid/e";
+        let hosts = format!("主机统计CSV\r\n{input}");
+        let origins = format!("origin-counts-csv\n{input}");
+        assert_eq!(
+            convert_url_component(&hosts).as_deref(),
+            Ok("主机,次数\r\nexample.invalid,4\r\napi.example.invalid,1")
+        );
+        assert_eq!(
+            convert_url_component(&origins).as_deref(),
+            Ok("源,次数\r\nhttps://example.invalid,2\r\nhttp://example.invalid,1\r\nhttps://api.example.invalid,1\r\nhttps://example.invalid:8443,1")
+        );
+        for invalid in [
+            "/a",
+            "https:///a",
+            "ftp://example.invalid",
+            "https://example.invalid/a b",
+        ] {
+            let query = format!("主机统计CSV\r\nhttps://example.invalid/\n\n{invalid}");
+            assert_eq!(
+                convert_url_component(&query),
+                Err(UrlEncodingError::InvalidWebAddressRow { row: 3 })
+            );
+        }
+    }
 
     #[test]
     fn compares_decoded_query_pairs_with_multiplicity() {
