@@ -59,6 +59,8 @@ pub(super) enum FractionError {
     TableInputs,
     SampleArguments,
     SampleOutputTooLarge,
+    SecantArguments,
+    EqualSecantPoints,
     SequenceArguments,
     MixedFractionArguments,
     DenominatorLimit,
@@ -110,6 +112,8 @@ impl FractionError {
                 "填写 [起点,终点,点数] 和算式，例如 [-1,1,5] x**2，支持 2 至 128 个点"
             }
             Self::SampleOutputTooLarge => "精确采样结果超过 1 MiB",
+            Self::SecantArguments => "填写 [起点,终点] 和算式，例如 [0,1/3] x**2",
+            Self::EqualSecantPoints => "平均变化率需要两个不同的横坐标",
             Self::SequenceArguments => "填写首项、公差或公比、项数，例如 1/3,1/6,5，最多 128 项",
             Self::MixedFractionArguments => "填写整数部分和小于 1 的非负分数，例如 -2 1/3",
             Self::DenominatorLimit => {
@@ -219,6 +223,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "等差数列" || verb.eq_ignore_ascii_case("arithmetic-sequence") {
         return fraction_sequence(expression, false);
+    }
+    if verb == "平均变化率" || verb.eq_ignore_ascii_case("secant") {
+        return fraction_secant(expression.trim()).map(|slope| slope.to_string());
     }
     if verb == "等比数列" || verb.eq_ignore_ascii_case("geometric-sequence") {
         return fraction_sequence(expression, true);
@@ -662,6 +669,28 @@ fn fraction_samples(input: &str) -> Result<String, FractionError> {
         )?;
     }
     Ok(csv)
+}
+
+fn fraction_secant(input: &str) -> Result<BigRational, FractionError> {
+    let (points, expression) = input
+        .strip_prefix('[')
+        .and_then(|input| input.split_once(']'))
+        .ok_or(FractionError::SecantArguments)?;
+    let points: Vec<_> = split_top_level_commas(points).take(3).collect();
+    let [start, end] = points.as_slice() else {
+        return Err(FractionError::SecantArguments);
+    };
+    let start = calculate_fraction(start)?;
+    let end = calculate_fraction(end)?;
+    if start == end {
+        return Err(FractionError::EqualSecantPoints);
+    }
+    let expression = expression.trim();
+    let left = calculate_fraction_with_variables(expression, Some(&start), None)?;
+    let right = calculate_fraction_with_variables(expression, Some(&end), None)?;
+    let slope = (right - left) / (end - start);
+    ensure_exact_size(&slope)?;
+    Ok(slope)
 }
 
 fn format_mixed_fraction(value: BigRational) -> String {
@@ -1763,6 +1792,25 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computes_the_exact_average_rate_of_change_in_either_direction() {
+        for query in ["平均变化率 [0,1/3] x**2", "secant [1/3,0] x^2"] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok("1/3"));
+        }
+        assert_eq!(
+            simplify_fraction("平均变化率 [0.50,1/2] x"),
+            Err(FractionError::EqualSecantPoints)
+        );
+        assert_eq!(
+            simplify_fraction("平均变化率 [1,2,3] x"),
+            Err(FractionError::SecantArguments)
+        );
+        assert_eq!(
+            simplify_fraction("平均变化率 [0,1] 1/x"),
+            Err(FractionError::ZeroDenominator)
+        );
+    }
 
     #[test]
     fn compares_fraction_expressions_exactly_including_factorials_and_unicode_operators() {

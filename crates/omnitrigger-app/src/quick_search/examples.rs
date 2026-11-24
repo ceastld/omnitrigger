@@ -5716,6 +5716,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求两个分数坐标间的精确平均变化率",
+        query: "分数: 平均变化率 [0,1/3] x**2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按首项和公差生成精确等差数列",
         query: "分数: 等差数列 1/3,1/6,5",
     },
@@ -6172,6 +6177,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "取值表",
                     "取值CSV",
                     "精确采样",
+                    "平均变化率",
                     "等差数列",
                     "等比数列",
                     "连分数",
