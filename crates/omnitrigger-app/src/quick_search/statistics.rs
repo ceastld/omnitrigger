@@ -41,12 +41,13 @@ pub(super) enum StatisticsError {
     InvalidBinEdges,
     CumulativeThreshold,
     BinomialArguments,
-    BinomialTableArguments,
+    BinomialDistributionArguments,
     BinomialQuantileArguments,
     ProbabilityTableTooLarge,
     GeometricArguments,
+    GeometricSummaryArguments,
     HypergeometricArguments,
-    HypergeometricTableArguments,
+    HypergeometricDistributionArguments,
     HypergeometricQuantileArguments,
     HypergeometricTableRows,
     InvalidContingencyTable,
@@ -84,7 +85,7 @@ impl StatisticsError {
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
             Self::CumulativeThreshold => "用 @ 隔开阈值和观测值，例如 2 @ 1,2,2,3",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
-            Self::BinomialTableArguments => {
+            Self::BinomialDistributionArguments => {
                 "用逗号填写试验次数和单次成功概率，例如 3,1/3，最多 128 次试验"
             }
             Self::BinomialQuantileArguments => {
@@ -94,10 +95,11 @@ impl StatisticsError {
             Self::GeometricArguments => {
                 "用逗号填写试验次数和单次成功概率，例如 3,25%。次数为 1 至 1024，概率须大于零"
             }
+            Self::GeometricSummaryArguments => "填写大于零的单次成功概率，例如 25%",
             Self::HypergeometricArguments => {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
             }
-            Self::HypergeometricTableArguments => {
+            Self::HypergeometricDistributionArguments => {
                 "依次填写总数、目标项数和抽取数，例如 10,4,3。总数最多 4096"
             }
             Self::HypergeometricQuantileArguments => {
@@ -301,6 +303,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
         "二项概率" | "binomial" => return binomial_probability(values, DiscreteEvent::Exactly),
         "二项概率表" | "binomial-table" => return binomial_csv(values),
+        "二项摘要" | "binomial-summary" => return binomial_summary(values),
         "二项分位点" | "binomial-quantile" => return binomial_quantile(values),
         "二项累计" | "binomial-cdf" => {
             return binomial_probability(values, DiscreteEvent::AtMost)
@@ -310,6 +313,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "几何概率" | "geometric" => return geometric_probability(values, false),
         "几何累计" | "geometric-cdf" => return geometric_probability(values, true),
+        "几何摘要" | "geometric-summary" => return geometric_summary(values),
         "超几何概率" | "hypergeometric" => {
             return hypergeometric_probability(values, DiscreteEvent::Exactly)
         }
@@ -320,6 +324,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             return hypergeometric_probability(values, DiscreteEvent::AtLeast)
         }
         "超几何概率表" | "hypergeometric-table" => return hypergeometric_csv(values),
+        "超几何摘要" | "hypergeometric-summary" => return hypergeometric_summary(values),
         "超几何分位点" | "hypergeometric-quantile" => return hypergeometric_quantile(values),
         "独立性卡方" | "chi-square" => return contingency_table(values, false),
         "期望频数" | "expected-counts" => return contingency_table(values, true),
@@ -1525,15 +1530,42 @@ fn binomial_masses(
     Ok((denominator, numerators))
 }
 
-fn binomial_csv(input: &str) -> Result<String, StatisticsError> {
+fn binomial_parameters(input: &str) -> Result<(u32, BigRational), StatisticsError> {
+    let invalid = StatisticsError::BinomialDistributionArguments;
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(trials), Some(probability), None) = (terms.next(), terms.next(), terms.next()) else {
-        return Err(StatisticsError::BinomialTableArguments);
+        return Err(invalid);
     };
-    let trials = binomial_trial_count(trials, StatisticsError::BinomialTableArguments)?;
-    let probability = parse_probability(probability)?;
+    Ok((
+        binomial_trial_count(trials, invalid)?,
+        parse_probability(probability)?,
+    ))
+}
+
+fn binomial_csv(input: &str) -> Result<String, StatisticsError> {
+    let (trials, probability) = binomial_parameters(input)?;
     let (denominator, masses) = binomial_masses(trials, &probability)?;
     probability_csv("成功次数", denominator, (0..=trials).zip(masses))
+}
+
+fn summarize_probability_distribution(
+    expectation: BigRational,
+    variance: BigRational,
+) -> Result<String, StatisticsError> {
+    let expectation = bounded(expectation)?;
+    let variance = bounded(variance)?;
+    let deviation = format_square_root(&variance);
+    Ok(format!(
+        "期望 {expectation} · 方差 {variance} · 标准差 {deviation}"
+    ))
+}
+
+fn binomial_summary(input: &str) -> Result<String, StatisticsError> {
+    let (trials, probability) = binomial_parameters(input)?;
+    let one = BigRational::from_integer(1.into());
+    let expectation = &probability * BigInt::from(trials);
+    let variance = &expectation * (one - probability);
+    summarize_probability_distribution(expectation, variance)
 }
 
 fn binomial_quantile(input: &str) -> Result<String, StatisticsError> {
@@ -1633,6 +1665,17 @@ fn geometric_probability(input: &str, cumulative: bool) -> Result<String, Statis
     Ok(bounded(result)?.to_string())
 }
 
+fn geometric_summary(input: &str) -> Result<String, StatisticsError> {
+    let probability = parse_probability(input.trim())?;
+    if probability.numer().sign() == Sign::NoSign {
+        return Err(StatisticsError::GeometricSummaryArguments);
+    }
+    let expectation = probability.recip();
+    let one = BigRational::from_integer(1.into());
+    let variance = &expectation * (&expectation - one);
+    summarize_probability_distribution(expectation, variance)
+}
+
 fn hypergeometric_probability(
     input: &str,
     event: DiscreteEvent,
@@ -1703,7 +1746,7 @@ fn hypergeometric_masses(
 fn hypergeometric_csv(input: &str) -> Result<String, StatisticsError> {
     let [total, marked, draws] = hypergeometric_parameters(
         input.split(','),
-        StatisticsError::HypergeometricTableArguments,
+        StatisticsError::HypergeometricDistributionArguments,
     )?;
     let unmarked = total - marked;
     let first = draws.saturating_sub(unmarked);
@@ -1716,6 +1759,26 @@ fn hypergeometric_csv(input: &str) -> Result<String, StatisticsError> {
         combination_count(total, draws),
         hypergeometric_masses(marked, unmarked, draws, first..=last),
     )
+}
+
+fn hypergeometric_summary(input: &str) -> Result<String, StatisticsError> {
+    let [total, marked, draws] = hypergeometric_parameters(
+        input.split(','),
+        StatisticsError::HypergeometricDistributionArguments,
+    )?;
+    if total == 0 {
+        return summarize_probability_distribution(BigRational::default(), BigRational::default());
+    }
+    let probability = BigRational::new(marked.into(), total.into());
+    let expectation = &probability * BigInt::from(draws);
+    let variance = if total == 1 {
+        BigRational::default()
+    } else {
+        let one = BigRational::from_integer(1.into());
+        let correction = BigRational::new((total - draws).into(), (total - 1).into());
+        &expectation * (one - probability) * correction
+    };
+    summarize_probability_distribution(expectation, variance)
 }
 
 fn hypergeometric_quantile(input: &str) -> Result<String, StatisticsError> {
@@ -2188,7 +2251,7 @@ mod tests {
         }
         assert_eq!(
             calculate_statistics("二项概率表 129,1/3"),
-            Err(StatisticsError::BinomialTableArguments)
+            Err(StatisticsError::BinomialDistributionArguments)
         );
     }
 
@@ -2544,11 +2607,46 @@ mod tests {
         }
         assert_eq!(
             calculate_statistics("超几何概率表 10,4,3,2"),
-            Err(StatisticsError::HypergeometricTableArguments)
+            Err(StatisticsError::HypergeometricDistributionArguments)
         );
         assert_eq!(
             calculate_statistics("超几何概率表 258,129,129"),
             Err(StatisticsError::HypergeometricTableRows)
+        );
+    }
+
+    #[test]
+    fn reports_exact_moments_for_discrete_probability_distributions() {
+        for (query, expected) in [
+            ("二项摘要 4,1/3", "期望 4/3 · 方差 8/9 · 标准差 √(8/9)"),
+            ("binomial-summary 4,50%", "期望 2 · 方差 1 · 标准差 1"),
+            ("二项摘要 0,1", "期望 0 · 方差 0 · 标准差 0"),
+            ("几何摘要 25%", "期望 4 · 方差 12 · 标准差 √12"),
+            ("geometric-summary 100%", "期望 1 · 方差 0 · 标准差 0"),
+            (
+                "超几何摘要 10,4,3",
+                "期望 6/5 · 方差 14/25 · 标准差 √(14/25)",
+            ),
+            ("超几何摘要 0,0,0", "期望 0 · 方差 0 · 标准差 0"),
+            ("hypergeometric-summary 1,1,1", "期望 1 · 方差 0 · 标准差 0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("几何摘要 0"),
+            Err(StatisticsError::GeometricSummaryArguments)
+        );
+        assert_eq!(
+            calculate_statistics("二项摘要 129,1/3"),
+            Err(StatisticsError::BinomialDistributionArguments)
+        );
+        assert_eq!(
+            calculate_statistics("超几何摘要 10,11,3"),
+            Err(StatisticsError::HypergeometricDistributionArguments)
         );
     }
 
