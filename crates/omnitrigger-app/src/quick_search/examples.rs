@@ -33,6 +33,8 @@ impl Example {
                     | "pointers-to-csv"
                     | "行路径转csv"
                     | "jsonl-pointers-to-csv"
+                    | "行分组统计csv"
+                    | "jsonl-group-statistics-csv"
                     | "行筛选"
                     | "filter-jsonl"
                     | "行任一筛选"
@@ -60,6 +62,8 @@ impl Example {
             match operation.as_str() {
                 "行路径转csv"
                 | "jsonl-pointers-to-csv"
+                | "行分组统计csv"
+                | "jsonl-group-statistics-csv"
                 | "行筛选"
                 | "filter-jsonl"
                 | "行任一筛选"
@@ -4029,6 +4033,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按逐行 JSON 的字段值计数",
         query: "JSON: 行分组计数CSV /金额\n{\"金额\":1.50}\n{\"金额\":\"1.5\"}\n{\"金额\":15e-1}\n{\"金额\":null}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算每组逐行 JSON 记录的精确合计和平均",
+        query: "JSON: 行分组统计CSV [\"/组\",\"/金额\"]\n{\"组\":1.00,\"金额\":1.50}\n{\"组\":\"北\",\"金额\":2}\n{\"组\":1e0,\"金额\":0.75}",
     },
     Example {
         icon: Icon::Terminal,

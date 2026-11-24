@@ -183,6 +183,7 @@ enum JsonCsvOperation {
     Paths,
     LinePaths,
     LineGroupCounts,
+    LineGroupSummaries,
     ValidateLines,
     Differences,
     Leaves,
@@ -199,6 +200,7 @@ impl JsonCsvOperation {
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "行路径转csv" | "jsonl-pointers-to-csv" => Some(Self::LinePaths),
             "行分组计数csv" | "jsonl-group-counts-csv" => Some(Self::LineGroupCounts),
+            "行分组统计csv" | "jsonl-group-statistics-csv" => Some(Self::LineGroupSummaries),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "对比csv" | "diff-csv" => Some(Self::Differences),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
@@ -218,6 +220,7 @@ impl JsonCsvOperation {
             | Self::Paths
             | Self::LinePaths
             | Self::LineGroupCounts
+            | Self::LineGroupSummaries
             | Self::ValidateLines
             | Self::Differences
             | Self::Leaves
@@ -238,6 +241,7 @@ impl JsonCsvOperation {
             Self::Paths => json_paths_to_csv(source, read_json_array),
             Self::LinePaths => json_paths_to_csv(source, read_json_lines),
             Self::LineGroupCounts => count_json_line_groups_csv(source),
+            Self::LineGroupSummaries => summarize_json_line_groups_csv(source),
             Self::ValidateLines => validate_json_lines_csv(source),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
             Self::Leaves => {
@@ -1277,23 +1281,51 @@ fn write_json_groups_from_query<'a, Group: serde::Serialize>(
     Ok(output)
 }
 
+#[derive(serde::Serialize)]
+struct JsonGroupSummary<'a> {
+    #[serde(rename = "值")]
+    value: &'a RawValue,
+    #[serde(rename = "计数")]
+    count: usize,
+    #[serde(rename = "合计")]
+    sum: String,
+    #[serde(rename = "平均")]
+    mean: String,
+}
+
 fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
+    let summaries = json_group_summaries(query, read_json_array)?;
+    Ok(serde_json::to_string(&summaries).expect("有效 JSON 值和字符串可以序列化"))
+}
+
+fn summarize_json_line_groups_csv(query: &str) -> Result<String, JsonError> {
+    let summaries = json_group_summaries(query, read_json_lines)?;
+    let mut output = String::from("值,类型,计数,合计,平均");
+    for summary in summaries {
+        append_bounded_csv_row(
+            &mut output,
+            [
+                summary.value.get(),
+                json_type_name(summary.value),
+                summary.count.to_string().as_str(),
+                &summary.sum,
+                &summary.mean,
+            ]
+            .into_iter(),
+            JsonError::CsvOutputTooLarge,
+        )?;
+    }
+    Ok(output)
+}
+
+fn json_group_summaries(
+    query: &str,
+    read_items: fn(&str) -> Result<Vec<&RawValue>, JsonError>,
+) -> Result<Vec<JsonGroupSummary<'_>>, JsonError> {
     struct Group<'a> {
         value: &'a RawValue,
         count: usize,
         sum: BigRational,
-    }
-
-    #[derive(serde::Serialize)]
-    struct Summary<'a> {
-        #[serde(rename = "值")]
-        value: &'a RawValue,
-        #[serde(rename = "计数")]
-        count: usize,
-        #[serde(rename = "合计")]
-        sum: String,
-        #[serde(rename = "平均")]
-        mean: String,
     }
 
     let (pointers, source) = strings_and_source(query, JsonError::GroupStatisticsPaths)?;
@@ -1304,7 +1336,7 @@ fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
     let groups = collect_json_groups(
         group,
         source,
-        read_json_array,
+        read_items,
         |value| Group {
             value,
             count: 0,
@@ -1317,20 +1349,19 @@ fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
             Ok(())
         },
     )?;
-    let summaries = groups
+    groups
         .into_iter()
         .map(|group| {
             let mean = &group.sum / BigInt::from(group.count);
             ensure_exact_size(&mean).map_err(|_| JsonError::GroupStatisticsRange)?;
-            Ok(Summary {
+            Ok(JsonGroupSummary {
                 value: group.value,
                 count: group.count,
                 sum: group.sum.to_string(),
                 mean: mean.to_string(),
             })
         })
-        .collect::<Result<Vec<_>, JsonError>>()?;
-    Ok(serde_json::to_string(&summaries).expect("有效 JSON 值和字符串可以序列化"))
+        .collect()
 }
 
 fn json_group_number(value: &RawValue) -> Result<BigRational, JsonError> {
@@ -3650,6 +3681,21 @@ mod tests {
         assert_eq!(
             transform_json(r#"多路径查重复 ["/a","/b"] [{"a":1,"b":2},{"a":1}]"#),
             Err(JsonError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn summarizes_json_line_groups_with_exact_sums_and_means() {
+        let source =
+            "{\"组\":1.00,\"金额\":1.50}\r\n\r\n{\"组\":\"北\",\"金额\":2}\r\n{\"组\":1e0,\"金额\":0.75}";
+        let query = format!("行分组统计CSV [\"/组\",\"/金额\"]\n{source}");
+        let expected =
+            "值,类型,计数,合计,平均\r\n1.00,number,2,9/4,9/8\r\n\"\"\"北\"\"\",string,1,2,2";
+        assert_eq!(transform_json(&query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(&query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json(&format!("{query}\n{{\"组\":1,\"金额\":\"0.75\"}}")),
+            Err(JsonError::GroupStatisticsNumber)
         );
     }
 
