@@ -248,7 +248,7 @@ pub(super) enum CsvError {
     CoordinateClipPointCount,
     CoordinateVariationPointCount,
     CoordinateLengthPointCount,
-    CoordinateRmsPointCount,
+    CoordinateDeviationPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     CoordinateThresholdSpanPointCount,
@@ -554,7 +554,7 @@ impl CsvError {
             Self::CoordinateClipPointCount => "曲线截取需要 2 至 64 个完整样点",
             Self::CoordinateVariationPointCount => "曲线变差需要 2 至 64 个完整样点",
             Self::CoordinateLengthPointCount => "曲线长度需要 2 至 64 个完整样点",
-            Self::CoordinateRmsPointCount => "曲线均方根需要 2 至 64 个完整样点",
+            Self::CoordinateDeviationPointCount => "曲线统计需要 2 至 64 个完整样点",
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
@@ -1170,7 +1170,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
         "曲线变差" | "curve-total-variation" => return coordinate_total_variation(input),
         "曲线长度" | "curve-length" => return coordinate_curve_length(input),
-        "曲线均方根" | "curve-rms" => return coordinate_root_mean_square(input),
+        "曲线均方根" | "curve-rms" => {
+            return coordinate_deviation_statistic(input, CoordinateDeviation::RootMeanSquare)
+        }
+        "曲线标准差" | "curve-standard-deviation" => {
+            return coordinate_deviation_statistic(input, CoordinateDeviation::StandardDeviation)
+        }
         "曲线截取" | "clip-curve" => {
             let mut table = read_coordinate_interval(input, CsvError::CoordinateClipPointCount)?;
             sort_distinct_coordinates(&mut table.samples)?;
@@ -5986,8 +5991,16 @@ fn read_coordinate_interval(
     Ok(table)
 }
 
-fn coordinate_root_mean_square(input: &str) -> Result<String, CsvError> {
-    let mut table = read_coordinate_interval(input, CsvError::CoordinateRmsPointCount)?;
+enum CoordinateDeviation {
+    RootMeanSquare,
+    StandardDeviation,
+}
+
+fn coordinate_deviation_statistic(
+    input: &str,
+    measure: CoordinateDeviation,
+) -> Result<String, CsvError> {
+    let mut table = read_coordinate_interval(input, CsvError::CoordinateDeviationPointCount)?;
     sort_distinct_coordinates(&mut table.samples)?;
     let mut triple_square_integral = BigRational::default();
     for pair in table.samples.windows(2) {
@@ -5999,9 +6012,17 @@ fn coordinate_root_mean_square(input: &str) -> Result<String, CsvError> {
     }
     let first = &table.samples[0].point.0;
     let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
-    let mean_square = triple_square_integral / ((last - first) * BigInt::from(3u8));
-    ensure_exact_size(&mean_square).map_err(|_| CsvError::ComputedNumberRange)?;
-    Ok(format_square_root(&mean_square))
+    let span = last - first;
+    let mean_square = triple_square_integral / (&span * BigInt::from(3u8));
+    let squared = match measure {
+        CoordinateDeviation::RootMeanSquare => mean_square,
+        CoordinateDeviation::StandardDeviation => {
+            let mean = integrate_trapezoid_samples(&mut table.samples, false, |_, _| {})? / span;
+            mean_square - &mean * &mean
+        }
+    };
+    ensure_exact_size(&squared).map_err(|_| CsvError::ComputedNumberRange)?;
+    Ok(format_square_root(&squared))
 }
 
 fn coordinate_curve_length(input: &str) -> Result<String, CsvError> {
@@ -7949,6 +7970,23 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
             Err(CsvError::CoordinateDifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn measures_exact_continuous_spread_around_the_interval_mean() {
+        let data = "x,y\n3,3\n0,0\n2,";
+        assert_eq!(
+            transform_csv(&format!("曲线标准差 [1,2] {data}")).as_deref(),
+            Ok("√(3/4)")
+        );
+        assert_eq!(
+            transform_csv(&format!("curve-standard-deviation [[1,2],[0,1]] {data}")).as_deref(),
+            Ok("√(1/12)")
+        );
+        assert_eq!(
+            transform_csv("曲线标准差 [1,2] x,y\n0,1/3\n1,1/3\n3,1/3").as_deref(),
+            Ok("0")
         );
     }
 
