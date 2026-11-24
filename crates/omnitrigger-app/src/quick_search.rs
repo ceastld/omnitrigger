@@ -1065,7 +1065,10 @@ impl Results {
                     Some(report) => Self::table_value(report.map_err(ValueError::Json)),
                     None => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 },
-                Scope::Toml => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
+                Scope::Toml => match toml_tools::toml_csv_report(term) {
+                    Some(report) => Self::table_value(report.map_err(ValueError::Toml)),
+                    None => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
+                },
                 Scope::Csv => {
                     if let Some(result) = csv_tools::csv_table_preview(term) {
                         Self::Value(
@@ -4886,6 +4889,39 @@ mod tests {
         assert_eq!(
             for_query(&query, &[]).refillable_text(),
             Some("编号\r\n001\r\n002")
+        );
+    }
+
+    #[test]
+    fn previews_toml_leaf_types_and_paths_as_a_csv_table() {
+        let source = concat!(
+            "flags = [true, false]\nserial = 9_007_199_254_740_993\n",
+            "[\"a/b\"]\ncreated = 2024-02-29\nnote = '茶,咖啡'\nratio = nan"
+        );
+        let expected = concat!(
+            "路径,类型,值\r\n/a~1b/created,datetime,2024-02-29\r\n",
+            "/a~1b/note,string,\"茶,咖啡\"\r\n/a~1b/ratio,float,nan\r\n",
+            "/flags/0,boolean,true\r\n/flags/1,boolean,false\r\n/serial,integer,9007199254740993"
+        );
+        let query = format!("TOML: 叶子CSV {source}");
+        let result = for_query(&query, &[]);
+        assert!(matches!(
+            &result,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(_),
+                ..
+            }))
+        ));
+        assert_eq!(result.refillable_text(), Some(expected));
+        let pipeline = format!("[\"TOML: LEAVES-CSV\"] {source}");
+        let (text, preview) =
+            transform_data_pipeline(&pipeline, chrono::DateTime::UNIX_EPOCH.fixed_offset())
+                .unwrap();
+        assert_eq!(text, expected);
+        assert!(matches!(preview, Some(PipelinePreview::Table(table)) if table.row_pages() == 1));
+        assert_eq!(
+            transform_toml("叶子CSV list = []\n[empty]").as_deref(),
+            Ok("路径,类型,值\r\n/empty,table,{}\r\n/list,array,[]")
         );
     }
 

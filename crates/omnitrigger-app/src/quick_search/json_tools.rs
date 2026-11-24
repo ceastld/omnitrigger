@@ -2122,7 +2122,7 @@ fn build_json_pointer(source: &str) -> Result<String, JsonError> {
     }
 }
 
-fn append_pointer_key(pointer: &mut String, key: &str) {
+pub(super) fn append_pointer_key(pointer: &mut String, key: &str) {
     pointer.push('/');
     for ch in key.chars() {
         match ch {

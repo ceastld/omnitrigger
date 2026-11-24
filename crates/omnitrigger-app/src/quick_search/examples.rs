@@ -3786,6 +3786,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用表格查看 TOML 路径、类型和数值",
+        query: "TOML: 叶子CSV date = 2024-02-29\n[\"a/b\"]\nnote = '茶,咖啡'\nport = 8000",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "压缩 JSON",
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },

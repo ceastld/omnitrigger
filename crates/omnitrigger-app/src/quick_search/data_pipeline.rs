@@ -42,7 +42,7 @@ use super::{
     tempo::calculate_tempo,
     text_tools::transform_text,
     timestamp::{convert_timestamp, is_timestamp_report},
-    toml_tools::transform_toml,
+    toml_tools::{toml_csv_report, transform_toml},
     url_encoding::convert_url_component,
 };
 
@@ -516,6 +516,9 @@ fn prepare_pipeline_preview(
     csv_error: &impl Fn(CsvError) -> DataPipelineError,
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
+        Scope::Toml => toml_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
         Scope::Json => json_csv_report(query).map(|report| {
             report_preview(report.map_err(|cause| cause.message()), error, csv_error)
         }),
