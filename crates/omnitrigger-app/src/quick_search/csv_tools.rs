@@ -189,6 +189,7 @@ pub(super) enum CsvError {
     InvalidNumberFilter,
     FilterConditions,
     SearchRowKeywords,
+    SearchRowColumns,
     Regex(TextError),
     ColumnOutOfRange,
     InvalidNumber,
@@ -482,6 +483,7 @@ impl CsvError {
             }
             Self::Regex(error) => error.message(),
             Self::SearchRowKeywords => "填写 1 至 16 个非空关键词，例如 [\"茶\",\"华东\"]",
+            Self::SearchRowColumns => "所选搜索列须互不重复，最多填写 16 列",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::NumericIssuesTooLarge => "数值列检查结果超过 1 MiB，请缩小表格范围",
@@ -7001,20 +7003,46 @@ struct CsvKeyword {
 enum CsvKeywordArgument {
     One(String),
     List(Vec<String>),
+    Scoped(CsvKeywordScope),
 }
 
-fn read_csv_keywords(input: &str) -> Result<(Vec<CsvKeyword>, &str), CsvError> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CsvKeywordScope {
+    #[serde(rename = "词", alias = "keywords")]
+    keywords: Vec<String>,
+    #[serde(rename = "列", alias = "columns")]
+    columns: Vec<ColumnReference>,
+}
+
+struct CsvKeywordQuery<'a> {
+    keywords: Vec<CsvKeyword>,
+    columns: Vec<ColumnReference>,
+    data: &'a str,
+}
+
+fn read_csv_keywords(input: &str) -> Result<CsvKeywordQuery<'_>, CsvError> {
     let invalid = CsvError::SearchRowKeywords;
     let (argument, data) = json_argument_and_data::<CsvKeywordArgument>(input, invalid)?;
-    let keywords = match argument {
-        CsvKeywordArgument::One(word) if word.is_empty() => return Ok((Vec::new(), data)),
-        CsvKeywordArgument::One(word) => vec![word],
-        CsvKeywordArgument::List(words) => words,
+    let (keywords, columns) = match argument {
+        CsvKeywordArgument::One(word) if word.is_empty() => {
+            return Ok(CsvKeywordQuery {
+                keywords: Vec::new(),
+                columns: Vec::new(),
+                data,
+            });
+        }
+        CsvKeywordArgument::One(word) => (vec![word], Vec::new()),
+        CsvKeywordArgument::List(words) => (words, Vec::new()),
+        CsvKeywordArgument::Scoped(scope) => (scope.keywords, scope.columns),
     };
     if !(1..=MAX_FILTER_CONDITIONS).contains(&keywords.len())
         || keywords.iter().any(|word| word.trim().is_empty())
     {
         return Err(invalid);
+    }
+    if columns.len() > MAX_FILTER_CONDITIONS {
+        return Err(CsvError::SearchRowColumns);
     }
     let keywords = keywords
         .into_iter()
@@ -7023,7 +7051,23 @@ fn read_csv_keywords(input: &str) -> Result<(Vec<CsvKeyword>, &str), CsvError> {
             original,
         })
         .collect();
-    Ok((keywords, data))
+    Ok(CsvKeywordQuery {
+        keywords,
+        columns,
+        data,
+    })
+}
+
+fn keyword_column_indices(
+    header: &[String],
+    columns: &[ColumnReference],
+) -> Result<Vec<usize>, CsvError> {
+    if columns.is_empty() {
+        return Ok((0..header.len()).collect());
+    }
+    let mut selected = resolve_distinct_columns(header, columns, CsvError::SearchRowColumns)?;
+    selected.sort_unstable();
+    Ok(selected)
 }
 
 fn csv_keyword_key(text: &str) -> String {
@@ -7033,16 +7077,24 @@ fn csv_keyword_key(text: &str) -> String {
 }
 
 fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
-    let (keywords, data) = read_csv_keywords(input)?;
+    let CsvKeywordQuery {
+        keywords,
+        columns,
+        data,
+    } = read_csv_keywords(input)?;
     let rows = read_table_for_preview(data, ',')?;
     if keywords.is_empty() {
         return Ok(rows);
     }
     let mut rows = rows.into_iter();
     let header = rows.next().ok_or(CsvError::MissingInput)?;
+    let columns = keyword_column_indices(&header, &columns)?;
     Ok(std::iter::once(header)
         .chain(rows.filter(|row| {
-            let cells: Vec<_> = row.iter().map(|cell| csv_keyword_key(cell)).collect();
+            let cells: Vec<_> = columns
+                .iter()
+                .map(|&index| csv_keyword_key(&row[index]))
+                .collect();
             keywords
                 .iter()
                 .all(|word| cells.iter().any(|cell| cell.contains(word.key.as_str())))
@@ -7051,14 +7103,20 @@ fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
 }
 
 fn csv_keyword_positions(input: &str) -> Result<CsvPreviewData, CsvError> {
-    let (keywords, data) = read_csv_keywords(input)?;
+    let CsvKeywordQuery {
+        keywords,
+        columns,
+        data,
+    } = read_csv_keywords(input)?;
     let rows = read_table_for_preview(data, ',')?;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let selected = keyword_column_indices(header, &columns)?;
     let columns = ["数据行号", "列号", "列名", "关键词", "内容"];
     let mut csv = columns.join(",");
     let mut matches_table = vec![columns.map(str::to_owned).to_vec()];
     for (record, row) in records.iter().enumerate() {
-        for (column, cell) in row.iter().enumerate() {
+        for &column in &selected {
+            let cell = &row[column];
             let key = csv_keyword_key(cell);
             let matches: Vec<_> = keywords
                 .iter()
@@ -10520,6 +10578,25 @@ mod tests {
         assert_eq!(
             transform_csv(r#"筛选 3 "值" a,b"#),
             Err(CsvError::ColumnOutOfRange)
+        );
+    }
+
+    #[test]
+    fn restricts_csv_keyword_matches_to_the_named_columns_without_reordering_hits() {
+        let data = "区域,备注,货品\n北区,咖啡,茶\n南区,茶,米";
+        assert_eq!(
+            transform_csv(&format!(r#"搜索行 {{"词":["茶"],"列":["备注"]}} {data}"#)).as_deref(),
+            Ok("区域,备注,货品\r\n南区,茶,米")
+        );
+        let query =
+            format!(r#"keyword-positions {{"keywords":["茶","咖啡"],"columns":[3,2]}} {data}"#);
+        let hits = read_rows(&transform_csv(&query).unwrap(), ',').unwrap();
+        assert_eq!(hits[1], ["1", "2", "备注", "[\"咖啡\"]", "咖啡"]);
+        assert_eq!(hits[2], ["1", "3", "货品", "[\"茶\"]", "茶"]);
+        assert_eq!(hits[3], ["2", "2", "备注", "[\"茶\"]", "茶"]);
+        assert_eq!(
+            transform_csv(&format!(r#"搜索行 {{"词":["茶"],"列":[2,"备注"]}} {data}"#)),
+            Err(CsvError::SearchRowColumns)
         );
     }
 
