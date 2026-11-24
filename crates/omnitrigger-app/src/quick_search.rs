@@ -5113,12 +5113,20 @@ mod tests {
         assert_eq!(plot.refillable_text(), Some("时间,温度\r\n0,1/2\r\n1,5/2"));
         let trace = for_query(&format!("处理: 步骤CSV {source}"), &[]);
         assert!(matches!(
-            trace,
+            &trace,
             Results::Value(Ok(ResultValue {
-                kind: ValueKind::Text,
+                kind: ValueKind::Table(_),
                 ..
             }))
         ));
+        assert_eq!(
+            trace.refillable_text(),
+            Some(concat!(
+                "步骤,命令,结果\r\n",
+                "1,CSV: 数值筛选 2 >= 0,\"编号,时间,温度\r\n002,0,1/2\r\n003,1,5/2\"\r\n",
+                "2,\"CSV: 散点图 [2,3]\",\"时间,温度\r\n0,1/2\r\n1,5/2\""
+            ))
+        );
 
         let box_plot = for_query(r#"处理: ["分数: 计算","统计: 箱线图"] 2**10"#, &[]);
         assert!(matches!(

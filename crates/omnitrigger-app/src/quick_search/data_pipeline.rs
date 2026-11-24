@@ -169,17 +169,24 @@ pub(super) fn transform_data_pipeline(
     input: &str,
     now: DateTime<FixedOffset>,
 ) -> Result<(String, Option<PipelinePreview>), DataPipelineError> {
+    let (mode, input) = split_pipeline_input(input);
     let mut preview = None;
-    let text = run_data_pipeline(input, now, &mut preview)?;
+    let text = run_data_pipeline(mode, input, now, &mut preview)?;
+    if matches!(
+        mode,
+        DataPipelineMode::StepsCsv | DataPipelineMode::RowsCsv | DataPipelineMode::ColumnCsv
+    ) {
+        preview = Some(PipelinePreview::Table(parse_table_preview(&text)?));
+    }
     Ok((text, preview))
 }
 
 fn run_data_pipeline(
+    mode: DataPipelineMode,
     input: &str,
     now: DateTime<FixedOffset>,
     preview: &mut Option<PipelinePreview>,
 ) -> Result<String, DataPipelineError> {
-    let (mode, input) = split_pipeline_input(input);
     let mut remaining_work = MAX_PIPELINE_OUTPUT_BYTES * MAX_PIPELINE_STEPS;
     if mode == DataPipelineMode::ColumnCsv {
         let ((name, column, steps), source) =
@@ -1032,6 +1039,32 @@ mod tests {
             run_pipeline("CSV列 [\"大写\",3,[\"文本: 大写\"]]\n编号,文本\n001,abc"),
             Err(DataPipelineError::Csv(CsvError::ColumnOutOfRange))
         );
+    }
+
+    #[test]
+    fn previews_csv_pipeline_reports_without_changing_quotes_or_multiline_cells() {
+        let now = DateTime::parse_from_rfc3339("2024-02-18T23:30:00-08:00").unwrap();
+        for (query, expected) in [
+            (
+                "步骤CSV [\"文本: 大写\"] 茶 a\n咖啡 b",
+                "步骤,命令,结果\r\n1,文本: 大写,\"茶 A\n咖啡 B\"",
+            ),
+            (
+                "逐行CSV [\"文本: 大写\"] 茶,a\n咖啡,b",
+                "输入,结果\r\n\"茶,a\",\"茶,A\"\r\n\"咖啡,b\",\"咖啡,B\"",
+            ),
+            (
+                "CSV列 [\"结果\",\"原文\",[\"文本: 大写\"]] 原文\n\"茶,a\"",
+                "原文,结果\r\n\"茶,a\",\"茶,A\"",
+            ),
+        ] {
+            let (text, preview) = transform_data_pipeline(query, now).unwrap();
+            assert_eq!(text, expected, "{query}");
+            assert!(
+                matches!(preview, Some(PipelinePreview::Table(table)) if table.row_pages() == 1),
+                "{query}"
+            );
+        }
     }
 
     #[test]
