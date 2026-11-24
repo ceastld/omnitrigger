@@ -182,6 +182,7 @@ enum JsonCsvOperation {
     Lines,
     Paths,
     LinePaths,
+    ValidateLines,
     Leaves,
     Keys,
     Values,
@@ -195,6 +196,7 @@ impl JsonCsvOperation {
             "行转csv" | "jsonl-to-csv" => Some(Self::Lines),
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "行路径转csv" | "jsonl-pointers-to-csv" => Some(Self::LinePaths),
+            "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
             "找键csv" | "find-key-csv" => Some(Self::Keys),
             "找值csv" | "find-value-csv" => Some(Self::Values),
@@ -211,6 +213,7 @@ impl JsonCsvOperation {
             | Self::Lines
             | Self::Paths
             | Self::LinePaths
+            | Self::ValidateLines
             | Self::Leaves
             | Self::Keys
             | Self::Values => true,
@@ -218,12 +221,17 @@ impl JsonCsvOperation {
     }
 
     fn run(self, source: &str) -> Result<String, JsonError> {
+        let source = match self {
+            Self::ValidateLines => source,
+            _ => source.trim_start(),
+        };
         match self {
             Self::Convert => json_to_csv(source),
             Self::RowsWithHeaders => json_array_rows_with_headers(source),
             Self::Lines => json_lines_to_csv(source),
             Self::Paths => json_paths_to_csv(source, read_json_array),
             Self::LinePaths => json_paths_to_csv(source, read_json_lines),
+            Self::ValidateLines => validate_json_lines_csv(source),
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
             }
@@ -234,24 +242,28 @@ impl JsonCsvOperation {
 }
 
 pub(super) fn json_csv_report(query: &str) -> Option<Result<String, JsonError>> {
-    let (operation, source) = query.split_once(char::is_whitespace)?;
+    let (operation, source) = split_json_operation(query)?;
     let operation = JsonCsvOperation::from_name(&operation.to_ascii_lowercase())?;
-    let source = source.trim_start();
-    operation.has_headers(source).then(|| operation.run(source))
+    operation
+        .has_headers(source.trim_start())
+        .then(|| operation.run(source))
+}
+
+fn split_json_operation(query: &str) -> Option<(&str, &str)> {
+    let (operation, source) = query.split_once(char::is_whitespace)?;
+    let source = query[operation.len()..]
+        .strip_prefix("\r\n")
+        .unwrap_or(source);
+    Some((operation, source))
 }
 
 fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String, JsonError> {
-    let (operation, source) = query
-        .split_once(char::is_whitespace)
-        .ok_or(JsonError::Incomplete)?;
-    let raw_source = query[operation.len()..]
-        .strip_prefix("\r\n")
-        .unwrap_or(source);
-    let source = source.trim_start();
+    let (operation, raw_source) = split_json_operation(query).ok_or(JsonError::Incomplete)?;
     let operation = operation.to_ascii_lowercase();
     if let Some(operation) = JsonCsvOperation::from_name(&operation) {
-        return operation.run(source);
+        return operation.run(raw_source);
     }
+    let source = raw_source.trim_start();
     let pretty = match operation.as_str() {
         "依次处理" | "pipeline" if allow_pipeline => return transform_json_pipeline(source),
         "依次处理" | "pipeline" => return Err(JsonError::NestedPipeline),
@@ -1580,11 +1592,7 @@ fn validate_json_lines(source: &str) -> Result<String, JsonError> {
         match serde_json::from_str::<&RawValue>(line) {
             Ok(_) => valid += 1,
             Err(error) => {
-                let reason = if error.is_eof() {
-                    "JSON 尚未完整"
-                } else {
-                    "JSON 语法无效"
-                };
+                let reason = json_line_error_reason(&error);
                 errors.push(format!("第 {line_number} 行 · {reason}"));
             }
         }
@@ -1594,6 +1602,35 @@ fn validate_json_lines(source: &str) -> Result<String, JsonError> {
     }
     errors.insert(0, format!("{} 行有效，{} 行无效", valid, errors.len()));
     Ok(errors.join("\n"))
+}
+
+fn validate_json_lines_csv(source: &str) -> Result<String, JsonError> {
+    let headers = "行号,状态,类型,原因";
+    let mut result = String::from(headers);
+    for (line_number, line) in json_lines(source) {
+        let (status, kind, reason) = match serde_json::from_str::<&RawValue>(line) {
+            Ok(value) => ("有效", json_type_name(value), ""),
+            Err(error) => ("无效", "", json_line_error_reason(&error)),
+        };
+        let line_number = line_number.to_string();
+        append_bounded_csv_row(
+            &mut result,
+            [line_number.as_str(), status, kind, reason].into_iter(),
+            JsonError::CsvOutputTooLarge,
+        )?;
+    }
+    if result.len() == headers.len() {
+        return Err(JsonError::Incomplete);
+    }
+    Ok(result)
+}
+
+fn json_line_error_reason(error: &serde_json::Error) -> &'static str {
+    if error.is_eof() {
+        "JSON 尚未完整"
+    } else {
+        "JSON 语法无效"
+    }
 }
 
 fn merge_json_objects(source: &str) -> Result<String, JsonError> {
@@ -2788,6 +2825,23 @@ mod tests {
             Ok("2 行有效，0 行无效")
         );
         assert_eq!(transform_json("校验行 \n \t\n"), Err(JsonError::Incomplete));
+    }
+
+    #[test]
+    fn reports_json_lines_types_and_syntax_errors_with_original_row_numbers() {
+        let query = "校验行CSV\r\n \t\r\n1e999\r\n\r\n错误文本\r\n{\"编号\":\r\nnull";
+        let expected = "行号,状态,类型,原因\r\n2,有效,number,\"\"\r\n4,无效,\"\",JSON 语法无效\r\n5,无效,\"\",JSON 尚未完整\r\n6,有效,null,\"\"";
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(
+            json_csv_report(query)
+                .expect("校验结果应显示为表格")
+                .as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            transform_json("validate-jsonl-csv\r\n\t\r\n"),
+            Err(JsonError::Incomplete)
+        );
     }
 
     #[test]

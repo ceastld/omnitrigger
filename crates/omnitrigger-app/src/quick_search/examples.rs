@@ -3880,6 +3880,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "表格预览逐行 JSON 的类型和语法错误",
+        query: "JSON: 校验行CSV\n{\"编号\":1}\n\n错误文本\n{\"编号\":\nnull",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "合并数组里的 JSON 对象",
         query: r#"JSON: 合并对象 [{"名称":"初稿","版本":1},{"版本":2}]"#,
     },
