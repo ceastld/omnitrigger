@@ -704,6 +704,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "一次预览多组加权分位数",
+        query: "统计: 加权分位表 [25%,50%,75%] 1@1,2@1,4@2",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "预览累计权重和累计比例",
         query: "统计: 加权累积分布 4@25%,1/2@1/8,4@1/8,-1@0,2@1/4",
     },
@@ -6114,6 +6119,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "频数CSV",
             "加权平均",
             "加权分位数",
+            "加权分位表",
             "加权累积分布",
             "加权累计权重",
             "加权累计比例",

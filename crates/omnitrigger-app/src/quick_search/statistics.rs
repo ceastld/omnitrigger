@@ -21,6 +21,7 @@ use super::scatter_plot::ScatterPlot;
 
 pub(super) const MAX_VALUES: usize = 128;
 const MAX_BIN_EDGES: usize = 16;
+const MAX_WEIGHTED_QUANTILES: usize = 16;
 const MAX_BINOMIAL_TRIALS: u32 = 128;
 const MAX_GEOMETRIC_TRIALS: u32 = 1024;
 
@@ -33,6 +34,7 @@ pub(super) enum StatisticsError {
     InvalidWeight,
     ZeroTotalWeight,
     WeightedReportTooLarge,
+    WeightedQuantileList,
     InvalidProbability,
     InvalidTrimShare,
     InvalidBinEdges,
@@ -69,6 +71,7 @@ impl StatisticsError {
             Self::InvalidWeight => "填写 数值@非负权重，或粘贴数值和权重两列",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::WeightedReportTooLarge => "加权分布结果超过 1 MiB，请缩短数值或减少数据",
+            Self::WeightedQuantileList => "用方括号填写 1 至 16 个概率，例如 [25%,50%,75%]",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidTrimShare => "每端处理的比例须为 0 到小于 50%，例如 10%",
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
@@ -237,6 +240,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             return weighted_variance(values.trim()).map(|variance| format_square_root(&variance));
         }
         "加权分位数" | "weighted-quantile" => return weighted_quantile(values.trim()),
+        "加权分位表" | "weighted-quantiles-csv" => {
+            return weighted_quantiles_csv(values.trim())
+        }
         "加权累计权重" | "weighted-cumulative-weight" => {
             return weighted_cumulative_value(values, false);
         }
@@ -679,17 +685,56 @@ fn weighted_quantile(input: &str) -> Result<String, StatisticsError> {
     let (probability, input) = operation_and_arguments(input);
     let probability = parse_probability(probability)?;
     let distribution = read_weighted_distribution(input.trim())?;
-    let target = bounded(distribution.total * probability)?;
-    let mut values = distribution.weights.into_iter();
+    weighted_quantile_value(&distribution, probability).map(ToString::to_string)
+}
+
+fn weighted_quantile_value(
+    distribution: &WeightedDistribution,
+    probability: BigRational,
+) -> Result<&BigRational, StatisticsError> {
+    let target = bounded(&distribution.total * probability)?;
+    let mut values = distribution.weights.iter();
     let (last_value, _) = values.next_back().ok_or(StatisticsError::ZeroTotalWeight)?;
     let mut cumulative = BigRational::default();
     for (value, weight) in values {
         cumulative = bounded(cumulative + weight)?;
         if cumulative >= target {
-            return Ok(value.to_string());
+            return Ok(value);
         }
     }
-    Ok(last_value.to_string())
+    Ok(last_value)
+}
+
+fn weighted_quantiles_csv(input: &str) -> Result<String, StatisticsError> {
+    let (probabilities, values) = input
+        .strip_prefix('[')
+        .and_then(|input| input.split_once(']'))
+        .ok_or(StatisticsError::WeightedQuantileList)?;
+    let probabilities: Vec<_> = split_top_level_commas(probabilities)
+        .take(MAX_WEIGHTED_QUANTILES + 1)
+        .collect();
+    if probabilities.is_empty()
+        || probabilities.len() > MAX_WEIGHTED_QUANTILES
+        || probabilities.iter().any(|value| value.trim().is_empty())
+    {
+        return Err(StatisticsError::WeightedQuantileList);
+    }
+    let probabilities = probabilities
+        .into_iter()
+        .map(|value| parse_probability(value.trim()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let distribution = read_weighted_distribution(values.trim_start())?;
+    let mut csv = String::from("概率,分位数");
+    for probability in probabilities {
+        let label = probability.to_string();
+        let value = weighted_quantile_value(&distribution, probability)?.to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [label.as_str(), value.as_str()].into_iter(),
+            StatisticsError::WeightedReportTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 struct WeightedDistribution {
@@ -766,6 +811,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
             operation.as_str(),
             "频数csv"
                 | "frequency-csv"
+                | "加权分位表"
+                | "weighted-quantiles-csv"
                 | "累计分布"
                 | "cumulative-distribution"
                 | "ecdf"

@@ -5035,6 +5035,36 @@ mod tests {
     }
 
     #[test]
+    fn previews_multiple_weighted_quantiles_in_query_order_including_exact_boundaries() {
+        let output = "概率,分位数\r\n3/4,4\r\n0,1\r\n1/4,1\r\n1,4\r\n1/4,1";
+        for query in [
+            "统计: 加权分位表 [75% , 0,1/4, 100% ,0.25] 1@1,2@1,4@2,-1@0",
+            r#"处理: ["统计: WEIGHTED-QUANTILES-CSV [75%,0,1/4,1,0.25]"] 1@1,2@1,4@2,-1@0"#,
+        ] {
+            let results = for_query(query, &[]);
+            assert!(
+                matches!(
+                    &results,
+                    Results::Value(Ok(ResultValue {
+                        kind: ValueKind::Table(_),
+                        ..
+                    }))
+                ),
+                "{query}"
+            );
+            assert_eq!(results.refillable_text(), Some(output), "{query}");
+        }
+        assert_eq!(
+            calculate_statistics("加权分位表 [] 1@1"),
+            Err(StatisticsError::WeightedQuantileList)
+        );
+        assert_eq!(
+            calculate_statistics("加权分位表 [110%] 1@1"),
+            Err(StatisticsError::InvalidProbability)
+        );
+    }
+
+    #[test]
     fn named_csv_box_plot_ignores_missing_values_and_keeps_an_exact_summary() {
         let data = "编号,金额\nA,1\nB,2\nC,\nD,3\nE,4\nF,8";
         let results = for_query(&format!(r#"CSV: 列箱线图 "金额" {data}"#), &[]);
