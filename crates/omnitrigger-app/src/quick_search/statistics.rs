@@ -179,18 +179,13 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         ),
         operation @ ("累计次数" | "cumulative-count" | "累计频率" | "cumulative-frequency") =>
         {
-            let (threshold, input) = values
-                .split_once('@')
-                .filter(|(threshold, _)| !threshold.trim().is_empty())
-                .ok_or(StatisticsError::CumulativeThreshold)?;
-            let threshold =
-                calculate_fraction(threshold.trim()).map_err(StatisticsError::Evaluation)?;
+            let (threshold, input) = cumulative_arguments(values)?;
             (
                 StatisticsOperation::CumulativeAt {
                     threshold,
                     frequency: matches!(operation, "累计频率" | "cumulative-frequency"),
                 },
-                input.trim(),
+                input,
             )
         }
         "众数" | "mode" => (
@@ -242,6 +237,12 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             return weighted_variance(values.trim()).map(|variance| format_square_root(&variance));
         }
         "加权分位数" | "weighted-quantile" => return weighted_quantile(values.trim()),
+        "加权累计权重" | "weighted-cumulative-weight" => {
+            return weighted_cumulative_value(values, false);
+        }
+        "加权累计比例" | "weighted-cumulative-share" => {
+            return weighted_cumulative_value(values, true);
+        }
         "移动合计" | "moving-sum" => return moving_sum_or_average(values.trim(), false),
         "移动平均" | "moving-average" => return moving_sum_or_average(values.trim(), true),
         "移动样本方差" | "moving-sample-variance" => {
@@ -694,6 +695,32 @@ fn weighted_quantile(input: &str) -> Result<String, StatisticsError> {
 struct WeightedDistribution {
     weights: BTreeMap<BigRational, BigRational>,
     total: BigRational,
+}
+
+fn cumulative_arguments(input: &str) -> Result<(BigRational, &str), StatisticsError> {
+    let (threshold, values) = input
+        .split_once('@')
+        .filter(|(threshold, _)| !threshold.trim().is_empty())
+        .ok_or(StatisticsError::CumulativeThreshold)?;
+    let threshold = calculate_fraction(threshold.trim()).map_err(StatisticsError::Evaluation)?;
+    Ok((threshold, values.trim()))
+}
+
+fn weighted_cumulative_value(input: &str, as_share: bool) -> Result<String, StatisticsError> {
+    let (threshold, values) = cumulative_arguments(input)?;
+    let distribution = read_weighted_distribution(values)?;
+    let weight = distribution
+        .weights
+        .range(..=threshold)
+        .try_fold(BigRational::default(), |sum, (_, weight)| {
+            bounded(sum + weight)
+        })?;
+    let result = if as_share {
+        bounded(weight / distribution.total)?
+    } else {
+        weight
+    };
+    Ok(result.to_string())
 }
 
 fn read_weighted_distribution(input: &str) -> Result<WeightedDistribution, StatisticsError> {
@@ -2498,6 +2525,30 @@ mod tests {
         ] {
             assert_eq!(calculate_statistics(query).as_deref(), Ok(expected));
         }
+    }
+
+    #[test]
+    fn computes_exact_weight_and_share_at_a_threshold_including_equal_values() {
+        for (query, expected) in [
+            ("加权累计权重 2 @ 1@1,2@1/2,3@2", "3/2"),
+            ("加权累计比例 1+1 @ 1@1,2@1/2,3@2", "3/7"),
+            ("weighted-cumulative-share 0 @ 1@1,2@1/2,3@2", "0"),
+            ("weighted-cumulative-share 3 @ 1\t1\n2\t1/2\n3\t2", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("加权累计比例 @ 1@2"),
+            Err(StatisticsError::CumulativeThreshold)
+        );
+        assert_eq!(
+            calculate_statistics("加权累计权重 2 @ 1@0,2@0"),
+            Err(StatisticsError::ZeroTotalWeight)
+        );
     }
 
     #[test]
