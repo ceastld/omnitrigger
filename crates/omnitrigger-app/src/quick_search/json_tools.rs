@@ -182,6 +182,7 @@ enum JsonCsvOperation {
     Lines,
     Paths,
     LinePaths,
+    LineGroupCounts,
     ValidateLines,
     Differences,
     Leaves,
@@ -197,6 +198,7 @@ impl JsonCsvOperation {
             "行转csv" | "jsonl-to-csv" => Some(Self::Lines),
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "行路径转csv" | "jsonl-pointers-to-csv" => Some(Self::LinePaths),
+            "行分组计数csv" | "jsonl-group-counts-csv" => Some(Self::LineGroupCounts),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "对比csv" | "diff-csv" => Some(Self::Differences),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
@@ -215,6 +217,7 @@ impl JsonCsvOperation {
             | Self::Lines
             | Self::Paths
             | Self::LinePaths
+            | Self::LineGroupCounts
             | Self::ValidateLines
             | Self::Differences
             | Self::Leaves
@@ -234,6 +237,7 @@ impl JsonCsvOperation {
             Self::Lines => json_lines_to_csv(source),
             Self::Paths => json_paths_to_csv(source, read_json_array),
             Self::LinePaths => json_paths_to_csv(source, read_json_lines),
+            Self::LineGroupCounts => count_json_line_groups_csv(source),
             Self::ValidateLines => validate_json_lines_csv(source),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
             Self::Leaves => {
@@ -1176,6 +1180,34 @@ fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
     )
 }
 
+fn count_json_line_groups_csv(query: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let groups = collect_json_groups(
+        &pointer,
+        source,
+        read_json_lines,
+        |value| (value, 0usize),
+        |(_, count), _| {
+            *count += 1;
+            Ok(())
+        },
+    )?;
+    let mut output = String::from("值,类型,计数");
+    for (value, count) in groups {
+        append_bounded_csv_row(
+            &mut output,
+            [
+                value.get(),
+                json_type_name(value),
+                count.to_string().as_str(),
+            ]
+            .into_iter(),
+            JsonError::CsvOutputTooLarge,
+        )?;
+    }
+    Ok(output)
+}
+
 fn group_json_records(query: &str) -> Result<String, JsonError> {
     #[derive(serde::Serialize)]
     struct Group<'a> {
@@ -1214,7 +1246,7 @@ fn write_json_groups_from_query<'a, Group: serde::Serialize>(
     let groups = if multiple_paths {
         let (paths, source) = distinct_json_paths_and_source(query)?;
         collect_json_groups_by(
-            source,
+            read_json_array(source)?,
             |item| {
                 let mut key = Vec::with_capacity(paths.len());
                 let mut values = Vec::with_capacity(paths.len());
@@ -1233,6 +1265,7 @@ fn write_json_groups_from_query<'a, Group: serde::Serialize>(
         collect_json_groups(
             &pointer,
             source,
+            read_json_array,
             |value| create(JsonGroupValue::Scalar(value)),
             append,
         )?
@@ -1271,6 +1304,7 @@ fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
     let groups = collect_json_groups(
         group,
         source,
+        read_json_array,
         |value| Group {
             value,
             count: 0,
@@ -1324,6 +1358,7 @@ fn median_json_groups(query: &str) -> Result<String, JsonError> {
     let groups = collect_json_groups(
         group,
         source,
+        read_json_array,
         |value| (value, Vec::new()),
         |(_, numbers), item| {
             if numbers.len() == MAX_VALUES {
@@ -1356,12 +1391,13 @@ fn median_json_groups(query: &str) -> Result<String, JsonError> {
 fn collect_json_groups<'a, Group>(
     pointer: &str,
     source: &'a str,
+    read_items: fn(&str) -> Result<Vec<&RawValue>, JsonError>,
     create: impl Fn(&'a RawValue) -> Group,
     append: impl Fn(&mut Group, &'a RawValue) -> Result<(), JsonError>,
 ) -> Result<Vec<Group>, JsonError> {
     let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
     collect_json_groups_by(
-        source,
+        read_items(source)?,
         |item| {
             let value = select_pointer_keys(item, &keys)?;
             let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
@@ -1373,14 +1409,14 @@ fn collect_json_groups<'a, Group>(
 }
 
 fn collect_json_groups_by<'a, Key: Eq + std::hash::Hash, Value, Group>(
-    source: &'a str,
+    items: Vec<&'a RawValue>,
     key_for: impl Fn(&'a RawValue) -> Result<(Key, Value), JsonError>,
     create: impl Fn(Value) -> Group,
     append: impl Fn(&mut Group, &'a RawValue) -> Result<(), JsonError>,
 ) -> Result<Vec<Group>, JsonError> {
     let mut positions = HashMap::new();
     let mut groups = Vec::new();
-    for item in read_json_array(source)? {
+    for item in items {
         let (key, value) = key_for(item)?;
         let position = *positions.entry(key).or_insert_with(|| {
             let position = groups.len();
@@ -3614,6 +3650,24 @@ mod tests {
         assert_eq!(
             transform_json(r#"多路径查重复 ["/a","/b"] [{"a":1,"b":2},{"a":1}]"#),
             Err(JsonError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn counts_json_lines_by_exact_scalar_and_preserves_the_first_spelling() {
+        let source =
+            "{\"金额\":1.50}\r\n\r\n{\"金额\":\"1.5\"}\r\n{\"金额\":15e-1}\r\n{\"金额\":null}";
+        let query = format!("行分组计数CSV /金额\r\n{source}");
+        let expected = "值,类型,计数\r\n1.50,number,2\r\n\"\"\"1.5\"\"\",string,1\r\nnull,null,1";
+        assert_eq!(transform_json(&query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(&query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json(&format!("{query}\n{{}}")),
+            Err(JsonError::MissingValue)
+        );
+        assert_eq!(
+            transform_json(&format!("{query}\n{{\"金额\":[]}}")),
+            Err(JsonError::ExpectedScalar)
         );
     }
 
