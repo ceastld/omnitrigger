@@ -954,8 +954,6 @@ enum Operation {
         target: String,
         limit: usize,
     },
-    SortWithOrders(Vec<(ColumnReference, FieldSortOrder)>),
-    SortByTimestamps(Vec<ColumnReference>, bool),
 }
 
 #[derive(Deserialize)]
@@ -2453,24 +2451,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::Unpivot(columns, [label, value])
         }
-        "多列排序" | "sort-by-fields" => {
-            let (rules, data) = json_argument_and_data::<Vec<(ColumnReference, FieldSortOrder)>>(
-                input,
-                CsvError::SortFields,
-            )?;
-            if !(1..=MAX_SORT_FIELDS).contains(&rules.len()) {
-                return Err(CsvError::SortFields);
-            }
-            input = data;
-            Operation::SortWithOrders(rules)
-        }
-        "时间戳排序" | "sort-timestamps" | "时间戳降序" | "sort-timestamps-desc" => {
-            let (columns, data) =
-                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
-            input = data;
-            let descending = matches!(operation.as_str(), "时间戳降序" | "sort-timestamps-desc");
-            Operation::SortByTimestamps(columns, descending)
-        }
         _ => return Err(CsvError::UnknownOperation),
     };
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
@@ -2940,10 +2920,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             target,
             limit,
         } => nearest_point_rows(&rows, labels, &coordinates, &target, limit),
-        Operation::SortWithOrders(rules) => sort_with_orders(&rows, rules),
-        Operation::SortByTimestamps(columns, descending) => {
-            sort_by_timestamps(&rows, &columns, descending)
-        }
     }
 }
 
@@ -6821,15 +6797,12 @@ fn sort_csv_for_preview(
     Ok((write_rows(&rows, ','), rows))
 }
 
-fn sort_by_timestamps(
-    rows: &[Vec<String>],
-    columns: &[ColumnReference],
-    descending: bool,
-) -> Result<String, CsvError> {
-    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+fn sort_by_timestamps(input: &str, descending: bool) -> Result<CsvPreviewData, CsvError> {
+    let (columns, data) = column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+    let mut records = read_table_for_preview(data, ',')?.into_iter();
+    let header = records.next().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(&header, &columns, CsvError::NamedColumnArguments)?;
     let mut records = records
-        .iter()
         .enumerate()
         .map(|(index, row)| {
             let times = columns
@@ -6851,22 +6824,27 @@ fn sort_by_timestamps(
             left.cmp(right)
         }
     });
-    Ok(write_rows(
-        std::iter::once(header).chain(records.into_iter().map(|(_, row)| row)),
-        ',',
-    ))
+    let rows: Vec<_> = std::iter::once(header)
+        .chain(records.into_iter().map(|(_, row)| row))
+        .collect();
+    Ok((write_rows(&rows, ','), rows))
 }
 
-fn sort_with_orders(
-    rows: &[Vec<String>],
-    rules: Vec<(ColumnReference, FieldSortOrder)>,
-) -> Result<String, CsvError> {
-    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+fn sort_with_orders(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let (rules, data) = json_argument_and_data::<Vec<(ColumnReference, FieldSortOrder)>>(
+        input,
+        CsvError::SortFields,
+    )?;
+    if !(1..=MAX_SORT_FIELDS).contains(&rules.len()) {
+        return Err(CsvError::SortFields);
+    }
+    let mut records = read_table_for_preview(data, ',')?.into_iter();
+    let header = records.next().ok_or(CsvError::MissingInput)?;
     let mut seen = HashSet::new();
     let fields = rules
         .into_iter()
         .map(|(reference, order)| {
-            let column = reference.resolve(header)?;
+            let column = reference.resolve(&header)?;
             validate_column_width(&[column], header.len())?;
             if !seen.insert(column) {
                 return Err(CsvError::SortFields);
@@ -6874,7 +6852,7 @@ fn sort_with_orders(
             Ok((column, order))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut ordered: Vec<_> = records.iter().collect();
+    let mut ordered: Vec<_> = records.collect();
     for (column, order) in fields.into_iter().rev() {
         ordered = order_records(
             ordered.into_iter(),
@@ -6883,7 +6861,8 @@ fn sort_with_orders(
             order.numeric(),
         )?;
     }
-    Ok(write_rows(std::iter::once(header).chain(ordered), ','))
+    let rows: Vec<_> = std::iter::once(header).chain(ordered).collect();
+    Ok((write_rows(&rows, ','), rows))
 }
 
 fn order_records<Row: AsRef<[String]>>(
@@ -6957,6 +6936,19 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
         .find(|(name, alias, _, _)| operation == *name || operation.eq_ignore_ascii_case(alias))
     {
         return Some(sort_csv_for_preview(input, descending, numeric));
+    }
+    if operation == "多列排序" || operation.eq_ignore_ascii_case("sort-by-fields") {
+        return Some(sort_with_orders(input));
+    }
+    let timestamp_sorts = [
+        ("时间戳排序", "sort-timestamps", false),
+        ("时间戳降序", "sort-timestamps-desc", true),
+    ];
+    if let Some((_, _, descending)) = timestamp_sorts
+        .into_iter()
+        .find(|(name, alias, _)| operation == *name || operation.eq_ignore_ascii_case(alias))
+    {
+        return Some(sort_by_timestamps(input, descending));
     }
     if let Some(delimiter) = table_preview_delimiter(operation) {
         return Some(read_preview_output(input, delimiter));
@@ -10628,6 +10620,28 @@ mod tests {
             let (text, preview) = csv_table_preview(&query).unwrap().unwrap();
             assert_eq!(text, expected);
             assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+            assert_eq!(preview.column_pages(), 1);
+        }
+    }
+
+    #[test]
+    fn previews_timestamp_sorting_and_mixed_column_orders_with_original_values() {
+        let data = "编号,时间,组,金额\n慢,3600,甲10,2\n同一,1970-01-01T01:00:00+01:00,甲2,1.5\n同二,0,甲2,3/2\n高,-1,甲2,4";
+        for (operation, expected_order) in [
+            ("时间戳排序 [\"时间\"]", ["高", "同一", "同二", "慢"]),
+            ("SORT-TIMESTAMPS-DESC 2", ["慢", "同一", "同二", "高"]),
+            (
+                "多列排序 [[\"组\",\"文本升序\"],[\"金额\",\"数值降序\"]]",
+                ["高", "同一", "同二", "慢"],
+            ),
+        ] {
+            let query = format!("{operation} {data}");
+            let (csv, preview) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(transform_csv(&query).as_deref(), Ok(csv.as_str()));
+            let sorted = read_rows(&csv, ',').unwrap();
+            let names: Vec<_> = sorted.iter().skip(1).map(|row| row[0].as_str()).collect();
+            assert_eq!(names, expected_order);
+            assert!(sorted.iter().any(|row| row[3] == "3/2"));
             assert_eq!(preview.column_pages(), 1);
         }
     }
