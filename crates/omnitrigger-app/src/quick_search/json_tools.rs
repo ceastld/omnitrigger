@@ -285,7 +285,10 @@ pub(super) fn result_format(query: &str, output: &str) -> Option<JsonResultForma
 }
 
 fn is_json_lines_output(operation: &str) -> bool {
-    matches!(operation, "展开数组" | "to-jsonl")
+    matches!(
+        operation,
+        "展开数组" | "to-jsonl" | "行筛选" | "filter-jsonl" | "行任一筛选" | "filter-any-jsonl"
+    )
 }
 
 fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String, JsonError> {
@@ -313,8 +316,18 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "筛选" | "filter" => return filter_json_by_scalar(source, true),
         "排除" | "exclude" => return filter_json_by_scalar(source, false),
         "数值筛选" | "filter-numeric" => return filter_json_numbers(source),
-        "多条件筛选" | "filter-all" => return filter_json_conditions(source, true),
-        "任一条件筛选" | "filter-any" => return filter_json_conditions(source, false),
+        "多条件筛选" | "filter-all" => {
+            return filter_json_conditions(source, true, ConditionRecords::Array)
+        }
+        "任一条件筛选" | "filter-any" => {
+            return filter_json_conditions(source, false, ConditionRecords::Array)
+        }
+        "行筛选" | "filter-jsonl" => {
+            return filter_json_conditions(source, true, ConditionRecords::Lines)
+        }
+        "行任一筛选" | "filter-any-jsonl" => {
+            return filter_json_conditions(source, false, ConditionRecords::Lines)
+        }
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "多路径去重" | "unique-by-pointers" => return match_json_by_pointers(source, false),
         "多路径查重复" | "duplicates-by-pointers" => {
@@ -332,7 +345,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "结构统计" | "structure-stats" => return json_structure_stats(source),
-        operation if is_json_lines_output(operation) => return json_array_to_lines(source),
+        "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
         "校验行" | "validate-jsonl" => return validate_json_lines(raw_source),
         "合并对象" | "merge-objects" => return merge_json_objects(source),
@@ -1020,7 +1033,16 @@ impl JsonCondition {
     }
 }
 
-fn filter_json_conditions(query: &str, match_all: bool) -> Result<String, JsonError> {
+enum ConditionRecords {
+    Array,
+    Lines,
+}
+
+fn filter_json_conditions(
+    query: &str,
+    match_all: bool,
+    records: ConditionRecords,
+) -> Result<String, JsonError> {
     let (input, source) = json_value_and_source(query, JsonError::FilterConditions)?;
     let conditions = serde_json::from_str::<Vec<(String, String, &RawValue)>>(input.get())
         .map_err(|_| JsonError::FilterConditions)?;
@@ -1048,7 +1070,7 @@ fn filter_json_conditions(query: &str, match_all: bool) -> Result<String, JsonEr
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    retain_json_items(read_json_array(source)?, |item| {
+    let keep = |item: &RawValue| {
         for condition in &conditions {
             let matches = condition.matches(item)?;
             if matches != match_all {
@@ -1056,7 +1078,20 @@ fn filter_json_conditions(query: &str, match_all: bool) -> Result<String, JsonEr
             }
         }
         Ok(match_all)
-    })
+    };
+    match records {
+        ConditionRecords::Array => retain_json_items(read_json_array(source)?, keep),
+        ConditionRecords::Lines => {
+            let mut matched = Vec::new();
+            for (_, line) in json_lines(source) {
+                let item = parse_json_line(line)?;
+                if keep(item)? {
+                    matched.push(item.get());
+                }
+            }
+            Ok(matched.join("\n"))
+        }
+    }
 }
 
 fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
@@ -3579,6 +3614,36 @@ mod tests {
         assert_eq!(
             transform_json(r#"多路径查重复 ["/a","/b"] [{"a":1,"b":2},{"a":1}]"#),
             Err(JsonError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn filters_json_lines_without_rounding_or_converting_records_to_an_array() {
+        let conditions = r#"[["/状态","=","完成"],["/金额",">=",9007199254740993]]"#;
+        let first = r#"{"编号":"001", "状态":"完成","金额":9007199254740993.00}"#;
+        let second = r#"{"编号":"002","状态":"完成","金额":9007199254740992.99}"#;
+        let third = r#"{"编号":"003","状态":"待办","金额":9007199254740994}"#;
+        let source = format!(
+            "{first}\r\n\r\n  {second}\r\n{third}\r\n{}",
+            r#"{"编号":"004","金额":"9007199254740993"}"#
+        );
+        let all = format!("行筛选 {conditions}\n{source}");
+        assert_eq!(transform_json(&all).as_deref(), Ok(first));
+        assert!(matches!(
+            result_format(&all, first),
+            Some(JsonResultFormat::JsonLines)
+        ));
+        assert_eq!(
+            transform_json(&format!("filter-any-jsonl {conditions} {source}")),
+            Ok(format!("{first}\n{second}\n{third}"))
+        );
+        assert_eq!(
+            transform_json(&format!("行筛选 {conditions}\n{source}\n{{")),
+            Err(JsonError::InvalidLine)
+        );
+        assert_eq!(
+            transform_json(&format!(r#"行筛选 {conditions} {{"状态":"待办"}}"#)),
+            Ok(String::new())
         );
     }
 

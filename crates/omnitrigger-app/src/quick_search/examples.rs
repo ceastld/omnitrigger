@@ -33,6 +33,10 @@ impl Example {
                     | "pointers-to-csv"
                     | "行路径转csv"
                     | "jsonl-pointers-to-csv"
+                    | "行筛选"
+                    | "filter-jsonl"
+                    | "行任一筛选"
+                    | "filter-any-jsonl"
                     | "多条件筛选"
                     | "filter-all"
                     | "任一条件筛选"
@@ -54,9 +58,12 @@ impl Example {
         }
         let has_data = if scope == Scope::Json {
             match operation.as_str() {
-                "行路径转csv" | "jsonl-pointers-to-csv" => {
-                    read_json_lines(data).is_ok_and(|rows| !rows.is_empty())
-                }
+                "行路径转csv"
+                | "jsonl-pointers-to-csv"
+                | "行筛选"
+                | "filter-jsonl"
+                | "行任一筛选"
+                | "filter-any-jsonl" => read_json_lines(data).is_ok_and(|rows| !rows.is_empty()),
                 _ => serde_json::from_str::<&serde_json::value::RawValue>(data).is_ok(),
             }
         } else {
@@ -4015,6 +4022,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "筛选同时满足条件的逐行 JSON",
+        query: "JSON: 行筛选 [[\"/状态\",\"=\",\"完成\"],[\"/金额\",\">=\",1.5]]\n{\"编号\":\"001\",\"状态\":\"完成\",\"金额\":1.50}\n{\"编号\":\"002\",\"状态\":\"待办\",\"金额\":2}\n{\"编号\":\"003\",\"状态\":\"完成\",\"金额\":1.49}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "筛选满足任一条件的逐行 JSON",
+        query: "JSON: 行任一筛选 [[\"/状态\",\"=\",\"完成\"],[\"/金额\",\">=\",1.5]]\n{\"编号\":\"001\",\"状态\":\"完成\",\"金额\":1.50}\n{\"编号\":\"002\",\"状态\":\"待办\",\"金额\":2}\n{\"编号\":\"003\",\"状态\":\"待办\",\"金额\":1.49}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定顺序选出 JSON 对象的字段",
         query: r#"JSON: 选键 ["编号","状态"] [{"状态":true,"编号":"001","备注":"茶"},{"编号":"002"}]"#,
     },
@@ -6629,6 +6646,10 @@ mod tests {
             (
                 "JSON: 行路径转CSV [\"/金额\"]\n{\"金额\":1.50}\n{\"金额\":0}",
                 Some("{\"金额\":1.50}\n{\"金额\":0}"),
+            ),
+            (
+                "JSON: 行筛选 [[\"/x\",\"=\",1]]\n{\"x\":1}\n{\"x\":2}",
+                Some("{\"x\":1}\n{\"x\":2}"),
             ),
             (
                 r#"JSON: 多条件筛选 [["/x","=",1]] [{"x":1},{"x":2}]"#,
