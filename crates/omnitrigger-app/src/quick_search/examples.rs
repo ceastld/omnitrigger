@@ -5471,6 +5471,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 分组数值摘要 [\"地区\"] \"金额\" 地区,金额\n南,1/2\n北,待定\n南,2\n北,",
     },
     Example {
+        icon: Icon::Layers,
+        title: "按组预览金额的精确分位数",
+        query: "CSV: 分组分位表 [[\"地区\"],\"金额\",[\"25%\",\"50%\"]] 地区,金额\n南,1/2\n北,10\n南,2\n西,",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按列名查看箱线图，跳过空白单元格",
         query: "CSV: 列箱线图 \"金额\" 编号,金额\nA,1\nB,2\nC,\nD,3\nE,4\nF,8",

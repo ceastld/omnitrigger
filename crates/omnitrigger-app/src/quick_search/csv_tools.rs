@@ -287,6 +287,7 @@ pub(super) enum CsvError {
     WeightedGroupArguments,
     WeightedFrequencyArguments,
     WeightedQuantileArguments,
+    GroupQuantileArguments,
     Statistics(StatisticsError),
     Serialization,
     JsonNumericCells,
@@ -628,6 +629,7 @@ impl CsvError {
             Self::WeightedGroupArguments => "依次填写分组列、数值列和权重列，例如 [[\"地区\"],\"成绩\",\"权重\"]",
             Self::WeightedFrequencyArguments => "填写分组列和权重列，例如 [[\"地区\",\"状态\"],\"权重\"]",
             Self::WeightedQuantileArguments => "填写数值列、权重列和概率列表，例如 [\"金额\",\"权重\",[\"25%\",0.5]]",
+            Self::GroupQuantileArguments => "填写分组列、数值列和概率列表，例如 [[\"地区\"],\"金额\",[\"25%\",0.5]]",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
             Self::JsonNumericCells => "所选列须为 JSON 数字或空白，例如 1.50 或 2e0",
@@ -7191,6 +7193,9 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "加权分位表" || operation.eq_ignore_ascii_case("weighted-quantiles-csv") {
         return Some(csv_weighted_quantiles(input));
     }
+    if operation == "分组分位表" || operation.eq_ignore_ascii_case("group-quantiles") {
+        return Some(csv_grouped_quantiles(input));
+    }
     if operation == "分组加权频数" || operation.eq_ignore_ascii_case("group-weighted-frequency")
     {
         return Some(csv_grouped_weighted_frequency(input));
@@ -7742,13 +7747,7 @@ fn csv_weighted_quantiles(input: &str) -> Result<CsvPreviewData, CsvError> {
         json_argument_and_data::<(ColumnReference, ColumnReference, Vec<Box<RawValue>>)>(
             input, invalid,
         )?;
-    if !(1..=MAX_WEIGHTED_QUANTILES).contains(&probabilities.len()) {
-        return Err(CsvError::Statistics(StatisticsError::WeightedQuantileList));
-    }
-    let probabilities = probabilities
-        .iter()
-        .map(|probability| csv_probability(probability, invalid))
-        .collect::<Result<_, _>>()?;
+    let probabilities = csv_quantile_probabilities(&probabilities, invalid)?;
     let rows = read_table_for_preview(data, ',')?;
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let [value, weight] = resolve_weighted_columns(header, [value, weight])?;
@@ -7773,6 +7772,84 @@ fn csv_weighted_quantiles(input: &str) -> Result<CsvPreviewData, CsvError> {
     let csv = distribution
         .quantiles_csv(probabilities)
         .map_err(CsvError::Statistics)?;
+    let rows = read_table_for_preview(&csv, ',')?;
+    Ok((csv, rows))
+}
+
+fn csv_quantile_probabilities(
+    probabilities: &[Box<RawValue>],
+    invalid: CsvError,
+) -> Result<Vec<BigRational>, CsvError> {
+    if !(1..=MAX_WEIGHTED_QUANTILES).contains(&probabilities.len()) {
+        return Err(CsvError::Statistics(StatisticsError::WeightedQuantileList));
+    }
+    probabilities
+        .iter()
+        .map(|probability| csv_probability(probability, invalid))
+        .collect()
+}
+
+fn csv_grouped_quantiles(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let invalid = CsvError::GroupQuantileArguments;
+    let ((groups, value, probabilities), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, ColumnReference, Vec<Box<RawValue>>)>(
+            input, invalid,
+        )?;
+    let probabilities = csv_quantile_probabilities(&probabilities, invalid)?;
+    let probability_labels: Vec<_> = probabilities.iter().map(ToString::to_string).collect();
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let value = value.resolve(header)?;
+    validate_column_width(&[value], header.len())?;
+
+    let mut csv = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(
+        &mut csv,
+        groups
+            .iter()
+            .map(|&index| header[index].as_str())
+            .chain(["概率", "分位数"]),
+        limit,
+    )?;
+    for group in grouped_row_positions(records, &groups) {
+        let mut numbers = Vec::new();
+        for &index in &group {
+            let cell = records[index][value].trim();
+            if cell.is_empty() {
+                continue;
+            }
+            let at_row = |cause| CsvError::DataRowValue {
+                row: index + 1,
+                cause,
+            };
+            if numbers.len() == MAX_VALUES {
+                return Err(at_row(StatisticsError::TooManyValues.message()));
+            }
+            numbers.push(parse_fraction_literal(cell).map_err(|error| at_row(error.message()))?);
+        }
+        numbers.sort_unstable();
+        let key = column_key(&records[group[0]], &groups);
+        for (probability, label) in probabilities.iter().zip(&probability_labels) {
+            let quantile = if numbers.is_empty() {
+                String::new()
+            } else {
+                interpolate_ordered_quantile(numbers.len() as u64, probability, |rank| {
+                    &numbers[rank as usize]
+                })
+                .map_err(CsvError::Statistics)?
+                .to_string()
+            };
+            append_bounded_csv_row(
+                &mut csv,
+                key.iter()
+                    .copied()
+                    .chain([label.as_str(), quantile.as_str()]),
+                limit,
+            )?;
+        }
+    }
     let rows = read_table_for_preview(&csv, ',')?;
     Ok((csv, rows))
 }
@@ -11390,6 +11467,36 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("搜索行 \"\" {data}")),
             Ok(write_rows(&rows, ','))
+        );
+    }
+
+    #[test]
+    fn reports_exact_csv_quantiles_per_group_and_keeps_empty_groups() {
+        let query = "分组分位表 [[\"地区\",2],\"金额\",[\"25%\",0.5,\"3/4\"]] 地区,状态,金额\n南,完成,1/2\n北,完成,10\n南,完成,2\n南,完成,\n西,待办,";
+        let expected = "地区,状态,概率,分位数\r\n南,完成,1/4,7/8\r\n南,完成,1/2,5/4\r\n南,完成,3/4,13/8\r\n北,完成,1/4,10\r\n北,完成,1/2,10\r\n北,完成,3/4,10\r\n西,待办,1/4,\"\"\r\n西,待办,1/2,\"\"\r\n西,待办,3/4,\"\"";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(query).expect("分组分位表可预览").unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv("group-quantiles [[],2,[1,0,0.5]] 地区,金额\n南,2\n北,8\n西,5")
+                .as_deref(),
+            Ok("概率,分位数\r\n1,8\r\n0,2\r\n1/2,5"),
+        );
+        assert_eq!(
+            transform_csv("分组分位表 [[1],2,[0]] 地区,金额").as_deref(),
+            Ok("地区,概率,分位数"),
+        );
+        assert!(matches!(
+            transform_csv("分组分位表 [[1],2,[0.5]] 地区,金额\n南,1\n北,\n南,待定"),
+            Err(CsvError::DataRowValue { row: 3, .. }),
+        ));
+        assert_eq!(
+            transform_csv("分组分位表 [[1,\"地区\"],2,[0.5]] 地区,金额\n南,1"),
+            Err(CsvError::GroupingColumns),
+        );
+        assert_eq!(
+            transform_csv("分组分位表 [[1],2,[]] 地区,金额\n南,1"),
+            Err(CsvError::Statistics(StatisticsError::WeightedQuantileList)),
         );
     }
 
