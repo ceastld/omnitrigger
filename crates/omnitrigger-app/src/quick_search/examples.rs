@@ -4713,6 +4713,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查找关键词在表格中的行号、列号和原文",
+        query: "CSV: 命中位置 [\"north\",\"茶\"] 区域,备注\nＮｏｒｔｈ,茶 North\n南区,米",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按状态和精确金额筛选 CSV 行",
         query: "CSV: 多条件筛选 [[\"状态\",\"文本=\",\"完成\"],[3,\">=\",\"3/2\"]] 编号,状态,金额\n001,完成,1.50\n002,待确认,2e0\n003,完成,1",
     },

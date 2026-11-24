@@ -6985,33 +6985,101 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "搜索行" || operation.eq_ignore_ascii_case("search-rows") {
         return Some(search_csv_rows(input).map(|rows| (write_rows(&rows, ','), rows)));
     }
+    if operation == "命中位置" || operation.eq_ignore_ascii_case("keyword-positions") {
+        return Some(csv_keyword_positions(input));
+    }
     table_preview_delimiter(operation).map(|delimiter| read_preview_output(input, delimiter))
 }
 
-fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+struct CsvKeyword {
+    original: String,
+    key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CsvKeywordArgument {
+    One(String),
+    List(Vec<String>),
+}
+
+fn read_csv_keywords(input: &str) -> Result<(Vec<CsvKeyword>, &str), CsvError> {
     let invalid = CsvError::SearchRowKeywords;
-    let (keywords, data) = json_argument_and_data::<Vec<String>>(input, invalid)?;
+    let (argument, data) = json_argument_and_data::<CsvKeywordArgument>(input, invalid)?;
+    let keywords = match argument {
+        CsvKeywordArgument::One(word) => vec![word],
+        CsvKeywordArgument::List(words) => words,
+    };
     if !(1..=MAX_FILTER_CONDITIONS).contains(&keywords.len())
         || keywords.iter().any(|word| word.trim().is_empty())
     {
         return Err(invalid);
     }
-    let fold = |text: &str| {
-        text.chars()
-            .map(|ch| narrow_ascii_graphic(ch).to_ascii_lowercase())
-            .collect::<String>()
-    };
-    let keywords: Vec<_> = keywords.iter().map(|word| fold(word)).collect();
+    let keywords = keywords
+        .into_iter()
+        .map(|original| CsvKeyword {
+            key: csv_keyword_key(&original),
+            original,
+        })
+        .collect();
+    Ok((keywords, data))
+}
+
+fn csv_keyword_key(text: &str) -> String {
+    text.chars()
+        .map(|ch| narrow_ascii_graphic(ch).to_ascii_lowercase())
+        .collect()
+}
+
+fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+    let (keywords, data) = read_csv_keywords(input)?;
     let mut rows = read_table_for_preview(data, ',')?.into_iter();
     let header = rows.next().ok_or(CsvError::MissingInput)?;
     Ok(std::iter::once(header)
         .chain(rows.filter(|row| {
-            let cells: Vec<_> = row.iter().map(|cell| fold(cell)).collect();
+            let cells: Vec<_> = row.iter().map(|cell| csv_keyword_key(cell)).collect();
             keywords
                 .iter()
-                .all(|word| cells.iter().any(|cell| cell.contains(word.as_str())))
+                .all(|word| cells.iter().any(|cell| cell.contains(word.key.as_str())))
         }))
         .collect())
+}
+
+fn csv_keyword_positions(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let (keywords, data) = read_csv_keywords(input)?;
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = ["数据行号", "列号", "列名", "关键词", "内容"];
+    let mut csv = columns.join(",");
+    let mut matches_table = vec![columns.map(str::to_owned).to_vec()];
+    for (record, row) in records.iter().enumerate() {
+        for (column, cell) in row.iter().enumerate() {
+            let key = csv_keyword_key(cell);
+            let matches: Vec<_> = keywords
+                .iter()
+                .filter(|keyword| key.contains(keyword.key.as_str()))
+                .map(|keyword| keyword.original.as_str())
+                .collect();
+            if matches.is_empty() {
+                continue;
+            }
+            let matched = serde_json::to_string(&matches).map_err(|_| CsvError::Serialization)?;
+            let fields = vec![
+                (record + 1).to_string(),
+                (column + 1).to_string(),
+                header[column].clone(),
+                matched,
+                cell.clone(),
+            ];
+            append_bounded_csv_row(
+                &mut csv,
+                fields.iter().map(String::as_str),
+                CsvError::StatisticsOutputTooLarge,
+            )?;
+            matches_table.push(fields);
+        }
+    }
+    Ok((csv, matches_table))
 }
 
 fn table_preview_delimiter(operation: &str) -> Option<char> {
@@ -10447,6 +10515,26 @@ mod tests {
         assert_eq!(
             transform_csv(r#"筛选 3 "值" a,b"#),
             Err(CsvError::ColumnOutOfRange)
+        );
+    }
+
+    #[test]
+    fn reports_matching_columns_and_original_keywords_for_each_csv_cell() {
+        let query = "命中位置 [\"north\",\"茶\"] 地区,备注\nＮｏｒｔｈ,\"茶 North\r\n冰\"\n南区,米";
+        let (csv, preview) = csv_table_preview(query).unwrap().unwrap();
+        assert_eq!(transform_csv(query).as_deref(), Ok(csv.as_str()));
+        let rows = read_rows(&csv, ',').unwrap();
+        assert_eq!(rows[0], ["数据行号", "列号", "列名", "关键词", "内容"]);
+        assert_eq!(rows[1], ["1", "1", "地区", "[\"north\"]", "Ｎｏｒｔｈ"]);
+        assert_eq!(
+            rows[2],
+            ["1", "2", "备注", "[\"north\",\"茶\"]", "茶 North\r\n冰"]
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(preview.row_pages(), 1);
+        assert_eq!(
+            transform_csv("keyword-positions \"茶\" 地区,备注\n南区,米").as_deref(),
+            Ok("数据行号,列号,列名,关键词,内容")
         );
     }
 
