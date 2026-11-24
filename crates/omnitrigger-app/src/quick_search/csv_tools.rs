@@ -249,6 +249,7 @@ pub(super) enum CsvError {
     CoordinateVariationPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
+    CoordinateThresholdSpanPointCount,
     CoordinateDifferenceArguments,
     CoordinateDifferencePointCount,
     CoordinateDifferenceNoOverlap,
@@ -554,6 +555,7 @@ impl CsvError {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
             Self::CoordinateCrossingPointCount => "水平交点需要 2 至 64 行同时含 x 和 y 的数据",
+            Self::CoordinateThresholdSpanPointCount => "超阈跨度需要 2 至 64 个完整样点",
             Self::CoordinateDifferenceArguments => {
                 "填写横坐标列、两条曲线的值列及新的差值列名，例如 [[\"时间\",\"实测\",\"基准\"],\"差值\"]"
             }
@@ -1170,6 +1172,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return table.to_csv();
         }
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
+        "超阈跨度" | "span-above-threshold" => return coordinate_span_above_threshold(input),
         "曲线差值" | "curve-difference" | "曲线对比图" | "curve-comparison-plot" => {
             let (curves, name) = read_coordinate_curve_comparison(input)?;
             return curves.to_csv(&name);
@@ -5644,20 +5647,45 @@ fn coordinate_argument(raw: &RawValue, invalid: CsvError) -> Result<BigRational,
     parse_fraction_literal(&text).map_err(|_| invalid)
 }
 
-fn coordinate_horizontal_crossings(input: &str) -> Result<String, CsvError> {
+fn read_coordinate_level(
+    input: &str,
+    point_count_error: CsvError,
+) -> Result<(CsvCoordinates, BigRational), CsvError> {
     let invalid = CsvError::CoordinateCrossingArguments;
     let ((columns, target), data) =
         json_argument_and_data::<([ColumnReference; 2], Box<RawValue>)>(input, invalid)?;
     let target = coordinate_argument(&target, invalid)?;
-    let mut table = read_coordinate_table(
-        data,
-        &columns,
-        invalid,
-        CsvError::CoordinateCrossingPointCount,
-    )?;
+    let mut table = read_coordinate_table(data, &columns, invalid, point_count_error)?;
     sort_distinct_coordinates(&mut table.samples)?;
+    Ok((table, target))
+}
 
+fn coordinate_horizontal_crossings(input: &str) -> Result<String, CsvError> {
+    let (table, target) = read_coordinate_level(input, CsvError::CoordinateCrossingPointCount)?;
     horizontal_crossings_csv(&table.samples, &target)
+}
+
+fn coordinate_span_above_threshold(input: &str) -> Result<String, CsvError> {
+    let (table, target) =
+        read_coordinate_level(input, CsvError::CoordinateThresholdSpanPointCount)?;
+    let mut total = BigRational::default();
+    for pair in table.samples.windows(2) {
+        let (left_x, left_y) = &pair[0].point;
+        let (right_x, right_y) = &pair[1].point;
+        let high = left_y.max(right_y);
+        if high <= &target {
+            continue;
+        }
+        let width = right_x - left_x;
+        let low = left_y.min(right_y);
+        total += if low >= &target {
+            width
+        } else {
+            width * (high - &target) / (high - low)
+        };
+        ensure_exact_size(&total).map_err(|_| CsvError::ComputedNumberRange)?;
+    }
+    Ok(total.to_string())
 }
 
 fn horizontal_crossings_csv(
@@ -8030,6 +8058,23 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("等距插值 [[1,2],65] {data}")),
             Err(CsvError::CoordinateResampleArguments)
+        );
+    }
+
+    #[test]
+    fn sums_exact_horizontal_spans_strictly_above_the_requested_level() {
+        let data = "x,y\n6,-1\n2,1\n4,1\n3,\n0,-1";
+        assert_eq!(
+            transform_csv(&format!("超阈跨度 [[1,2],0] {data}")).as_deref(),
+            Ok("4")
+        );
+        assert_eq!(
+            transform_csv(&format!("span-above-threshold [[1,2],\"1/2\"] {data}")).as_deref(),
+            Ok("3")
+        );
+        assert_eq!(
+            transform_csv("超阈跨度 [[1,2],0] x,y\n0,0\n2,0\n3,1\n4,0").as_deref(),
+            Ok("2")
         );
     }
 
