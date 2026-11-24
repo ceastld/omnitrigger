@@ -44,6 +44,10 @@ pub(super) enum StatisticsError {
     BinomialDistributionArguments,
     BinomialQuantileArguments,
     NegativeBinomialArguments,
+    NegativeBinomialSummaryArguments,
+    NegativeBinomialQuantileArguments,
+    NegativeBinomialQuantileUnbounded,
+    NegativeBinomialQuantileLimit,
     ProbabilityTableTooLarge,
     GeometricArguments,
     GeometricSummaryArguments,
@@ -95,6 +99,14 @@ impl StatisticsError {
             Self::NegativeBinomialArguments => {
                 "依次填写目标成功次数、试验总次数和单次成功概率，例如 3,5,50%。次数为 1 至 128，概率须大于零"
             }
+            Self::NegativeBinomialSummaryArguments => {
+                "依次填写 1 至 128 次目标成功次数和单次成功概率，例如 3,50%"
+            }
+            Self::NegativeBinomialQuantileArguments => {
+                "依次填写目标成功次数、单次成功概率和目标累计概率，例如 3,50%,75%"
+            }
+            Self::NegativeBinomialQuantileUnbounded => "单次成功概率小于 1 时，有限次试验的累计概率达不到 100%",
+            Self::NegativeBinomialQuantileLimit => "128 次试验内达不到给定累计概率",
             Self::ProbabilityTableTooLarge => "概率表超过 CSV 输出上限",
             Self::GeometricArguments => {
                 "用逗号填写试验次数和单次成功概率，例如 3,25%。次数为 1 至 1024，概率须大于零"
@@ -323,6 +335,12 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "负二项至少" | "negative-binomial-at-least" => {
             return negative_binomial_probability(values, DiscreteEvent::AtLeast)
+        }
+        "负二项摘要" | "negative-binomial-summary" => {
+            return negative_binomial_summary(values)
+        }
+        "负二项分位点" | "negative-binomial-quantile" => {
+            return negative_binomial_quantile(values)
         }
         "几何概率" | "geometric" => return geometric_probability(values, false),
         "几何累计" | "geometric-cdf" => return geometric_probability(values, true),
@@ -1531,12 +1549,9 @@ fn negative_binomial_probability(
     else {
         return Err(invalid);
     };
-    let target = binomial_trial_count(target, invalid)?;
-    let trials = binomial_trial_count(trials, invalid)?;
-    let probability = parse_probability(probability)?;
-    if target == 0 || trials == 0 || probability.numer().sign() == Sign::NoSign {
-        return Err(invalid);
-    }
+    let target = positive_binomial_trial_count(target, invalid)?;
+    let trials = positive_binomial_trial_count(trials, invalid)?;
+    let probability = positive_trial_probability(probability, invalid)?;
     if trials < target {
         return Ok(u8::from(matches!(event, DiscreteEvent::AtLeast)).to_string());
     }
@@ -1554,6 +1569,78 @@ fn negative_binomial_probability(
         }
     };
     Ok(bounded(result)?.to_string())
+}
+
+fn negative_binomial_summary(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::NegativeBinomialSummaryArguments;
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(target), Some(probability), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(invalid);
+    };
+    let target = positive_binomial_trial_count(target, invalid)?;
+    let probability = positive_trial_probability(probability, invalid)?;
+    waiting_trial_summary(target, probability)
+}
+
+fn negative_binomial_quantile(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::NegativeBinomialQuantileArguments;
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(target), Some(probability), Some(level), None) =
+        (terms.next(), terms.next(), terms.next(), terms.next())
+    else {
+        return Err(invalid);
+    };
+    let target = positive_binomial_trial_count(target, invalid)?;
+    let probability = positive_trial_probability(probability, invalid)?;
+    let level = parse_probability(level)?;
+    let one = BigRational::from_integer(1.into());
+    if probability == one || level.numer().sign() == Sign::NoSign {
+        return Ok(target.to_string());
+    }
+    if level == one {
+        return Err(StatisticsError::NegativeBinomialQuantileUnbounded);
+    }
+    let failures = &one - &probability;
+    let mut mass = rational_power(probability, BigRational::from_integer(target.into()))
+        .map_err(StatisticsError::Evaluation)?;
+    let mut cumulative = mass.clone();
+    for trials in target..=MAX_BINOMIAL_TRIALS {
+        if cumulative >= level {
+            return Ok(trials.to_string());
+        }
+        if trials < MAX_BINOMIAL_TRIALS {
+            // 相邻两项的组合数比值为 n/(n-r+1)。
+            mass = bounded(
+                mass * &failures * BigInt::from(trials) / BigInt::from(trials - target + 1),
+            )?;
+            cumulative = bounded(cumulative + &mass)?;
+        }
+    }
+    Err(StatisticsError::NegativeBinomialQuantileLimit)
+}
+
+fn positive_binomial_trial_count(
+    input: &str,
+    invalid: StatisticsError,
+) -> Result<u32, StatisticsError> {
+    let count = binomial_trial_count(input, invalid)?;
+    if count == 0 {
+        Err(invalid)
+    } else {
+        Ok(count)
+    }
+}
+
+fn positive_trial_probability(
+    input: &str,
+    invalid: StatisticsError,
+) -> Result<BigRational, StatisticsError> {
+    let probability = parse_probability(input)?;
+    if probability.numer().sign() == Sign::NoSign {
+        Err(invalid)
+    } else {
+        Ok(probability)
+    }
 }
 
 fn binomial_trial_count(input: &str, invalid: StatisticsError) -> Result<u32, StatisticsError> {
@@ -1733,13 +1820,16 @@ fn geometric_probability(input: &str, cumulative: bool) -> Result<String, Statis
 }
 
 fn geometric_summary(input: &str) -> Result<String, StatisticsError> {
-    let probability = parse_probability(input.trim())?;
-    if probability.numer().sign() == Sign::NoSign {
-        return Err(StatisticsError::GeometricSummaryArguments);
-    }
-    let expectation = probability.recip();
+    let probability =
+        positive_trial_probability(input.trim(), StatisticsError::GeometricSummaryArguments)?;
+    waiting_trial_summary(1, probability)
+}
+
+fn waiting_trial_summary(target: u32, probability: BigRational) -> Result<String, StatisticsError> {
+    let inverse = probability.recip();
+    let expectation = &inverse * BigInt::from(target);
     let one = BigRational::from_integer(1.into());
-    let variance = &expectation * (&expectation - one);
+    let variance = &expectation * (inverse - one);
     summarize_probability_distribution(expectation, variance)
 }
 
@@ -2320,6 +2410,48 @@ mod tests {
             calculate_statistics("二项概率表 129,1/3"),
             Err(StatisticsError::BinomialDistributionArguments)
         );
+    }
+
+    #[test]
+    fn summarizes_and_finds_exact_quantiles_for_a_target_success_count() {
+        for (query, expected) in [
+            ("负二项摘要 3,50%", "期望 6 · 方差 6 · 标准差 √6"),
+            (
+                "negative-binomial-summary 3,100%",
+                "期望 3 · 方差 0 · 标准差 0",
+            ),
+            ("负二项分位点 3,50%,50%", "5"),
+            ("negative-binomial-quantile 3,50%,75%", "7"),
+            ("负二项分位点 1,25%,60%", "4"),
+            ("负二项分位点 3,50%,0%", "3"),
+            ("负二项分位点 3,100%,100%", "3"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            (
+                "负二项分位点 3,50%,100%",
+                StatisticsError::NegativeBinomialQuantileUnbounded,
+            ),
+            (
+                "负二项分位点 1,1/1000,50%",
+                StatisticsError::NegativeBinomialQuantileLimit,
+            ),
+            (
+                "负二项分位点 0,50%,50%",
+                StatisticsError::NegativeBinomialQuantileArguments,
+            ),
+            (
+                "负二项摘要 3,0",
+                StatisticsError::NegativeBinomialSummaryArguments,
+            ),
+        ] {
+            assert_eq!(calculate_statistics(query), Err(error), "{query}");
+        }
     }
 
     #[test]
