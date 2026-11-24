@@ -5955,6 +5955,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "降序",
         ],
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
+        Scope::Statistics => &["加权平均", "加权分位数", "加权累积分布"],
         Scope::Decibel => &[
             "功率比",
             "幅度比",
@@ -6160,6 +6161,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
+            if !term.is_empty()
+                && replaceable_tool_operations(scope)
+                    .iter()
+                    .any(|operation| operation.starts_with(term)) => {}
+        Scope::Statistics
             if matches!(
                 term,
                 "频" | "频数"
@@ -6176,8 +6182,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "中位绝对偏"
                     | "中位绝对偏差"
                     | "平均绝对偏差"
-                    | "加权"
-                    | "加权平均"
                     | "移"
                     | "移动"
                     | "移动平"
@@ -6457,11 +6461,17 @@ mod tests {
             (Scope::Json, "改键", "改键 ["),
             (Scope::Date, "月末", "月末序列 2024-01,3"),
             (Scope::Statistics, "箱线", "箱线摘要 1,2,3"),
+            (Scope::Statistics, "加权分位数", "加权分位数 60%"),
+            (Scope::Statistics, "加权累积", "加权累积分布 1@2"),
             (Scope::LinearFit, "多项", "多项式 2"),
             (Scope::TextTools, "取列", "取列 \"x\""),
         ] {
-            assert!(tool_operation_examples(scope, prefix).is_some());
-            assert_eq!(tool_operation_examples(scope, with_argument), None);
+            assert!(tool_operation_examples(scope, prefix).is_some(), "{prefix}");
+            assert_eq!(
+                tool_operation_examples(scope, with_argument),
+                None,
+                "{with_argument}"
+            );
         }
     }
 
