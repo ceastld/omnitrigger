@@ -4883,6 +4883,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "列出曲线严格高于阈值的各个区间",
+        query: "CSV: 超阈区间 [[\"时间\",\"高度\"],0] 时间,高度\n6,-1\n1,0\n4,0\n3,0\n2,2\n5,1\n0,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在共同横坐标区间对齐两条曲线并计算差值",
         query: "CSV: 曲线差值 [[\"时间\",\"实测\",\"基准\"],\"差值\"] 时间,实测,基准\n5,,10\n0,0,\n2,4,\n1,,3\n4,4,\n3,,6",
     },
@@ -5837,6 +5842,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "等距插值",
             "水平交点",
             "超阈跨度",
+            "超阈区间",
             "曲线差值",
             "曲线对比图",
             "曲线交点",

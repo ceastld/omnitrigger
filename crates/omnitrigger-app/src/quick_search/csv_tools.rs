@@ -252,6 +252,7 @@ pub(super) enum CsvError {
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     CoordinateThresholdSpanPointCount,
+    CoordinateThresholdIntervalPointCount,
     CoordinateDifferenceArguments,
     CoordinateDifferencePointCount,
     CoordinateDifferenceNoOverlap,
@@ -560,6 +561,7 @@ impl CsvError {
             }
             Self::CoordinateCrossingPointCount => "水平交点需要 2 至 64 行同时含 x 和 y 的数据",
             Self::CoordinateThresholdSpanPointCount => "超阈跨度需要 2 至 64 个完整样点",
+            Self::CoordinateThresholdIntervalPointCount => "超阈区间需要 2 至 64 个完整样点",
             Self::CoordinateDifferenceArguments => {
                 "填写横坐标列、两条曲线的值列及新的差值列名，例如 [[\"时间\",\"实测\",\"基准\"],\"差值\"]"
             }
@@ -1183,6 +1185,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
         "超阈跨度" | "span-above-threshold" => return coordinate_span_above_threshold(input),
+        "超阈区间" | "intervals-above-threshold" => {
+            return coordinate_intervals_above_threshold(input)
+        }
         "曲线差值" | "curve-difference" | "曲线对比图" | "curve-comparison-plot" => {
             let (curves, name) = read_coordinate_curve_comparison(input)?;
             return curves.to_csv(&name);
@@ -5694,6 +5699,52 @@ fn coordinate_span_above_threshold(input: &str) -> Result<String, CsvError> {
     Ok(total.to_string())
 }
 
+fn coordinate_intervals_above_threshold(input: &str) -> Result<String, CsvError> {
+    let (table, target) =
+        read_coordinate_level(input, CsvError::CoordinateThresholdIntervalPointCount)?;
+    let mut csv = String::from("起始横坐标,结束横坐标,包含起点,包含终点");
+    let mut append_interval =
+        |start: &BigRational, end: &BigRational, start_included: bool, end_included: bool| {
+            let included = |value| if value { "是" } else { "否" };
+            let row = [
+                start.to_string(),
+                end.to_string(),
+                included(start_included).to_owned(),
+                included(end_included).to_owned(),
+            ];
+            append_bounded_csv_row(
+                &mut csv,
+                row.iter().map(String::as_str),
+                CsvError::StatisticsOutputTooLarge,
+            )
+        };
+    let first = &table.samples[0].point;
+    let mut interval_start = (first.1 > target).then(|| (first.0.clone(), true));
+    for pair in table.samples.windows(2) {
+        let left = &pair[0].point;
+        let right = &pair[1].point;
+        match (left.1 > target, right.1 > target) {
+            (false, true) => {
+                let start = crossing_inside_segment(left, right, &target)?
+                    .unwrap_or_else(|| left.0.clone());
+                interval_start = Some((start, false));
+            }
+            (true, false) => {
+                let (start, included) = interval_start.take().expect("超阈区间已开始");
+                let crossing = crossing_inside_segment(left, right, &target)?;
+                let end = crossing.as_ref().unwrap_or(&right.0);
+                append_interval(&start, end, included, false)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some((start, included)) = interval_start {
+        let end = &table.samples.last().expect("至少有两个完整坐标").point.0;
+        append_interval(&start, end, included, true)?;
+    }
+    Ok(csv)
+}
+
 fn horizontal_crossings_csv(
     samples: &[CoordinateSample],
     target: &BigRational,
@@ -8210,6 +8261,23 @@ mod tests {
         assert_eq!(
             transform_csv("超阈跨度 [[1,2],0] x,y\n0,0\n2,0\n3,1\n4,0").as_deref(),
             Ok("2")
+        );
+    }
+
+    #[test]
+    fn preserves_open_threshold_boundaries_and_separates_intervals_touching_at_a_point() {
+        let data = "x,y\n6,-1\n1,0\n4,0\n3,0\n2,2\n5,1\n0,1";
+        assert_eq!(
+            transform_csv(&format!("超阈区间 [[1,2],0] {data}")).as_deref(),
+            Ok("起始横坐标,结束横坐标,包含起点,包含终点\r\n0,1,是,否\r\n1,3,否,否\r\n4,11/2,否,否")
+        );
+        assert_eq!(
+            transform_csv("intervals-above-threshold [[1,2],\"-1/2\"] x,y\n0,0\n2,0").as_deref(),
+            Ok("起始横坐标,结束横坐标,包含起点,包含终点\r\n0,2,是,是")
+        );
+        assert_eq!(
+            transform_csv("超阈区间 [[1,2],0] x,y\n0,-1\n1,0\n2,-1").as_deref(),
+            Ok("起始横坐标,结束横坐标,包含起点,包含终点")
         );
     }
 
