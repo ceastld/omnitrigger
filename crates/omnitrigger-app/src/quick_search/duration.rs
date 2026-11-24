@@ -195,6 +195,10 @@ fn bounded_duration_value(term: &str) -> Result<i128, DurationError> {
     Ok(nanos)
 }
 
+pub(super) fn duration_nanoseconds(input: &str) -> Result<i128, DurationError> {
+    bounded_duration_value(&normalize(input.trim()).to_ascii_lowercase())
+}
+
 fn scaled_duration(input: &str) -> Result<i128, DurationError> {
     let (duration, factor) = input
         .split_once('@')

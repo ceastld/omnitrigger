@@ -41,7 +41,9 @@ use super::{
     cidr::{CidrError, LongestPrefixLookup},
     conversion::{exact_data_converter, ConversionError},
     correlation_plot::{CorrelationCell, CorrelationPlot},
-    duration::{elapsed_clock_interval, format_clock_duration},
+    duration::{
+        duration_nanoseconds, elapsed_clock_interval, format_clock_duration, DurationError,
+    },
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, format_significant_digits,
         format_square_root, format_square_root_sum, interpolate_fraction, parse_fraction_literal,
@@ -2239,6 +2241,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
             input = data;
             Operation::GroupMedian { columns, amount }
+        }
+        "分组时长合计" | "group-duration-sum" => {
+            let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
+            let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
+            let rows = read_table_for_preview(data, ',')?;
+            return sum_durations_by_columns(&rows, &columns, amount);
         }
         "分组数值摘要" | "group-numeric-profile" => {
             let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
@@ -5473,6 +5481,46 @@ fn aggregate_by_columns(
     Ok(grouped_csv(header, &columns, groups, label))
 }
 
+fn sum_durations_by_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    duration: ColumnReference,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
+    let duration = duration.resolve(header)?;
+    validate_column_width(&[duration], header.len())?;
+    let mut groups = HashMap::<_, (usize, Option<i128>)>::new();
+    for (position, row) in records.iter().enumerate() {
+        let (_, total) = groups
+            .entry(column_key(row, &columns))
+            .or_insert((position, None));
+        let input = row[duration].trim();
+        if input.is_empty() {
+            continue;
+        }
+        let error = |cause: DurationError| CsvError::DataRowValue {
+            row: position + 1,
+            cause: cause.message(),
+        };
+        let duration = duration_nanoseconds(input).map_err(error)?;
+        *total = Some(
+            total
+                .unwrap_or_default()
+                .checked_add(duration)
+                .ok_or_else(|| error(DurationError::OutOfRange))?,
+        );
+    }
+    let groups = groups.into_iter().map(|(key, (position, value))| {
+        let total = value.map_or_else(String::new, |nanos| {
+            let sign = if nanos.is_negative() { "-" } else { "" };
+            format_clock_duration(nanos.unsigned_abs(), sign)
+        });
+        (key, (position, total))
+    });
+    Ok(grouped_csv(header, &columns, groups, "时长合计"))
+}
+
 fn median_by_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -7091,6 +7139,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-column"
             | "数值对比列"
             | "compare-numeric-column"
+            | "分组时长合计"
+            | "group-duration-sum"
             | "网段归属列"
             | "cidr-column"
             | "网段名称列"
@@ -12931,6 +12981,20 @@ null"#
             transform_csv("分组最大 1 2 地区,金额\n北,无"),
             Err(CsvError::InvalidNumber)
         );
+    }
+
+    #[test]
+    fn sums_signed_durations_by_csv_groups_with_mixed_notation_and_blank_values() {
+        let data = "人员,时长\n北,01:30\n南,PT45S\n北,30.25秒\n空,\n南,-15秒\n负,-1ns\n北,";
+        let query = format!(r#"分组时长合计 ["人员"] "时长" {data}"#);
+        let result =
+            "人员,时长合计\r\n北,00:02:00.25\r\n南,00:00:30\r\n空,\"\"\r\n负,-00:00:00.000000001";
+        assert_eq!(transform_csv(&query).as_deref(), Ok(result));
+        assert_eq!(csv_table_preview(&query).unwrap().unwrap().0, result);
+        assert!(matches!(
+            transform_csv("group-duration-sum 1 2 人员,时长\n北,01:00\n南,无效"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
