@@ -4687,19 +4687,19 @@ mod tests {
             assert_eq!(results.refillable_text(), Some(expected.as_str()));
             assert!(results.value_preview_expandable());
         }
-        let intermediate = for_query(
+        let selected_column = for_query(
             &format!(r#"处理: ["CSV: 秩相关图 [1,2,3,4]","CSV: 选列 2"] {data}"#),
             &[],
         );
         let expected_column = transform_csv(&format!("选列 2 {expected}")).unwrap();
         assert_eq!(
-            intermediate.refillable_text(),
+            selected_column.refillable_text(),
             Some(expected_column.as_str())
         );
         assert!(matches!(
-            &intermediate,
+            &selected_column,
             Results::Value(Ok(ResultValue {
-                kind: ValueKind::Text,
+                kind: ValueKind::Table(_),
                 ..
             }))
         ));

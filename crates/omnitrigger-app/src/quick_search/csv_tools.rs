@@ -755,14 +755,10 @@ enum Operation {
     JsonObjects,
     JsonNumericObjects(Vec<ColumnReference>),
     Markdown(Option<Vec<MarkdownAlignment>>),
-    Transpose,
     ConvertDelimiter {
         from: char,
         to: char,
     },
-    SelectColumns(Vec<usize>),
-    SelectNamedColumns(Vec<String>),
-    DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
     UnicodeNormalizedColumn(String, ColumnReference, UnicodeForm),
     CompareTextColumns(String, ColumnReference, ColumnReference, TextComparison),
@@ -1236,7 +1232,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::Markdown(Some(alignments))
         }
-        "转置" | "transpose" => Operation::Transpose,
         "转tsv" | "tsv" => Operation::ConvertDelimiter {
             from: ',',
             to: '\t',
@@ -1273,22 +1268,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 ranges: ranges.to_owned(),
                 keep_selected: matches!(operation, "取行" | "pick-rows"),
             }
-        }
-        "选列" | "pick-columns" => {
-            let (columns, data) = column_arguments(input)?;
-            input = data;
-            Operation::SelectColumns(columns)
-        }
-        "选列名" | "pick-by-header" => {
-            let (names, data) = json_argument_and_data(input, CsvError::InvalidColumnNames)?;
-            input = data;
-            Operation::SelectNamedColumns(names)
-        }
-        "去列" | "drop-columns" => {
-            let (columns, data) =
-                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
-            input = data;
-            Operation::DropColumns(columns)
         }
         "去空白" | "trim-columns" => {
             let (columns, data) =
@@ -2529,11 +2508,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::JsonObjects => json_objects(&rows, None),
         Operation::JsonNumericObjects(columns) => json_objects(&rows, Some(&columns)),
         Operation::Markdown(alignments) => markdown_table(&rows, alignments.as_deref()),
-        Operation::Transpose => Ok(transpose(&rows)),
         Operation::ConvertDelimiter { to, .. } => Ok(write_rows(&rows, to)),
-        Operation::SelectColumns(columns) => select_columns(&rows, &columns),
-        Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
-        Operation::DropColumns(columns) => drop_columns(&rows, &columns),
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
         Operation::UnicodeNormalizedColumn(name, source, form) => {
             let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
@@ -3453,7 +3428,10 @@ fn drop_empty_csv_records(rows: &[Vec<String>]) -> Result<String, CsvError> {
     Ok(write_rows(std::iter::once(header).chain(retained), ','))
 }
 
-fn drop_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
+fn drop_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+) -> Result<Vec<Vec<String>>, CsvError> {
     let header = rows.first().ok_or(CsvError::MissingInput)?;
     let removed: HashSet<_> =
         resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?
@@ -3489,20 +3467,22 @@ fn drop_empty_csv_columns(rows: &[Vec<String>]) -> Result<String, CsvError> {
     if columns.is_empty() {
         return Err(CsvError::NoColumnsRemain);
     }
-    select_columns(rows, &columns)
+    select_columns(rows, &columns).map(|selected| write_rows(&selected, ','))
 }
 
-fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
+fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<Vec<Vec<String>>, CsvError> {
     let width = rows.first().ok_or(CsvError::MissingInput)?.len();
     validate_column_width(columns, width)?;
-    let selected: Vec<_> = rows
+    Ok(rows
         .iter()
         .map(|row| columns.iter().map(|&index| row[index].clone()).collect())
-        .collect();
-    Ok(write_rows(&selected, ','))
+        .collect())
 }
 
-fn select_named_columns(rows: &[Vec<String>], names: &[String]) -> Result<String, CsvError> {
+fn select_named_columns(
+    rows: &[Vec<String>],
+    names: &[String],
+) -> Result<Vec<Vec<String>>, CsvError> {
     let header = rows.first().ok_or(CsvError::MissingInput)?;
     let mut seen = HashSet::with_capacity(names.len());
     if names.is_empty() || names.iter().any(|name| !seen.insert(name)) {
@@ -6978,7 +6958,31 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     {
         return Some(sort_csv_for_preview(input, descending, numeric));
     }
-    table_preview_delimiter(operation).map(|delimiter| read_preview_output(input, delimiter))
+    if let Some(delimiter) = table_preview_delimiter(operation) {
+        return Some(read_preview_output(input, delimiter));
+    }
+    csv_layout_preview(operation, input)
+}
+
+fn csv_layout_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewData, CsvError>> {
+    let projected = match operation.to_ascii_lowercase().as_str() {
+        "转置" | "transpose" => read_table_for_preview(input, ',').map(|rows| transpose(&rows)),
+        "选列" | "pick-columns" => column_arguments(input).and_then(|(columns, data)| {
+            select_columns(&read_table_for_preview(data, ',')?, &columns)
+        }),
+        "选列名" | "pick-by-header" => {
+            json_argument_and_data::<Vec<String>>(input, CsvError::InvalidColumnNames).and_then(
+                |(names, data)| select_named_columns(&read_table_for_preview(data, ',')?, &names),
+            )
+        }
+        "去列" | "drop-columns" => {
+            column_reference_arguments(input, CsvError::NamedColumnArguments).and_then(
+                |(columns, data)| drop_columns(&read_table_for_preview(data, ',')?, &columns),
+            )
+        }
+        _ => return None,
+    };
+    Some(projected.map(|rows| (write_rows(&rows, ','), rows)))
 }
 
 struct CsvKeyword {
@@ -7926,17 +7930,11 @@ fn markdown_cell(cell: &str) -> String {
     result
 }
 
-fn transpose(rows: &[Vec<String>]) -> String {
+fn transpose(rows: &[Vec<String>]) -> Vec<Vec<String>> {
     let columns = rows.first().map_or(0, Vec::len);
     (0..columns)
-        .map(|column| {
-            rows.iter()
-                .map(|row| csv_cell(&row[column]))
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .collect::<Vec<_>>()
-        .join("\r\n")
+        .map(|column| rows.iter().map(|row| row[column].clone()).collect())
+        .collect()
 }
 
 fn write_rows<'a>(rows: impl IntoIterator<Item = &'a Vec<String>>, delimiter: char) -> String {
@@ -10606,6 +10604,32 @@ mod tests {
             transform_csv("keyword-positions \"茶\" 地区,备注\n南区,米").as_deref(),
             Ok("数据行号,列号,列名,关键词,内容")
         );
+    }
+
+    #[test]
+    fn previews_selected_dropped_and_transposed_columns_with_exact_cells() {
+        let data = "编号,名称,备注\n001,茶,\"甲,乙\"\n002,米,\"带\n换行\"";
+        for (operation, expected) in [
+            ("选列 3,1", "备注,编号\r\n\"甲,乙\",001\r\n\"带\n换行\",002"),
+            (
+                "选列名 [\"备注\",\"编号\"]",
+                "备注,编号\r\n\"甲,乙\",001\r\n\"带\n换行\",002",
+            ),
+            (
+                "去列 [\"名称\"]",
+                "编号,备注\r\n001,\"甲,乙\"\r\n002,\"带\n换行\"",
+            ),
+            (
+                "TRANSPOSE",
+                "编号,001,002\r\n名称,茶,米\r\n备注,\"甲,乙\",\"带\n换行\"",
+            ),
+        ] {
+            let query = format!("{operation} {data}");
+            let (text, preview) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(text, expected);
+            assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+            assert_eq!(preview.column_pages(), 1);
+        }
     }
 
     #[test]
