@@ -716,7 +716,7 @@ mod tests {
     mod real_metadata {
         use super::*;
         use std::{
-            path::PathBuf,
+            path::{Path, PathBuf},
             sync::atomic::{AtomicU64, Ordering},
         };
 
@@ -728,7 +728,10 @@ mod tests {
 
         impl TemporaryFixture {
             fn new() -> Self {
-                let base = std::env::temp_dir();
+                Self::new_in(&std::env::temp_dir())
+            }
+
+            fn new_in(base: &Path) -> Self {
                 assert_eq!(
                     stat_local_path(base.to_str().expect("临时目录需要有效Unicode"), || Ok(()))
                         .expect("临时目录必须位于受支持的本地固定卷"),
@@ -802,7 +805,8 @@ mod tests {
 
         #[test]
         fn local_preview_reads_a_bounded_prefix_and_rejects_non_files() {
-            let fixture = TemporaryFixture::new();
+            // 句柄名称测试使用检出的本地路径。
+            let fixture = TemporaryFixture::new_in(Path::new(env!("CARGO_MANIFEST_DIR")));
             let file = fixture.root.join("empty-file");
             std::fs::write(&file, "甲乙abc").unwrap();
             assert_eq!(

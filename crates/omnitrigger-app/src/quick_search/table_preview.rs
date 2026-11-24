@@ -3,7 +3,7 @@ use gpui::{div, prelude::*, px, relative, Div, FontWeight};
 use crate::theme::{self, rgb};
 
 const MAX_DATA_ROWS: usize = 6;
-const MAX_VISIBLE_COLUMNS: usize = 6;
+pub(super) const MAX_VISIBLE_COLUMNS: usize = 6;
 const MAX_VISIBLE_CELL_CHARACTERS: usize = 128;
 const MAX_COLUMN_WIDTH_UNITS: usize = 26;
 const MIN_COLUMN_WIDTH_UNITS: usize = 6;
@@ -14,6 +14,7 @@ pub(super) struct TablePreview {
     rows: Vec<Vec<String>>,
     data_rows: usize,
     columns: usize,
+    columns_per_page: usize,
     column_width_units: Vec<usize>,
     highlighted_cells: Vec<(usize, usize)>,
 }
@@ -32,9 +33,15 @@ impl TablePreview {
             rows,
             data_rows,
             columns,
+            columns_per_page: MAX_VISIBLE_COLUMNS,
             column_width_units,
             highlighted_cells: Vec::new(),
         }
+    }
+
+    pub(super) fn with_columns_per_page(mut self, columns: usize) -> Self {
+        self.columns_per_page = columns.clamp(1, MAX_VISIBLE_COLUMNS);
+        self
     }
 
     pub(super) fn with_highlighted_cells(mut self, cells: Vec<(usize, usize)>) -> Self {
@@ -49,7 +56,7 @@ impl TablePreview {
     pub(super) fn first_match_column_page(&self) -> Option<usize> {
         self.highlighted_cells
             .first()
-            .map(|&(_, column)| column / MAX_VISIBLE_COLUMNS)
+            .map(|&(_, column)| column / self.columns_per_page)
     }
 
     pub(super) fn preview_height(&self) -> f32 {
@@ -61,7 +68,7 @@ impl TablePreview {
     }
 
     pub(super) fn column_pages(&self) -> usize {
-        self.columns.div_ceil(MAX_VISIBLE_COLUMNS)
+        self.columns.div_ceil(self.columns_per_page)
     }
 
     pub(super) fn legend(&self) -> Div {
@@ -71,21 +78,23 @@ impl TablePreview {
             .child(format!("{} 行 · {} 列", self.data_rows, self.columns))
     }
 
+    fn visible_columns(&self, page: usize) -> std::ops::Range<usize> {
+        let first = page * self.columns_per_page;
+        first..self.columns.min(first + self.columns_per_page)
+    }
+
     fn visible_rows(&self, row_page: usize, column_page: usize) -> impl Iterator<Item = &[String]> {
         let first_record = 1 + row_page * MAX_DATA_ROWS;
-        let first_column = column_page * MAX_VISIBLE_COLUMNS;
-        let column_end = self.columns.min(first_column + MAX_VISIBLE_COLUMNS);
+        let columns = self.visible_columns(column_page);
         self.rows
             .first()
             .into_iter()
             .chain(self.rows.iter().skip(first_record).take(MAX_DATA_ROWS))
-            .map(move |row| &row[first_column..column_end])
+            .map(move |row| &row[columns.clone()])
     }
 
     fn column_width_fractions(&self, column_page: usize) -> Vec<f32> {
-        let first = column_page * MAX_VISIBLE_COLUMNS;
-        let end = self.columns.min(first + MAX_VISIBLE_COLUMNS);
-        let widths = &self.column_width_units[first..end];
+        let widths = &self.column_width_units[self.visible_columns(column_page)];
         if widths.is_empty() {
             return Vec::new();
         }
@@ -117,7 +126,7 @@ impl TablePreview {
                 } else {
                     row_page * MAX_DATA_ROWS + index
                 };
-                let first_column = column_page * MAX_VISIBLE_COLUMNS;
+                let first_column = column_page * self.columns_per_page;
                 div()
                     .flex()
                     .items_center()

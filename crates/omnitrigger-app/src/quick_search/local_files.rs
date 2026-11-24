@@ -354,10 +354,11 @@ impl LocalFilesIndex {
             };
         }
         if matches!(query.output, FileOutput::TimeCsv | FileOutput::InventoryCsv) {
-            return Results::table_value(Ok(file_metadata_csv(
+            let csv = file_metadata_csv(
                 matches.into_iter().map(|(_, entry)| entry),
                 query.output == FileOutput::InventoryCsv,
-            )));
+            );
+            return Results::table_value_with_columns(Ok(csv), 2);
         }
         if let FileOutput::DateCounts(field, grouping) = query.output {
             return Results::table_value(Ok(file_date_counts(
@@ -1422,7 +1423,7 @@ mod tests {
         assert!(matches!(
             index.results(query),
             Results::Value(Ok(value))
-                if matches!(&value.kind, ValueKind::Table(_)) && value.text == concat!(
+                if matches!(&value.kind, ValueKind::Table(table) if table.column_pages() == 2) && value.text == concat!(
                     "名称,创建时间UTC,修改时间UTC,路径\r\n",
                     "\"report,final.txt\",1969-12-31T23:59:59.999999900Z,",
                     "1970-01-01T00:00:00Z,\"C:\\Work\\report,final.txt\"\r\n",
@@ -1441,7 +1442,7 @@ mod tests {
         assert!(matches!(
             index.results(inventory),
             Results::Value(Ok(value))
-                if matches!(&value.kind, ValueKind::Table(_)) && value.text == concat!(
+                if matches!(&value.kind, ValueKind::Table(table) if table.column_pages() == 3) && value.text == concat!(
                     "名称,类型,字节数,创建时间UTC,修改时间UTC,路径\r\n",
                     "\"report,final.txt\",文件,0,1969-12-31T23:59:59.999999900Z,",
                     "1970-01-01T00:00:00Z,\"C:\\Work\\report,final.txt\"\r\n",

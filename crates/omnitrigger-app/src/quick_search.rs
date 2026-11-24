@@ -1413,8 +1413,14 @@ impl Results {
     }
 
     fn table_value(result: Result<String, ValueError>) -> Self {
+        Self::table_value_with_columns(result, table_preview::MAX_VISIBLE_COLUMNS)
+    }
+
+    fn table_value_with_columns(result: Result<String, ValueError>, columns: usize) -> Self {
         Self::Value(result.and_then(|text| {
-            let table = csv_tools::parse_table_preview(&text).map_err(ValueError::Csv)?;
+            let table = csv_tools::parse_table_preview(&text)
+                .map_err(ValueError::Csv)?
+                .with_columns_per_page(columns);
             Ok(ResultValue {
                 text,
                 kind: ValueKind::Table(table),
@@ -1543,6 +1549,15 @@ impl Results {
             Destination::LocalFile { path, .. } => Some(path),
             _ => None,
         }
+    }
+
+    fn local_file_index(&self, path: &str) -> Option<usize> {
+        let Self::Destinations(items) = self else {
+            return None;
+        };
+        items.iter().position(
+            |item| matches!(item, Destination::LocalFile { path: current, .. } if current == path),
+        )
     }
 
     fn selected_text_file(&self, selected: usize) -> Option<&str> {
@@ -1697,7 +1712,12 @@ struct ResultRefill {
 
 enum RefillKind {
     Result,
-    File,
+    File { path: String },
+}
+
+struct FileSearchReturn {
+    query: String,
+    path: String,
 }
 
 enum ResultSaveState {
@@ -1832,6 +1852,7 @@ pub(super) struct QuickSearch {
     input_before_table_search: Option<TableSearchOrigin>,
     table_search_return: Option<TableSearchOrigin>,
     result_refill: Option<ResultRefill>,
+    file_search_return: Option<FileSearchReturn>,
     result_save: ResultSaveState,
     input_file_load: InputFileLoadState,
     previous_input: String,
@@ -1953,6 +1974,7 @@ impl QuickSearch {
             input_before_table_search: None,
             table_search_return: None,
             result_refill: None,
+            file_search_return: None,
             result_save: ResultSaveState::Ready,
             input_file_load: InputFileLoadState::Ready,
             previous_input,
@@ -2079,6 +2101,17 @@ impl QuickSearch {
                 .pages
                 .columns
                 .min(table.column_pages().saturating_sub(1));
+        }
+        if let Some(origin) = self
+            .file_search_return
+            .take()
+            .filter(|origin| origin.query == query)
+        {
+            if matches!(self.results, Results::LocalFilesLoading) {
+                self.file_search_return = Some(origin);
+            } else if let Some(index) = self.results.local_file_index(&origin.path) {
+                self.selected = index;
+            }
         }
         let query = if refilled { "" } else { query.trim() };
         let local_files_query = match scoped_query(query) {
@@ -2210,15 +2243,17 @@ impl QuickSearch {
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |this, cx| {
                     if this.index.local_files.finish(&load, entries) {
-                        let previous = this.results.local_file_path(this.selected).map(str::to_owned);
+                        let previous = this
+                            .results
+                            .local_file_path(this.selected)
+                            .map(str::to_owned);
                         let query = this.input.read(cx).text();
                         this.refresh_results(&query, window, cx);
-                        if let (Some(path), Results::Destinations(items)) = (previous, &this.results) {
-                            if let Some(index) = items.iter().position(|item| {
-                                matches!(item, Destination::LocalFile { path: current, .. } if current == &path)
-                            }) {
-                                this.selected = index;
-                            }
+                        if let Some(index) = previous
+                            .as_deref()
+                            .and_then(|path| this.results.local_file_index(path))
+                        {
+                            this.selected = index;
                         }
                     }
                 });
@@ -2479,7 +2514,9 @@ impl QuickSearch {
                                 this.result_refill = Some(ResultRefill {
                                     original,
                                     inserted: inserted.clone(),
-                                    kind: RefillKind::File,
+                                    kind: RefillKind::File {
+                                        path: selected_path,
+                                    },
                                 });
                                 this.fill_query(inserted, window, cx);
                             }
@@ -2579,6 +2616,12 @@ impl QuickSearch {
 
     fn refill_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(refill) = self.result_refill.take() {
+            if let RefillKind::File { path } = refill.kind {
+                self.file_search_return = Some(FileSearchReturn {
+                    query: refill.original.clone(),
+                    path,
+                });
+            }
             self.fill_query(refill.original, window, cx);
         } else if let Some(text) = self.results.refillable_text() {
             let original = self.input.read(cx).text();
@@ -4069,9 +4112,9 @@ impl Render for QuickSearch {
         let refill_action = if naming_bookmark {
             None
         } else if let Some(refill) = &self.result_refill {
-            Some(match refill.kind {
+            Some(match &refill.kind {
                 RefillKind::Result => "恢复输入 F3",
-                RefillKind::File => "回到文件 F3",
+                RefillKind::File { .. } => "回到文件 F3",
             })
         } else {
             self.results.refillable_text().map(|_| "填回结果 F3")
@@ -7118,7 +7161,11 @@ mod tests {
 
     #[test]
     fn selected_file_opens_in_its_tool_with_original_text_and_size_limit() {
-        let dir = tempfile::tempdir().unwrap();
+        // 使用检出的本地路径，避免系统临时目录的配置影响句柄名称核验。
+        let dir = tempfile::Builder::new()
+            .prefix("qs-local-file-")
+            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .unwrap();
         let path = dir.path().join("记录.JSONL");
         let payload = "{\"编号\":\"001\",\"金额\":1.50}\r\n{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}";
         std::fs::write(&path, payload).unwrap();
