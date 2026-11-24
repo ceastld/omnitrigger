@@ -2409,6 +2409,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "网段: 排除 192.0.2.0/28, 192.0.2.1/32",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "合并相邻和重叠的 IPv4 或 IPv6 网段",
+        query: "网段: 合并 192.0.2.128/25,192.0.2.0/25,2001:db8::/64,2001:db8:0:1::/64",
+    },
+    Example {
         icon: Icon::Clock,
         title: "Unix 时间戳",
         query: "时间戳: 1700000000123ms",
@@ -6378,7 +6383,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Cidr
             if !term.is_empty()
-                && ["子网", "排除", "归属CSV"]
+                && ["子网", "排除", "归属CSV", "合并"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Matrix

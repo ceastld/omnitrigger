@@ -159,6 +159,7 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
             "分解" | "range-to-cidr" => return range_to_cidr(range, false),
             "子网" | "subnets" => return split_subnets(range),
             "排除" | "exclude" => return exclude_network(range),
+            "合并" | "collapse" => return collapse_networks(range),
             _ => {}
         }
     }
@@ -276,6 +277,40 @@ fn exclude_network(input: &str) -> Result<String, CidrError> {
         .join("\n"))
 }
 
+fn collapse_networks(input: &str) -> Result<String, CidrError> {
+    let mut intervals = Vec::new();
+    for network in input
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|network| !network.is_empty())
+    {
+        let (address, prefix) = parse_network(network)?;
+        let width = address_width(address);
+        let mask = host_mask(width - prefix);
+        intervals.push((width, bits(address) & !mask, bits(address) | mask));
+    }
+    if intervals.is_empty() {
+        return Err(CidrError::Incomplete);
+    }
+    intervals.sort_unstable();
+    let mut merged: Vec<(u32, u128, u128)> = Vec::new();
+    for (width, first, last) in intervals {
+        if let Some((_, _, previous_last)) = merged
+            .last_mut()
+            .filter(|current| width == current.0 && first <= current.2.saturating_add(1))
+        {
+            *previous_last = (*previous_last).max(last);
+            continue;
+        }
+        merged.push((width, first, last));
+    }
+
+    let mut networks = Vec::new();
+    for (width, first, last) in merged {
+        append_network_range(&mut networks, width, first, last);
+    }
+    Ok(networks.join("\n"))
+}
+
 fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
     let (first, last) = input.split_once(['至', ',']).ok_or(CidrError::Incomplete)?;
     let (first, last) = (first.trim(), last.trim());
@@ -288,7 +323,7 @@ fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
     if address_width(last) != width {
         return Err(CidrError::DifferentFamilies);
     }
-    let (mut cursor, last) = (bits(first), bits(last));
+    let (cursor, last) = (bits(first), bits(last));
     if cursor > last {
         return Err(CidrError::ReversedRange);
     }
@@ -300,6 +335,11 @@ fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
     }
 
     let mut networks = Vec::new();
+    append_network_range(&mut networks, width, cursor, last);
+    Ok(networks.join("\n"))
+}
+
+fn append_network_range(networks: &mut Vec<String>, width: u32, mut cursor: u128, last: u128) {
     loop {
         // 选取起点对齐且完全位于剩余区间中的最大网段。
         let remaining_bits = (last - cursor).checked_add(1).map_or(128, u128::ilog2);
@@ -308,7 +348,7 @@ fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
         networks.push(format!("{start}/{}", width - host_bits));
         let block_last = cursor | host_mask(host_bits);
         if block_last == last {
-            return Ok(networks.join("\n"));
+            break;
         }
         cursor = block_last + 1;
     }
@@ -317,6 +357,28 @@ fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collapses_overlapping_and_adjacent_networks_without_covering_gaps() {
+        for (query, expected) in [
+            (
+                "合并 2001:db8:0:1::/64,192.0.2.192/26,192.0.2.128/25,192.0.2.9/25,2001:db8::/64",
+                "192.0.2.0/24\n2001:db8::/63",
+            ),
+            (
+                "collapse 192.0.2.0/26,192.0.2.128/26,192.0.2.192/27",
+                "192.0.2.0/26\n192.0.2.128/26\n192.0.2.192/27",
+            ),
+            (
+                "合并 ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128,::/0,0.0.0.0/0",
+                "0.0.0.0/0\n::/0",
+            ),
+        ] {
+            assert_eq!(calculate_cidr(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(calculate_cidr("合并 192.0.2.1/33"), Err(CidrError::Prefix));
+        assert_eq!(calculate_cidr("合并 ,"), Err(CidrError::Incomplete));
+    }
 
     #[test]
     fn excludes_a_contained_subnet_without_enumerating_addresses() {
