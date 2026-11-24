@@ -1,5 +1,5 @@
 use super::{
-    conversion::convert_wave, csv_tools::csv_cell, decibel::convert_decibels,
+    cidr::calculate_cidr, conversion::convert_wave, csv_tools::csv_cell, decibel::convert_decibels,
     solid::calculate_solid, tempo::calculate_tempo,
 };
 
@@ -33,6 +33,7 @@ pub(super) fn map_tool_batch(
             "分贝" | "decibel" => |line| convert_decibels(line).map_err(|error| error.message()),
             "立体" | "solid" => |line| calculate_solid(line).map_err(|error| error.message()),
             "波长" | "wave" => |line| convert_wave(line).map_err(|error| error.message()),
+            "网段" | "cidr" => |line| calculate_cidr(line).map_err(|error| error.message()),
             _ => return None,
         };
     Some(if csv_operation.is_some() {

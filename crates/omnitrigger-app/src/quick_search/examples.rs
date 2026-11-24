@@ -1510,6 +1510,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行计算网段内的地址和子网",
+        query: "批量换算: 网段 取地址 192.0.2.137/26,2\n取子网 192.0.2.137/26,/28,3",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "导出网段运算输入与结果的对照表",
+        query: "批量换算: 网段对照 子网 192.0.2.0/30 到 /31\n偏移 2001:db8::3/126,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
     },
@@ -6566,6 +6576,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "分贝对照",
                     "立体对照",
                     "波长对照",
+                    "网段",
+                    "网段对照",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term))) => {}

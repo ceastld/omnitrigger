@@ -4458,7 +4458,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_tempo_decibel_solid_and_wave_tools_on_batch_inputs() {
+    fn runs_tool_operations_on_each_batch_input() {
         for (query, expected) in [
             (
                 "批量换算: 节拍 时长 120 BPM @ 3/2\n速度 1.5秒 @ 3",
@@ -4476,6 +4476,14 @@ mod tests {
                 "批量换算: 波长对照 1 MHz\n34.3 cm @ 343 m/s to kHz",
                 "输入,结果\r\n1 MHz,299.792458 m\r\n34.3 cm @ 343 m/s to kHz,1 kHz",
             ),
+            (
+                "批量换算: 网段 取地址 192.0.2.137/26,2\n取子网 192.0.2.137/26,/28,3",
+                "192.0.2.129\n192.0.2.160/28",
+            ),
+            (
+                "批量换算: CIDR-CSV 子网 192.0.2.0/30 到 /31\n偏移 2001:db8::3/126,1",
+                "输入,结果\r\n子网 192.0.2.0/30 到 /31,\"192.0.2.0/31\n192.0.2.2/31\"\r\n\"偏移 2001:db8::3/126,1\",2001:db8::4/126",
+            ),
         ] {
             assert!(
                 matches!(for_query(query, &[]), Results::Value(Ok(value)) if value.text == expected),
@@ -4488,6 +4496,13 @@ mod tests {
         ));
         assert!(matches!(
             for_query("批量换算: wave 500 nm\n\n1 km @ 0 m/s", &[]),
+            Results::Value(Err(ValueError::BatchTool(BatchError::Row { line: 3, .. })))
+        ));
+        assert!(matches!(
+            for_query(
+                "批量换算: 网段对照 取地址 192.0.2.0/26,1\n\n偏移 ::/0,-1",
+                &[]
+            ),
             Results::Value(Err(ValueError::BatchTool(BatchError::Row { line: 3, .. })))
         ));
     }
