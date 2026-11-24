@@ -1586,10 +1586,15 @@ enum TableAxis {
     Columns,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct TablePages {
     rows: usize,
     columns: usize,
+}
+
+struct TableSearchOrigin {
+    query: String,
+    pages: TablePages,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1719,7 +1724,8 @@ pub(super) struct QuickSearch {
     input_before_help: Option<String>,
     input_before_calculation_history: Option<String>,
     input_before_bookmarks: Option<String>,
-    input_before_table_search: Option<String>,
+    input_before_table_search: Option<TableSearchOrigin>,
+    table_search_return: Option<TableSearchOrigin>,
     result_refill: Option<ResultRefill>,
     result_save: ResultSaveState,
     input_file_load: InputFileLoadState,
@@ -1840,6 +1846,7 @@ impl QuickSearch {
             input_before_calculation_history: None,
             input_before_bookmarks: None,
             input_before_table_search: None,
+            table_search_return: None,
             result_refill: None,
             result_save: ResultSaveState::Ready,
             input_file_load: InputFileLoadState::Ready,
@@ -1943,6 +1950,24 @@ impl QuickSearch {
             if previous_height != next_height {
                 window.resize(size(px(WIDTH), px(next_height)));
             }
+        }
+        let return_to = self
+            .table_search_return
+            .take()
+            .filter(|origin| origin.query == query);
+        if let (
+            Some(origin),
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(table),
+                ..
+            })),
+        ) = (return_to, &self.results)
+        {
+            self.table_pages.rows = origin.pages.rows.min(table.row_pages().saturating_sub(1));
+            self.table_pages.columns = origin
+                .pages
+                .columns
+                .min(table.column_pages().saturating_sub(1));
         }
         let query = if refilled { "" } else { query.trim() };
         let local_files_query = match scoped_query(query) {
@@ -2428,10 +2453,15 @@ impl QuickSearch {
             return;
         }
         if let Some(original) = self.input_before_table_search.take() {
-            self.fill_query(original, window, cx);
+            let query = original.query.clone();
+            self.table_search_return = Some(original);
+            self.fill_query(query, window, cx);
         } else if let Some(text) = self.searchable_table_text() {
             let query = format!("{TABLE_SEARCH_COMMAND}\"\" {text}");
-            self.input_before_table_search = Some(self.input.read(cx).text());
+            self.input_before_table_search = Some(TableSearchOrigin {
+                query: self.input.read(cx).text(),
+                pages: self.table_pages,
+            });
             self.fill_query(query, window, cx);
             self.input.update(cx, |input, cx| {
                 input.move_cursor_to(TABLE_SEARCH_COMMAND.len() + 1, cx)
@@ -5526,6 +5556,33 @@ mod tests {
         search.key_down(&event("ctrl-f", false), window, cx);
         assert_eq!(search.input.read(cx).text(), QUERY);
         assert!(search.input_before_table_search.is_none());
+
+        let mut query = "CSV: 表格预览 A,B,C,D,E,F,G,H".to_owned();
+        for row in 1..=8 {
+            query.push_str(&format!("\n{row},b,c,d,e,f,g,末列"));
+        }
+        search.fill_query(query.clone(), window, cx);
+        search.refresh_results(&query, window, cx);
+        search.key_down(&event("pagedown", false), window, cx);
+        search.key_down(&event("shift-pagedown", false), window, cx);
+        assert_eq!(
+            (search.table_pages.rows, search.table_pages.columns),
+            (1, 1)
+        );
+        search.key_down(&event("ctrl-f", false), window, cx);
+        let filtering = search.input.read(cx).text();
+        search.refresh_results(&filtering, window, cx);
+        assert_eq!(
+            (search.table_pages.rows, search.table_pages.columns),
+            (0, 0)
+        );
+        search.key_down(&event("ctrl-f", false), window, cx);
+        assert_eq!(search.input.read(cx).text(), query);
+        search.refresh_results(&query, window, cx);
+        assert_eq!(
+            (search.table_pages.rows, search.table_pages.columns),
+            (1, 1)
+        );
     }
 
     #[cfg(target_os = "windows")]
