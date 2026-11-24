@@ -172,6 +172,47 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
     transform_json_operation(query, true)
 }
 
+enum JsonCsvOperation {
+    Convert,
+    Paths,
+    Leaves,
+}
+
+impl JsonCsvOperation {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "转csv" | "to-csv" => Some(Self::Convert),
+            "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
+            "叶子csv" | "leaves-csv" => Some(Self::Leaves),
+            _ => None,
+        }
+    }
+
+    fn has_headers(&self, source: &str) -> bool {
+        match self {
+            Self::Convert => source
+                .strip_prefix('[')
+                .is_some_and(|rows| rows.trim_start().starts_with('{')),
+            Self::Paths | Self::Leaves => true,
+        }
+    }
+
+    fn run(self, source: &str) -> Result<String, JsonError> {
+        match self {
+            Self::Convert => json_to_csv(source),
+            Self::Paths => json_paths_to_csv(source),
+            Self::Leaves => write_json_pointer_results(source, PointerResultMode::Csv),
+        }
+    }
+}
+
+pub(super) fn json_csv_report(query: &str) -> Option<Result<String, JsonError>> {
+    let (operation, source) = query.split_once(char::is_whitespace)?;
+    let operation = JsonCsvOperation::from_name(&operation.to_ascii_lowercase())?;
+    let source = source.trim_start();
+    operation.has_headers(source).then(|| operation.run(source))
+}
+
 fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String, JsonError> {
     let (operation, source) = query
         .split_once(char::is_whitespace)
@@ -180,7 +221,11 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         .strip_prefix("\r\n")
         .unwrap_or(source);
     let source = source.trim_start();
-    let pretty = match operation.to_ascii_lowercase().as_str() {
+    let operation = operation.to_ascii_lowercase();
+    if let Some(operation) = JsonCsvOperation::from_name(&operation) {
+        return operation.run(source);
+    }
+    let pretty = match operation.as_str() {
         "依次处理" | "pipeline" if allow_pipeline => return transform_json_pipeline(source),
         "依次处理" | "pipeline" => return Err(JsonError::NestedPipeline),
         "格式化" | "format" | "pretty" => true,
@@ -233,9 +278,6 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "展平" | "flatten" => {
             return write_json_pointer_results(source, PointerResultMode::Flattened)
         }
-        "叶子csv" | "leaves-csv" => {
-            return write_json_pointer_results(source, PointerResultMode::Csv)
-        }
         "改键" | "rename-key" => return rename_json_key(source),
         "改值" | "replace" => return write_json_value(source, false),
         "加路径" | "add-path" => return write_json_value(source, true),
@@ -250,8 +292,6 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
             return rewrite_object_keys(source, ObjectKeyMode::DropNull);
         }
         "补字段" | "fill-missing-field" => return fill_missing_json_fields(source),
-        "转csv" | "to-csv" => return json_to_csv(source),
-        "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
         "选键" | "pick-keys" => return pick_json_keys(source),
         _ => return Err(JsonError::UnknownOperation),
     };

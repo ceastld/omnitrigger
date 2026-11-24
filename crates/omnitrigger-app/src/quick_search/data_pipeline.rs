@@ -20,7 +20,9 @@ use super::{
     duration::convert_duration,
     equation::{equation_chart, solve_equation, solve_linear_system},
     fraction::simplify_fraction,
-    json_tools::{read_json_array, read_unique_object_entries, transform_json, JsonError},
+    json_tools::{
+        json_csv_report, read_json_array, read_unique_object_entries, transform_json, JsonError,
+    },
     linear_fit::{calculate_linear_fit, calculate_plot, plot_request},
     matrix::calculate_matrix,
     operators::json_argument_and_tail,
@@ -514,6 +516,9 @@ fn prepare_pipeline_preview(
     csv_error: &impl Fn(CsvError) -> DataPipelineError,
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
+        Scope::Json => json_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
         Scope::Date if is_date_report(query) => {
             let report = calculate_date(query, now.date_naive()).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))

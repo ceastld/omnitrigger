@@ -1061,7 +1061,10 @@ impl Results {
                 Scope::TextTools => {
                     Self::text_value(transform_text(term).map_err(ValueError::Text))
                 }
-                Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
+                Scope::Json => match json_tools::json_csv_report(term) {
+                    Some(report) => Self::table_value(report.map_err(ValueError::Json)),
+                    None => Self::text_value(transform_json(term).map_err(ValueError::Json)),
+                },
                 Scope::Toml => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
                 Scope::Csv => {
                     if let Some(result) = csv_tools::csv_table_preview(term) {
@@ -4884,6 +4887,38 @@ mod tests {
             for_query(&query, &[]).refillable_text(),
             Some("编号\r\n001\r\n002")
         );
+    }
+
+    #[test]
+    fn previews_json_csv_reports_with_headers_and_preserves_their_exact_text() {
+        for term in [
+            r#"转CSV [{"编号":"001","数量":1.20},{"编号":"002","备注":"甲,乙"}]"#,
+            r#"路径转CSV ["/订单/金额"] [{"订单":{"金额":1.50}},{"订单":{}}]"#,
+            r#"LEAVES-CSV {"金额":[1.20e+2,null],"备注":"甲,乙"}"#,
+        ] {
+            let expected = transform_json(term).unwrap();
+            let direct = for_query(&format!("JSON: {term}"), &[]);
+            assert!(matches!(
+                &direct,
+                Results::Value(Ok(ResultValue {
+                    kind: ValueKind::Table(_),
+                    ..
+                }))
+            ));
+            assert_eq!(direct.refillable_text(), Some(expected.as_str()));
+            let (operation, input) = term.split_once(' ').unwrap();
+            let pipeline = format!(r#"["JSON: {operation}"] {input}"#);
+            let (text, preview) =
+                transform_data_pipeline(&pipeline, chrono::DateTime::UNIX_EPOCH.fixed_offset())
+                    .unwrap();
+            assert_eq!(text, expected);
+            assert!(matches!(preview, Some(PipelinePreview::Table(_))), "{term}");
+        }
+        assert!(matches!(
+            for_query("JSON: 转CSV [[1,2],[3,4]]", &[]),
+            Results::Value(Ok(ResultValue { text, kind: ValueKind::Text }))
+                if text == "1,2\r\n3,4"
+        ));
     }
 
     #[test]
