@@ -226,6 +226,12 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             (StatisticsOperation::MeanAbsoluteDeviation, values.trim())
         }
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
+        "加权方差" | "加权总体方差" | "weighted-variance" => {
+            return weighted_variance(values.trim()).map(|variance| variance.to_string());
+        }
+        "加权标准差" | "加权总体标准差" | "weighted-stddev" => {
+            return weighted_variance(values.trim()).map(|variance| format_square_root(&variance));
+        }
         "加权分位数" | "weighted-quantile" => return weighted_quantile(values.trim()),
         operation if is_weighted_distribution_operation(operation) => {
             return weighted_cumulative_csv(values.trim());
@@ -617,6 +623,25 @@ fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
         return Err(StatisticsError::ZeroTotalWeight);
     }
     bounded(total_value / total_weight).map(|value| value.to_string())
+}
+
+fn weighted_variance(input: &str) -> Result<BigRational, StatisticsError> {
+    let distribution = read_weighted_distribution(input)?;
+    let total_value = distribution
+        .weights
+        .iter()
+        .try_fold(BigRational::default(), |total, (value, weight)| {
+            bounded(total + value * weight)
+        })?;
+    let mean = bounded(total_value / &distribution.total)?;
+    let sum_of_squares = distribution.weights.into_iter().try_fold(
+        BigRational::default(),
+        |total, (value, weight)| {
+            let distance = value - &mean;
+            bounded(total + &distance * &distance * weight)
+        },
+    )?;
+    bounded(sum_of_squares / distribution.total)
 }
 
 fn weighted_quantile(input: &str) -> Result<String, StatisticsError> {
@@ -2201,6 +2226,31 @@ mod tests {
         ] {
             assert_eq!(calculate_statistics(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn keeps_weighted_population_variance_and_standard_deviation_exact() {
+        for (query, expected) in [
+            ("加权方差 0@1,4@3", "3"),
+            ("加权标准差 0@25%,4@75%", "√3"),
+            ("weighted-variance 0@1/4,1/2@3/4", "3/64"),
+            ("加权总体方差 -4@1,-4@3,200@0", "0"),
+            ("weighted-stddev 2@3/2", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("加权方差 0@0,4@0"),
+            Err(StatisticsError::ZeroTotalWeight)
+        );
+        assert_eq!(
+            calculate_statistics("加权标准差 0@-1,4@3"),
+            Err(StatisticsError::InvalidWeight)
+        );
     }
 
     #[test]

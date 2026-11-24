@@ -644,6 +644,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按权重求精确总体方差",
+        query: "统计: 加权方差 0@1,4@3",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按权重求精确总体标准差",
+        query: "统计: 加权标准差 0@25%,4@75%",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按累计权重求分位数",
         query: "统计: 加权分位数 60% 3@40%,1@10%,2@50%",
     },
@@ -5955,7 +5965,13 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "降序",
         ],
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
-        Scope::Statistics => &["加权平均", "加权分位数", "加权累积分布"],
+        Scope::Statistics => &[
+            "加权平均",
+            "加权分位数",
+            "加权累积分布",
+            "加权方差",
+            "加权标准差",
+        ],
         Scope::Decibel => &[
             "功率比",
             "幅度比",
@@ -6463,6 +6479,7 @@ mod tests {
             (Scope::Statistics, "箱线", "箱线摘要 1,2,3"),
             (Scope::Statistics, "加权分位数", "加权分位数 60%"),
             (Scope::Statistics, "加权累积", "加权累积分布 1@2"),
+            (Scope::Statistics, "加权标准差", "加权标准差 1@2"),
             (Scope::LinearFit, "多项", "多项式 2"),
             (Scope::TextTools, "取列", "取列 \"x\""),
         ] {
