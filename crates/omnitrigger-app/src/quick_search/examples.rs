@@ -4853,6 +4853,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按横坐标间距求分段直线的精确均方根",
+        query: "CSV: 曲线均方根 [\"时间\",\"高度\"] 时间,高度\n3,3\n0,0\n2,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将间距不等的完整样点重采样到等距坐标",
         query: "CSV: 等距插值 [[\"时间\",\"高度\"],5] 时间,高度\n3,3\n0,0\n2,\n1,2",
     },
@@ -5817,6 +5822,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "曲线截取",
             "曲线变差",
             "曲线长度",
+            "曲线均方根",
             "等距插值",
             "水平交点",
             "超阈跨度",

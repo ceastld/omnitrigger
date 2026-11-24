@@ -248,6 +248,7 @@ pub(super) enum CsvError {
     CoordinateClipPointCount,
     CoordinateVariationPointCount,
     CoordinateLengthPointCount,
+    CoordinateRmsPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     CoordinateThresholdSpanPointCount,
@@ -553,6 +554,7 @@ impl CsvError {
             Self::CoordinateClipPointCount => "曲线截取需要 2 至 64 个完整样点",
             Self::CoordinateVariationPointCount => "曲线变差需要 2 至 64 个完整样点",
             Self::CoordinateLengthPointCount => "曲线长度需要 2 至 64 个完整样点",
+            Self::CoordinateRmsPointCount => "曲线均方根需要 2 至 64 个完整样点",
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
@@ -1169,6 +1171,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
         "曲线变差" | "curve-total-variation" => return coordinate_total_variation(input),
         "曲线长度" | "curve-length" => return coordinate_curve_length(input),
+        "曲线均方根" | "curve-rms" => return coordinate_root_mean_square(input),
         "曲线截取" | "clip-curve" => {
             let mut table = read_coordinate_interval(input, CsvError::CoordinateClipPointCount)?;
             sort_distinct_coordinates(&mut table.samples)?;
@@ -5988,6 +5991,24 @@ fn read_coordinate_interval(
     Ok(table)
 }
 
+fn coordinate_root_mean_square(input: &str) -> Result<String, CsvError> {
+    let mut table = read_coordinate_interval(input, CsvError::CoordinateRmsPointCount)?;
+    sort_distinct_coordinates(&mut table.samples)?;
+    let mut triple_square_integral = BigRational::default();
+    for pair in table.samples.windows(2) {
+        let (left_x, left_y) = &pair[0].point;
+        let (right_x, right_y) = &pair[1].point;
+        let triple_mean_square = left_y * left_y + left_y * right_y + right_y * right_y;
+        triple_square_integral += (right_x - left_x) * triple_mean_square;
+        ensure_exact_size(&triple_square_integral).map_err(|_| CsvError::ComputedNumberRange)?;
+    }
+    let first = &table.samples[0].point.0;
+    let last = &table.samples.last().expect("至少有两个完整坐标").point.0;
+    let mean_square = triple_square_integral / ((last - first) * BigInt::from(3u8));
+    ensure_exact_size(&mean_square).map_err(|_| CsvError::ComputedNumberRange)?;
+    Ok(format_square_root(&mean_square))
+}
+
 fn coordinate_curve_length(input: &str) -> Result<String, CsvError> {
     let mut table = read_coordinate_interval(input, CsvError::CoordinateLengthPointCount)?;
     sort_distinct_coordinates(&mut table.samples)?;
@@ -7910,6 +7931,27 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
             Err(CsvError::CoordinateDifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn integrates_the_square_of_the_linear_curve_over_exact_coordinates() {
+        let data = "x,y\n3,3\n0,0\n2,";
+        assert_eq!(
+            transform_csv(&format!("曲线均方根 [1,2] {data}")).as_deref(),
+            Ok("√3")
+        );
+        assert_eq!(
+            transform_csv(&format!("curve-rms [[1,2],[\"1/2\",\"5/2\"]] {data}")).as_deref(),
+            Ok("√(31/12)")
+        );
+        assert_eq!(
+            transform_csv("曲线均方根 [1,2] x,y\n-1,-2\n1,-2").as_deref(),
+            Ok("2")
+        );
+        assert_eq!(
+            transform_csv("曲线均方根 [1,2] x,y\n-1,-1\n1,1").as_deref(),
+            Ok("√(1/3)")
         );
     }
 
