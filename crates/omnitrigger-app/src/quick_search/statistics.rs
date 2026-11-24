@@ -6,6 +6,7 @@ use num_rational::BigRational;
 use super::bin_plot::BinPlot;
 use super::box_plot::BoxPlot;
 use super::calculator::{evaluate, format_round_trip, normalize};
+use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{
     calculate_fraction, combination_count, ensure_exact_size, format_signed_square_root,
     format_square_root, rational_power, FractionError, MAX_COMBINATORIAL_ARGUMENT,
@@ -31,6 +32,7 @@ pub(super) enum StatisticsError {
     FrequencyOverflow,
     InvalidWeight,
     ZeroTotalWeight,
+    WeightedReportTooLarge,
     InvalidProbability,
     InvalidTrimShare,
     InvalidBinEdges,
@@ -66,6 +68,7 @@ impl StatisticsError {
             Self::FrequencyOverflow => "频数合计超出支持范围",
             Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
             Self::ZeroTotalWeight => "权重合计须大于零",
+            Self::WeightedReportTooLarge => "加权分布结果超过 1 MiB，请缩短数值或减少数据",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidTrimShare => "每端处理的比例须为 0 到小于 50%，例如 10%",
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
@@ -224,6 +227,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "加权分位数" | "weighted-quantile" => return weighted_quantile(values.trim()),
+        operation if is_weighted_distribution_operation(operation) => {
+            return weighted_cumulative_csv(values.trim());
+        }
         "移动合计" | "moving-sum" => return moving_sum_or_average(values.trim(), false),
         "移动平均" | "moving-average" => return moving_sum_or_average(values.trim(), true),
         "移动样本方差" | "moving-sample-variance" => {
@@ -616,28 +622,70 @@ fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
 fn weighted_quantile(input: &str) -> Result<String, StatisticsError> {
     let (probability, input) = operation_and_arguments(input);
     let probability = parse_probability(probability)?;
-    let mut values = Vec::new();
-    let mut total_weight = BigRational::default();
-    for term in observation_terms(input.trim())? {
-        let (value, weight) = read_weighted_observation(term)?;
-        if weight.numer().sign() != Sign::NoSign {
-            total_weight = bounded(total_weight + &weight)?;
-            values.push((value, weight));
-        }
-    }
-    values.sort_by(|left, right| left.0.cmp(&right.0));
-    let ((last_value, _), preceding) = values
-        .split_last()
-        .ok_or(StatisticsError::ZeroTotalWeight)?;
-    let target = bounded(total_weight * probability)?;
+    let distribution = read_weighted_distribution(input.trim())?;
+    let target = bounded(distribution.total * probability)?;
+    let mut values = distribution.weights.into_iter();
+    let (last_value, _) = values.next_back().ok_or(StatisticsError::ZeroTotalWeight)?;
     let mut cumulative = BigRational::default();
-    for (value, weight) in preceding {
+    for (value, weight) in values {
         cumulative = bounded(cumulative + weight)?;
         if cumulative >= target {
             return Ok(value.to_string());
         }
     }
     Ok(last_value.to_string())
+}
+
+struct WeightedDistribution {
+    weights: BTreeMap<BigRational, BigRational>,
+    total: BigRational,
+}
+
+fn read_weighted_distribution(input: &str) -> Result<WeightedDistribution, StatisticsError> {
+    let mut weights = BTreeMap::<BigRational, BigRational>::new();
+    let mut total_weight = BigRational::default();
+    for term in observation_terms(input)? {
+        let (value, weight) = read_weighted_observation(term)?;
+        if weight.numer().sign() != Sign::NoSign {
+            total_weight = bounded(total_weight + &weight)?;
+            let previous = weights.entry(value).or_default();
+            *previous = bounded(&*previous + weight)?;
+        }
+    }
+    if weights.is_empty() {
+        return Err(StatisticsError::ZeroTotalWeight);
+    }
+    Ok(WeightedDistribution {
+        weights,
+        total: total_weight,
+    })
+}
+
+fn is_weighted_distribution_operation(operation: &str) -> bool {
+    operation == "加权累积分布" || operation.eq_ignore_ascii_case("weighted-cdf")
+}
+
+pub(super) fn weighted_distribution_report(query: &str) -> Option<Result<String, StatisticsError>> {
+    let (operation, values) = operation_and_arguments(query.trim());
+    is_weighted_distribution_operation(&normalize(operation))
+        .then(|| weighted_cumulative_csv(normalize(values).trim()))
+}
+
+fn weighted_cumulative_csv(input: &str) -> Result<String, StatisticsError> {
+    let distribution = read_weighted_distribution(input)?;
+    let mut cumulative = BigRational::default();
+    let mut csv = "值,累计权重,累计比例".to_owned();
+    for (value, weight) in distribution.weights {
+        cumulative = bounded(cumulative + weight)?;
+        let share = bounded(&cumulative / &distribution.total)?;
+        let fields = [value.to_string(), cumulative.to_string(), share.to_string()];
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
+            StatisticsError::WeightedReportTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn read_weighted_observation(term: &str) -> Result<(BigRational, BigRational), StatisticsError> {

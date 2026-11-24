@@ -648,6 +648,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 加权分位数 60% 3@40%,1@10%,2@50%",
     },
     Example {
+        icon: Icon::Layers,
+        title: "预览累计权重和累计比例",
+        query: "统计: 加权累积分布 4@25%,1/2@1/8,4@1/8,-1@0,2@1/4",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按固定窗口计算精确移动平均",
         query: "统计: 移动平均 2 1/2,1,2,4",

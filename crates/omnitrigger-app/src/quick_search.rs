@@ -1185,7 +1185,16 @@ impl Results {
                     }
                 }
                 Scope::Statistics => {
-                    if let Some(values) = statistics::cumulative_plot_arguments(term) {
+                    if let Some(result) = statistics::weighted_distribution_report(term) {
+                        Self::Value(result.map_err(ValueError::Statistics).and_then(|text| {
+                            let table =
+                                csv_tools::parse_table_preview(&text).map_err(ValueError::Csv)?;
+                            Ok(ResultValue {
+                                text,
+                                kind: ValueKind::Table(table),
+                            })
+                        }))
+                    } else if let Some(values) = statistics::cumulative_plot_arguments(term) {
                         Self::plot_value(
                             statistics::plot_cumulative_distribution(values)
                                 .map_err(ValueError::Statistics),
@@ -5040,6 +5049,22 @@ mod tests {
             equation::solve_equation("函数图 x² @ 2 到 2"),
             Err(EquationError::FunctionPlotArguments)
         );
+    }
+
+    #[test]
+    fn previews_exact_weighted_cumulative_distributions_including_ties() {
+        let term = "加权累积分布 4@25%,1/2@1/8,4@1/8,-1@0,2@1/4";
+        let expected = "值,累计权重,累计比例\r\n1/2,1/8,1/6\r\n2,3/8,1/2\r\n4,3/4,1";
+        assert_eq!(calculate_statistics(term).as_deref(), Ok(expected));
+        assert!(matches!(
+            for_query(&format!("统计: {term}"), &[]),
+            Results::Value(Ok(ResultValue { text, kind: ValueKind::Table(_) })) if text == expected
+        ));
+        let now = chrono::DateTime::UNIX_EPOCH.fixed_offset();
+        let pipeline = r#"["统计: 加权累积分布"] 4@25%,1/2@1/8,4@1/8,-1@0,2@1/4"#;
+        let (text, preview) = transform_data_pipeline(pipeline, now).unwrap();
+        assert_eq!(text, expected);
+        assert!(matches!(preview, Some(PipelinePreview::Table(table)) if table.row_pages() == 1));
     }
 
     #[test]

@@ -34,6 +34,7 @@ use super::{
     statistics::{
         bin_plot_arguments, box_plot_arguments, calculate_bin_plot, calculate_box_plot,
         calculate_statistics, cumulative_plot_arguments, plot_cumulative_distribution,
+        weighted_distribution_report,
     },
     table_preview::TablePreview,
     tempo::calculate_tempo,
@@ -590,6 +591,11 @@ fn prepare_pipeline_preview(
                     plot_cumulative_distribution(input)
                         .map(|(text, plot)| (text, PipelinePreview::Scatter(plot)))
                         .map_err(|cause| error(cause.message()))
+                })
+            })
+            .or_else(|| {
+                weighted_distribution_report(query).map(|report| {
+                    report_preview(report.map_err(|cause| cause.message()), error, csv_error)
                 })
             }),
         _ => None,
