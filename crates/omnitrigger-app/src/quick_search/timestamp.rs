@@ -168,6 +168,32 @@ pub(super) fn is_offset_timestamp(text: &str) -> bool {
     text.as_bytes().get(10) == Some(&b'T') && parse_explicit_time(text, None).is_ok()
 }
 
+enum TimestampReport {
+    Zones,
+    CivilDays,
+    OffsetChanges,
+    DailyClock,
+}
+
+impl TimestampReport {
+    fn from_operation(operation: &str) -> Option<Self> {
+        match operation.to_ascii_lowercase().as_str() {
+            "时区csv" | "zone-csv" => Some(Self::Zones),
+            "日区间" | "day-intervals" => Some(Self::CivilDays),
+            "偏移变更" | "offset-changes" => Some(Self::OffsetChanges),
+            "每日同刻" | "daily-clock" => Some(Self::DailyClock),
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn is_timestamp_report(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .next()
+        .is_some_and(|operation| TimestampReport::from_operation(&normalize(operation)).is_some())
+}
+
 fn convert_timestamp_with_local(
     query: &str,
     now: DateTime<Utc>,
@@ -182,17 +208,13 @@ fn convert_timestamp_with_local(
     if operation == "时区候选" || operation.eq_ignore_ascii_case("zone-candidates") {
         return timestamp_candidates(argument, &to_local);
     }
-    if operation == "日区间" || operation.eq_ignore_ascii_case("day-intervals") {
-        return civil_day_intervals(argument);
-    }
-    if operation == "偏移变更" || operation.eq_ignore_ascii_case("offset-changes") {
-        return timezone_offset_changes(argument);
-    }
-    if operation == "每日同刻" || operation.eq_ignore_ascii_case("daily-clock") {
-        return daily_clock_series(argument);
-    }
-    let table =
-        operation.eq_ignore_ascii_case("时区csv") || operation.eq_ignore_ascii_case("zone-csv");
+    let table = match TimestampReport::from_operation(operation) {
+        Some(TimestampReport::CivilDays) => return civil_day_intervals(argument),
+        Some(TimestampReport::OffsetChanges) => return timezone_offset_changes(argument),
+        Some(TimestampReport::DailyClock) => return daily_clock_series(argument),
+        Some(TimestampReport::Zones) => true,
+        None => false,
+    };
     let input = if table { argument.trim_start() } else { input };
     let (input, target_zone) = if let Some((source, target)) = split_conversion(input) {
         let targets = if table {

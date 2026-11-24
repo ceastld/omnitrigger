@@ -141,7 +141,7 @@ use statistics::{calculate_statistics, StatisticsError};
 use tempo::{calculate_tempo, TempoError};
 use text_tools::{count_text, transform_text, TextError};
 use timecode::{convert_timecode, TimecodeError};
-use timestamp::{convert_timestamp, is_offset_timestamp, TimestampError};
+use timestamp::{convert_timestamp, is_offset_timestamp, is_timestamp_report, TimestampError};
 use toml_tools::{transform_toml, TomlError};
 use triangle::{calculate_triangle, TriangleError};
 use triggers::{matching_triggers, search_triggers, SearchTrigger, TriggerSearchError};
@@ -1001,13 +1001,18 @@ impl Results {
                 Scope::Timestamp => Self::Value(
                     convert_timestamp(term, chrono::Utc::now())
                         .map_err(ValueError::Timestamp)
-                        .map(|text| {
-                            let kind = if is_offset_timestamp(&text) {
+                        .and_then(|text| {
+                            let kind = if is_timestamp_report(term) {
+                                ValueKind::Table(
+                                    csv_tools::parse_table_preview(&text)
+                                        .map_err(ValueError::Csv)?,
+                                )
+                            } else if is_offset_timestamp(&text) {
                                 ValueKind::TimestampInstant
                             } else {
                                 ValueKind::Text
                             };
-                            ResultValue { text, kind }
+                            Ok(ResultValue { text, kind })
                         }),
                 ),
                 Scope::Uuid => {
@@ -4407,6 +4412,30 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn previews_timestamp_reports_as_tables_without_changing_their_csv() {
+        for term in [
+            "时区ＣＳＶ 1ns to UTC, +08:00",
+            "offset-changes 2026 UTC",
+            "日区间 2026-03-08 America/New_York",
+            "每日同刻 2026-03-07 02:30 America/New_York @ 3",
+        ] {
+            let csv = convert_timestamp(term, chrono::DateTime::UNIX_EPOCH).unwrap();
+            assert!(
+                matches!(for_query(&format!("时间戳: {term}"), &[]),
+                    Results::Value(Ok(ResultValue { text, kind: ValueKind::Table(_) })) if text == csv),
+                "{term}"
+            );
+        }
+        assert!(matches!(
+            for_query("时间戳: 0 to UTC, +08:00", &[]),
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Text,
+                ..
+            }))
+        ));
     }
 
     #[test]

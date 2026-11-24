@@ -13,8 +13,8 @@ use super::{
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, build_column_box_plot,
         build_correlation_plot, build_scatter_plot, column_box_plot_arguments,
-        correlation_plot_arguments, csv_count_chart, csv_table_preview, scatter_arguments,
-        transform_csv, ColumnReference, CsvError,
+        correlation_plot_arguments, csv_count_chart, csv_table_preview, parse_table_preview,
+        scatter_arguments, transform_csv, ColumnReference, CsvError,
     },
     decibel::convert_decibels,
     duration::convert_duration,
@@ -38,7 +38,7 @@ use super::{
     table_preview::TablePreview,
     tempo::calculate_tempo,
     text_tools::transform_text,
-    timestamp::convert_timestamp,
+    timestamp::{convert_timestamp, is_timestamp_report},
     toml_tools::transform_toml,
     url_encoding::convert_url_component,
 };
@@ -431,7 +431,7 @@ fn run_pipeline_steps(
         }
         let preview_text = match &mut view {
             PipelineView::Preview(preview) if index == steps.len() => {
-                prepare_pipeline_preview(scope, &query, &error, &csv_error)
+                prepare_pipeline_preview(scope, &query, now, &error, &csv_error)
                     .transpose()?
                     .map(|(text, prepared)| {
                         **preview = Some(prepared);
@@ -501,10 +501,19 @@ fn run_pipeline_steps(
 fn prepare_pipeline_preview(
     scope: Scope,
     query: &str,
+    now: DateTime<FixedOffset>,
     error: &impl Fn(&'static str) -> DataPipelineError,
     csv_error: &impl Fn(CsvError) -> DataPipelineError,
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
+        Scope::Timestamp if is_timestamp_report(query) => Some(
+            convert_timestamp(query, now.to_utc())
+                .map_err(|cause| error(cause.message()))
+                .and_then(|text| {
+                    let table = parse_table_preview(&text).map_err(csv_error)?;
+                    Ok((text, PipelinePreview::Table(table)))
+                }),
+        ),
         Scope::Csv => csv_table_preview(query)
             .map(|result| {
                 result
@@ -636,6 +645,14 @@ mod tests {
             run_pipeline(r#"["时间戳:","时间戳:"] 现在"#).as_deref(),
             Ok("2024-02-19T07:30:00Z"),
         );
+        let now = DateTime::parse_from_rfc3339("2024-02-18T23:30:00-08:00").unwrap();
+        let report = r#"["时间戳: 时区CSV"] 现在 to UTC, +08:00"#;
+        let (text, preview) = transform_data_pipeline(report, now).unwrap();
+        assert_eq!(
+            text,
+            "时区,时间\r\nUTC,2024-02-19T07:30:00Z\r\n+08:00,2024-02-19T15:30:00+08:00"
+        );
+        assert!(matches!(preview, Some(PipelinePreview::Table(table)) if table.row_pages() == 1));
     }
 
     #[test]
