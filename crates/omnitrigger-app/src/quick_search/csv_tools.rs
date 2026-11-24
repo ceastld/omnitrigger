@@ -7007,6 +7007,7 @@ fn read_csv_keywords(input: &str) -> Result<(Vec<CsvKeyword>, &str), CsvError> {
     let invalid = CsvError::SearchRowKeywords;
     let (argument, data) = json_argument_and_data::<CsvKeywordArgument>(input, invalid)?;
     let keywords = match argument {
+        CsvKeywordArgument::One(word) if word.is_empty() => return Ok((Vec::new(), data)),
         CsvKeywordArgument::One(word) => vec![word],
         CsvKeywordArgument::List(words) => words,
     };
@@ -7033,7 +7034,11 @@ fn csv_keyword_key(text: &str) -> String {
 
 fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
     let (keywords, data) = read_csv_keywords(input)?;
-    let mut rows = read_table_for_preview(data, ',')?.into_iter();
+    let rows = read_table_for_preview(data, ',')?;
+    if keywords.is_empty() {
+        return Ok(rows);
+    }
+    let mut rows = rows.into_iter();
     let header = rows.next().ok_or(CsvError::MissingInput)?;
     Ok(std::iter::once(header)
         .chain(rows.filter(|row| {
@@ -10555,6 +10560,11 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("搜索行 [\" \"] {data}")),
             Err(CsvError::SearchRowKeywords)
+        );
+        let rows = read_rows(data, ',').unwrap();
+        assert_eq!(
+            transform_csv(&format!("搜索行 \"\" {data}")),
+            Ok(write_rows(&rows, ','))
         );
     }
 
