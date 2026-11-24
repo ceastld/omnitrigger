@@ -349,18 +349,18 @@ impl LocalFilesIndex {
                 .filter(|(_, entry)| entry.kind == "file")
                 .map(|(_, entry)| *entry);
             return match extension_summary(files, query.output == FileOutput::ExtensionSizes) {
-                Some(output) => Results::text_value(Ok(output)),
+                Some(output) => Results::table_value(Ok(output)),
                 None => Results::LocalFilesUnavailable("有文件的大小无法读取".to_owned()),
             };
         }
         if matches!(query.output, FileOutput::TimeCsv | FileOutput::InventoryCsv) {
-            return Results::text_value(Ok(file_metadata_csv(
+            return Results::table_value(Ok(file_metadata_csv(
                 matches.into_iter().map(|(_, entry)| entry),
                 query.output == FileOutput::InventoryCsv,
             )));
         }
         if let FileOutput::DateCounts(field, grouping) = query.output {
-            return Results::text_value(Ok(file_date_counts(
+            return Results::table_value(Ok(file_date_counts(
                 matches.into_iter().map(|(_, entry)| entry),
                 field,
                 grouping,
@@ -1015,6 +1015,7 @@ fn directory_input(query: &str) -> Option<InputSuggestion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quick_search::ValueKind;
 
     fn entry(name: &str, kind: &'static str) -> LocalDirectoryEntry {
         LocalDirectoryEntry {
@@ -1421,7 +1422,7 @@ mod tests {
         assert!(matches!(
             index.results(query),
             Results::Value(Ok(value))
-                if value.text == concat!(
+                if matches!(&value.kind, ValueKind::Table(_)) && value.text == concat!(
                     "名称,创建时间UTC,修改时间UTC,路径\r\n",
                     "\"report,final.txt\",1969-12-31T23:59:59.999999900Z,",
                     "1970-01-01T00:00:00Z,\"C:\\Work\\report,final.txt\"\r\n",
@@ -1440,7 +1441,7 @@ mod tests {
         assert!(matches!(
             index.results(inventory),
             Results::Value(Ok(value))
-                if value.text == concat!(
+                if matches!(&value.kind, ValueKind::Table(_)) && value.text == concat!(
                     "名称,类型,字节数,创建时间UTC,修改时间UTC,路径\r\n",
                     "\"report,final.txt\",文件,0,1969-12-31T23:59:59.999999900Z,",
                     "1970-01-01T00:00:00Z,\"C:\\Work\\report,final.txt\"\r\n",
@@ -1642,7 +1643,8 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    index.results(query), Results::Value(Ok(value)) if value.text == expected
+                    index.results(query), Results::Value(Ok(value))
+                        if matches!(&value.kind, ValueKind::Table(_)) && value.text == expected
                 ),
                 "{query}"
             );
@@ -1839,7 +1841,7 @@ mod tests {
         ));
         assert!(matches!(
             index.results(query),
-            Results::Value(Ok(value)) if value.text ==
+            Results::Value(Ok(value)) if matches!(&value.kind, ValueKind::Table(_)) && value.text ==
                 "扩展名,数量,字节数\r\n.pdf,2,18446744073709551616\r\n无扩展名,1,5\r\n.txt,1,5"
         ));
         assert!(matches!(
@@ -1877,7 +1879,7 @@ mod tests {
         ));
         assert!(matches!(
             index.results(r"C:\Work | missing | 后缀统计"), Results::Value(Ok(value))
-                if value.text == "扩展名,数量"
+                if matches!(&value.kind, ValueKind::Table(_)) && value.text == "扩展名,数量"
         ));
         assert!(split_query(r"C:\Work | | 后缀统计 仅文件夹").is_none());
         assert!(split_query(r"C:\Work | | 后缀统计 路径列表").is_none());
