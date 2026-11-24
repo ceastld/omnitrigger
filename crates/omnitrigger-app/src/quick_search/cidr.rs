@@ -3,7 +3,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint};
 
 use super::{
     calculator::normalize, csv_tools::append_bounded_csv_row, operators::json_argument_and_tail,
@@ -30,6 +30,8 @@ pub(super) enum CidrError {
     NetworkPositionArguments,
     AddressOrdinal,
     AddressOutsideNetwork,
+    NetworkOffsetArguments,
+    NetworkOffsetOutsideRange,
 }
 
 impl CidrError {
@@ -55,6 +57,10 @@ impl CidrError {
             Self::NetworkPositionArguments => "用逗号分隔网段与地址或序号，例如 192.0.2.0/24,2",
             Self::AddressOrdinal => "地址序号从 1 开始，并须在网段的地址数之内",
             Self::AddressOutsideNetwork => "地址须位于指定网段内",
+            Self::NetworkOffsetArguments => {
+                "用逗号分隔网段与有符号整数偏移，例如 192.0.2.137/26,-2"
+            }
+            Self::NetworkOffsetOutsideRange => "偏移后的网段超出该 IP 版本的地址范围",
         }
     }
 }
@@ -277,6 +283,7 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
             "合并" | "collapse" => return collapse_networks(range),
             "取地址" | "nth-address" => return network_address_position(range, true),
             "地址序号" | "address-position" => return network_address_position(range, false),
+            "偏移" | "offset" => return offset_network(range),
             "交集" | "intersect" => {
                 return compare_network_sets(range, NetworkSetOperation::Intersect)
             }
@@ -589,6 +596,27 @@ fn network_address_position(input: &str, find_address: bool) -> Result<String, C
     Ok((BigUint::from(bits(member) - first) + 1u8).to_string())
 }
 
+fn offset_network(input: &str) -> Result<String, CidrError> {
+    let invalid = CidrError::NetworkOffsetArguments;
+    let (network, offset) = input.split_once(',').ok_or(invalid)?;
+    let (address, prefix) = parse_network(network)?;
+    let offset = offset.trim();
+    let digits = offset.strip_prefix(['+', '-']).unwrap_or(offset);
+    if !(1..=39).contains(&digits.len()) || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+        return Err(invalid);
+    }
+    let offset = offset.parse::<BigInt>().map_err(|_| invalid)?;
+    let width = address_width(address);
+    let host_bits = width - prefix;
+    let start = bits(address) & !host_mask(host_bits);
+    let target = BigInt::from(start) + (offset << host_bits);
+    let target = u128::try_from(target)
+        .ok()
+        .filter(|&target| target <= host_mask(width))
+        .ok_or(CidrError::NetworkOffsetOutsideRange)?;
+    Ok(format!("{}/{prefix}", as_address(target, width)))
+}
+
 fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
     let (first, last) = input.split_once(['至', ',']).ok_or(CidrError::Incomplete)?;
     let (first, last) = (first.trim(), last.trim());
@@ -692,6 +720,46 @@ mod tests {
         }
         assert_eq!(calculate_cidr("合并 192.0.2.1/33"), Err(CidrError::Prefix));
         assert_eq!(calculate_cidr("合并 ,"), Err(CidrError::Incomplete));
+    }
+
+    #[test]
+    fn offsets_networks_by_whole_blocks_without_wrapping_at_either_address_boundary() {
+        for (query, expected) in [
+            ("偏移 192.0.2.137/26,-2", "192.0.2.0/26"),
+            ("OFFSET 192.0.2.37/255.255.255.192,+1", "192.0.2.64/26"),
+            ("偏移 2001:db8::3/126,1", "2001:db8::4/126"),
+            ("偏移 2001:db8::9/126,0", "2001:db8::8/126"),
+            ("偏移 2001:db8::1/0,0", "::/0"),
+            (
+                "偏移 ::/128,+340282366920938463463374607431768211455",
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128",
+            ),
+        ] {
+            assert_eq!(calculate_cidr(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "偏移 0.0.0.0/26,-1",
+            "偏移 255.255.255.255/32,1",
+            "偏移 ::/0,1",
+            "偏移 ::/128,340282366920938463463374607431768211456",
+        ] {
+            assert_eq!(
+                calculate_cidr(query),
+                Err(CidrError::NetworkOffsetOutsideRange),
+                "{query}"
+            );
+        }
+        for query in [
+            "偏移 192.0.2.0/24",
+            "偏移 192.0.2.0/24,+",
+            "偏移 192.0.2.0/24,1.5",
+        ] {
+            assert_eq!(
+                calculate_cidr(query),
+                Err(CidrError::NetworkOffsetArguments),
+                "{query}"
+            );
+        }
     }
 
     #[test]

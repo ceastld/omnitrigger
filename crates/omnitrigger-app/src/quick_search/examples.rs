@@ -2510,6 +2510,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "向前或向后移动指定数量的相邻网段",
+        query: "网段: 偏移 192.0.2.137/26,-2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求覆盖地址区间的最小网段",
         query: "网段: 覆盖 192.0.2.1 至 192.0.2.6",
     },
@@ -6583,6 +6588,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "对称差",
                     "取地址",
                     "地址序号",
+                    "偏移",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
