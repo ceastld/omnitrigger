@@ -642,7 +642,7 @@ fn format_fit_errors(residual_sum: BigRational, count: BigInt) -> Result<String,
     ))
 }
 
-fn format_power_expression(coefficients: Vec<BigRational>) -> String {
+pub(super) fn format_power_expression(coefficients: Vec<BigRational>) -> String {
     let one = BigInt::from(1u8);
     let mut expression = String::new();
     for (degree, coefficient) in coefficients.into_iter().enumerate().rev() {

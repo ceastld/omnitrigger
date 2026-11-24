@@ -6,6 +6,7 @@ use num_rational::BigRational;
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::conversion::split_conversion;
 use super::csv_tools::append_bounded_csv_row;
+use super::linear_fit::format_power_expression;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
 
@@ -225,7 +226,13 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
         return fraction_sequence(expression, false);
     }
     if verb == "平均变化率" || verb.eq_ignore_ascii_case("secant") {
-        return fraction_secant(expression.trim()).map(|slope| slope.to_string());
+        return fraction_secant(expression.trim()).map(|line| line.slope.to_string());
+    }
+    if verb == "割线式" || verb.eq_ignore_ascii_case("secant-line") {
+        let line = fraction_secant(expression.trim())?;
+        let intercept = line.value_at_start - &line.slope * line.start;
+        ensure_exact_size(&intercept)?;
+        return Ok(format_power_expression(vec![intercept, line.slope]));
     }
     if verb == "等比数列" || verb.eq_ignore_ascii_case("geometric-sequence") {
         return fraction_sequence(expression, true);
@@ -671,7 +678,13 @@ fn fraction_samples(input: &str) -> Result<String, FractionError> {
     Ok(csv)
 }
 
-fn fraction_secant(input: &str) -> Result<BigRational, FractionError> {
+struct FractionSecant {
+    start: BigRational,
+    value_at_start: BigRational,
+    slope: BigRational,
+}
+
+fn fraction_secant(input: &str) -> Result<FractionSecant, FractionError> {
     let (points, expression) = input
         .strip_prefix('[')
         .and_then(|input| input.split_once(']'))
@@ -688,9 +701,13 @@ fn fraction_secant(input: &str) -> Result<BigRational, FractionError> {
     let expression = expression.trim();
     let left = calculate_fraction_with_variables(expression, Some(&start), None)?;
     let right = calculate_fraction_with_variables(expression, Some(&end), None)?;
-    let slope = (right - left) / (end - start);
+    let slope = (right - &left) / (end - &start);
     ensure_exact_size(&slope)?;
-    Ok(slope)
+    Ok(FractionSecant {
+        start,
+        value_at_start: left,
+        slope,
+    })
 }
 
 fn format_mixed_fraction(value: BigRational) -> String {
@@ -1792,6 +1809,20 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_a_secant_expression_that_can_be_evaluated_exactly_again() {
+        let line = simplify_fraction("割线式 [1/3,2/3] x**2").unwrap();
+        assert_eq!(line, "x - 2/9");
+        assert_eq!(
+            simplify_fraction(&format!("取值CSV [1/3,2/3] {line}")).as_deref(),
+            Ok("x,y\r\n1/3,1/9\r\n2/3,4/9")
+        );
+        assert_eq!(
+            simplify_fraction("secant-line [2,1] 1/7").as_deref(),
+            Ok("1/7")
+        );
+    }
 
     #[test]
     fn computes_the_exact_average_rate_of_change_in_either_direction() {

@@ -5721,6 +5721,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "生成可再次代入的精确割线算式",
+        query: "分数: 割线式 [1/3,2/3] x**2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按首项和公差生成精确等差数列",
         query: "分数: 等差数列 1/3,1/6,5",
     },
@@ -6178,6 +6183,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "取值CSV",
                     "精确采样",
                     "平均变化率",
+                    "割线式",
                     "等差数列",
                     "等比数列",
                     "连分数",
