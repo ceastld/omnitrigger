@@ -21,7 +21,7 @@ use super::scatter_plot::ScatterPlot;
 
 pub(super) const MAX_VALUES: usize = 128;
 const MAX_BIN_EDGES: usize = 16;
-const MAX_WEIGHTED_QUANTILES: usize = 16;
+pub(super) const MAX_WEIGHTED_QUANTILES: usize = 16;
 const MAX_BINOMIAL_TRIALS: u32 = 128;
 const MAX_GEOMETRIC_TRIALS: u32 = 1024;
 
@@ -724,22 +724,54 @@ fn weighted_quantiles_csv(input: &str) -> Result<String, StatisticsError> {
         .map(|value| parse_probability(value.trim()))
         .collect::<Result<Vec<_>, _>>()?;
     let distribution = read_weighted_distribution(values.trim_start())?;
-    let mut csv = String::from("概率,分位数");
-    for probability in probabilities {
-        let label = probability.to_string();
-        let value = weighted_quantile_value(&distribution, probability)?.to_string();
-        append_bounded_csv_row(
-            &mut csv,
-            [label.as_str(), value.as_str()].into_iter(),
-            StatisticsError::WeightedReportTooLarge,
-        )?;
-    }
-    Ok(csv)
+    distribution.quantiles_csv(probabilities)
 }
 
-struct WeightedDistribution {
+#[derive(Default)]
+pub(super) struct WeightedDistribution {
     weights: BTreeMap<BigRational, BigRational>,
     total: BigRational,
+}
+
+impl WeightedDistribution {
+    pub(super) fn record(
+        &mut self,
+        (value, weight): (BigRational, BigRational),
+    ) -> Result<(), StatisticsError> {
+        match weight.numer().sign() {
+            Sign::NoSign => return Ok(()),
+            Sign::Minus => return Err(StatisticsError::InvalidWeight),
+            Sign::Plus => {}
+        }
+        let total = bounded(&self.total + &weight)?;
+        let group_weight = match self.weights.get(&value) {
+            Some(previous) => bounded(previous + weight)?,
+            None => bounded(weight)?,
+        };
+        self.weights.insert(value, group_weight);
+        self.total = total;
+        Ok(())
+    }
+
+    pub(super) fn quantiles_csv(
+        &self,
+        probabilities: Vec<BigRational>,
+    ) -> Result<String, StatisticsError> {
+        if self.weights.is_empty() {
+            return Err(StatisticsError::ZeroTotalWeight);
+        }
+        let mut csv = String::from("概率,分位数");
+        for probability in probabilities {
+            let label = probability.to_string();
+            let value = weighted_quantile_value(self, probability)?.to_string();
+            append_bounded_csv_row(
+                &mut csv,
+                [label.as_str(), value.as_str()].into_iter(),
+                StatisticsError::WeightedReportTooLarge,
+            )?;
+        }
+        Ok(csv)
+    }
 }
 
 fn cumulative_arguments(input: &str) -> Result<(BigRational, &str), StatisticsError> {
@@ -769,23 +801,14 @@ fn weighted_cumulative_value(input: &str, as_share: bool) -> Result<String, Stat
 }
 
 fn read_weighted_distribution(input: &str) -> Result<WeightedDistribution, StatisticsError> {
-    let mut weights = BTreeMap::<BigRational, BigRational>::new();
-    let mut total_weight = BigRational::default();
+    let mut distribution = WeightedDistribution::default();
     for term in observation_terms(input)? {
-        let (value, weight) = read_weighted_observation(term)?;
-        if weight.numer().sign() != Sign::NoSign {
-            total_weight = bounded(total_weight + &weight)?;
-            let previous = weights.entry(value).or_default();
-            *previous = bounded(&*previous + weight)?;
-        }
+        distribution.record(read_weighted_observation(term)?)?;
     }
-    if weights.is_empty() {
+    if distribution.weights.is_empty() {
         return Err(StatisticsError::ZeroTotalWeight);
     }
-    Ok(WeightedDistribution {
-        weights,
-        total: total_weight,
-    })
+    Ok(distribution)
 }
 
 enum WeightedFrequencyReport {

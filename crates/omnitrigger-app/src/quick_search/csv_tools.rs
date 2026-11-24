@@ -24,7 +24,8 @@ use super::scientific::{average, median};
 use super::statistics::{
     interpolate_ordered_quantile, parse_bin_edges, parse_probability, parse_statistical_weight,
     parse_weighted_pair, plot_binned_float_values, plot_binned_unweighted,
-    report_binned_unweighted, unweighted_box_fences, WeightedMean,
+    report_binned_unweighted, unweighted_box_fences, WeightedDistribution, WeightedMean,
+    MAX_WEIGHTED_QUANTILES,
 };
 use super::{
     bin_plot::BinPlot,
@@ -277,6 +278,7 @@ pub(super) enum CsvError {
     WeightedMeanArguments,
     WeightedGroupArguments,
     WeightedFrequencyArguments,
+    WeightedQuantileArguments,
     Statistics(StatisticsError),
     Serialization,
     JsonNumericCells,
@@ -611,6 +613,7 @@ impl CsvError {
             Self::WeightedMeanArguments => "依次填写数值列和权重列，例如 [\"成绩\",\"权重\"]",
             Self::WeightedGroupArguments => "依次填写分组列、数值列和权重列，例如 [[\"地区\"],\"成绩\",\"权重\"]",
             Self::WeightedFrequencyArguments => "填写分组列和权重列，例如 [[\"地区\",\"状态\"],\"权重\"]",
+            Self::WeightedQuantileArguments => "填写数值列、权重列和概率列表，例如 [\"金额\",\"权重\",[\"25%\",0.5]]",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
             Self::JsonNumericCells => "所选列须为 JSON 数字或空白，例如 1.50 或 2e0",
@@ -6051,17 +6054,21 @@ struct CurveHeightEvent {
     density_change: BigRational,
 }
 
-fn coordinate_curve_quantile(input: &str) -> Result<String, CsvError> {
-    let invalid = CsvError::CoordinateQuantileArguments;
-    let ((columns, probability), data) =
-        json_argument_and_data::<([ColumnReference; 2], Box<RawValue>)>(input, invalid)?;
+fn csv_probability(probability: &RawValue, invalid: CsvError) -> Result<BigRational, CsvError> {
     let raw = probability.get();
     let probability = if raw.starts_with('"') {
         Cow::Owned(serde_json::from_str::<String>(raw).map_err(|_| invalid)?)
     } else {
         Cow::Borrowed(raw)
     };
-    let probability = parse_probability(probability.trim()).map_err(CsvError::Statistics)?;
+    parse_probability(probability.trim()).map_err(CsvError::Statistics)
+}
+
+fn coordinate_curve_quantile(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateQuantileArguments;
+    let ((columns, probability), data) =
+        json_argument_and_data::<([ColumnReference; 2], Box<RawValue>)>(input, invalid)?;
+    let probability = csv_probability(&probability, invalid)?;
     let mut table = read_coordinate_table(
         data,
         &columns,
@@ -6975,6 +6982,9 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "分组加权平均" || operation.eq_ignore_ascii_case("group-weighted-mean") {
         return Some(csv_grouped_weighted_mean(input));
     }
+    if operation == "加权分位表" || operation.eq_ignore_ascii_case("weighted-quantiles-csv") {
+        return Some(csv_weighted_quantiles(input));
+    }
     if operation == "分组加权频数" || operation.eq_ignore_ascii_case("group-weighted-frequency")
     {
         return Some(csv_grouped_weighted_frequency(input));
@@ -7497,6 +7507,47 @@ fn record_weighted_csv_row(
                 error.message()
             },
         })
+}
+
+fn csv_weighted_quantiles(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let invalid = CsvError::WeightedQuantileArguments;
+    let ((value, weight, probabilities), data) =
+        json_argument_and_data::<(ColumnReference, ColumnReference, Vec<Box<RawValue>>)>(
+            input, invalid,
+        )?;
+    if !(1..=MAX_WEIGHTED_QUANTILES).contains(&probabilities.len()) {
+        return Err(CsvError::Statistics(StatisticsError::WeightedQuantileList));
+    }
+    let probabilities = probabilities
+        .iter()
+        .map(|probability| csv_probability(probability, invalid))
+        .collect::<Result<_, _>>()?;
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let [value, weight] = resolve_weighted_columns(header, [value, weight])?;
+    let mut distribution = WeightedDistribution::default();
+    let mut count = 0;
+    for (index, row) in records.iter().enumerate() {
+        let (value, weight) = (row[value].trim(), row[weight].trim());
+        if value.is_empty() || weight.is_empty() {
+            continue;
+        }
+        count += 1;
+        let row_error = |error: StatisticsError| CsvError::DataRowValue {
+            row: index + 1,
+            cause: error.message(),
+        };
+        if count > MAX_VALUES {
+            return Err(row_error(StatisticsError::TooManyValues));
+        }
+        let pair = parse_weighted_pair(value, &normalize(weight)).map_err(row_error)?;
+        distribution.record(pair).map_err(row_error)?;
+    }
+    let csv = distribution
+        .quantiles_csv(probabilities)
+        .map_err(CsvError::Statistics)?;
+    let rows = read_table_for_preview(&csv, ',')?;
+    Ok((csv, rows))
 }
 
 fn csv_grouped_weighted_frequency(input: &str) -> Result<CsvPreviewData, CsvError> {
@@ -11036,6 +11087,24 @@ mod tests {
             transform_csv(&format!("搜索行 \"\" {data}")),
             Ok(write_rows(&rows, ','))
         );
+    }
+
+    #[test]
+    fn selects_csv_weighted_quantile_columns_and_reports_invalid_data_rows() {
+        let query = "加权分位表 [2,\"权重\",[\"25%\",0.5,\"3/4\"]] 编号,金额,权重\n001,1,1\n002,2,1\n003,4,50%\n004,4,3/2\n005,,9";
+        let expected = "概率,分位数\r\n1/4,1\r\n1/2,2\r\n3/4,4";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(
+            csv_table_preview(query)
+                .expect("选列加权分位表应可预览")
+                .map(|(text, _)| text)
+                .as_deref(),
+            Ok(expected)
+        );
+        assert!(matches!(
+            transform_csv("加权分位表 [1,2,[0.5]] 值,权重\r\n1,1\r\n2,-1"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
