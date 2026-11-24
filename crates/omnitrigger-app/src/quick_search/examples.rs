@@ -4848,6 +4848,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求各段的欧氏长度并保留精确根式",
+        query: "CSV: 曲线长度 [\"x\",\"y\"] x,y\n0,0\n1,1\n2,0\n5,4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将间距不等的完整样点重采样到等距坐标",
         query: "CSV: 等距插值 [[\"时间\",\"高度\"],5] 时间,高度\n3,3\n0,0\n2,\n1,2",
     },
@@ -5811,6 +5816,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "曲线极值",
             "曲线截取",
             "曲线变差",
+            "曲线长度",
             "等距插值",
             "水平交点",
             "超阈跨度",

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
@@ -1050,11 +1050,51 @@ pub(super) fn format_square_root(value: &BigRational) -> String {
     debug_assert!(value.numer().sign() != Sign::Minus);
     if let Some(root) = exact_abs_square_root(value) {
         root.to_string()
-    } else if value.is_integer() {
+    } else {
+        format_radical(value)
+    }
+}
+
+fn format_radical(value: &BigRational) -> String {
+    if value.is_integer() {
         format!("√{value}")
     } else {
         format!("√({value})")
     }
+}
+
+pub(super) fn format_square_root_sum(
+    values: impl Iterator<Item = BigRational>,
+) -> Result<String, FractionError> {
+    let mut exact = BigRational::default();
+    let mut radicals = BTreeMap::new();
+    for value in values {
+        debug_assert!(value.numer().sign() != Sign::Minus);
+        ensure_exact_size(&value)?;
+        if let Some(root) = exact_abs_square_root(&value) {
+            exact += root;
+            ensure_exact_size(&exact)?;
+        } else {
+            *radicals.entry(value).or_insert(0usize) += 1;
+        }
+    }
+    if radicals.is_empty() {
+        return Ok(exact.to_string());
+    }
+
+    let mut terms = Vec::with_capacity(radicals.len() + 1);
+    if exact.numer().sign() != Sign::NoSign {
+        terms.push(exact.to_string());
+    }
+    terms.extend(radicals.into_iter().map(|(value, count)| {
+        let term = format_radical(&value);
+        if count == 1 {
+            term
+        } else {
+            format!("{count}{term}")
+        }
+    }));
+    Ok(terms.join(" + "))
 }
 
 pub(super) fn format_exact_multiple(value: &BigRational, symbol: &str) -> String {

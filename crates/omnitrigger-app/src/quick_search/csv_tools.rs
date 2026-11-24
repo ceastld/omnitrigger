@@ -38,8 +38,8 @@ use super::{
     duration::{elapsed_clock_interval, format_clock_duration},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, format_significant_digits,
-        format_square_root, interpolate_fraction, parse_fraction_literal, rounded_decimal,
-        FractionError, MAX_DECIMAL_PLACES,
+        format_square_root, format_square_root_sum, interpolate_fraction, parse_fraction_literal,
+        rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
     },
     json_tools::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
@@ -247,6 +247,7 @@ pub(super) enum CsvError {
     CoordinateExtremaPointCount,
     CoordinateClipPointCount,
     CoordinateVariationPointCount,
+    CoordinateLengthPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     CoordinateThresholdSpanPointCount,
@@ -551,6 +552,7 @@ impl CsvError {
             Self::CoordinateExtremaPointCount => "曲线极值需要 2 至 64 个完整样点",
             Self::CoordinateClipPointCount => "曲线截取需要 2 至 64 个完整样点",
             Self::CoordinateVariationPointCount => "曲线变差需要 2 至 64 个完整样点",
+            Self::CoordinateLengthPointCount => "曲线长度需要 2 至 64 个完整样点",
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
@@ -1166,6 +1168,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
         "曲线变差" | "curve-total-variation" => return coordinate_total_variation(input),
+        "曲线长度" | "curve-length" => return coordinate_curve_length(input),
         "曲线截取" | "clip-curve" => {
             let mut table = read_coordinate_interval(input, CsvError::CoordinateClipPointCount)?;
             sort_distinct_coordinates(&mut table.samples)?;
@@ -5985,6 +5988,19 @@ fn read_coordinate_interval(
     Ok(table)
 }
 
+fn coordinate_curve_length(input: &str) -> Result<String, CsvError> {
+    let mut table = read_coordinate_interval(input, CsvError::CoordinateLengthPointCount)?;
+    sort_distinct_coordinates(&mut table.samples)?;
+    let squared_distances = table.samples.windows(2).map(|pair| {
+        let (left_x, left_y) = &pair[0].point;
+        let (right_x, right_y) = &pair[1].point;
+        let dx = right_x - left_x;
+        let dy = right_y - left_y;
+        &dx * &dx + &dy * &dy
+    });
+    format_square_root_sum(squared_distances).map_err(|_| CsvError::ComputedNumberRange)
+}
+
 fn coordinate_total_variation(input: &str) -> Result<String, CsvError> {
     let mut table = read_coordinate_interval(input, CsvError::CoordinateVariationPointCount)?;
     sort_distinct_coordinates(&mut table.samples)?;
@@ -7894,6 +7910,27 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
             Err(CsvError::CoordinateDifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn sums_exact_curve_lengths_as_rational_values_and_radicals() {
+        let triangle = "x,y\n6,0\n3,4\n0,0\n2,";
+        assert_eq!(
+            transform_csv(&format!("曲线长度 [1,2] {triangle}")).as_deref(),
+            Ok("10")
+        );
+        assert_eq!(
+            transform_csv(&format!("curve-length [[1,2],[1,5]] {triangle}")).as_deref(),
+            Ok("20/3")
+        );
+        assert_eq!(
+            transform_csv("曲线长度 [1,2] x,y\n0,0\n1,1\n2,0\n5,4").as_deref(),
+            Ok("5 + 2√2")
+        );
+        assert_eq!(
+            transform_csv("曲线长度 [1,2] x,y\n0,0\n1/2,1/2").as_deref(),
+            Ok("√(1/2)")
         );
     }
 
