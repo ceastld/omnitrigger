@@ -1668,6 +1668,7 @@ fn input_file_query_prefix(path: &Path) -> &'static str {
         Some("csv") => "CSV: 表格预览 ",
         Some("tsv") => "CSV: 从TSV ",
         Some("json") => "JSON: 格式化 ",
+        Some("jsonl" | "ndjson") => "JSON: 合并行 ",
         Some("toml") => "TOML: 校验 ",
         _ => "文本: 原文 ",
     }
@@ -6690,6 +6691,8 @@ mod tests {
             ("销售.CSV", "CSV: 表格预览 "),
             ("名单.tsv", "CSV: 从TSV "),
             ("package.JSON", "JSON: 格式化 "),
+            ("交易.JSONL", "JSON: 合并行 "),
+            ("日志.ndjson", "JSON: 合并行 "),
             ("配置.toml", "TOML: 校验 "),
             ("草稿.txt", "文本: 原文 "),
             ("说明", "文本: 原文 "),
@@ -6698,6 +6701,15 @@ mod tests {
         }
         assert!(accepts_input_file(""));
         assert!(accepts_input_file(" \t\r\n"));
+        let payload = "{\"编号\":\"001\",\"金额\":1.50}\r\n{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}";
+        let json_lines = format!(
+            "{}{payload}",
+            input_file_query_prefix(Path::new("数据.jsonl"))
+        );
+        assert_eq!(
+            for_query(&json_lines, &[]).refillable_text(),
+            Some("[{\"编号\":\"001\",\"金额\":1.50},{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}]")
+        );
         assert!(!accepts_input_file("2**10"));
         let text = "  开头\r\n中间\t末尾 \r\n";
         let query = format!("{}{text}", input_file_query_prefix(Path::new("说明.txt")));
