@@ -4932,6 +4932,32 @@ mod tests {
     }
 
     #[test]
+    fn previews_explicit_fraction_points_in_input_order_with_duplicates() {
+        let expected = "x,y\r\n3/2,31/12\r\n-2,13/3\r\n3/2,31/12\r\n0,1/3";
+        for query in [
+            "分数: 取值CSV [3/2,-2,1.50,0] x**2+1/3",
+            r#"处理: ["分数: TABLE-CSV [3/2,-2,1.50,0]"] x**2+1/3"#,
+        ] {
+            let results = for_query(query, &[]);
+            assert!(
+                matches!(
+                    &results,
+                    Results::Value(Ok(ResultValue {
+                        kind: ValueKind::Table(_),
+                        ..
+                    }))
+                ),
+                "{query}"
+            );
+            assert_eq!(results.refillable_text(), Some(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("取值CSV [1,,2] x"),
+            Err(FractionError::TableInputs)
+        );
+    }
+
+    #[test]
     fn named_csv_box_plot_ignores_missing_values_and_keeps_an_exact_summary() {
         let data = "编号,金额\nA,1\nB,2\nC,\nD,3\nE,4\nF,8";
         let results = for_query(&format!(r#"CSV: 列箱线图 "金额" {data}"#), &[]);

@@ -212,10 +212,10 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
         return from_repeating_decimal(expression.trim()).map(|value| value.to_string());
     }
     if verb == "取值表" || verb.eq_ignore_ascii_case("table") {
-        return fraction_table(expression.trim());
+        return fraction_table(expression.trim(), FractionTableFormat::Tsv);
     }
-    if is_fraction_sample(verb) {
-        return fraction_samples(expression.trim());
+    if let Some(report) = fraction_csv_command(verb, expression.trim()) {
+        return report;
     }
     if verb == "等差数列" || verb.eq_ignore_ascii_case("arithmetic-sequence") {
         return fraction_sequence(expression, false);
@@ -587,7 +587,12 @@ pub(super) fn calculate_fraction_with_variables(
     Ok(value)
 }
 
-fn fraction_table(input: &str) -> Result<String, FractionError> {
+enum FractionTableFormat {
+    Tsv,
+    Csv,
+}
+
+fn fraction_table(input: &str, format: FractionTableFormat) -> Result<String, FractionError> {
     let (points, expression) = input
         .strip_prefix('[')
         .and_then(|input| input.split_once(']'))
@@ -596,24 +601,34 @@ fn fraction_table(input: &str) -> Result<String, FractionError> {
     if points.len() > MAX_TABLE_INPUTS || points.iter().any(|point| point.trim().is_empty()) {
         return Err(FractionError::TableInputs);
     }
-    let mut rows = vec!["x\ty".to_owned()];
+    let (header, delimiter, newline) = match format {
+        FractionTableFormat::Tsv => ("x\ty", '\t', "\n"),
+        FractionTableFormat::Csv => ("x,y", ',', "\r\n"),
+    };
+    let mut rows = vec![header.to_owned()];
     for point in points {
         let x = parse_fraction_literal(point)?;
         let y = calculate_fraction_with_variables(expression.trim(), Some(&x), None)?;
-        rows.push(format!("{x}\t{y}"));
+        rows.push(format!("{x}{delimiter}{y}"));
     }
-    Ok(rows.join("\n"))
+    Ok(rows.join(newline))
 }
 
-fn is_fraction_sample(verb: &str) -> bool {
-    verb == "精确采样" || verb.eq_ignore_ascii_case("sample-csv")
+fn fraction_csv_command(verb: &str, expression: &str) -> Option<Result<String, FractionError>> {
+    if verb == "精确采样" || verb.eq_ignore_ascii_case("sample-csv") {
+        Some(fraction_samples(expression))
+    } else if verb == "取值CSV" || verb.eq_ignore_ascii_case("table-csv") {
+        Some(fraction_table(expression, FractionTableFormat::Csv))
+    } else {
+        None
+    }
 }
 
 pub(super) fn fraction_csv_report(input: &str) -> Option<Result<String, FractionError>> {
     let normalized = normalize(input);
     let input = normalized.trim();
     let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-    is_fraction_sample(verb).then(|| fraction_samples(expression.trim()))
+    fraction_csv_command(verb, expression.trim())
 }
 
 fn fraction_samples(input: &str) -> Result<String, FractionError> {
