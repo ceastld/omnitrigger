@@ -3935,6 +3935,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在表格中查看 JSON 的修改、移除和新增",
+        query: r#"JSON: 对比CSV {"a/b":[1.00,null],"旧":2e0} {"a/b":[1,true],"新":null}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除 JSON 深处的成员或数组项",
         query: r#"JSON: 删路径 /订单/0/备注 {"订单":[{"金额":1.50,"备注":"草稿"}],"税率":0.10}"#,
     },

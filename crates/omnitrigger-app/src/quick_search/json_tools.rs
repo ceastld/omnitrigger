@@ -183,6 +183,7 @@ enum JsonCsvOperation {
     Paths,
     LinePaths,
     ValidateLines,
+    Differences,
     Leaves,
     Keys,
     Values,
@@ -197,6 +198,7 @@ impl JsonCsvOperation {
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "行路径转csv" | "jsonl-pointers-to-csv" => Some(Self::LinePaths),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
+            "对比csv" | "diff-csv" => Some(Self::Differences),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
             "找键csv" | "find-key-csv" => Some(Self::Keys),
             "找值csv" | "find-value-csv" => Some(Self::Values),
@@ -214,6 +216,7 @@ impl JsonCsvOperation {
             | Self::Paths
             | Self::LinePaths
             | Self::ValidateLines
+            | Self::Differences
             | Self::Leaves
             | Self::Keys
             | Self::Values => true,
@@ -232,6 +235,7 @@ impl JsonCsvOperation {
             Self::Paths => json_paths_to_csv(source, read_json_array),
             Self::LinePaths => json_paths_to_csv(source, read_json_lines),
             Self::ValidateLines => validate_json_lines_csv(source),
+            Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
             }
@@ -331,7 +335,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "复制路径" | "copy-path" => return transfer_json_value(source, false),
         "移动路径" | "move-path" => return transfer_json_value(source, true),
         "应用补丁" | "apply-patch" => return apply_json_patch(source),
-        "对比" | "diff" => return compare_json_values(source),
+        "对比" | "diff" => return compare_json_values(source, ComparisonOutput::Json),
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "去空字段" | "remove-null-fields" => return remove_null_json_fields(source),
@@ -2408,11 +2412,42 @@ struct JsonDifference<'a> {
     right: Option<&'a RawValue>,
 }
 
-fn compare_json_values(source: &str) -> Result<String, JsonError> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ComparisonOutput {
+    Json,
+    Csv,
+}
+
+fn compare_json_values(source: &str, format: ComparisonOutput) -> Result<String, JsonError> {
     let (left, right) = json_value_and_source(source, JsonError::Invalid)?;
     let right = serde_json::from_str::<&RawValue>(right).map_err(json_parse_error)?;
-    let mut output = String::from("[");
+    let mut output = String::from(match format {
+        ComparisonOutput::Json => "[",
+        ComparisonOutput::Csv => "指针,变化,左值,右值",
+    });
     compare_json_trees(left, right, |difference| {
+        if format == ComparisonOutput::Csv {
+            if difference.pointer.contains('\0') {
+                return Err(JsonError::CsvNullCharacter);
+            }
+            let change = match (difference.left, difference.right) {
+                (None, _) => "新增",
+                (_, None) => "移除",
+                _ => "修改",
+            };
+            append_bounded_csv_row(
+                &mut output,
+                [
+                    difference.pointer,
+                    change,
+                    difference.left.map_or("", RawValue::get),
+                    difference.right.map_or("", RawValue::get),
+                ]
+                .into_iter(),
+                JsonError::ComparisonTooLarge,
+            )?;
+            return Ok(true);
+        }
         let encoded = serde_json::to_string(&difference).map_err(json_parse_error)?;
         if output.len() + encoded.len() + 2 > MAX_PRETTY_BYTES {
             return Err(JsonError::ComparisonTooLarge);
@@ -2423,7 +2458,9 @@ fn compare_json_values(source: &str) -> Result<String, JsonError> {
         output.push_str(&encoded);
         Ok(true)
     })?;
-    output.push(']');
+    if format == ComparisonOutput::Json {
+        output.push(']');
+    }
     Ok(output)
 }
 
@@ -4395,6 +4432,25 @@ mod tests {
             Err(JsonError::DuplicateKey)
         );
         assert_eq!(transform_json("对比 {}"), Err(JsonError::Incomplete));
+    }
+
+    #[test]
+    fn compares_json_in_csv_preserving_null_absence_and_original_values() {
+        let query = r#"对比CSV {"a/b":[1.00,null],"旧":2e0} {"a/b":[1,true],"新":null}"#;
+        let expected = "指针,变化,左值,右值\r\n/a~1b/1,修改,null,true\r\n/旧,移除,2e0,\"\"\r\n/新,新增,\"\",null";
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(
+            json_csv_report(query).expect("差异应显示为表格").as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            transform_json("diff-csv [1.50] [1.5]").as_deref(),
+            Ok("指针,变化,左值,右值")
+        );
+        assert_eq!(
+            transform_json(r#"对比CSV {"a\u0000":1} {"a\u0000":2}"#),
+            Err(JsonError::CsvNullCharacter)
+        );
     }
 
     #[test]
