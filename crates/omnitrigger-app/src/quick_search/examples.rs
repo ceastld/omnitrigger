@@ -25,7 +25,9 @@ impl Example {
         if scope == Scope::Json
             && !matches!(
                 operation.to_ascii_lowercase().as_str(),
-                "路径转csv"
+                "行数组转csv"
+                    | "rows-to-csv"
+                    | "路径转csv"
                     | "pointers-to-csv"
                     | "多条件筛选"
                     | "filter-all"
@@ -3936,6 +3938,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把 JSON 对象列表转换为 CSV",
         query: r#"JSON: 转CSV [{"编号":"001","数量":1.20},{"编号":"002","备注":"甲,乙"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "为 JSON 行数组指定表头并转成 CSV",
+        query: r#"JSON: 行数组转CSV ["名称","金额"] [["茶,咖啡",1.50],["梨",null]]"#,
     },
     Example {
         icon: Icon::Terminal,

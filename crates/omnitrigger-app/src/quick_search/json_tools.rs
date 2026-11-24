@@ -66,6 +66,7 @@ pub(super) enum JsonError {
     MissingKey,
     RenameConflict,
     CsvRows,
+    CsvRowHeaders,
     CsvDuplicateKey,
     CsvNullCharacter,
     CsvOutputTooLarge,
@@ -139,6 +140,7 @@ impl JsonError {
             Self::MissingKey => "顶层对象中找不到要改名的键",
             Self::RenameConflict => "改键要求原键唯一且新键名可用",
             Self::CsvRows => "输入等宽且有数据列的数组，或至少有一个键的对象列表",
+            Self::CsvRowHeaders => "先填写非空且互不重复的列名，再粘贴等宽的行数组",
             Self::CsvDuplicateKey => "同一对象的 CSV 列名需要唯一",
             Self::CsvNullCharacter => "CSV 单元格不能包含空字符 U+0000",
             Self::CsvOutputTooLarge => "CSV 转换结果超过 1 MiB",
@@ -174,6 +176,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
 
 enum JsonCsvOperation {
     Convert,
+    RowsWithHeaders,
     Paths,
     Leaves,
 }
@@ -182,6 +185,7 @@ impl JsonCsvOperation {
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "转csv" | "to-csv" => Some(Self::Convert),
+            "行数组转csv" | "rows-to-csv" => Some(Self::RowsWithHeaders),
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
             _ => None,
@@ -193,13 +197,14 @@ impl JsonCsvOperation {
             Self::Convert => source
                 .strip_prefix('[')
                 .is_some_and(|rows| rows.trim_start().starts_with('{')),
-            Self::Paths | Self::Leaves => true,
+            Self::RowsWithHeaders | Self::Paths | Self::Leaves => true,
         }
     }
 
     fn run(self, source: &str) -> Result<String, JsonError> {
         match self {
             Self::Convert => json_to_csv(source),
+            Self::RowsWithHeaders => json_array_rows_with_headers(source),
             Self::Paths => json_paths_to_csv(source),
             Self::Leaves => write_json_pointer_results(source, PointerResultMode::Csv),
         }
@@ -1804,10 +1809,39 @@ fn json_to_csv(source: &str) -> Result<String, JsonError> {
     let rows = read_json_array(source)?;
     match rows.first().and_then(|row| row.get().chars().next()) {
         None => Ok(String::new()),
-        Some('[') => json_array_rows_to_csv(rows),
+        Some('[') => json_array_rows_to_csv(rows, None),
         Some('{') => json_object_rows_to_csv(rows),
         _ => Err(JsonError::CsvRows),
     }
+}
+
+fn json_array_rows_with_headers(query: &str) -> Result<String, JsonError> {
+    let (headers, source) = strings_and_source(query, JsonError::CsvRowHeaders)?;
+    if headers.is_empty()
+        || headers.iter().any(|header| header.trim().is_empty())
+        || headers.iter().collect::<HashSet<_>>().len() != headers.len()
+    {
+        return Err(JsonError::CsvRowHeaders);
+    }
+    let mut output = headers
+        .iter()
+        .map(|header| encode_csv_cell(header))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(",");
+    let records = json_array_rows_to_csv(read_json_array(source)?, Some(headers.len()))?;
+    let additional_bytes = if records.is_empty() {
+        0
+    } else {
+        records.len() + 2
+    };
+    if output.len().saturating_add(additional_bytes) > MAX_PRETTY_BYTES {
+        return Err(JsonError::CsvOutputTooLarge);
+    }
+    if !records.is_empty() {
+        output.push_str("\r\n");
+        output.push_str(&records);
+    }
+    Ok(output)
 }
 
 fn json_paths_to_csv(query: &str) -> Result<String, JsonError> {
@@ -1895,8 +1929,10 @@ fn map_json_objects(
     Ok(output)
 }
 
-fn json_array_rows_to_csv(rows: Vec<&RawValue>) -> Result<String, JsonError> {
-    let mut width = None;
+fn json_array_rows_to_csv(
+    rows: Vec<&RawValue>,
+    mut width: Option<usize>,
+) -> Result<String, JsonError> {
     let mut output = Vec::with_capacity(rows.len());
     for row in rows {
         if !row.get().starts_with('[') {

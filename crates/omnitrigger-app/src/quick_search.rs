@@ -4893,6 +4893,7 @@ mod tests {
     fn previews_json_csv_reports_with_headers_and_preserves_their_exact_text() {
         for term in [
             r#"转CSV [{"编号":"001","数量":1.20},{"编号":"002","备注":"甲,乙"}]"#,
+            r#"行数组转CSV ["名称","金额"] [["茶,咖啡",1.50],["梨",null]]"#,
             r#"路径转CSV ["/订单/金额"] [{"订单":{"金额":1.50}},{"订单":{}}]"#,
             r#"LEAVES-CSV {"金额":[1.20e+2,null],"备注":"甲,乙"}"#,
         ] {
@@ -4919,6 +4920,27 @@ mod tests {
             Results::Value(Ok(ResultValue { text, kind: ValueKind::Text }))
                 if text == "1,2\r\n3,4"
         ));
+    }
+
+    #[test]
+    fn converts_json_rows_with_explicit_headers_and_validates_their_width() {
+        assert_eq!(
+            transform_json(r#"rows-to-csv ["名称,备注","金额"] [["茶,咖啡",1.50],["梨",null]]"#)
+                .as_deref(),
+            Ok("\"名称,备注\",金额\r\n\"茶,咖啡\",1.50\r\n梨,\"\"")
+        );
+        assert_eq!(
+            transform_json(r#"行数组转CSV ["金额"] []"#).as_deref(),
+            Ok("金额")
+        );
+        assert_eq!(
+            transform_json(r#"行数组转CSV ["金额","金额"] [[1,2]]"#),
+            Err(JsonError::CsvRowHeaders)
+        );
+        assert_eq!(
+            transform_json(r#"行数组转CSV ["品名","金额"] [["茶"]]"#),
+            Err(JsonError::CsvRows)
+        );
     }
 
     #[test]
