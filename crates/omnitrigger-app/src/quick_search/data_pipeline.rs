@@ -6,7 +6,7 @@ use serde_json::value::RawValue;
 use super::{
     bin_plot::BinPlot,
     box_plot::BoxPlot,
-    calendar::calculate_date,
+    calendar::{calculate_date, is_date_report},
     complex::calculate_complex,
     conversion::{calculate_circuit, convert_wave},
     correlation_plot::CorrelationPlot,
@@ -506,14 +506,14 @@ fn prepare_pipeline_preview(
     csv_error: &impl Fn(CsvError) -> DataPipelineError,
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
-        Scope::Timestamp if is_timestamp_report(query) => Some(
-            convert_timestamp(query, now.to_utc())
-                .map_err(|cause| error(cause.message()))
-                .and_then(|text| {
-                    let table = parse_table_preview(&text).map_err(csv_error)?;
-                    Ok((text, PipelinePreview::Table(table)))
-                }),
-        ),
+        Scope::Date if is_date_report(query) => {
+            let report = calculate_date(query, now.date_naive()).map_err(|cause| cause.message());
+            Some(report_preview(report, error, csv_error))
+        }
+        Scope::Timestamp if is_timestamp_report(query) => {
+            let report = convert_timestamp(query, now.to_utc()).map_err(|cause| cause.message());
+            Some(report_preview(report, error, csv_error))
+        }
         Scope::Csv => csv_table_preview(query)
             .map(|result| {
                 result
@@ -594,6 +594,16 @@ fn prepare_pipeline_preview(
             }),
         _ => None,
     }
+}
+
+fn report_preview(
+    report: Result<String, &'static str>,
+    error: &impl Fn(&'static str) -> DataPipelineError,
+    csv_error: &impl Fn(CsvError) -> DataPipelineError,
+) -> Result<(String, PipelinePreview), DataPipelineError> {
+    let text = report.map_err(error)?;
+    let table = parse_table_preview(&text).map_err(csv_error)?;
+    Ok((text, PipelinePreview::Table(table)))
 }
 
 #[cfg(test)]

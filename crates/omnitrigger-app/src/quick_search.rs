@@ -88,7 +88,9 @@ use batch::{
     batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError, BatchToolOutput,
 };
 use calculator::{calculate, calculate_with_answer, looks_like_calculation, CalculationError};
-use calendar::{calculate_date, looks_like_date_query, parse_complete_date, DateError};
+use calendar::{
+    calculate_date, is_date_report, looks_like_date_query, parse_complete_date, DateError,
+};
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
 use color::{
@@ -1365,14 +1367,16 @@ impl Results {
     fn date_value(query: &str) -> Self {
         let result =
             calculate_date(query, chrono::Local::now().date_naive()).map_err(ValueError::Date);
-        Self::Value(result.map(|text| {
+        Self::Value(result.and_then(|text| {
             let date = text.trim();
-            let kind = if date.chars().nth(11).is_none() && parse_complete_date(date).is_ok() {
+            let kind = if is_date_report(query) {
+                ValueKind::Table(csv_tools::parse_table_preview(&text).map_err(ValueError::Csv)?)
+            } else if date.chars().nth(11).is_none() && parse_complete_date(date).is_ok() {
                 ValueKind::CalendarDate
             } else {
                 ValueKind::Text
             };
-            ResultValue { text, kind }
+            Ok(ResultValue { text, kind })
         }))
     }
 
@@ -4390,6 +4394,37 @@ mod tests {
         assert!(matches!(
             for_query("颜色: #0000FF80 叠加 #fff", &[]),
             Results::Value(Ok(value)) if value.text == "#7F7FFF"
+        ));
+    }
+
+    #[test]
+    fn renders_calendar_csv_reports_as_tables_for_search_and_pipelines() {
+        for term in [
+            "逐日ＣＳＶ 2024-02-29 至 2024-03-03",
+            "按月拆分CSV 2024-01-31 至 2024-03-02",
+            "SPLIT-WEEKS-CSV 2026-12-30 至 2027-01-05",
+            "按季度拆分CSV 2024-03-30 至 2024-04-02",
+            "按半年拆分CSV 2024-06-29 至 2024-07-02",
+            "按年拆分CSV 2023-12-30 至 2024-01-02",
+            "星期统计 2024-02-29 至 2024-03-09",
+        ] {
+            let now = chrono::DateTime::parse_from_rfc3339("2024-02-29T12:00:00+08:00").unwrap();
+            let pipeline = format!("[\"日期:\"] {term}");
+            let (text, preview) = transform_data_pipeline(&pipeline, now).unwrap();
+            assert_eq!(text, calculate_date(term, now.date_naive()).unwrap());
+            assert!(matches!(preview, Some(PipelinePreview::Table(_))), "{term}");
+            assert!(
+                matches!(for_query(&format!("日期: {term}"), &[]),
+                    Results::Value(Ok(ResultValue { text: direct, kind: ValueKind::Table(_) })) if direct == text),
+                "{term}"
+            );
+        }
+        assert!(matches!(
+            for_query("日期: 按月拆分 2024-01-31 至 2024-03-02", &[]),
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Text,
+                ..
+            }))
         ));
     }
 

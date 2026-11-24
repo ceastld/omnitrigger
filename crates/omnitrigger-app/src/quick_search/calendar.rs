@@ -907,6 +907,36 @@ enum DateRangeSplit {
     DaysCsv,
 }
 
+enum DateReport {
+    Split(DateRangeSplit),
+    WeekdayCounts,
+}
+
+impl DateReport {
+    fn from_operation(operation: &str) -> Option<Self> {
+        let split = match operation.to_ascii_lowercase().as_str() {
+            "按月拆分csv" | "split-months-csv" => DateRangeSplit::MonthsCsv,
+            "按周拆分csv" | "split-weeks-csv" => DateRangeSplit::WeeksCsv,
+            "按季拆分csv" | "按季度拆分csv" | "split-quarters-csv" => {
+                DateRangeSplit::QuartersCsv
+            }
+            "按半年拆分csv" | "split-half-years-csv" => DateRangeSplit::HalfYearsCsv,
+            "按年拆分csv" | "split-years-csv" => DateRangeSplit::YearsCsv,
+            "逐日csv" | "days-csv" => DateRangeSplit::DaysCsv,
+            "星期统计" | "weekday-counts" => return Some(Self::WeekdayCounts),
+            _ => return None,
+        };
+        Some(Self::Split(split))
+    }
+}
+
+pub(super) fn is_date_report(query: &str) -> bool {
+    query
+        .split_whitespace()
+        .next()
+        .is_some_and(|operation| DateReport::from_operation(&normalize(operation)).is_some())
+}
+
 fn split_date_range(
     input: &str,
     today: NaiveDate,
@@ -1538,6 +1568,12 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if operation == "列出" || operation.eq_ignore_ascii_case("list") {
         return list_dates(rest.trim_start(), today);
     }
+    if let Some(report) = DateReport::from_operation(operation) {
+        return match report {
+            DateReport::Split(split) => split_date_range(rest, today, split),
+            DateReport::WeekdayCounts => count_weekdays_csv(rest, today),
+        };
+    }
     match operation.to_ascii_lowercase().as_str() {
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
         "月初序列" | "month-start-series" => {
@@ -1564,23 +1600,6 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "按月拆分" | "split-months" => {
             return split_date_range(rest, today, DateRangeSplit::Months)
         }
-        "按月拆分csv" | "split-months-csv" => {
-            return split_date_range(rest, today, DateRangeSplit::MonthsCsv)
-        }
-        "按周拆分csv" | "split-weeks-csv" => {
-            return split_date_range(rest, today, DateRangeSplit::WeeksCsv)
-        }
-        "按季拆分csv" | "按季度拆分csv" | "split-quarters-csv" => {
-            return split_date_range(rest, today, DateRangeSplit::QuartersCsv)
-        }
-        "按半年拆分csv" | "split-half-years-csv" => {
-            return split_date_range(rest, today, DateRangeSplit::HalfYearsCsv)
-        }
-        "按年拆分csv" | "split-years-csv" => {
-            return split_date_range(rest, today, DateRangeSplit::YearsCsv)
-        }
-        "逐日csv" | "days-csv" => return split_date_range(rest, today, DateRangeSplit::DaysCsv),
-        "星期统计" | "weekday-counts" => return count_weekdays_csv(rest, today),
         "表格序号" | "excel-serial" => return spreadsheet_serial(rest, today, false),
         "从表格序号" | "from-excel-serial" => return spreadsheet_serial(rest, today, true),
         _ => {}
