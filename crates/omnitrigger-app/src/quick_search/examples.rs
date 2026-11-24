@@ -8,6 +8,7 @@ use super::json_tools::read_json_lines;
 use super::operators::json_argument_and_tail;
 use super::scientific::split_name;
 use super::scope::{parse_scope, scoped_query, tool_example_keyword, Scope};
+use super::text_tools::is_fixed_width_csv_operation;
 use super::title_rank;
 
 pub(super) struct Example {
@@ -19,10 +20,14 @@ pub(super) struct Example {
 impl Example {
     pub(super) fn data_start(&self) -> Option<usize> {
         let (scope, term) = scoped_query(self.query)?;
+        let (operation, arguments) = term.split_once(char::is_whitespace)?;
+        if scope == Scope::TextTools && is_fixed_width_csv_operation(operation) {
+            let (_, data) = json_argument_and_tail::<Vec<usize>>(arguments)?;
+            return (!data.is_empty()).then_some(self.query.len() - data.len());
+        }
         if !matches!(scope, Scope::Csv | Scope::Json) {
             return None;
         }
-        let (operation, arguments) = term.split_once(char::is_whitespace)?;
         let operation = operation.to_ascii_lowercase();
         if scope == Scope::Json
             && !matches!(
@@ -6942,6 +6947,12 @@ mod tests {
             ("CSV: 选列 1 名称,值\n茶,2", None),
             ("CSV: 转置\n编号,名称\n001,茶", None),
             ("文本: 逐行配对 [\"甲\"]\n茶\n米", None),
+            (
+                "文本: 定宽转CSV [3,2]\r\n 01北京  \r\n002上海 ",
+                Some(" 01北京  \r\n002上海 "),
+            ),
+            ("文本: fixed-width-csv [3,2] 001北京", Some("001北京")),
+            ("文本: 定宽转CSV [3,2]", None),
             (
                 r#"JSON: 路径转CSV ["/金额"] [{"金额":1.50}]"#,
                 Some(r#"[{"金额":1.50}]"#),

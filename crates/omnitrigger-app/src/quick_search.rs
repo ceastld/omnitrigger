@@ -6278,6 +6278,12 @@ mod tests {
                 r#"[{"订单":{"商品":"甲,乙","金额":0.50}}]"#,
                 "/订单/商品,/订单/金额\r\n\"甲,乙\",0.50",
             ),
+            (
+                "文本: 定宽转CSV",
+                "文本: 定宽转CSV [3,2]\n",
+                "009南京已核对\r\n012",
+                "列1,列2,余下\r\n009,南京,已核对\r\n012,\"\",\"\"",
+            ),
         ] {
             search.fill_query(command, window, cx);
             search.refresh_results(command, window, cx);
