@@ -3648,6 +3648,7 @@ impl Render for QuickSearch {
                         header.child(
                             button("toggle-quick-search-help", label, Tone::Ghost, true)
                                 .h(px(24.))
+                                .px(px(10.))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_help(window, cx);
                                 })),
@@ -3656,7 +3657,7 @@ impl Render for QuickSearch {
                     .when(!naming_bookmark && accepts_input_file(&query), |header| {
                         let (label, hint) = match &self.input_file_load {
                             InputFileLoadState::Ready => {
-                                ("载入 Ctrl+O", "在光标处插入 UTF-8 文件内容")
+                                ("载入", "Ctrl+O 在光标处插入 UTF-8 文件内容")
                             }
                             InputFileLoadState::InProgress => {
                                 ("正在载入", "正在选择或读取输入文件")
@@ -3671,6 +3672,7 @@ impl Render for QuickSearch {
                                 !self.file_operation_in_progress(),
                             )
                             .h(px(24.))
+                            .px(px(10.))
                             .tooltip(theme::text_tooltip(hint.to_owned().into()))
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
@@ -3683,6 +3685,7 @@ impl Render for QuickSearch {
                         header.child(
                             button("refill-quick-search-result", label, Tone::Ghost, true)
                                 .h(px(24.))
+                                .px(px(10.))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.refill_result(window, cx);
                                 })),
@@ -3693,6 +3696,7 @@ impl Render for QuickSearch {
                             // 操作改变时使用新的按钮标识，结束上一次的悬停提示。
                             button(label, label, Tone::Ghost, true)
                                 .h(px(24.))
+                                .px(px(10.))
                                 .tooltip(theme::text_tooltip(hint.into()))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_bookmark(window, cx);
@@ -3720,6 +3724,7 @@ impl Render for QuickSearch {
                                 enabled && !self.file_operation_in_progress(),
                             )
                             .h(px(24.))
+                            .px(px(10.))
                             .tooltip(theme::text_tooltip(hint))
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
