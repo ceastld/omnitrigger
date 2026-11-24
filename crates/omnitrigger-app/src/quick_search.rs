@@ -1923,6 +1923,13 @@ impl QuickSearch {
             self.results = next;
             self.expanded_value_pages = None;
             self.table_pages = TablePages::default();
+            if let Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(table),
+                ..
+            })) = &self.results
+            {
+                self.table_pages.columns = table.first_match_column_page().unwrap_or_default();
+            }
             self.selected = 0;
             if previous_height != next_height {
                 window.resize(size(px(WIDTH), px(next_height)));

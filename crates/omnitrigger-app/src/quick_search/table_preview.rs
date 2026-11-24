@@ -12,6 +12,7 @@ pub(super) struct TablePreview {
     rows: Vec<Vec<String>>,
     data_rows: usize,
     columns: usize,
+    highlighted_cells: Vec<(usize, usize)>,
 }
 
 impl TablePreview {
@@ -22,7 +23,23 @@ impl TablePreview {
             rows,
             data_rows,
             columns,
+            highlighted_cells: Vec::new(),
         }
+    }
+
+    pub(super) fn with_highlighted_cells(mut self, cells: Vec<(usize, usize)>) -> Self {
+        self.highlighted_cells = cells;
+        self
+    }
+
+    pub(super) fn is_cell_highlighted(&self, row: usize, column: usize) -> bool {
+        self.highlighted_cells.binary_search(&(row, column)).is_ok()
+    }
+
+    pub(super) fn first_match_column_page(&self) -> Option<usize> {
+        self.highlighted_cells
+            .first()
+            .map(|&(_, column)| column / MAX_VISIBLE_COLUMNS)
     }
 
     pub(super) fn preview_height(&self) -> f32 {
@@ -69,6 +86,12 @@ impl TablePreview {
             .border_color(rgb(theme::BORDER_MID))
             .text_size(px(13.))
             .children(rows.enumerate().map(|(index, row)| {
+                let row_index = if index == 0 {
+                    0
+                } else {
+                    row_page * MAX_DATA_ROWS + index
+                };
+                let first_column = column_page * MAX_VISIBLE_COLUMNS;
                 div()
                     .flex()
                     .items_center()
@@ -85,11 +108,20 @@ impl TablePreview {
                     .when(index + 1 < visible_count, |row| {
                         row.border_b_1().border_color(rgb(theme::BORDER))
                     })
-                    .children(row.iter().map(|value| {
+                    .children(row.iter().enumerate().map(|(column, value)| {
                         div()
                             .flex_1()
                             .min_w_0()
                             .px(px(8.))
+                            .when(
+                                self.is_cell_highlighted(row_index, first_column + column),
+                                |cell| {
+                                    cell.bg(rgb(theme::ACCENT_BG))
+                                        .text_color(rgb(theme::ACCENT))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .rounded(px(4.))
+                                },
+                            )
                             .truncate()
                             .child(display_cell(value))
                     }))

@@ -1125,6 +1125,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     if let Some(table) = coordinate_line_table(operation, input) {
         return table?.to_csv();
     }
+    if is_csv_row_search(operation) {
+        return search_csv_rows(input, false).map(|matches| write_rows(&matches.rows, ','));
+    }
     if let Some(result) = csv_preview_output(operation, input) {
         return result.map(|(text, _)| text);
     }
@@ -6910,6 +6913,14 @@ fn order_records<Row: AsRef<[String]>>(
 
 pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePreview), CsvError>> {
     let (operation, data) = split_argument(query)?;
+    if is_csv_row_search(operation) {
+        return Some(search_csv_rows(data, true).map(|matches| {
+            let text = write_rows(&matches.rows, ',');
+            let table =
+                TablePreview::from_rows(matches.rows).with_highlighted_cells(matches.highlighted);
+            (text, table)
+        }));
+    }
     Some(
         csv_preview_output(operation, data)?
             .map(|(text, rows)| (text, TablePreview::from_rows(rows))),
@@ -6919,9 +6930,6 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
 type CsvPreviewData = (String, Vec<Vec<String>>);
 
 fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewData, CsvError>> {
-    if operation == "搜索行" || operation.eq_ignore_ascii_case("search-rows") {
-        return Some(search_csv_rows(input).map(|rows| (write_rows(&rows, ','), rows)));
-    }
     if operation == "命中位置" || operation.eq_ignore_ascii_case("keyword-positions") {
         return Some(csv_keyword_positions(input));
     }
@@ -7060,7 +7068,16 @@ fn csv_keyword_key(text: &str) -> String {
         .collect()
 }
 
-fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+fn is_csv_row_search(operation: &str) -> bool {
+    operation == "搜索行" || operation.eq_ignore_ascii_case("search-rows")
+}
+
+struct CsvRowMatches {
+    rows: Vec<Vec<String>>,
+    highlighted: Vec<(usize, usize)>,
+}
+
+fn search_csv_rows(input: &str, highlight: bool) -> Result<CsvRowMatches, CsvError> {
     let CsvKeywordQuery {
         keywords,
         columns,
@@ -7068,22 +7085,49 @@ fn search_csv_rows(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
     } = read_csv_keywords(input)?;
     let rows = read_table_for_preview(data, ',')?;
     if keywords.is_empty() {
-        return Ok(rows);
+        return Ok(CsvRowMatches {
+            rows,
+            highlighted: Vec::new(),
+        });
     }
     let mut rows = rows.into_iter();
     let header = rows.next().ok_or(CsvError::MissingInput)?;
     let columns = keyword_column_indices(&header, &columns)?;
-    Ok(std::iter::once(header)
-        .chain(rows.filter(|row| {
-            let cells: Vec<_> = columns
-                .iter()
-                .map(|&index| csv_keyword_key(&row[index]))
-                .collect();
-            keywords
-                .iter()
-                .all(|word| cells.iter().any(|cell| cell.contains(word.key.as_str())))
-        }))
-        .collect())
+    let mut matches = CsvRowMatches {
+        rows: vec![header],
+        highlighted: Vec::new(),
+    };
+    for row in rows {
+        let cells: Vec<_> = columns
+            .iter()
+            .map(|&index| csv_keyword_key(&row[index]))
+            .collect();
+        if !keywords
+            .iter()
+            .all(|word| cells.iter().any(|cell| cell.contains(word.key.as_str())))
+        {
+            continue;
+        }
+        if highlight {
+            let row_index = matches.rows.len();
+            matches
+                .highlighted
+                .extend(
+                    columns
+                        .iter()
+                        .copied()
+                        .zip(cells)
+                        .filter_map(|(column, cell)| {
+                            keywords
+                                .iter()
+                                .any(|word| cell.contains(word.key.as_str()))
+                                .then_some((row_index, column))
+                        }),
+                );
+        }
+        matches.rows.push(row);
+    }
+    Ok(matches)
 }
 
 fn csv_keyword_positions(input: &str) -> Result<CsvPreviewData, CsvError> {
@@ -10576,6 +10620,25 @@ mod tests {
             transform_csv(&format!(r#"搜索行 {{"词":["茶"],"列":[2,"备注"]}} {data}"#)),
             Err(CsvError::SearchRowColumns)
         );
+    }
+
+    #[test]
+    fn highlights_only_matching_cells_inside_the_csv_search_scope() {
+        let data = "A,B,C,D,E,F,查找列,H\n茶,2,3,4,5,6,米,8\n茶,2,3,4,5,6,茶,8";
+        let query = format!(r#"搜索行 {{"词":["茶"],"列":["查找列"]}} {data}"#);
+        let (text, preview) = csv_table_preview(&query).unwrap().unwrap();
+        assert_eq!(transform_csv(&query).as_deref(), Ok(text.as_str()));
+        assert_eq!(text, "A,B,C,D,E,F,查找列,H\r\n茶,2,3,4,5,6,茶,8");
+        assert_eq!(preview.first_match_column_page(), Some(1));
+        assert!(preview.is_cell_highlighted(1, 6));
+        assert!(!preview.is_cell_highlighted(1, 0));
+        assert!(!preview.is_cell_highlighted(0, 6));
+
+        let (_, preview) = csv_table_preview(&format!("搜索行 \"水\" {data}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(preview.first_match_column_page(), None);
+        assert_eq!(preview.row_pages(), 0);
     }
 
     #[test]
