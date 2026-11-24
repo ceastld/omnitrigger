@@ -1423,6 +1423,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"处理: JSON对象 ["分数:"] {"乙":1.25,"甲":0.50}"#,
     },
     Example {
+        icon: Icon::Layers,
+        title: "提取逐行 JSON 的金额并输出精确分数",
+        query: "处理: JSON行 [\"JSON: 取值 /金额\",\"分数:\"]\n{\"金额\":0.50}\n{\"金额\":1.25}",
+    },
+    Example {
         icon: Icon::Browser,
         title: "解码网址查询参数并取出第一个值",
         query: r#"处理: ["URL: 参数JSON","JSON: 取值 /0/1"] https://example.invalid/?q=%E8%8C%B6+1"#,

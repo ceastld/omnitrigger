@@ -587,6 +587,9 @@ impl ValueError {
             }
             Self::DataPipeline(DataPipelineError::Csv(error)) => error.message(),
             Self::DataPipeline(DataPipelineError::Json(error)) => error.message(),
+            Self::DataPipeline(DataPipelineError::JsonLine { line, cause }) => {
+                return format!("第 {line} 行 · {}", cause.message()).into();
+            }
             Self::DataPipeline(DataPipelineError::CsvRowStep { row, index, cause }) => {
                 return format!("第 {row} 个数据行的第 {index} 步失败 · {cause}").into();
             }

@@ -21,7 +21,8 @@ use super::{
     equation::{equation_chart, solve_equation, solve_linear_system},
     fraction::simplify_fraction,
     json_tools::{
-        json_csv_report, read_json_array, read_unique_object_entries, transform_json, JsonError,
+        json_csv_report, json_lines, parse_json_line, read_json_array, read_unique_object_entries,
+        transform_json, JsonError,
     },
     linear_fit::{calculate_linear_fit, calculate_plot, plot_request},
     matrix::calculate_matrix,
@@ -73,6 +74,10 @@ pub(super) enum DataPipelineError {
     CsvColumnArguments,
     Csv(CsvError),
     Json(JsonError),
+    JsonLine {
+        line: usize,
+        cause: JsonError,
+    },
     Step {
         index: usize,
         cause: &'static str,
@@ -128,6 +133,7 @@ pub(super) enum DataPipelineMode {
     ColumnCsv,
     JsonArray,
     JsonObject,
+    JsonLines,
 }
 
 #[derive(Clone, Copy)]
@@ -149,6 +155,7 @@ pub(super) fn split_pipeline_input(input: &str) -> (DataPipelineMode, &str) {
         "csv列" | "csv-column" => (DataPipelineMode::ColumnCsv, arguments),
         "json数组" | "json-array" => (DataPipelineMode::JsonArray, arguments),
         "json对象" | "json-object" => (DataPipelineMode::JsonObject, arguments),
+        "json行" | "json-lines" => (DataPipelineMode::JsonLines, arguments),
         _ => (DataPipelineMode::LastResult, input),
     }
 }
@@ -239,6 +246,9 @@ fn run_data_pipeline(
                 &mut remaining_work,
             )
         }
+        DataPipelineMode::JsonLines => {
+            run_pipeline_json_lines(&steps, source, now, &mut remaining_work)
+        }
         DataPipelineMode::Rows | DataPipelineMode::RowsCsv => run_pipeline_rows(
             &steps,
             source,
@@ -272,30 +282,12 @@ fn run_pipeline_json<'a>(
     let mut result = String::from(open);
     for (index, (key, value)) in values.into_iter().enumerate() {
         let item = index + 1;
-        let raw = value.get();
-        let input = if raw.starts_with('"') {
-            Cow::Owned(
-                serde_json::from_str::<String>(raw)
-                    .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?,
-            )
-        } else {
-            Cow::Borrowed(raw)
-        };
         let location = if object {
             PipelineLocation::JsonField(item)
         } else {
             PipelineLocation::JsonItem(item)
         };
-        let text = run_pipeline_steps(
-            steps,
-            &input,
-            now,
-            PipelineView::Text,
-            location,
-            remaining_work,
-        )?;
-        let encoded = serde_json::to_string(&text)
-            .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?;
+        let encoded = run_pipeline_json_value(value, steps, now, location, remaining_work)?;
         let key = key
             .map(|key| serde_json::to_string(&key))
             .transpose()
@@ -320,6 +312,64 @@ fn run_pipeline_json<'a>(
     }
     result.push(close);
     Ok(result)
+}
+
+fn run_pipeline_json_lines(
+    steps: &[PipelineStep],
+    source: &str,
+    now: DateTime<FixedOffset>,
+    remaining_work: &mut usize,
+) -> Result<String, DataPipelineError> {
+    let mut result = String::new();
+    for (line, input) in json_lines(source) {
+        let value =
+            parse_json_line(input).map_err(|cause| DataPipelineError::JsonLine { line, cause })?;
+        let encoded = run_pipeline_json_value(
+            value,
+            steps,
+            now,
+            PipelineLocation::Line(line),
+            remaining_work,
+        )
+        .map_err(|error| match error {
+            DataPipelineError::Json(cause) => DataPipelineError::JsonLine { line, cause },
+            _ => error,
+        })?;
+        let separator = if result.is_empty() { "" } else { "\n" };
+        if result.len() + separator.len() + encoded.len() > MAX_PIPELINE_OUTPUT_BYTES {
+            return Err(DataPipelineError::RowOutputTooLarge { line });
+        }
+        result.push_str(separator);
+        result.push_str(&encoded);
+    }
+    Ok(result)
+}
+
+fn run_pipeline_json_value(
+    value: &RawValue,
+    steps: &[PipelineStep],
+    now: DateTime<FixedOffset>,
+    location: PipelineLocation,
+    remaining_work: &mut usize,
+) -> Result<String, DataPipelineError> {
+    let raw = value.get();
+    let input = if raw.starts_with('"') {
+        Cow::Owned(
+            serde_json::from_str::<String>(raw)
+                .map_err(|_| DataPipelineError::Json(JsonError::Invalid))?,
+        )
+    } else {
+        Cow::Borrowed(raw)
+    };
+    let output = run_pipeline_steps(
+        steps,
+        &input,
+        now,
+        PipelineView::Text,
+        location,
+        remaining_work,
+    )?;
+    serde_json::to_string(&output).map_err(|_| DataPipelineError::Json(JsonError::Invalid))
 }
 
 fn run_pipeline_rows(
@@ -970,6 +1020,41 @@ mod tests {
         assert_eq!(
             run_pipeline(&input),
             Err(DataPipelineError::JsonArrayTooLarge { item: 2 })
+        );
+    }
+
+    #[test]
+    fn maps_json_lines_to_single_line_strings_and_reports_source_lines() {
+        let query = "JSON行 [\"文本: 大写\"]\r\n\"a\\nb\"\r\n\t\r\n1.50\r\n9007199254740993";
+        assert_eq!(
+            run_pipeline(query).as_deref(),
+            Ok("\"A\\nB\"\n\"1.50\"\n\"9007199254740993\"")
+        );
+        assert_eq!(
+            run_pipeline("json-lines [\"文本: 大写\"]\r\n1\r\n\t\r\n{"),
+            Err(DataPipelineError::JsonLine {
+                line: 3,
+                cause: JsonError::InvalidLine,
+            })
+        );
+        assert!(matches!(
+            run_pipeline("JSON行 [\"分数:\"]\n0.5\n\nnull"),
+            Err(DataPipelineError::RowStep {
+                line: 3,
+                index: 1,
+                ..
+            })
+        ));
+        let invalid_string = "JSON行 [\"文本: 大写\"]\n\"a\"\n\"\\uD800\"";
+        assert!(matches!(
+            run_pipeline(invalid_string),
+            Err(DataPipelineError::JsonLine { line: 2, .. })
+        ));
+        let value = "a".repeat(MAX_PIPELINE_OUTPUT_BYTES / 2);
+        let input = format!("JSON行 [\"文本: 大写\"]\n\"{value}\"\n\"{value}\"");
+        assert_eq!(
+            run_pipeline(&input),
+            Err(DataPipelineError::RowOutputTooLarge { line: 2 })
         );
     }
 

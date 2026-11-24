@@ -1563,11 +1563,11 @@ pub(super) fn read_json_lines(source: &str) -> Result<Vec<&RawValue>, JsonError>
         .collect()
 }
 
-fn parse_json_line(line: &str) -> Result<&RawValue, JsonError> {
+pub(super) fn parse_json_line(line: &str) -> Result<&RawValue, JsonError> {
     serde_json::from_str::<&RawValue>(line).map_err(|_| JsonError::InvalidLine)
 }
 
-fn json_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
+pub(super) fn json_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     source.lines().enumerate().filter_map(|(index, line)| {
         (!line.trim_matches([' ', '\t', '\r']).is_empty()).then_some((index + 1, line))
     })
