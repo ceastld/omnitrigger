@@ -146,6 +146,7 @@ pub(super) enum CsvError {
     ClockDifferenceColumnArguments,
     TimestampDifferenceColumnArguments,
     GroupTimestampDifferenceColumnArguments,
+    GroupTimestampSummaryArguments,
     TimestampZoneColumnArguments,
     DurationNumberColumnArguments,
     CidrColumnArguments,
@@ -388,6 +389,9 @@ impl CsvError {
             }
             Self::GroupTimestampDifferenceColumnArguments => {
                 "填写新列名、时间戳列和分组列，例如 [\"间隔\",\"时刻\",[\"设备\"]]"
+            }
+            Self::GroupTimestampSummaryArguments => {
+                "填写分组列和时间戳列，例如 [[\"设备\"],\"时刻\"]"
             }
             Self::TimestampZoneColumnArguments => {
                 "填写新列名、来源列和目标时区，例如 [\"标准时间\",\"时间\",\"UTC\"]"
@@ -7320,6 +7324,10 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "连续段摘要" || operation.eq_ignore_ascii_case("run-summary") {
         return Some(csv_run_summary(input));
     }
+    if operation == "分组时间戳摘要" || operation.eq_ignore_ascii_case("group-timestamp-summary")
+    {
+        return Some(csv_grouped_timestamp_summary(input));
+    }
     if operation == "分组加权频数" || operation.eq_ignore_ascii_case("group-weighted-frequency")
     {
         return Some(csv_grouped_weighted_frequency(input));
@@ -7973,6 +7981,74 @@ fn csv_grouped_quantiles(input: &str) -> Result<CsvPreviewData, CsvError> {
                 limit,
             )?;
         }
+    }
+    let rows = read_table_for_preview(&csv, ',')?;
+    Ok((csv, rows))
+}
+
+fn csv_grouped_timestamp_summary(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let invalid = CsvError::GroupTimestampSummaryArguments;
+    let ((groups, source), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, ColumnReference)>(input, invalid)?;
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+
+    let mut csv = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(
+        &mut csv,
+        groups.iter().map(|&column| header[column].as_str()).chain([
+            "有效时间戳",
+            "最早",
+            "最晚",
+            "跨度",
+        ]),
+        limit,
+    )?;
+    for group in grouped_row_positions(records, &groups) {
+        let mut count = 0;
+        let mut earliest: Option<(DateTime<Utc>, &str)> = None;
+        let mut latest: Option<(DateTime<Utc>, &str)> = None;
+        for &index in &group {
+            let cell = records[index][source].as_str();
+            if cell.trim().is_empty() {
+                continue;
+            }
+            let current = absolute_timestamp(cell).map_err(|error| CsvError::DataRowValue {
+                row: index + 1,
+                cause: error.message(),
+            })?;
+            if earliest.is_none_or(|(time, _)| current < time) {
+                earliest = Some((current, cell));
+            }
+            if latest.is_none_or(|(time, _)| current > time) {
+                latest = Some((current, cell));
+            }
+            count += 1;
+        }
+        let (first, last, span) = match earliest.zip(latest) {
+            Some(((start, first), (end, last))) => {
+                let span = format_absolute_elapsed(start, end).map_err(|error| {
+                    CsvError::DataRowValue {
+                        row: group[0] + 1,
+                        cause: error.message(),
+                    }
+                })?;
+                (first, last, span)
+            }
+            None => ("", "", String::new()),
+        };
+        let count = count.to_string();
+        let key = column_key(&records[group[0]], &groups);
+        append_bounded_csv_row(
+            &mut csv,
+            key.into_iter()
+                .chain([count.as_str(), first, last, span.as_str()]),
+            limit,
+        )?;
     }
     let rows = read_table_for_preview(&csv, ',')?;
     Ok((csv, rows))
@@ -12662,6 +12738,32 @@ null"#
                 Err(CsvError::DataRowValue { row: 2, .. })
             ));
         }
+    }
+
+    #[test]
+    fn summarizes_original_timestamp_endpoints_and_exact_utc_spans_per_group() {
+        let query = "分组时间戳摘要 [[\"设备\"],\"时刻\"] 设备,时刻\nA,2026-03-08T03:30:00-04:00\nB,2ns\nC,\nA,2026-03-08T01:30:00-05:00\nA,2026-03-08T06:30:00Z\nB,1ns";
+        let expected = concat!(
+            "设备,有效时间戳,最早,最晚,跨度\r\n",
+            "A,3,2026-03-08T01:30:00-05:00,2026-03-08T03:30:00-04:00,01:00:00\r\n",
+            "B,2,1ns,2ns,00:00:00.000000001\r\n",
+            "C,0,\"\",\"\",\"\"",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(query)
+            .expect("分组时间戳摘要可预览")
+            .unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv("GROUP-TIMESTAMP-SUMMARY [[],1] 时刻\n1ns").as_deref(),
+            Ok("有效时间戳,最早,最晚,跨度\r\n1,1ns,1ns,00:00:00"),
+        );
+        assert!(matches!(
+            transform_csv(
+                "分组时间戳摘要 [[1],2] 设备,时刻\nA,1ns\nA,2026-11-01 01:30 America/New_York"
+            ),
+            Err(CsvError::DataRowValue { row: 2, .. }),
+        ));
     }
 
     #[test]
