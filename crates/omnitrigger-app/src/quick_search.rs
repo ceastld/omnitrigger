@@ -3271,10 +3271,10 @@ impl QuickSearch {
                     "行",
                     "table-prev-rows",
                     "上页",
-                    "PageUp 上一行页 · Ctrl+PageUp 首页",
+                    "PageUp 向上翻页 · Ctrl+PageUp 首页",
                     "table-next-rows",
                     "下页",
-                    "PageDown 下一行页 · Ctrl+PageDown 末页",
+                    "PageDown 向下翻页 · Ctrl+PageDown 末页",
                 ),
                 TableAxis::Columns => (
                     self.table_pages.columns,
@@ -3295,6 +3295,7 @@ impl QuickSearch {
             .child(
                 button(prev_id, prev_label, Tone::Ghost, page > 0)
                     .h(px(20.))
+                    .px(px(7.))
                     .tooltip(theme::text_tooltip(prev_key.into()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.change_table_page(axis, PageChange::Previous, cx);
@@ -3304,6 +3305,7 @@ impl QuickSearch {
             .child(
                 button(next_id, next_label, Tone::Ghost, page + 1 < count)
                     .h(px(20.))
+                    .px(px(7.))
                     .tooltip(theme::text_tooltip(next_key.into()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.change_table_page(axis, PageChange::Next, cx);
@@ -3337,6 +3339,7 @@ impl QuickSearch {
                             footer.child(
                                 button("search-current-table", label, Tone::Ghost, true)
                                     .h(px(20.))
+                                    .px(px(8.))
                                     .tooltip(theme::text_tooltip(hint.into()))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_table_search(window, cx);
