@@ -3695,6 +3695,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "文本: 按行分组CSV 3 甲\n乙\n丙\n丁",
     },
     Example {
+        icon: Icon::Layers,
+        title: "按字符宽度拆分每行并预览 CSV",
+        query: "文本: 定宽转CSV [3,2]\n001北京备注\n002上海\n003",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按分隔符拆分成行",
         query: "文本: 拆分成行 \"、\" 苹果、梨",

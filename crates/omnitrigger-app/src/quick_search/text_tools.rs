@@ -83,6 +83,7 @@ pub(super) enum TextError {
     InvalidColumn,
     CsvColumnCount,
     CsvTextColumns,
+    FixedWidthColumns,
     MissingColumn,
     InvalidLineRange,
     EdgeLineCount,
@@ -138,6 +139,9 @@ impl TextError {
             Self::MissingColumn => "至少一行的列数不足",
             Self::CsvColumnCount => "填写 1 至 128 的列数，例如 文本: 按行分组CSV 3",
             Self::CsvTextColumns => "用 JSON 数组填写 2 至 128 段文本，每段对应一列",
+            Self::FixedWidthColumns => {
+                "用 JSON 数组填写 1 至 32 个列宽，每项为 1 至 4096，例如 [3,4]"
+            }
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::EdgeLineCount => "填写正整数行数，例如 文本: 取末尾行 2",
             Self::InvalidLineStep => "填写起始行号和正整数步长，例如 文本: 间隔取行 2,3",
@@ -192,8 +196,15 @@ pub(super) fn is_raw_text_operation(operation: &str) -> bool {
     operation == "原文" || operation.eq_ignore_ascii_case("raw")
 }
 
+pub(super) fn is_fixed_width_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("定宽转CSV") || operation.eq_ignore_ascii_case("fixed-width-csv")
+}
+
 pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> {
     let (operation, text) = input.split_once(char::is_whitespace)?;
+    if is_fixed_width_csv_operation(operation) {
+        return Some(fixed_width_csv(text));
+    }
     match operation.to_ascii_lowercase().as_str() {
         "markdown标题csv" | "markdown-headings-csv" => {
             let text = input[operation.len()..]
@@ -1667,6 +1678,46 @@ fn chunk_lines_as_csv(input: &str) -> Result<String, TextError> {
     Ok(output)
 }
 
+fn fixed_width_csv(input: &str) -> Result<String, TextError> {
+    let invalid = TextError::FixedWidthColumns;
+    let (widths, text) = json_argument_and_tail::<Vec<usize>>(input).ok_or(invalid)?;
+    if !(1..=32).contains(&widths.len()) || widths.iter().any(|width| !(1..=4096).contains(width)) {
+        return Err(invalid);
+    }
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    if text.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+
+    let mut csv = String::new();
+    let headings: Vec<_> = (1..=widths.len())
+        .map(|column| format!("列{column}"))
+        .collect();
+    let limit = TextError::ResultTooLarge;
+    append_bounded_csv_row(
+        &mut csv,
+        headings.iter().map(String::as_str).chain(["余下"]),
+        limit,
+    )?;
+    for line in text.lines() {
+        let mut graphemes = line.grapheme_indices(true);
+        let mut start = 0;
+        let mut fields = Vec::with_capacity(widths.len() + 1);
+        for &width in &widths {
+            let end = graphemes
+                .nth(width - 1)
+                .map_or(line.len(), |(offset, grapheme)| offset + grapheme.len());
+            fields.push(&line[start..end]);
+            start = end;
+        }
+        fields.push(&line[start..]);
+        append_bounded_csv_row(&mut csv, fields.into_iter(), limit)?;
+    }
+    Ok(csv)
+}
+
 enum LineSetOperation {
     Intersection,
     FirstOnly,
@@ -3061,6 +3112,25 @@ mod tests {
             assert_eq!(
                 transform_text(&format!("按行分组CSV {width} 甲")),
                 Err(TextError::CsvColumnCount)
+            );
+        }
+    }
+
+    #[test]
+    fn splits_fixed_width_text_at_grapheme_boundaries_and_keeps_remaining_content() {
+        let query = "定宽转CSV [2,1]\r\nÁ👩‍💻中,余 \r\nx\r\n\r\n\"y北尾 ";
+        let expected =
+            "列1,列2,余下\r\nÁ👩‍💻,中,\",余 \"\r\nx,\"\",\"\"\r\n\"\",\"\",\"\"\r\n\"\"\"y\",北,尾 ";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("FIXED-WIDTH-CSV [1]  前后 ").as_deref(),
+            Ok("列1,余下\r\n ,前后 "),
+        );
+        for widths in ["[]", "[0]", "[4097]", "[1.5]", "[-1]"] {
+            assert_eq!(
+                transform_text(&format!("定宽转CSV {widths} 示例")),
+                Err(TextError::FixedWidthColumns),
             );
         }
     }

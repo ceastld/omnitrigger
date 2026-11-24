@@ -42,7 +42,7 @@ use super::{
     },
     table_preview::TablePreview,
     tempo::calculate_tempo,
-    text_tools::transform_text,
+    text_tools::{text_csv_report, transform_text},
     timestamp::{convert_timestamp, is_timestamp_report},
     toml_tools::{toml_csv_report, transform_toml},
     url_encoding::convert_url_component,
@@ -569,6 +569,9 @@ fn prepare_pipeline_preview(
     csv_error: &impl Fn(CsvError) -> DataPipelineError,
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
+        Scope::TextTools => text_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
         Scope::Toml => toml_csv_report(query).map(|report| {
             report_preview(report.map_err(|cause| cause.message()), error, csv_error)
         }),
@@ -1186,6 +1189,10 @@ mod tests {
             (
                 "CSV列 [\"结果\",\"原文\",[\"文本: 大写\"]] 原文\n\"茶,a\"",
                 "原文,结果\r\n\"茶,a\",\"茶,A\"",
+            ),
+            (
+                "[\"文本: 定宽转CSV [2,1]\"] 01北,茶\nx",
+                "列1,列2,余下\r\n01,北,\",茶\"\r\nx,\"\",\"\"",
             ),
         ] {
             let (text, preview) = transform_data_pipeline(query, now).unwrap();
