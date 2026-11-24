@@ -38,6 +38,7 @@ use super::{
         parse_complete_date, shift_calendar_days, shift_calendar_months, shift_calendar_workdays,
         workday_exceptions_from_dates, SpreadsheetDateSystem,
     },
+    cidr::{CidrError, LongestPrefixLookup},
     conversion::{exact_data_converter, ConversionError},
     correlation_plot::{CorrelationCell, CorrelationPlot},
     duration::{elapsed_clock_interval, format_clock_duration},
@@ -136,6 +137,8 @@ pub(super) enum CsvError {
     ClockDifferenceColumnArguments,
     TimestampDifferenceColumnArguments,
     TimestampZoneColumnArguments,
+    CidrColumnArguments,
+    CidrLookup(CidrError),
     DateOffsetColumnArguments,
     WorkdayOffsetColumnArguments,
     WorkdayOffsetExceptions,
@@ -371,6 +374,8 @@ impl CsvError {
             Self::TimestampZoneColumnArguments => {
                 "填写新列名、来源列和目标时区，例如 [\"标准时间\",\"时间\",\"UTC\"]"
             }
+            Self::CidrColumnArguments => "填写新列名、地址列和网段列表。网段名称列使用 [网段,名称] 列表",
+            Self::CidrLookup(error) => error.message(),
             Self::DateOffsetColumnArguments => {
                 "填写新列名、来源日期列和整数偏移量列，例如 [\"到期日期\",\"日期\",\"天数\"]"
             }
@@ -1917,6 +1922,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     cause: error.message(),
                 })
             });
+        }
+        kind @ ("网段归属列" | "cidr-column" | "网段名称列" | "cidr-name-column") => {
+            return append_cidr_column(input, matches!(kind, "网段名称列" | "cidr-name-column"));
         }
         "时间戳差列" | "timestamp-difference-column" => {
             let ((name, start, end), data) =
@@ -4449,6 +4457,32 @@ fn read_function_rows(
         values.push(value);
     }
     Ok(FunctionRows { rows, values })
+}
+
+fn append_cidr_column(input: &str, use_name: bool) -> Result<String, CsvError> {
+    let invalid = CsvError::CidrColumnArguments;
+    let ((name, source, networks), data) =
+        json_argument_and_data::<(String, ColumnReference, Box<RawValue>)>(input, invalid)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(invalid);
+    }
+    let lookup = LongestPrefixLookup::parse(networks.get()).map_err(CsvError::CidrLookup)?;
+    if use_name && !lookup.has_names() {
+        return Err(invalid);
+    }
+    append_transformed_csv_column(data, &name, source, |row, value| {
+        let address = normalize(value)
+            .trim()
+            .parse()
+            .map_err(|_| CsvError::DataRowValue {
+                row,
+                cause: CidrError::Address.message(),
+            })?;
+        Ok(lookup
+            .find(address)
+            .map(|(prefix, name)| if use_name { name.to_owned() } else { prefix })
+            .unwrap_or_default())
+    })
 }
 
 fn append_from_one_column(
@@ -7057,6 +7091,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-column"
             | "数值对比列"
             | "compare-numeric-column"
+            | "网段归属列"
+            | "cidr-column"
+            | "网段名称列"
+            | "cidr-name-column"
     ) {
         return Some(transform_csv_operation(operation, data).and_then(|text| {
             let table = parse_table_preview(&text)?;
@@ -12358,6 +12396,37 @@ null"#
                 Err(CsvError::MovingColumnArguments)
             );
         }
+    }
+
+    #[test]
+    fn appends_longest_prefixes_or_names_without_rewriting_the_address_column() {
+        let source = "编号,地址\n001,１９２.０.２.１９０\n002,2001:db8::7\n003,192.0.3.1\n004,";
+        let networks =
+            r#"[["192.0.2.0/24","办公"],["192.0.2.128/25","实验室, Ａ"],["2001:db8::/32","IPv6"]]"#;
+        for (operation, expected) in [
+            (
+                "网段归属列",
+                "编号,地址,结果\r\n001,１９２.０.２.１９０,192.0.2.128/25\r\n002,2001:db8::7,2001:db8::/32\r\n003,192.0.3.1,\"\"\r\n004,\"\",\"\"",
+            ),
+            (
+                "cidr-name-column",
+                "编号,地址,结果\r\n001,１９２.０.２.１９０,\"实验室, Ａ\"\r\n002,2001:db8::7,IPv6\r\n003,192.0.3.1,\"\"\r\n004,\"\",\"\"",
+            ),
+        ] {
+            let query = format!(r#"{operation} ["结果","地址",{networks}] {source}"#);
+            assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+            assert_eq!(csv_table_preview(&query).unwrap().unwrap().0, expected);
+        }
+        assert!(matches!(
+            transform_csv(
+                "网段归属列 [\"网段\",2,[\"192.0.2.0/24\"]] 编号,地址\n001,192.0.2.1\n002,非地址"
+            ),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+        assert_eq!(
+            transform_csv(r#"网段名称列 ["名称",1,["192.0.2.0/24"]] 地址"#),
+            Err(CsvError::CidrColumnArguments)
+        );
     }
 
     #[test]

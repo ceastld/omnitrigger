@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -120,6 +120,68 @@ enum LookupNetworks {
     Named(Vec<[String; 2]>),
 }
 
+pub(super) struct LongestPrefixLookup {
+    candidates: HashMap<(u32, u32, u128), String>,
+    named: bool,
+}
+
+impl LongestPrefixLookup {
+    pub(super) fn parse(input: &str) -> Result<Self, CidrError> {
+        let rules = serde_json::from_str(input).map_err(|_| CidrError::LookupArguments)?;
+        Self::from_networks(rules)
+    }
+
+    fn from_networks(rules: LookupNetworks) -> Result<Self, CidrError> {
+        let (networks, named) = match rules {
+            LookupNetworks::Unnamed(networks) => (
+                networks
+                    .into_iter()
+                    .map(|network| [network, String::new()])
+                    .collect(),
+                false,
+            ),
+            LookupNetworks::Named(networks) => (networks, true),
+        };
+        if networks.is_empty() {
+            return Err(CidrError::LookupArguments);
+        }
+        let mut candidates = HashMap::with_capacity(networks.len());
+        for [network, name] in networks {
+            let (address, prefix) = parse_network(&normalize(&network))?;
+            let width = address_width(address);
+            let first = bits(address) & !host_mask(width - prefix);
+            match candidates.entry((width, prefix, first)) {
+                Entry::Vacant(entry) => {
+                    entry.insert(name);
+                }
+                Entry::Occupied(entry) if entry.get() != &name => {
+                    return Err(CidrError::ConflictingNetworkNames);
+                }
+                Entry::Occupied(_) => {}
+            }
+        }
+        Ok(Self { candidates, named })
+    }
+
+    pub(super) fn has_names(&self) -> bool {
+        self.named
+    }
+
+    pub(super) fn find(&self, address: IpAddr) -> Option<(String, &str)> {
+        let width = address_width(address);
+        let address_bits = bits(address);
+        (0..=width).rev().find_map(|prefix| {
+            let first = address_bits & !host_mask(width - prefix);
+            self.candidates.get(&(width, prefix, first)).map(|name| {
+                (
+                    format!("{}/{prefix}", as_address(first, width)),
+                    name.as_str(),
+                )
+            })
+        })
+    }
+}
+
 fn longest_prefix_report(input: &str) -> Result<String, CidrError> {
     let normalized;
     let (networks, addresses) = match json_argument_and_tail::<LookupNetworks>(input) {
@@ -132,36 +194,8 @@ fn longest_prefix_report(input: &str) -> Result<String, CidrError> {
             (LookupNetworks::Unnamed(networks), addresses)
         }
     };
-    let mut candidates = HashMap::<_, &str>::new();
-    let prefix_key = |network: &str| -> Result<_, CidrError> {
-        let (address, prefix) = parse_network(&normalize(network))?;
-        let width = address_width(address);
-        let first = bits(address) & !host_mask(width - prefix);
-        Ok((width, prefix, first))
-    };
-    let with_names = match &networks {
-        LookupNetworks::Unnamed(networks) => {
-            for network in networks {
-                candidates.insert(prefix_key(network)?, "");
-            }
-            false
-        }
-        LookupNetworks::Named(networks) => {
-            for [network, name] in networks {
-                if candidates
-                    .insert(prefix_key(network)?, name.as_str())
-                    .is_some_and(|previous| previous != name.as_str())
-                {
-                    return Err(CidrError::ConflictingNetworkNames);
-                }
-            }
-            true
-        }
-    };
-    if candidates.is_empty() {
-        return Err(CidrError::LookupArguments);
-    }
-    let (headings, columns) = if with_names {
+    let lookup = LongestPrefixLookup::from_networks(networks)?;
+    let (headings, columns) = if lookup.has_names() {
         ("地址,匹配网段,名称", 3)
     } else {
         ("地址,匹配网段", 2)
@@ -172,17 +206,7 @@ fn longest_prefix_report(input: &str) -> Result<String, CidrError> {
         .filter(|address| !address.is_empty())
     {
         let address = address.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
-        let width = address_width(address);
-        let address_bits = bits(address);
-        let (network, name) = (0..=width)
-            .rev()
-            .find_map(|prefix| {
-                let first = address_bits & !host_mask(width - prefix);
-                candidates
-                    .get(&(width, prefix, first))
-                    .map(|&name| (format!("{}/{prefix}", as_address(first, width)), name))
-            })
-            .unwrap_or_default();
+        let (network, name) = lookup.find(address).unwrap_or_default();
         let address = address.to_string();
         let fields = [address.as_str(), network.as_str(), name];
         append_bounded_csv_row(
