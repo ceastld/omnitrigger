@@ -1,9 +1,6 @@
 use crate::trigger_browse::{FacetValue, ScopeKind, StatusKind};
 
-use super::{
-    calculator::narrow_ascii_graphic,
-    text_tools::{is_fixed_width_csv_operation, is_raw_text_operation},
-};
+use super::{calculator::narrow_ascii_graphic, text_tools::preserves_operand_trailing_whitespace};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Scope {
@@ -88,9 +85,10 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         let term = term.trim_start();
         let keep_trailing = scope == Scope::Csv
             || (scope == Scope::TextTools
-                && term.split_whitespace().next().is_some_and(|operation| {
-                    is_raw_text_operation(operation) || is_fixed_width_csv_operation(operation)
-                }));
+                && term
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(preserves_operand_trailing_whitespace));
         let term = if keep_trailing { term } else { term.trim_end() };
         return Some((scope, term));
     }

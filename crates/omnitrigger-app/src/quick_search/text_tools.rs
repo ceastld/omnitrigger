@@ -200,18 +200,30 @@ pub(super) fn is_fixed_width_csv_operation(operation: &str) -> bool {
     operation.eq_ignore_ascii_case("定宽转CSV") || operation.eq_ignore_ascii_case("fixed-width-csv")
 }
 
+fn is_line_lengths_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("行长度CSV")
+        || operation.eq_ignore_ascii_case("line-lengths-csv")
+}
+
+pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
+    is_raw_text_operation(operation)
+        || is_fixed_width_csv_operation(operation)
+        || is_line_lengths_csv_operation(operation)
+}
+
 pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> {
     let (operation, text) = input.split_once(char::is_whitespace)?;
+    let text = input[operation.len()..]
+        .strip_prefix("\r\n")
+        .unwrap_or(text);
     if is_fixed_width_csv_operation(operation) {
         return Some(fixed_width_csv(text));
     }
+    if is_line_lengths_csv_operation(operation) {
+        return Some(line_lengths_csv(text));
+    }
     match operation.to_ascii_lowercase().as_str() {
-        "markdown标题csv" | "markdown-headings-csv" => {
-            let text = input[operation.len()..]
-                .strip_prefix("\r\n")
-                .unwrap_or(text);
-            Some(markdown_headings_csv(text))
-        }
+        "markdown标题csv" | "markdown-headings-csv" => Some(markdown_headings_csv(text)),
         _ => None,
     }
 }
@@ -848,6 +860,33 @@ fn normalize_unicode(input: &str) -> Result<String, TextError> {
         return Err(TextError::ResultTooLarge);
     }
     Ok(normalized)
+}
+
+fn line_lengths_csv(text: &str) -> Result<String, TextError> {
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut csv = String::from("行号,字素簇,码位,UTF-16单元,UTF-8字节");
+    let mut lines = newline_pattern().split(text).enumerate().peekable();
+    while let Some((index, line)) = lines.next() {
+        if line.is_empty() && lines.peek().is_none() {
+            break;
+        }
+        let fields = [
+            index + 1,
+            line.graphemes(true).count(),
+            line.chars().count(),
+            line.encode_utf16().count(),
+            line.len(),
+        ]
+        .map(|value| value.to_string());
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn codepoint_table(text: &str) -> Result<String, TextError> {
@@ -3114,6 +3153,20 @@ mod tests {
                 Err(TextError::CsvColumnCount)
             );
         }
+    }
+
+    #[test]
+    fn counts_each_line_with_exact_whitespace_and_mixed_line_endings() {
+        let query = "行长度CSV\r\nÁ😀\r\n\r北 \t";
+        let expected =
+            "行号,字素簇,码位,UTF-16单元,UTF-8字节\r\n1,2,3,4,7\r\n2,0,0,0,0\r\n3,3,3,3,5";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("LINE-LENGTHS-CSV  \n\t\n").as_deref(),
+            Ok("行号,字素簇,码位,UTF-16单元,UTF-8字节\r\n1,1,1,1,1\r\n2,1,1,1,1"),
+        );
+        assert_eq!(transform_text("行长度CSV "), Err(TextError::MissingText));
     }
 
     #[test]
