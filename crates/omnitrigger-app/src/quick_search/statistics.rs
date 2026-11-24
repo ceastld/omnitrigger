@@ -66,7 +66,7 @@ impl StatisticsError {
             Self::TooManyValues => "最多可统计 128 个值或频数组",
             Self::InvalidFrequency => "每组用 数值@次数，次数须为正整数",
             Self::FrequencyOverflow => "频数合计超出支持范围",
-            Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
+            Self::InvalidWeight => "填写 数值@非负权重，或粘贴数值和权重两列",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::WeightedReportTooLarge => "加权分布结果超过 1 MiB，请缩短数值或减少数据",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
@@ -714,7 +714,13 @@ fn weighted_cumulative_csv(input: &str) -> Result<String, StatisticsError> {
 }
 
 fn read_weighted_observation(term: &str) -> Result<(BigRational, BigRational), StatisticsError> {
-    let (value, weight) = term.split_once('@').ok_or(StatisticsError::InvalidWeight)?;
+    let (value, weight) = term
+        .split_once('@')
+        .or_else(|| {
+            term.split_once('\t')
+                .filter(|(_, weight)| !weight.contains('\t'))
+        })
+        .ok_or(StatisticsError::InvalidWeight)?;
     let value = calculate_fraction(value).map_err(StatisticsError::Evaluation)?;
     let weight = if let Some(percent) = weight.trim().strip_suffix('%') {
         calculate_fraction(percent).map(|value| value / BigInt::from(100))
@@ -2205,6 +2211,30 @@ mod tests {
         assert_eq!(
             calculate_statistics("协方差 1,2; 3,4,5"),
             Err(StatisticsError::Paired(LinearFitError::InvalidPoint))
+        );
+    }
+
+    #[test]
+    fn accepts_copied_two_column_numeric_ranges_in_weighted_statistics() {
+        let values = "80\t30%\r\n90\t70%";
+        for (command, expected) in [
+            ("加权平均", "87"),
+            ("加权分位数 50%", "90"),
+            ("加权方差", "21"),
+            ("加权标准差", "√21"),
+            (
+                "加权累积分布",
+                "值,累计权重,累计比例\r\n80,3/10,3/10\r\n90,1,1",
+            ),
+        ] {
+            assert_eq!(
+                calculate_statistics(&format!("{command}\n{values}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            calculate_statistics("加权平均 1\t2\t3"),
+            Err(StatisticsError::InvalidWeight)
         );
     }
 

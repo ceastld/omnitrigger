@@ -644,6 +644,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "粘贴数值和权重两列求加权平均值",
+        query: "统计: 加权平均 80\t30%\n90\t70%",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按权重求精确总体方差",
         query: "统计: 加权方差 0@1,4@3",
     },
