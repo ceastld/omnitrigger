@@ -47,6 +47,8 @@ pub(super) enum RadixError {
     ReverseBitsArguments,
     ReverseBytesArguments,
     ReverseWidthExceeded,
+    GrayCodeArguments,
+    GrayCodeWidthExceeded,
     SheetColumnArguments,
     RomanArguments,
     RomanRange,
@@ -67,13 +69,17 @@ impl RadixError {
             Self::ByteOrderInteger => "填写非负整数，可用十进制或 0x、0b、0o 前缀",
             Self::ByteOrderWidthExceeded
             | Self::RotateBitsWidthExceeded
-            | Self::ReverseWidthExceeded => "整数超出所填位宽",
+            | Self::ReverseWidthExceeded
+            | Self::GrayCodeWidthExceeded => "整数超出所填位宽",
             Self::SignedByteOrderInteger => "填写有符号整数，可用十进制或 0x、0b、0o 前缀",
             Self::SignedByteOrderWidthExceeded => "有符号整数超出所填位宽",
             Self::ReadByteOrderArguments => "填写大端或小端，例如 读字节序 小端 @ 78 56 34 12",
             Self::ReadByteOrderBytes => "填写 1 至 16 个两位十六进制字节，字节之间用空格分开",
             Self::BitRangeArguments => {
                 "填写位号范围和非负整数，例如 取位 8-15 @ 0x12345678。位号为 0 至 8191"
+            }
+            Self::GrayCodeArguments => {
+                "填写非负整数，可加位宽，例如 格雷码 8 @ 10 或 读格雷码 0b1111"
             }
             Self::WriteBitsArguments => {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
@@ -202,6 +208,12 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     }
     if operation == "字节倒序" || operation.eq_ignore_ascii_case("reverse-bytes") {
         return reverse_bits_or_bytes(arguments, true);
+    }
+    if operation == "格雷码" || operation.eq_ignore_ascii_case("gray-code") {
+        return convert_gray_code(arguments, false);
+    }
+    if operation == "读格雷码" || operation.eq_ignore_ascii_case("read-gray-code") {
+        return convert_gray_code(arguments, true);
     }
     if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
         return convert_sheet_column(arguments);
@@ -453,6 +465,32 @@ fn reverse_bits_or_bytes(input: &str, by_byte: bool) -> Result<String, RadixErro
     Ok(format_padded_bit_value(&reversed, width))
 }
 
+fn convert_gray_code(input: &str, decode: bool) -> Result<String, RadixError> {
+    let invalid = RadixError::GrayCodeArguments;
+    let (width, number) = if let Some((width, number)) = input.split_once('@') {
+        (Some(bit_width(width, invalid)?), number)
+    } else {
+        (None, input)
+    };
+    let mut value = unsigned_bit_value(number, invalid)?;
+    let width = width.unwrap_or_else(|| value.bits().max(1));
+    if value.bits() > width {
+        return Err(RadixError::GrayCodeWidthExceeded);
+    }
+    if decode {
+        // 每次异或合并的高位范围翻倍，得到逐位累积异或的结果。
+        let mut shift = 1;
+        while shift < width {
+            let higher = &value >> shift;
+            value ^= higher;
+            shift *= 2;
+        }
+        return Ok(value.to_string());
+    }
+    let gray = &value ^ (&value >> 1u8);
+    Ok(format!("0b{gray:0>width$b}", width = width as usize))
+}
+
 fn bit_width(input: &str, error: RadixError) -> Result<u64, RadixError> {
     input
         .trim()
@@ -629,6 +667,37 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_reflected_binary_gray_codes_at_the_requested_width() {
+        for (query, expected) in [
+            ("格雷码 0", "0b0"),
+            ("格雷码 10", "0b1111"),
+            ("GRAY-CODE 8 @ 0xA", "0b00001111"),
+            ("读格雷码 0b1111", "10"),
+            ("READ-GRAY-CODE 8 @ 0b0000_1111", "10"),
+            ("读格雷码 1 @ 0", "0"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("格雷码 0 @ 0", RadixError::GrayCodeArguments),
+            ("格雷码 8193 @ 0", RadixError::GrayCodeArguments),
+            ("格雷码 -1", RadixError::GrayCodeArguments),
+            ("读格雷码 3 @ 0xF", RadixError::GrayCodeWidthExceeded),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
+        }
+        let max = format!("0x{}", "f".repeat(2048));
+        let encoded = convert_arbitrary_radix(&format!("格雷码 {max}")).unwrap();
+        assert_eq!(encoded, format!("0b1{}", "0".repeat(8191)));
+        let decoded = convert_arbitrary_radix(&format!("读格雷码 {encoded}")).unwrap();
+        assert_eq!(decoded, bit_mask(8192).to_string());
+    }
 
     #[test]
     fn reverses_bits_or_bytes_within_the_explicit_width() {
