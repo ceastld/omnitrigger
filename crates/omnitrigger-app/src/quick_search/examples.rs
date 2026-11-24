@@ -2440,6 +2440,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "取出网段中指定序号的地址",
+        query: "网段: 取地址 192.0.2.137/26,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查出地址在网段中从一开始的序号",
+        query: "网段: 地址序号 192.0.2.137/26,192.0.2.129",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求覆盖地址区间的最小网段",
         query: "网段: 覆盖 192.0.2.1 至 192.0.2.6",
     },
@@ -6494,6 +6504,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "交集",
                     "差集",
                     "对称差",
+                    "取地址",
+                    "地址序号",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

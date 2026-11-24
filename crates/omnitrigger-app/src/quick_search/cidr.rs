@@ -27,6 +27,9 @@ pub(super) enum CidrError {
     ReportTooLarge,
     NetworkSetArguments,
     NetworkSetTooLarge,
+    NetworkPositionArguments,
+    AddressOrdinal,
+    AddressOutsideNetwork,
 }
 
 impl CidrError {
@@ -49,6 +52,9 @@ impl CidrError {
                 "填写两组网段，例如 [[\"192.0.2.0/24\"],[\"192.0.2.128/25\"]]"
             }
             Self::NetworkSetTooLarge => "网段集合运算最多输入和输出各 4096 个网段",
+            Self::NetworkPositionArguments => "用逗号分隔网段与地址或序号，例如 192.0.2.0/24,2",
+            Self::AddressOrdinal => "地址序号从 1 开始，并须在网段的地址数之内",
+            Self::AddressOutsideNetwork => "地址须位于指定网段内",
         }
     }
 }
@@ -269,6 +275,8 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
             "子网" | "subnets" => return split_subnets(range),
             "排除" | "exclude" => return exclude_network(range),
             "合并" | "collapse" => return collapse_networks(range),
+            "取地址" | "nth-address" => return network_address_position(range, true),
+            "地址序号" | "address-position" => return network_address_position(range, false),
             "交集" | "intersect" => {
                 return compare_network_sets(range, NetworkSetOperation::Intersect)
             }
@@ -545,6 +553,42 @@ fn subtract_network_intervals(
     result
 }
 
+fn network_address_position(input: &str, find_address: bool) -> Result<String, CidrError> {
+    let (network, value) = input
+        .split_once(',')
+        .ok_or(CidrError::NetworkPositionArguments)?;
+    let (address, prefix) = parse_network(network)?;
+    let width = address_width(address);
+    let mask = host_mask(width - prefix);
+    let first = bits(address) & !mask;
+    let value = value.trim();
+    if find_address {
+        let digits = value.trim_start_matches('0');
+        if digits.is_empty()
+            || digits.len() > 39
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(CidrError::AddressOrdinal);
+        }
+        let ordinal = digits
+            .parse::<BigUint>()
+            .map_err(|_| CidrError::AddressOrdinal)?;
+        let offset = u128::try_from(ordinal - 1u8).map_err(|_| CidrError::AddressOrdinal)?;
+        if offset > mask {
+            return Err(CidrError::AddressOrdinal);
+        }
+        return Ok(as_address(first | offset, width).to_string());
+    }
+    let member = value.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
+    if address_width(member) != width {
+        return Err(CidrError::DifferentFamilies);
+    }
+    if bits(member) & !mask != first {
+        return Err(CidrError::AddressOutsideNetwork);
+    }
+    Ok((BigUint::from(bits(member) - first) + 1u8).to_string())
+}
+
 fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
     let (first, last) = input.split_once(['至', ',']).ok_or(CidrError::Incomplete)?;
     let (first, last) = (first.trim(), last.trim());
@@ -648,6 +692,40 @@ mod tests {
         }
         assert_eq!(calculate_cidr("合并 192.0.2.1/33"), Err(CidrError::Prefix));
         assert_eq!(calculate_cidr("合并 ,"), Err(CidrError::Incomplete));
+    }
+
+    #[test]
+    fn round_trips_address_positions_at_ipv4_and_full_ipv6_boundaries() {
+        for (query, expected) in [
+            ("取地址 192.0.2.137/26,2", "192.0.2.129"),
+            ("地址序号 192.0.2.137/26,192.0.2.129", "2"),
+            ("nth-address 192.0.2.137/32,1", "192.0.2.137"),
+            (
+                "取地址 ::/0,340282366920938463463374607431768211456",
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            ),
+            (
+                "address-position ::/0,ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                "340282366920938463463374607431768211456",
+            ),
+        ] {
+            assert_eq!(calculate_cidr(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("取地址 192.0.2.137/32,0", CidrError::AddressOrdinal),
+            ("取地址 192.0.2.137/32,2", CidrError::AddressOrdinal),
+            (
+                "取地址 ::/0,340282366920938463463374607431768211457",
+                CidrError::AddressOrdinal,
+            ),
+            (
+                "地址序号 192.0.2.0/24,192.0.3.1",
+                CidrError::AddressOutsideNetwork,
+            ),
+            ("地址序号 ::/0,192.0.2.1", CidrError::DifferentFamilies),
+        ] {
+            assert_eq!(calculate_cidr(query), Err(error), "{query}");
+        }
     }
 
     #[test]
