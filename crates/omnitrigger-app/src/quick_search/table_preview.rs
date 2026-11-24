@@ -1,10 +1,12 @@
-use gpui::{div, prelude::*, px, Div, FontWeight};
+use gpui::{div, prelude::*, px, relative, Div, FontWeight};
 
 use crate::theme::{self, rgb};
 
 const MAX_DATA_ROWS: usize = 6;
 const MAX_VISIBLE_COLUMNS: usize = 6;
 const MAX_VISIBLE_CELL_CHARACTERS: usize = 128;
+const MAX_COLUMN_WIDTH_UNITS: usize = 26;
+const MIN_COLUMN_WIDTH_UNITS: usize = 6;
 const ROW_HEIGHT: f32 = 27.;
 
 #[derive(PartialEq, Eq)]
@@ -12,6 +14,7 @@ pub(super) struct TablePreview {
     rows: Vec<Vec<String>>,
     data_rows: usize,
     columns: usize,
+    column_width_units: Vec<usize>,
     highlighted_cells: Vec<(usize, usize)>,
 }
 
@@ -19,10 +22,17 @@ impl TablePreview {
     pub(super) fn from_rows(rows: Vec<Vec<String>>) -> Self {
         let data_rows = rows.len().saturating_sub(1);
         let columns = rows.first().map_or(0, Vec::len);
+        let mut column_width_units = vec![MIN_COLUMN_WIDTH_UNITS; columns];
+        for row in &rows {
+            for (width, value) in column_width_units.iter_mut().zip(row) {
+                *width = (*width).max(cell_width_units(value));
+            }
+        }
         Self {
             rows,
             data_rows,
             columns,
+            column_width_units,
             highlighted_cells: Vec::new(),
         }
     }
@@ -72,8 +82,24 @@ impl TablePreview {
             .map(move |row| &row[first_column..column_end])
     }
 
+    fn column_width_fractions(&self, column_page: usize) -> Vec<f32> {
+        let first = column_page * MAX_VISIBLE_COLUMNS;
+        let end = self.columns.min(first + MAX_VISIBLE_COLUMNS);
+        let widths = &self.column_width_units[first..end];
+        if widths.is_empty() {
+            return Vec::new();
+        }
+        let total = widths.iter().sum::<usize>() as f32;
+        let equal_share = 0.5 / widths.len() as f32;
+        widths
+            .iter()
+            .map(|&width| equal_share + 0.5 * width as f32 / total)
+            .collect()
+    }
+
     pub(super) fn render(&self, row_page: usize, column_page: usize) -> Div {
         let rows = self.visible_rows(row_page, column_page);
+        let column_widths = self.column_width_fractions(column_page);
         let visible_count = 1 + (self.data_rows - row_page * MAX_DATA_ROWS).min(MAX_DATA_ROWS);
         div()
             .flex()
@@ -110,7 +136,7 @@ impl TablePreview {
                     })
                     .children(row.iter().enumerate().map(|(column, value)| {
                         div()
-                            .flex_1()
+                            .w(relative(column_widths[column]))
                             .min_w_0()
                             .px(px(8.))
                             .when(
@@ -129,6 +155,15 @@ impl TablePreview {
     }
 }
 
+fn cell_width_units(value: &str) -> usize {
+    let characters = value
+        .chars()
+        .take(MAX_COLUMN_WIDTH_UNITS)
+        .map(|character| 1 + usize::from(!character.is_ascii() || character.is_ascii_control()))
+        .sum::<usize>();
+    (characters + 2).clamp(MIN_COLUMN_WIDTH_UNITS, MAX_COLUMN_WIDTH_UNITS)
+}
+
 fn display_cell(value: &str) -> String {
     let clipped = value.char_indices().nth(MAX_VISIBLE_CELL_CHARACTERS);
     let visible = clipped.map_or(value, |(end, _)| &value[..end]);
@@ -145,6 +180,27 @@ fn display_cell(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gives_long_table_cells_more_room_while_preserving_every_visible_column() {
+        let rows = [
+            ["数据行", "列号", "列名", "规则号", "规则", "内容", "备注"],
+            ["2", "1", "日期", "1", "日期", "2023-02-29", "文字"],
+            ["2", "3", "比率", "3", "数值范围", "1.01", "新值"],
+        ];
+        let table = TablePreview::from_rows(
+            rows.into_iter()
+                .map(|row| row.into_iter().map(str::to_owned).collect())
+                .collect(),
+        );
+        let widths = table.column_width_fractions(0);
+        assert_eq!(widths.len(), 6);
+        assert!(widths[5] > 1. / 6.);
+        assert!(widths.iter().all(|width| *width >= 0.1));
+        assert!((widths.iter().sum::<f32>() - 1.).abs() < 1e-6);
+        assert_eq!(table.column_width_fractions(1), vec![1.]);
+        assert_eq!(cell_width_units(&"长".repeat(1000)), MAX_COLUMN_WIDTH_UNITS);
+    }
 
     #[test]
     fn pages_records_and_columns_without_losing_the_header_or_last_cells() {
