@@ -240,6 +240,7 @@ pub(super) enum CsvError {
     CoordinateInterpolationArguments,
     CoordinateInterpolationPointCount,
     CoordinateSlopePointCount,
+    CoordinateSegmentPointCount,
     CoordinateDuplicateX,
     CoordinateInterpolationRange,
     CoordinateResampleArguments,
@@ -538,6 +539,7 @@ impl CsvError {
             }
             Self::CoordinateInterpolationPointCount => "线性插值需要 2 至 64 行同时含 x 和 y 的数据",
             Self::CoordinateSlopePointCount => "曲线斜率需要 2 至 64 个完整样点",
+            Self::CoordinateSegmentPointCount => "分段直线需要 2 至 64 个完整样点",
             Self::CoordinateDuplicateX => "完整样点的横坐标须互不相同",
             Self::CoordinateInterpolationRange => "查询横坐标须在完整样点的范围内",
             Self::CoordinateResampleArguments => {
@@ -1154,6 +1156,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
         "曲线斜率" | "curve-slopes" => return coordinate_slopes(input),
+        "分段直线" | "linear-segments" => return coordinate_linear_segments(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
@@ -5596,6 +5599,31 @@ fn coordinate_slopes(input: &str) -> Result<String, CsvError> {
     Ok(csv)
 }
 
+fn coordinate_linear_segments(input: &str) -> Result<String, CsvError> {
+    let mut table = parse_coordinate_table(input, CsvError::CoordinateSegmentPointCount)?;
+    sort_distinct_coordinates(&mut table.samples)?;
+    let mut csv = String::from("起始横坐标,结束横坐标,斜率,截距");
+    for pair in table.samples.windows(2) {
+        let (left_x, left_y) = &pair[0].point;
+        let right_x = &pair[1].point.0;
+        let slope = coordinate_secant_slope(&pair[0].point, &pair[1].point)?;
+        let intercept = left_y - &slope * left_x;
+        ensure_exact_size(&intercept).map_err(|_| CsvError::ComputedNumberRange)?;
+        let row = [
+            left_x.to_string(),
+            right_x.to_string(),
+            slope.to_string(),
+            intercept.to_string(),
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            row.iter().map(String::as_str),
+            CsvError::StatisticsOutputTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
 fn coordinate_argument(raw: &RawValue, invalid: CsvError) -> Result<BigRational, CsvError> {
     let text = raw.get();
     let text = if text.starts_with('"') {
@@ -7962,6 +7990,23 @@ mod tests {
         );
         assert_eq!(
             transform_csv("水平交点 [[1,2],0] x,y\n1/2,0\n0.50,1"),
+            Err(CsvError::CoordinateDuplicateX)
+        );
+    }
+
+    #[test]
+    fn exports_exact_piecewise_linear_coefficients_with_each_segments_domain() {
+        let data = "x,y\n3,3\n0,-1/2\n2,\n1,2";
+        assert_eq!(
+            transform_csv(&format!("分段直线 [\"x\",\"y\"] {data}")).as_deref(),
+            Ok("起始横坐标,结束横坐标,斜率,截距\r\n0,1,5/2,-1/2\r\n1,3,1/2,3/2")
+        );
+        assert_eq!(
+            transform_csv("linear-segments [1,2] x,y\n-1,-2\n1,-2").as_deref(),
+            Ok("起始横坐标,结束横坐标,斜率,截距\r\n-1,1,0,-2")
+        );
+        assert_eq!(
+            transform_csv("分段直线 [1,2] x,y\n1/2,0\n0.50,2"),
             Err(CsvError::CoordinateDuplicateX)
         );
     }
