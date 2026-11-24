@@ -48,7 +48,7 @@ impl CidrError {
             Self::NetworkSetArguments => {
                 "填写两组网段，例如 [[\"192.0.2.0/24\"],[\"192.0.2.128/25\"]]"
             }
-            Self::NetworkSetTooLarge => "交集或差集最多输入和输出各 4096 个网段",
+            Self::NetworkSetTooLarge => "网段集合运算最多输入和输出各 4096 个网段",
         }
     }
 }
@@ -275,6 +275,9 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
             "差集" | "subtract" => {
                 return compare_network_sets(range, NetworkSetOperation::Subtract)
             }
+            "对称差" | "symmetric-difference" => {
+                return compare_network_sets(range, NetworkSetOperation::SymmetricDifference)
+            }
             _ => {}
         }
     }
@@ -425,6 +428,10 @@ fn merge_network_intervals<'a>(
             last: bits(address) | mask,
         });
     }
+    Ok(merge_intervals(intervals))
+}
+
+fn merge_intervals(mut intervals: Vec<NetworkInterval>) -> Vec<NetworkInterval> {
     intervals.sort_unstable();
     let mut merged: Vec<NetworkInterval> = Vec::new();
     for interval in intervals {
@@ -436,12 +443,13 @@ fn merge_network_intervals<'a>(
             merged.push(interval);
         }
     }
-    Ok(merged)
+    merged
 }
 
 enum NetworkSetOperation {
     Intersect,
     Subtract,
+    SymmetricDifference,
 }
 
 fn compare_network_sets(input: &str, operation: NetworkSetOperation) -> Result<String, CidrError> {
@@ -454,7 +462,12 @@ fn compare_network_sets(input: &str, operation: NetworkSetOperation) -> Result<S
     let right = merge_network_intervals(right.iter().map(String::as_str))?;
     let intervals = match operation {
         NetworkSetOperation::Intersect => intersect_network_intervals(&left, &right),
-        NetworkSetOperation::Subtract => subtract_network_intervals(left, &right),
+        NetworkSetOperation::Subtract => subtract_network_intervals(&left, &right),
+        NetworkSetOperation::SymmetricDifference => {
+            let mut changed = subtract_network_intervals(&left, &right);
+            changed.extend(subtract_network_intervals(&right, &left));
+            merge_intervals(changed)
+        }
     };
     let mut networks = Vec::new();
     for NetworkInterval { width, first, last } in intervals {
@@ -467,6 +480,7 @@ fn compare_network_sets(input: &str, operation: NetworkSetOperation) -> Result<S
         return Ok(match operation {
             NetworkSetOperation::Intersect => "无重叠网段",
             NetworkSetOperation::Subtract => "无剩余网段",
+            NetworkSetOperation::SymmetricDifference => "无差异网段",
         }
         .to_owned());
     }
@@ -495,12 +509,13 @@ fn intersect_network_intervals(
 }
 
 fn subtract_network_intervals(
-    left: Vec<NetworkInterval>,
+    left: &[NetworkInterval],
     right: &[NetworkInterval],
 ) -> Vec<NetworkInterval> {
     let mut right = right.iter().peekable();
     let mut result = Vec::new();
-    for mut remaining in left {
+    for &interval in left {
+        let mut remaining = interval;
         loop {
             let Some(excluded) = right.peek() else {
                 result.push(remaining);
@@ -633,6 +648,27 @@ mod tests {
         }
         assert_eq!(calculate_cidr("合并 192.0.2.1/33"), Err(CidrError::Prefix));
         assert_eq!(calculate_cidr("合并 ,"), Err(CidrError::Incomplete));
+    }
+
+    #[test]
+    fn keeps_only_changed_address_coverage_and_minimizes_adjacent_prefixes() {
+        for (query, expected) in [
+            (
+                r#"对称差 [["192.0.2.0/25","2001:db8::/63"],["192.0.2.64/26","192.0.2.128/25","2001:db8:0:1::/64"]]"#,
+                "192.0.2.0/26\n192.0.2.128/25\n2001:db8::/64",
+            ),
+            (
+                r#"symmetric-difference [["192.0.2.0/25"],["192.0.2.128/25"]]"#,
+                "192.0.2.0/24",
+            ),
+            (r#"对称差 [["::/0"],["::/1","8000::/1"]]"#, "无差异网段"),
+            (
+                r#"对称差 [[],["255.255.255.255/32"]]"#,
+                "255.255.255.255/32",
+            ),
+        ] {
+            assert_eq!(calculate_cidr(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]

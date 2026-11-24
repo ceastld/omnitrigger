@@ -2474,6 +2474,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "网段: 差集 [[\"192.0.2.0/24\",\"2001:db8::/63\"],[\"192.0.2.0/26\",\"192.0.2.128/25\",\"2001:db8:0:1::/64\"]]",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "找出两组网段中只被一方覆盖的地址",
+        query: r#"网段: 对称差 [["192.0.2.0/25","2001:db8::/63"],["192.0.2.64/26","192.0.2.128/25","2001:db8:0:1::/64"]]"#,
+    },
+    Example {
         icon: Icon::Clock,
         title: "Unix 时间戳",
         query: "时间戳: 1700000000123ms",
@@ -6480,9 +6485,18 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Cidr
             if !term.is_empty()
-                && ["子网", "排除", "归属CSV", "清单CSV", "合并", "交集", "差集"]
-                    .into_iter()
-                    .any(|operation| operation.starts_with(term)) => {}
+                && [
+                    "子网",
+                    "排除",
+                    "归属CSV",
+                    "清单CSV",
+                    "合并",
+                    "交集",
+                    "差集",
+                    "对称差",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::Matrix
             if matches!(term, "乘方" | "特" | "特征" | "特征值")
                 || (!term.is_empty()
