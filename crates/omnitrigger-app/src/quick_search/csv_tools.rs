@@ -121,6 +121,9 @@ pub(super) enum CsvError {
     JoinTooLarge,
     HeaderComparisonArguments,
     ColumnComparisonArguments,
+    AllColumnComparisonArguments,
+    ComparisonHeaderMismatch,
+    NoComparedColumns,
     DuplicateComparisonKey,
     ColumnComparisonTooLarge,
     FillTooLarge,
@@ -335,6 +338,9 @@ impl CsvError {
             Self::ColumnComparisonArguments => {
                 "填写键列与一个或多个对比列，例如 [[\"编号\"],[\"状态\",\"金额\"]]，再填写原表和新表"
             }
+            Self::AllColumnComparisonArguments => "填写键列数组，例如 [\"编号\"]，再填写包含原表和新表的 JSON 字符串数组",
+            Self::ComparisonHeaderMismatch => "两张表须包含相同的列名，列顺序可以不同",
+            Self::NoComparedColumns => "请至少保留一个用来对比的非键列",
             Self::DuplicateComparisonKey => "对比列需要每张表中的键组合各出现一次",
             Self::ColumnComparisonTooLarge => "表格对比结果超过 1 MiB，请缩小表格范围",
             Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
@@ -1234,8 +1240,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "左表匹配" | "semi-join" => return join_csv(input, JoinKind::MatchedLeft),
         "左表独有" | "anti-join" => return join_csv(input, JoinKind::UnmatchedLeft),
         "表头对比" | "compare-headers" => return compare_csv_headers(input),
-        "对比列" | "compare-column" => return compare_csv_column(input, false),
-        "数值对比列" | "compare-numeric-column" => return compare_csv_column(input, true),
+        "对比列" | "compare-column" => return compare_csv_column(input, ComparisonMode::Text),
+        "数值对比列" | "compare-numeric-column" => {
+            return compare_csv_column(input, ComparisonMode::Numeric)
+        }
+        "对比全部列" | "compare-all-columns" => {
+            return compare_csv_column(input, ComparisonMode::All)
+        }
         "纵向合并" | "stack" => return stack_csv(input),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
@@ -3146,28 +3157,67 @@ enum ComparisonColumns {
     Multiple(Vec<ColumnReference>),
 }
 
-fn compare_csv_column(input: &str, numeric: bool) -> Result<String, CsvError> {
-    let ((key_columns, selection), data) = json_argument_and_data::<(
-        Vec<ColumnReference>,
-        ComparisonColumns,
-    )>(input, CsvError::ColumnComparisonArguments)?;
-    let (columns, label_columns) = match selection {
-        ComparisonColumns::One(column) => (vec![column], false),
-        ComparisonColumns::Multiple(columns) => (columns, true),
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ComparisonMode {
+    Text,
+    Numeric,
+    All,
+}
+
+fn compare_csv_column(input: &str, mode: ComparisonMode) -> Result<String, CsvError> {
+    let all_columns = mode == ComparisonMode::All;
+    let (key_columns, columns, label_columns, data, invalid) = if all_columns {
+        let invalid = CsvError::AllColumnComparisonArguments;
+        let (keys, data) = json_argument_and_data::<Vec<ColumnReference>>(input, invalid)?;
+        (keys, Vec::new(), true, data, invalid)
+    } else {
+        let invalid = CsvError::ColumnComparisonArguments;
+        let ((keys, selection), data) =
+            json_argument_and_data::<(Vec<ColumnReference>, ComparisonColumns)>(input, invalid)?;
+        let (columns, label_columns) = match selection {
+            ComparisonColumns::One(column) => (vec![column], false),
+            ComparisonColumns::Multiple(columns) => (columns, true),
+        };
+        (keys, columns, label_columns, data, invalid)
     };
-    if key_columns.is_empty() || columns.is_empty() {
-        return Err(CsvError::ColumnComparisonArguments);
+    if key_columns.is_empty() || (!all_columns && columns.is_empty()) {
+        return Err(invalid);
     }
-    let [old, new] = read_csv_pair(data, CsvError::ColumnComparisonArguments)?;
+    let [old, new] = read_csv_pair(data, invalid)?;
     let (old_header, old_rows) = old.split_first().ok_or(CsvError::MissingInput)?;
     let (new_header, new_rows) = new.split_first().ok_or(CsvError::MissingInput)?;
     let resolve = |header: &[String], columns: &[ColumnReference]| {
-        resolve_distinct_columns(header, columns, CsvError::ColumnComparisonArguments)
+        resolve_distinct_columns(header, columns, invalid)
     };
     let old_keys = resolve(old_header, &key_columns)?;
-    let new_keys = resolve(new_header, &key_columns)?;
-    let old_columns = resolve(old_header, &columns)?;
-    let new_columns = resolve(new_header, &columns)?;
+    let (new_keys, old_columns, new_columns) = if all_columns {
+        let old_positions = named_header_positions(old_header)?;
+        let new_positions = named_header_positions(new_header)?;
+        if old_positions.len() != new_positions.len()
+            || !old_positions
+                .keys()
+                .all(|column| new_positions.contains_key(column))
+        {
+            return Err(CsvError::ComparisonHeaderMismatch);
+        }
+        let old_columns: Vec<_> = (0..old_header.len())
+            .filter(|index| !old_keys.contains(index))
+            .collect();
+        if old_columns.is_empty() {
+            return Err(CsvError::NoComparedColumns);
+        }
+        let in_new = |&index: &usize| new_positions[old_header[index].as_str()] - 1;
+        let new_keys = old_keys.iter().map(in_new).collect();
+        let new_columns = old_columns.iter().map(in_new).collect();
+        (new_keys, old_columns, new_columns)
+    } else {
+        (
+            resolve(new_header, &key_columns)?,
+            resolve(old_header, &columns)?,
+            resolve(new_header, &columns)?,
+        )
+    };
+    let numeric = mode == ComparisonMode::Numeric;
     let column_labels: Vec<_> = old_columns
         .iter()
         .map(|&index| label_columns.then_some(old_header[index].as_str()))
@@ -7161,6 +7211,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-column"
             | "数值对比列"
             | "compare-numeric-column"
+            | "对比全部列"
+            | "compare-all-columns"
             | "分组时长合计"
             | "group-duration-sum"
             | "时长数值列"
@@ -10084,6 +10136,39 @@ mod tests {
             r#"表头对比 ["编号","编号,"]"#,
         ] {
             assert_eq!(transform_csv(query), Err(CsvError::InvalidHeader));
+        }
+    }
+
+    #[test]
+    fn compares_all_non_key_columns_by_header_even_when_headers_are_reordered() {
+        let query = r#"对比全部列 [1,"地区"] ["编号,地区,状态,金额\n001,北,草稿,1.50\n002,南,完成,3","金额,编号,状态,地区\n1.5,001,完成,北\n4,003,待办,南"]"#;
+        let expected = "键1,键2,列,变更,原值,新值\r\n001,北,状态,修改,草稿,完成\r\n001,北,金额,修改,1.50,1.5\r\n002,南,状态,删除,完成,\"\"\r\n002,南,金额,删除,3,\"\"\r\n003,南,状态,新增,\"\",待办\r\n003,南,金额,新增,\"\",4";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(query).expect("整表差异可预览").unwrap();
+        assert_eq!(csv, expected);
+        for (query, error) in [
+            (
+                r#"对比全部列 [1] ["编号,金额","编号,状态"]"#,
+                CsvError::ComparisonHeaderMismatch,
+            ),
+            (
+                r#"对比全部列 [1] ["编号,金额,金额","编号,金额,状态"]"#,
+                CsvError::InvalidHeader,
+            ),
+            (
+                r#"对比全部列 [1] ["编号","编号"]"#,
+                CsvError::NoComparedColumns,
+            ),
+            (
+                r#"对比全部列 [1] ["编号,金额\n001,1\n001,2","金额,编号"]"#,
+                CsvError::DuplicateComparisonKey,
+            ),
+            (
+                r#"对比全部列 [] ["编号,金额","金额,编号"]"#,
+                CsvError::AllColumnComparisonArguments,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
         }
     }
 
