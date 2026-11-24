@@ -66,6 +66,7 @@ pub(super) enum JsonError {
     MissingKey,
     RenameConflict,
     CsvRows,
+    CsvLineObjects,
     CsvRowHeaders,
     CsvDuplicateKey,
     CsvNullCharacter,
@@ -140,6 +141,7 @@ impl JsonError {
             Self::MissingKey => "顶层对象中找不到要改名的键",
             Self::RenameConflict => "改键要求原键唯一且新键名可用",
             Self::CsvRows => "输入等宽且有数据列的数组，或至少有一个键的对象列表",
+            Self::CsvLineObjects => "每行填写一个 JSON 对象，至少有一行包含字段",
             Self::CsvRowHeaders => "先填写非空且互不重复的列名，再粘贴等宽的行数组",
             Self::CsvDuplicateKey => "同一对象的 CSV 列名需要唯一",
             Self::CsvNullCharacter => "CSV 单元格不能包含空字符 U+0000",
@@ -177,6 +179,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
 enum JsonCsvOperation {
     Convert,
     RowsWithHeaders,
+    Lines,
     Paths,
     Leaves,
     Keys,
@@ -188,6 +191,7 @@ impl JsonCsvOperation {
         match name {
             "转csv" | "to-csv" => Some(Self::Convert),
             "行数组转csv" | "rows-to-csv" => Some(Self::RowsWithHeaders),
+            "行转csv" | "jsonl-to-csv" => Some(Self::Lines),
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
             "找键csv" | "find-key-csv" => Some(Self::Keys),
@@ -201,7 +205,12 @@ impl JsonCsvOperation {
             Self::Convert => source
                 .strip_prefix('[')
                 .is_some_and(|rows| rows.trim_start().starts_with('{')),
-            Self::RowsWithHeaders | Self::Paths | Self::Leaves | Self::Keys | Self::Values => true,
+            Self::RowsWithHeaders
+            | Self::Lines
+            | Self::Paths
+            | Self::Leaves
+            | Self::Keys
+            | Self::Values => true,
         }
     }
 
@@ -209,6 +218,7 @@ impl JsonCsvOperation {
         match self {
             Self::Convert => json_to_csv(source),
             Self::RowsWithHeaders => json_array_rows_with_headers(source),
+            Self::Lines => json_lines_to_csv(source),
             Self::Paths => json_paths_to_csv(source),
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
@@ -1529,12 +1539,25 @@ fn json_lines_to_array(source: &str) -> Result<String, JsonError> {
     }
     let values = json_lines(source)
         .map(|(_, line)| {
-            let value =
-                serde_json::from_str::<&RawValue>(line).map_err(|_| JsonError::InvalidLine)?;
+            let value = parse_json_line(line)?;
             layout_json(value.get(), false)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("[{}]", values.join(",")))
+}
+
+fn json_lines_to_csv(source: &str) -> Result<String, JsonError> {
+    let rows = json_lines(source)
+        .map(|(_, line)| parse_json_line(line))
+        .collect::<Result<Vec<_>, _>>()?;
+    json_object_rows_to_csv(rows).map_err(|error| match error {
+        JsonError::CsvRows => JsonError::CsvLineObjects,
+        _ => error,
+    })
+}
+
+fn parse_json_line(line: &str) -> Result<&RawValue, JsonError> {
+    serde_json::from_str::<&RawValue>(line).map_err(|_| JsonError::InvalidLine)
 }
 
 fn json_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
@@ -1996,22 +2019,22 @@ fn json_object_rows_to_csv(rows: Vec<&RawValue>) -> Result<String, JsonError> {
         return Err(JsonError::CsvRows);
     }
 
-    let mut output = Vec::with_capacity(entries.len() + 1);
-    let headers = order
-        .iter()
-        .map(|name| encode_csv_cell(name))
-        .collect::<Result<Vec<_>, _>>()?;
-    output.push(headers.join(","));
+    if order.iter().any(|name| name.contains('\0')) {
+        return Err(JsonError::CsvNullCharacter);
+    }
+    let mut output = String::new();
+    let limit = JsonError::CsvOutputTooLarge;
+    append_bounded_csv_row(&mut output, order.iter().map(String::as_str), limit)?;
     for fields in entries {
         let record = (0..order.len())
             .map(|index| match fields.get(&index) {
-                Some(value) => json_csv_cell(value),
-                None => encode_csv_cell(""),
+                Some(value) => json_csv_text(value),
+                None => Ok(Cow::Borrowed("")),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        output.push(record.join(","));
+        append_bounded_csv_row(&mut output, record.iter().map(|cell| cell.as_ref()), limit)?;
     }
-    Ok(output.join("\r\n"))
+    Ok(output)
 }
 
 fn json_csv_cell(value: &RawValue) -> Result<String, JsonError> {

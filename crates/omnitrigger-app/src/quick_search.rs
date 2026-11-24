@@ -4962,6 +4962,43 @@ mod tests {
     }
 
     #[test]
+    fn previews_json_lines_as_csv_and_bounds_expanded_object_tables() {
+        let lines = "{\"编号\":\"001\",\"销售\":1.50}\r\n\r\n{\"编号\":\"002\",\"备注\":\"甲,乙\"}";
+        let query = format!("JSON: 行转CSV {lines}");
+        let result = for_query(&query, &[]);
+        assert!(matches!(
+            &result,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(_),
+                ..
+            }))
+        ));
+        assert_eq!(
+            result.refillable_text(),
+            Some("编号,销售,备注\r\n001,1.50,\"\"\r\n002,\"\",\"甲,乙\"")
+        );
+        assert_eq!(
+            transform_json("行转CSV {\"编号\":1}\n{"),
+            Err(JsonError::InvalidLine)
+        );
+        assert_eq!(
+            transform_json("行转CSV {\"编号\":1}\n42"),
+            Err(JsonError::CsvLineObjects)
+        );
+        let sparse = (0..640)
+            .map(|index| format!(r#"{{"列{index}":1}}"#))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transform_json(&format!("jsonl-to-csv {}", sparse.join("\n"))),
+            Err(JsonError::CsvOutputTooLarge)
+        );
+        assert_eq!(
+            transform_json(&format!("转CSV [{}]", sparse.join(","))),
+            Err(JsonError::CsvOutputTooLarge)
+        );
+    }
+
+    #[test]
     fn exports_matching_json_paths_with_exact_raw_values() {
         assert_eq!(
             transform_json(r#"找值CSV 1.5 {"甲":1.50,"乙":1.5e0,"丙":"1.5"}"#).as_deref(),

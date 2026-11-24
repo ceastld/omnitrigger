@@ -3856,6 +3856,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把逐行 JSON 对象预览为 CSV 表格",
+        query: "JSON: 行转CSV {\"编号\":\"001\",\"金额\":1.50}\n{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "校验 JSON Lines 并指出每个无效行",
         query: "JSON: 校验行 {\"编号\":1}\n错误文本\n{\"编号\":\nnull",
     },
