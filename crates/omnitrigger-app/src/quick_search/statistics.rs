@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, collections::BTreeMap};
+use std::{borrow::Borrow, collections::BTreeMap, ops::RangeInclusive};
 
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
@@ -291,17 +291,25 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
-        "二项概率" | "binomial" => return binomial_probability(values, BinomialEvent::Exactly),
+        "二项概率" | "binomial" => return binomial_probability(values, DiscreteEvent::Exactly),
         "二项概率表" | "binomial-table" => return binomial_csv(values),
         "二项累计" | "binomial-cdf" => {
-            return binomial_probability(values, BinomialEvent::AtMost)
+            return binomial_probability(values, DiscreteEvent::AtMost)
         }
         "二项至少" | "binomial-at-least" => {
-            return binomial_probability(values, BinomialEvent::AtLeast)
+            return binomial_probability(values, DiscreteEvent::AtLeast)
         }
         "几何概率" | "geometric" => return geometric_probability(values, false),
         "几何累计" | "geometric-cdf" => return geometric_probability(values, true),
-        "超几何概率" | "hypergeometric" => return hypergeometric_probability(values),
+        "超几何概率" | "hypergeometric" => {
+            return hypergeometric_probability(values, DiscreteEvent::Exactly)
+        }
+        "超几何累计" | "hypergeometric-cdf" => {
+            return hypergeometric_probability(values, DiscreteEvent::AtMost)
+        }
+        "超几何至少" | "hypergeometric-at-least" => {
+            return hypergeometric_probability(values, DiscreteEvent::AtLeast)
+        }
         "超几何概率表" | "hypergeometric-table" => return hypergeometric_csv(values),
         "独立性卡方" | "chi-square" => return contingency_table(values, false),
         "期望频数" | "expected-counts" => return contingency_table(values, true),
@@ -1419,13 +1427,13 @@ fn squared_deviation_sum(
         })
 }
 
-enum BinomialEvent {
+enum DiscreteEvent {
     Exactly,
     AtMost,
     AtLeast,
 }
 
-fn binomial_probability(input: &str, event: BinomialEvent) -> Result<String, StatisticsError> {
+fn binomial_probability(input: &str, event: DiscreteEvent) -> Result<String, StatisticsError> {
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(trials), Some(successes), Some(probability), None) =
         (terms.next(), terms.next(), terms.next(), terms.next())
@@ -1441,12 +1449,12 @@ fn binomial_probability(input: &str, event: BinomialEvent) -> Result<String, Sta
     let probability = parse_probability(probability)?;
     let one = BigRational::from_integer(BigInt::from(1u8));
     // 至少成功 k 次等价于至多失败 n-k 次。
-    let (successes, probability) = if matches!(event, BinomialEvent::AtLeast) {
+    let (successes, probability) = if matches!(event, DiscreteEvent::AtLeast) {
         (trials - successes, &one - probability)
     } else {
         (successes, probability)
     };
-    let cumulative = !matches!(event, BinomialEvent::Exactly);
+    let cumulative = !matches!(event, DiscreteEvent::Exactly);
     if (cumulative && successes == trials) || trials == 0 {
         return Ok("1".to_owned());
     }
@@ -1575,16 +1583,31 @@ fn geometric_probability(input: &str, cumulative: bool) -> Result<String, Statis
     Ok(bounded(result)?.to_string())
 }
 
-fn hypergeometric_probability(input: &str) -> Result<String, StatisticsError> {
+fn hypergeometric_probability(
+    input: &str,
+    event: DiscreteEvent,
+) -> Result<String, StatisticsError> {
     let invalid = StatisticsError::HypergeometricArguments;
     let (parameters, hits) = input.rsplit_once(',').ok_or(invalid)?;
     let [total, marked, draws] = hypergeometric_parameters(parameters, invalid)?;
     let hits = hits.trim().parse::<u32>().map_err(|_| invalid)?;
     let unmarked = total - marked;
-    if hits < draws.saturating_sub(unmarked) || hits > marked.min(draws) {
+    let first = draws.saturating_sub(unmarked);
+    let last = marked.min(draws);
+    let counts = match event {
+        DiscreteEvent::Exactly => hits.max(first)..=hits.min(last),
+        DiscreteEvent::AtMost => first..=hits.min(last),
+        DiscreteEvent::AtLeast => hits.max(first)..=last,
+    };
+    if counts.is_empty() {
         return Ok("0".to_owned());
     }
-    let numerator = hypergeometric_mass(marked, unmarked, draws, hits);
+    if counts == (first..=last) {
+        return Ok("1".to_owned());
+    }
+    let numerator = hypergeometric_masses(marked, unmarked, draws, counts)
+        .map(|(_, mass)| mass)
+        .sum();
     let probability = BigRational::new(numerator, combination_count(total, draws));
     Ok(bounded(probability)?.to_string())
 }
@@ -1607,8 +1630,25 @@ fn hypergeometric_parameters(
     Ok([total, marked, draws])
 }
 
-fn hypergeometric_mass(marked: u32, unmarked: u32, draws: u32, hits: u32) -> BigInt {
-    combination_count(marked, hits) * combination_count(unmarked, draws - hits)
+fn hypergeometric_masses(
+    marked: u32,
+    unmarked: u32,
+    draws: u32,
+    counts: RangeInclusive<u32>,
+) -> impl Iterator<Item = (u32, BigInt)> {
+    let (&first, &last) = (counts.start(), counts.end());
+    let mut mass = combination_count(marked, first) * combination_count(unmarked, draws - first);
+    counts.map(move |hits| {
+        let here = mass.clone();
+        if hits < last {
+            // 相邻两项的组合数比值共用固定分母，直接递推概率分子。
+            let remainder = draws - hits;
+            let multiplier = (marked - hits) * remainder;
+            let divisor = (hits + 1) * (unmarked - remainder + 1);
+            mass = &mass * multiplier / divisor;
+        }
+        (hits, here)
+    })
 }
 
 fn hypergeometric_csv(input: &str) -> Result<String, StatisticsError> {
@@ -1620,22 +1660,10 @@ fn hypergeometric_csv(input: &str) -> Result<String, StatisticsError> {
     if last - first >= MAX_HYPERGEOMETRIC_TABLE_ROWS {
         return Err(StatisticsError::HypergeometricTableRows);
     }
-    let mut mass = hypergeometric_mass(marked, unmarked, draws, first);
-    let counts_and_masses = (first..=last).map(|hits| {
-        let here = mass.clone();
-        if hits < last {
-            // 相邻两项的组合数比值共用固定分母，直接递推概率分子。
-            let remainder = draws - hits;
-            let multiplier = (marked - hits) * remainder;
-            let divisor = (hits + 1) * (unmarked - remainder + 1);
-            mass = &mass * multiplier / divisor;
-        }
-        (hits, here)
-    });
     probability_csv(
         "命中次数",
         combination_count(total, draws),
-        counts_and_masses,
+        hypergeometric_masses(marked, unmarked, draws, first..=last),
     )
 }
 
@@ -2448,6 +2476,31 @@ mod tests {
         assert_eq!(
             calculate_statistics("超几何概率表 258,129,129"),
             Err(StatisticsError::HypergeometricTableRows)
+        );
+    }
+
+    #[test]
+    fn computes_exact_inclusive_sampling_tails_beyond_the_table_limit() {
+        for (query, expected) in [
+            ("超几何累计 10,4,3,2", "29/30"),
+            ("超几何至少 10,4,3,2", "1/3"),
+            ("hypergeometric-cdf 10,8,4,1", "0"),
+            ("hypergeometric-at-least 10,8,4,1", "1"),
+            ("超几何累计 10,8,4,200", "1"),
+            ("超几何至少 10,8,4,200", "0"),
+            ("超几何累计 4096,2048,2047,1023", "1/2"),
+            ("超几何至少 4096,2048,2047,1024", "1/2"),
+            ("超几何至少 0,0,0,0", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("超几何至少 10,4,3,-1"),
+            Err(StatisticsError::HypergeometricArguments)
         );
     }
 

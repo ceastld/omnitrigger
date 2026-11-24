@@ -885,6 +885,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算不放回抽取至多命中指定次数的概率",
+        query: "统计: 超几何累计 10,4,3,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算不放回抽取至少命中指定次数的概率",
+        query: "统计: 超几何至少 10,4,3,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算列联表的皮尔逊卡方和自由度",
         query: "统计: 独立性卡方 1,2; 3,4",
     },
@@ -6423,6 +6433,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "几何累计",
                     "超几何概率",
                     "超几何概率表",
+                    "超几何累计",
+                    "超几何至少",
                     "独立性卡方",
                     "期望频数",
                     "箱线摘要",
