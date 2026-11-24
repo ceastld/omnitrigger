@@ -4305,6 +4305,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计各列的空值、不同值和重复值种数",
+        query: "CSV: 列值概览 [\"备注\",1] 编号,备注\n001,\"茶,咖啡\"\n1,\"茶,咖啡\"\n001,\" \"\n,\"\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位数值列里的文本或空单元格",
         query: "CSV: 检查数值列 [\"金额\"] 编号,金额\n001,1.50\n002,待确认\n003,\n004,1/3",
     },

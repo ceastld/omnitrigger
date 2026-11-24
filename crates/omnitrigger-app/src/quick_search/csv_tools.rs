@@ -6935,6 +6935,9 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "分组加权平均" || operation.eq_ignore_ascii_case("group-weighted-mean") {
         return Some(csv_grouped_weighted_mean(input));
     }
+    if operation == "列值概览" || operation.eq_ignore_ascii_case("value-profile") {
+        return Some(csv_value_profile(input));
+    }
     let sorts = [
         ("排序", "sort-columns", false, false),
         ("降序", "sort-columns-desc", true, false),
@@ -6985,6 +6988,52 @@ fn csv_layout_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewD
         _ => return None,
     };
     Some(projected.map(|rows| (write_rows(&rows, ','), rows)))
+}
+
+fn csv_value_profile(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let invalid = CsvError::NamedColumnArguments;
+    let (columns, data) = column_reference_arguments(input, invalid)?;
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, &columns, invalid)?;
+    let headings = [
+        "列号",
+        "列名",
+        "空单元格",
+        "非空单元格",
+        "不同非空值",
+        "重复值种数",
+    ];
+    let mut csv = headings.join(",");
+    let mut summary = vec![headings.into_iter().map(str::to_owned).collect()];
+    for column in columns {
+        let mut counts = HashMap::new();
+        let mut nonempty = 0;
+        for cell in records
+            .iter()
+            .map(|row| row[column].as_str())
+            .filter(|cell| !cell.is_empty())
+        {
+            *counts.entry(cell).or_insert(0usize) += 1;
+            nonempty += 1;
+        }
+        let repeated = counts.values().filter(|&&count| count > 1).count();
+        let row = vec![
+            (column + 1).to_string(),
+            header[column].clone(),
+            (records.len() - nonempty).to_string(),
+            nonempty.to_string(),
+            counts.len().to_string(),
+            repeated.to_string(),
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            row.iter().map(String::as_str),
+            CsvError::StatisticsOutputTooLarge,
+        )?;
+        summary.push(row);
+    }
+    Ok((csv, summary))
 }
 
 struct CsvKeyword {
@@ -9892,6 +9941,32 @@ mod tests {
         assert_eq!(
             transform_csv("空值统计 [2,\"备注\"] 编号,备注\n001,茶"),
             Err(CsvError::NamedColumnArguments)
+        );
+    }
+
+    #[test]
+    fn profiles_csv_column_value_counts_without_coercing_or_trimming_values() {
+        let query = "列值概览 [\"备注\",1] 编号,备注\r\n001,\"茶,咖啡\"\r\n1,\"茶,咖啡\"\r\n001,\" \"\r\n,\"\"";
+        let expected = "列号,列名,空单元格,非空单元格,不同非空值,重复值种数\r\n2,备注,1,3,2,1\r\n1,编号,1,3,2,1";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(
+            csv_table_preview(query)
+                .expect("列概览应显示为表格")
+                .map(|(text, _)| text)
+                .as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            transform_csv("value-profile 1 编号").as_deref(),
+            Ok("列号,列名,空单元格,非空单元格,不同非空值,重复值种数\r\n1,编号,0,0,0,0")
+        );
+        assert_eq!(
+            transform_csv("列值概览 [2,\"备注\"] 编号,备注\n001,茶"),
+            Err(CsvError::NamedColumnArguments)
+        );
+        assert_eq!(
+            transform_csv("列值概览 2 编号,备注\n001"),
+            Err(CsvError::DifferentColumnCount)
         );
     }
 
