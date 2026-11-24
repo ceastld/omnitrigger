@@ -208,6 +208,46 @@ fn classify_attributes(result: Result<u32, u32>) -> Result<LocalPathKind, LocalS
     }
 }
 
+#[cfg(windows)]
+fn verify_opened_path(
+    handle: windows::Win32::Foundation::HANDLE,
+    path: &str,
+    check: &impl Fn() -> Result<(), LocalStatError>,
+) -> Result<(), LocalStatError> {
+    use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_NT};
+
+    let drive = &path[..2];
+    let device =
+        system_step(check, || NativeMetadata.current_device(drive))?.map_err(error_for_os)?;
+    if !physical_volume_device(&device) {
+        return Err(fault("path_not_local"));
+    }
+    let mut buffer = vec![0u16; MAX_PATH_UNITS + 1];
+    let name = system_step(check, || {
+        // SAFETY: 句柄有效，输出切片大小固定；NT 卷名可与受限 DOS 当前映射核对。
+        let length =
+            unsafe { GetFinalPathNameByHandleW(handle, &mut buffer, VOLUME_NAME_NT) } as usize;
+        if length == 0 {
+            return Err(error_for_os(
+                unsafe { windows::Win32::Foundation::GetLastError() }.0,
+            ));
+        }
+        if length >= buffer.len() {
+            return Err(fault("path_unavailable"));
+        }
+        String::from_utf16(&buffer[..length]).map_err(|_| fault("path_unavailable"))
+    })??;
+    let expected = format!("{}\\{}", device, path[3..].replace('/', "\\"));
+    // 比较副本只去单个合法尾分隔符，不改变公开路径。非 ASCII 大小写别名可保守拒绝。
+    if !name
+        .trim_end_matches('\\')
+        .eq_ignore_ascii_case(expected.trim_end_matches('\\'))
+    {
+        return Err(fault("path_unavailable"));
+    }
+    Ok(())
+}
+
 #[cfg(any(windows, test))]
 fn stat_with(
     path: &str,
@@ -759,6 +799,46 @@ mod tests {
         }
 
         #[test]
+        fn local_preview_reads_a_bounded_prefix_and_rejects_non_files() {
+            let fixture = TemporaryFixture::new();
+            let file = fixture.root.join("empty-file");
+            std::fs::write(&file, "甲乙abc").unwrap();
+            assert_eq!(
+                read_local_preview_file(file.to_str().unwrap(), 6, || Ok(())),
+                Ok("甲乙".as_bytes().to_vec())
+            );
+            assert_eq!(
+                read_local_preview_file(fixture.root.to_str().unwrap(), 6, || Ok(()))
+                    .unwrap_err()
+                    .code,
+                "not_file"
+            );
+            assert_eq!(
+                read_local_preview_file(fixture.root.join("missing").to_str().unwrap(), 6, || Ok(
+                    ()
+                ))
+                .unwrap_err()
+                .code,
+                "path_missing"
+            );
+            assert_eq!(
+                read_local_preview_file(
+                    fixture
+                        .root
+                        .join("OneDrive-fixture")
+                        .join("leaf")
+                        .to_str()
+                        .unwrap(),
+                    6,
+                    || Ok(())
+                )
+                .unwrap_err()
+                .code,
+                "path_unavailable"
+            );
+        }
+
+        #[test]
         fn local_stat_attribute_constants_match_the_pinned_windows_bindings() {
             use windows::Win32::Storage::FileSystem::{
                 FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
@@ -784,3 +864,8 @@ pub use directory::{
     LocalDirectoryEntry, LocalDirectoryMetadata, LocalDirectoryOptions, MAX_DIRECTORY_BYTES,
     MAX_DIRECTORY_ENTRIES,
 };
+
+#[cfg(windows)]
+mod preview_file;
+#[cfg(windows)]
+pub use preview_file::read_local_preview_file;

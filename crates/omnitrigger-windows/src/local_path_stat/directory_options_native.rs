@@ -96,7 +96,7 @@ pub(super) fn read_options(
     require_directory(stat_local_path(path, check)?)?;
     let handle = system_step(check, || open(path))??;
     let original = system_step(check, || info(&handle))??;
-    verify_name(&handle, path, check)?;
+    verify_opened_path(handle.0, path, check)?;
     require_directory(stat_local_path(path, check)?)?;
     let clock = if options.metadata {
         Some(system_step(check, LocalClock::capture)??)
@@ -189,7 +189,7 @@ pub(super) fn read_options(
             }
         }
     }
-    verify_name(&handle, path, check)?;
+    verify_opened_path(handle.0, path, check)?;
     let current = system_step(check, || info(&handle))??;
     let reopened = system_step(check, || open(path))??;
     let current_path = system_step(check, || info(&reopened))??;

@@ -219,8 +219,8 @@ fn parse_buffer(
 #[cfg(windows)]
 mod native {
     use super::super::{
-        classify_attributes, error_for_os, physical_volume_device, stat_local_path, system_step,
-        LocalPathKind, Metadata, NativeMetadata,
+        classify_attributes, error_for_os, stat_local_path, system_step, verify_opened_path,
+        LocalPathKind,
     };
     use super::*;
     use windows::{
@@ -229,11 +229,10 @@ mod native {
             Foundation::{CloseHandle, HANDLE},
             Storage::FileSystem::{
                 CreateFileW, FileFullDirectoryInfo, GetFileInformationByHandle,
-                GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-                BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_NO_RECALL,
-                FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-                VOLUME_NAME_NT,
+                GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION,
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_NO_RECALL, FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+                FILE_SHARE_WRITE, OPEN_EXISTING,
             },
         },
     };
@@ -292,42 +291,6 @@ mod native {
         require_directory(classify_attributes(Ok(information.dwFileAttributes))?)?;
         Ok(information)
     }
-    fn verify_name(
-        handle: &Handle,
-        path: &str,
-        check: &impl Fn() -> Result<(), LocalStatError>,
-    ) -> Result<(), LocalStatError> {
-        let drive = &path[..2];
-        let device =
-            system_step(check, || NativeMetadata.current_device(drive))?.map_err(error_for_os)?;
-        if !physical_volume_device(&device) {
-            return Err(directory_fault("path_not_local"));
-        }
-        let mut buffer = vec![0u16; super::super::MAX_PATH_UNITS + 1];
-        let name = system_step(check, || {
-            // SAFETY: 句柄有效，输出切片大小固定；NT 卷名可与受限 DOS 当前映射核对。
-            let length = unsafe { GetFinalPathNameByHandleW(handle.0, &mut buffer, VOLUME_NAME_NT) }
-                as usize;
-            if length == 0 {
-                return Err(error_for_os(
-                    unsafe { windows::Win32::Foundation::GetLastError() }.0,
-                ));
-            }
-            if length >= buffer.len() {
-                return Err(directory_fault("path_unavailable"));
-            }
-            String::from_utf16(&buffer[..length]).map_err(|_| directory_fault("path_unavailable"))
-        })??;
-        let expected = format!("{}\\{}", device, path[3..].replace('/', "\\"));
-        // 比较副本只去单个合法尾分隔符，不改变公开路径。非 ASCII 大小写别名可保守拒绝。
-        if !name
-            .trim_end_matches('\\')
-            .eq_ignore_ascii_case(expected.trim_end_matches('\\'))
-        {
-            return Err(directory_fault("path_unavailable"));
-        }
-        Ok(())
-    }
     fn identity(value: &BY_HANDLE_FILE_INFORMATION) -> (u32, u32, u32) {
         (
             value.dwVolumeSerialNumber,
@@ -347,7 +310,7 @@ mod native {
         // system_step 内部创建 RAII 包装：若返回后取消，丢弃 Result 时同样关闭句柄。
         let handle = system_step(check, || open(path))??;
         let original = system_step(check, || info(&handle))??;
-        verify_name(&handle, path, check)?;
+        verify_opened_path(handle.0, path, check)?;
         // 打开后复验祖先；句柄枚举始终针对已核验的原目录。
         require_directory(stat_local_path(path, check)?)?;
         let mut collector = Collector::new(path, max_entries);
@@ -391,8 +354,8 @@ mod native {
         require_directory(stat_local_path(path, check)?)?;
         let current = system_step(check, || open(path))??;
         let current_info = system_step(check, || info(&current))??;
-        verify_name(&current, path, check)?;
-        verify_name(&handle, path, check)?;
+        verify_opened_path(current.0, path, check)?;
+        verify_opened_path(handle.0, path, check)?;
         if identity(&original) != identity(&current_info) {
             return Err(directory_fault("directory_changed"));
         }

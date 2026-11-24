@@ -1538,6 +1538,25 @@ impl Results {
         }
     }
 
+    fn selected_text_file(&self, selected: usize) -> Option<&str> {
+        let Self::Destinations(items) = self else {
+            return None;
+        };
+        let Destination::LocalFile {
+            path,
+            is_directory: false,
+            ..
+        } = items.get(selected)?
+        else {
+            return None;
+        };
+        matches!(
+            input_file_extension(Path::new(path)).as_deref(),
+            Some("txt" | "md" | "log" | "csv" | "tsv" | "json" | "jsonl" | "ndjson" | "toml")
+        )
+        .then_some(path.as_str())
+    }
+
     fn value_preview_expandable(&self) -> bool {
         matches!(
             self,
@@ -1666,6 +1685,12 @@ struct BookmarkNameEdit {
 struct ResultRefill {
     original: String,
     inserted: String,
+    kind: RefillKind,
+}
+
+enum RefillKind {
+    Result,
+    File,
 }
 
 enum ResultSaveState {
@@ -1694,13 +1719,14 @@ fn accepts_input_file(query: &str) -> bool {
         )
 }
 
-fn input_file_query_prefix(path: &Path) -> &'static str {
-    match path
-        .extension()
+fn input_file_extension(path: &Path) -> Option<String> {
+    path.extension()
         .and_then(std::ffi::OsStr::to_str)
         .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
+}
+
+fn input_file_query_prefix(path: &Path) -> &'static str {
+    match input_file_extension(path).as_deref() {
         Some("csv") => "CSV: 表格预览 ",
         Some("tsv") => "CSV: 从TSV ",
         Some("json") => "JSON: 格式化 ",
@@ -1715,19 +1741,26 @@ fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String
     if !path.metadata().map_err(read_error)?.is_file() {
         return Err("请选择一个普通文本文件".to_owned());
     }
-    let max_bytes = character_limit * 4 + "\u{feff}".len();
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .map_err(read_error)?
-        .take((max_bytes + 1) as u64)
+        .take((input_file_byte_limit(character_limit) + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(read_error)?;
+    decode_input_file(&bytes, character_limit)
+}
+
+fn input_file_byte_limit(character_limit: usize) -> usize {
+    character_limit * 4 + "\u{feff}".len()
+}
+
+fn decode_input_file(bytes: &[u8], character_limit: usize) -> Result<String, String> {
     let too_long = || format!("文件内容超过可插入的 {character_limit} 字符");
-    if bytes.len() > max_bytes {
+    if bytes.len() > input_file_byte_limit(character_limit) {
         return Err(too_long());
     }
     let encoding_error = || "文件须为 UTF-8 文本或带 BOM 的 UTF-16 文本".to_owned();
-    let text = match bytes.as_slice() {
+    let text = match bytes {
         [0xff, 0xfe, payload @ ..] | [0xfe, 0xff, payload @ ..] => {
             let units = payload.chunks_exact(2);
             if !units.remainder().is_empty() {
@@ -1747,7 +1780,7 @@ fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String
                 .map_err(|_| encoding_error())?
         }
         _ => {
-            let payload = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&bytes);
+            let payload = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
             std::str::from_utf8(payload)
                 .map_err(|_| encoding_error())?
                 .to_owned()
@@ -1760,6 +1793,19 @@ fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String
         return Err(too_long());
     }
     Ok(text)
+}
+
+fn read_selected_text_query(path: &str) -> Result<String, String> {
+    let prefix = input_file_query_prefix(Path::new(path));
+    let character_limit = INPUT_CHARACTER_LIMIT - prefix.chars().count();
+    let bytes = omnitrigger_windows::read_local_preview_file(
+        path,
+        input_file_byte_limit(character_limit) + 1,
+        || Ok(()),
+    )
+    .map_err(|error| error.message)?;
+    let text = decode_input_file(&bytes, character_limit)?;
+    Ok(format!("{prefix}{text}"))
 }
 
 pub(super) struct QuickSearch {
@@ -1947,11 +1993,17 @@ impl QuickSearch {
         if self.bookmark_name_edit.is_some() {
             return;
         }
+        if self
+            .result_refill
+            .as_ref()
+            .is_some_and(|refill| refill.inserted != query)
+        {
+            self.result_refill = None;
+        }
         let refilled = self.has_refilled_input(query);
         let next = if refilled {
             Results::RefilledInput
         } else {
-            self.result_refill = None;
             self.index.results(query)
         };
         if !Self::shows_help(query, &next) {
@@ -2382,6 +2434,58 @@ impl QuickSearch {
         .detach();
     }
 
+    fn load_selected_text_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation_in_progress()
+            || self.bookmark_name_edit.is_some()
+            || self.input.read(cx).is_composing()
+        {
+            return;
+        }
+        let Some(path) = self
+            .results
+            .selected_text_file(self.selected)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let original = self.input.read(cx).text();
+        self.input_file_load = InputFileLoadState::InProgress;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let selected_path = path.clone();
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { read_selected_text_query(&path) })
+                .await;
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.input_file_load = InputFileLoadState::Ready;
+                    let input = this.input.read(cx);
+                    if !input.is_composing()
+                        && this.bookmark_name_edit.is_none()
+                        && input.text() == original
+                        && this.results.selected_text_file(this.selected)
+                            == Some(selected_path.as_str())
+                    {
+                        match loaded {
+                            Ok(inserted) => {
+                                this.result_refill = Some(ResultRefill {
+                                    original,
+                                    inserted: inserted.clone(),
+                                    kind: RefillKind::File,
+                                });
+                                this.fill_query(inserted, window, cx);
+                            }
+                            Err(error) => this.input_file_load = InputFileLoadState::Failed(error),
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
     fn save_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_operation_in_progress() {
             return;
@@ -2475,6 +2579,7 @@ impl QuickSearch {
             self.result_refill = Some(ResultRefill {
                 original,
                 inserted: inserted.clone(),
+                kind: RefillKind::Result,
             });
             self.input
                 .update(cx, |input, cx| input.set_text(inserted, cx));
@@ -2516,9 +2621,9 @@ impl QuickSearch {
     }
 
     fn has_refilled_input(&self, query: &str) -> bool {
-        self.result_refill
-            .as_ref()
-            .is_some_and(|refill| refill.inserted == query)
+        self.result_refill.as_ref().is_some_and(|refill| {
+            matches!(refill.kind, RefillKind::Result) && refill.inserted == query
+        })
     }
 
     fn fill_query(
@@ -2914,6 +3019,11 @@ impl QuickSearch {
             "f3" if self.result_refill.is_some() || self.results.refillable_text().is_some() => {
                 if !event.is_held {
                     self.refill_result(window, cx);
+                }
+            }
+            "f3" if self.results.selected_text_file(self.selected).is_some() => {
+                if !event.is_held {
+                    self.load_selected_text_file(window, cx);
                 }
             }
             "f4" => {
@@ -3948,10 +4058,14 @@ impl Render for QuickSearch {
         let focused = self.input.focus_handle(cx).is_focused(window);
         let query = self.input.read(cx).text();
         let naming_bookmark = self.bookmark_name_edit.is_some();
+        let selected_text_file = self.results.selected_text_file(self.selected).is_some();
         let refill_action = if naming_bookmark {
             None
-        } else if self.result_refill.is_some() {
-            Some("恢复输入 F3")
+        } else if let Some(refill) = &self.result_refill {
+            Some(match refill.kind {
+                RefillKind::Result => "恢复输入 F3",
+                RefillKind::File => "回到文件 F3",
+            })
         } else {
             self.results.refillable_text().map(|_| "填回结果 F3")
         };
@@ -4031,33 +4145,43 @@ impl Render for QuickSearch {
                                 })),
                         )
                     })
-                    .when(!naming_bookmark && accepts_input_file(&query), |header| {
-                        let (label, hint) = match &self.input_file_load {
-                            InputFileLoadState::Ready => {
-                                ("载入", "Ctrl+O 在光标处插入 UTF-8 或 UTF-16 文本")
-                            }
-                            InputFileLoadState::InProgress => {
-                                ("正在载入", "正在选择或读取输入文件")
-                            }
-                            InputFileLoadState::Failed(error) => ("载入失败", error.as_str()),
-                        };
-                        header.child(
-                            button(
-                                label,
-                                label,
-                                Tone::Ghost,
-                                !self.file_operation_in_progress(),
+                    .when(
+                        !naming_bookmark && (selected_text_file || accepts_input_file(&query)),
+                        |header| {
+                            let (label, hint) = match &self.input_file_load {
+                                InputFileLoadState::Ready if selected_text_file => {
+                                    ("载入所选 F3", "F3 在搜索框中载入所选本地文本")
+                                }
+                                InputFileLoadState::Ready => {
+                                    ("载入", "Ctrl+O 在光标处插入 UTF-8 或 UTF-16 文本")
+                                }
+                                InputFileLoadState::InProgress => {
+                                    ("正在载入", "正在选择或读取输入文件")
+                                }
+                                InputFileLoadState::Failed(error) => ("载入失败", error.as_str()),
+                            };
+                            header.child(
+                                button(
+                                    label,
+                                    label,
+                                    Tone::Ghost,
+                                    !self.file_operation_in_progress(),
+                                )
+                                .h(px(24.))
+                                .px(px(10.))
+                                .tooltip(theme::text_tooltip(hint.to_owned().into()))
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        if selected_text_file {
+                                            this.load_selected_text_file(window, cx);
+                                        } else {
+                                            this.load_input_file(window, cx);
+                                        }
+                                    },
+                                )),
                             )
-                            .h(px(24.))
-                            .px(px(10.))
-                            .tooltip(theme::text_tooltip(hint.to_owned().into()))
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.load_input_file(window, cx);
-                                },
-                            )),
-                        )
-                    })
+                        },
+                    )
                     .when_some(refill_action, |header, label| {
                         header.child(
                             button("refill-quick-search-result", label, Tone::Ghost, true)
@@ -6983,6 +7107,24 @@ mod tests {
             std::fs::write(&file, invalid).unwrap();
             assert!(read_input_file(&file, 8).unwrap_err().contains("UTF-16"));
         }
+    }
+
+    #[test]
+    fn selected_file_opens_in_its_tool_with_original_text_and_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("记录.JSONL");
+        let payload = "{\"编号\":\"001\",\"金额\":1.50}\r\n{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}";
+        std::fs::write(&path, payload).unwrap();
+        let result = read_selected_text_query(path.to_str().unwrap()).unwrap();
+        assert_eq!(result, format!("JSON: 合并行 {payload}"));
+        assert_eq!(
+            for_query(&result, &[]).refillable_text(),
+            Some("[{\"编号\":\"001\",\"金额\":1.50},{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}]")
+        );
+        std::fs::write(&path, "甲".repeat(INPUT_CHARACTER_LIMIT)).unwrap();
+        assert!(read_selected_text_query(path.to_str().unwrap())
+            .unwrap_err()
+            .contains("字符"));
     }
 
     #[test]

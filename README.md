@@ -136,6 +136,7 @@
 - 通过 `Tab` 或 `Alt+↑` 切换文件夹后，可在同一个搜索框用 `Alt+←` 返回、用 `Alt+→` 前进。返回时恢复原查询的名称筛选、排序和输出选项。
 - 找到文件后可按 `Alt+Enter` 或点选中行的「定位」，在资源管理器中选中该文件或文件夹。
 - 在文件搜索中按 `F5` 可用当前目录与筛选条件重新读取结果。读取期间保留列表，原选中项仍存在时继续选中它。
+- 在文件搜索中选中本地 TXT、Markdown、LOG、CSV、TSV、JSON、JSONL、NDJSON 或 TOML 文件后，按 `F3` 或点「载入所选」可直接在搜索框里查看内容。编码和字数上限与「载入」一致。编辑前再次按 `F3` 可返回文件查询。
 - 输入 `文件: C:\工作 | *.pdf | 最近修改` 可把匹配项按最后修改时间从新到旧排列。可留空中间的名称条件，修改时间相同的按名称排列。 [Windows 目录项的最后修改时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw)
 - 输入 `文件: C:\工作 | *.pdf | 最近创建` 可按创建时间从新到旧排列。创建时间相同的按名称排列，缺少创建时间的项排在最后。 [Windows 目录项的创建时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
 - 输入 `文件: C:\工作 | *.pdf | 大小` 可把匹配文件按字节数从大到小排列，并在每个文件下方显示字节数。同样大小的文件按名称排列，匹配的文件夹排在文件之后。 [Windows 目录项的文件大小](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
