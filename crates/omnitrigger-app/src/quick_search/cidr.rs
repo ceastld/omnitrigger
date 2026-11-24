@@ -1,8 +1,13 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use num_bigint::BigUint;
 
-use super::calculator::normalize;
+use super::{
+    calculator::normalize, csv_tools::append_bounded_csv_row, operators::json_argument_and_tail,
+};
 
 const MAX_SUBNETS: u32 = 128;
 
@@ -16,6 +21,8 @@ pub(super) enum CidrError {
     ChildPrefix,
     OutsideNetwork,
     TooManySubnets,
+    LookupArguments,
+    ReportTooLarge,
 }
 
 impl CidrError {
@@ -29,6 +36,10 @@ impl CidrError {
             Self::ChildPrefix => "子网的前缀长度须大于或等于原网段",
             Self::OutsideNetwork => "要排除的网段须完全位于原网段内",
             Self::TooManySubnets => "每次最多列出 128 个子网，请减小前缀差",
+            Self::LookupArguments => {
+                "用 JSON 数组填写候选网段，再用逗号、空格或换行分隔要查找的 IP 地址"
+            }
+            Self::ReportTooLarge => "网段归属表超过 CSV 输出上限",
         }
     }
 }
@@ -85,7 +96,62 @@ fn host_mask(host_bits: u32) -> u128 {
     u128::MAX.checked_shr(128 - host_bits).unwrap_or(0)
 }
 
+pub(super) fn cidr_csv_report(query: &str) -> Option<Result<String, CidrError>> {
+    let (operation, data) = query.split_once(char::is_whitespace)?;
+    match operation.to_ascii_lowercase().as_str() {
+        "归属csv" | "longest-prefix-csv" => Some(longest_prefix_report(&normalize(data))),
+        _ => None,
+    }
+}
+
+fn longest_prefix_report(input: &str) -> Result<String, CidrError> {
+    let (networks, addresses) =
+        json_argument_and_tail::<Vec<String>>(input).ok_or(CidrError::LookupArguments)?;
+    if networks.is_empty() {
+        return Err(CidrError::LookupArguments);
+    }
+    let mut candidates = HashSet::new();
+    for network in networks {
+        let (address, prefix) = parse_network(&network)?;
+        let width = address_width(address);
+        let first = bits(address) & !host_mask(width - prefix);
+        candidates.insert((width, prefix, first));
+    }
+    const HEADERS: &str = "地址,匹配网段";
+    let mut output = String::from(HEADERS);
+    for address in addresses
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|address| !address.is_empty())
+    {
+        let address = address.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
+        let width = address_width(address);
+        let address_bits = bits(address);
+        let network = (0..=width)
+            .rev()
+            .find_map(|prefix| {
+                let first = address_bits & !host_mask(width - prefix);
+                candidates
+                    .contains(&(width, prefix, first))
+                    .then(|| format!("{}/{prefix}", as_address(first, width)))
+            })
+            .unwrap_or_default();
+        let address = address.to_string();
+        append_bounded_csv_row(
+            &mut output,
+            [address.as_str(), network.as_str()].into_iter(),
+            CidrError::ReportTooLarge,
+        )?;
+    }
+    if output.len() == HEADERS.len() {
+        return Err(CidrError::LookupArguments);
+    }
+    Ok(output)
+}
+
 pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
+    if let Some(report) = cidr_csv_report(query) {
+        return report;
+    }
     let input = normalize(query).replace(char::is_whitespace, " ");
     if let Some((operation, range)) = input.split_once(' ') {
         match operation.to_ascii_lowercase().as_str() {
@@ -303,6 +369,29 @@ mod tests {
         ] {
             assert_eq!(calculate_cidr(query), Err(expected));
         }
+    }
+
+    #[test]
+    fn finds_longest_matching_prefixes_with_mixed_address_families() {
+        let query = "归属CSV [\"192.0.2.0/24\",\"192.0.2.150/25\",\"2001:db8::/32\",\"::1/128\"] 192.0.2.190,192.0.2.1\r\n192.0.3.1 2001:db8::7 ::1";
+        let expected = concat!(
+            "地址,匹配网段\r\n",
+            "192.0.2.190,192.0.2.128/25\r\n",
+            "192.0.2.1,192.0.2.0/24\r\n",
+            "192.0.3.1,\"\"\r\n",
+            "2001:db8::7,2001:db8::/32\r\n",
+            "::1,::1/128",
+        );
+        assert_eq!(calculate_cidr(query).as_deref(), Ok(expected));
+        assert_eq!(cidr_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            calculate_cidr(r#"longest-prefix-csv ["0.0.0.0/0"] 198.51.100.4"#).as_deref(),
+            Ok("地址,匹配网段\r\n198.51.100.4,0.0.0.0/0")
+        );
+        assert_eq!(
+            calculate_cidr("归属CSV [] 192.0.2.1"),
+            Err(CidrError::LookupArguments)
+        );
     }
 
     #[test]

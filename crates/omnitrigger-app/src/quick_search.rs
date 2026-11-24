@@ -1036,7 +1036,10 @@ impl Results {
                 Scope::Rectangle => {
                     Self::text_value(calculate_rectangle(term).map_err(ValueError::Rectangle))
                 }
-                Scope::Cidr => Self::text_value(calculate_cidr(term).map_err(ValueError::Cidr)),
+                Scope::Cidr => match cidr::cidr_csv_report(term) {
+                    Some(report) => Self::table_value(report.map_err(ValueError::Cidr)),
+                    None => Self::text_value(calculate_cidr(term).map_err(ValueError::Cidr)),
+                },
                 Scope::FileMode => {
                     Self::text_value(calculate_file_mode(term).map_err(ValueError::FileMode))
                 }

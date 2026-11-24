@@ -2385,6 +2385,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "找出每个地址命中的最长前缀",
+        query: r#"网段: 归属CSV ["192.0.2.0/24","192.0.2.128/25","2001:db8::/32"] 192.0.2.190,192.0.2.1,192.0.3.1,2001:db8::7"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求覆盖地址区间的最小网段",
         query: "网段: 覆盖 192.0.2.1 至 192.0.2.6",
     },
@@ -6373,7 +6378,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Cidr
             if !term.is_empty()
-                && ["子网", "排除"]
+                && ["子网", "排除", "归属CSV"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Matrix
