@@ -223,6 +223,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             (StatisticsOperation::MeanAbsoluteDeviation, values.trim())
         }
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
+        "加权分位数" | "weighted-quantile" => return weighted_quantile(values.trim()),
         "移动合计" | "moving-sum" => return moving_sum_or_average(values.trim(), false),
         "移动平均" | "moving-average" => return moving_sum_or_average(values.trim(), true),
         "移动样本方差" | "moving-sample-variance" => {
@@ -602,17 +603,7 @@ fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
     let mut total_weight = BigRational::default();
     let mut total_value = BigRational::default();
     for term in observation_terms(input)? {
-        let (value, weight) = term.split_once('@').ok_or(StatisticsError::InvalidWeight)?;
-        let value = calculate_fraction(value).map_err(StatisticsError::Evaluation)?;
-        let weight = if let Some(percent) = weight.trim().strip_suffix('%') {
-            calculate_fraction(percent).map(|value| value / BigInt::from(100))
-        } else {
-            calculate_fraction(weight)
-        }
-        .map_err(StatisticsError::Evaluation)?;
-        if weight.numer().sign() == Sign::Minus {
-            return Err(StatisticsError::InvalidWeight);
-        }
+        let (value, weight) = read_weighted_observation(term)?;
         total_value = bounded(total_value + value * &weight)?;
         total_weight = bounded(total_weight + weight)?;
     }
@@ -620,6 +611,48 @@ fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
         return Err(StatisticsError::ZeroTotalWeight);
     }
     bounded(total_value / total_weight).map(|value| value.to_string())
+}
+
+fn weighted_quantile(input: &str) -> Result<String, StatisticsError> {
+    let (probability, input) = operation_and_arguments(input);
+    let probability = parse_probability(probability)?;
+    let mut values = Vec::new();
+    let mut total_weight = BigRational::default();
+    for term in observation_terms(input.trim())? {
+        let (value, weight) = read_weighted_observation(term)?;
+        if weight.numer().sign() != Sign::NoSign {
+            total_weight = bounded(total_weight + &weight)?;
+            values.push((value, weight));
+        }
+    }
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+    let ((last_value, _), preceding) = values
+        .split_last()
+        .ok_or(StatisticsError::ZeroTotalWeight)?;
+    let target = bounded(total_weight * probability)?;
+    let mut cumulative = BigRational::default();
+    for (value, weight) in preceding {
+        cumulative = bounded(cumulative + weight)?;
+        if cumulative >= target {
+            return Ok(value.to_string());
+        }
+    }
+    Ok(last_value.to_string())
+}
+
+fn read_weighted_observation(term: &str) -> Result<(BigRational, BigRational), StatisticsError> {
+    let (value, weight) = term.split_once('@').ok_or(StatisticsError::InvalidWeight)?;
+    let value = calculate_fraction(value).map_err(StatisticsError::Evaluation)?;
+    let weight = if let Some(percent) = weight.trim().strip_suffix('%') {
+        calculate_fraction(percent).map(|value| value / BigInt::from(100))
+    } else {
+        calculate_fraction(weight)
+    }
+    .map_err(StatisticsError::Evaluation)?;
+    if weight.numer().sign() == Sign::Minus {
+        return Err(StatisticsError::InvalidWeight);
+    }
+    Ok((value, weight))
 }
 
 fn report_frequencies(
@@ -2117,6 +2150,32 @@ mod tests {
             ("加权平均 4@-1/2,8@1", StatisticsError::InvalidWeight),
             ("加权平均 4,8@1", StatisticsError::InvalidWeight),
             ("加权平均", StatisticsError::Incomplete),
+        ] {
+            assert_eq!(calculate_statistics(query), Err(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn finds_the_first_positive_weight_value_reaching_the_exact_quantile() {
+        for (query, expected) in [
+            ("加权分位数 60% 3@40%,1@10%,2@50%", "2"),
+            ("加权分位数 61% 3@40%,1@10%,2@50%", "3"),
+            ("weighted-quantile 0 -10@0,5/3@1/4,2@3/4", "5/3"),
+            ("weighted-quantile 1 2@1/4,8@0,5/3@3/4", "2"),
+            ("加权分位数 1/2 -2@1/3,-2@1/3,7@1/3", "-2"),
+            ("加权分位数 50% -1@2\n2@3", "2"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, expected) in [
+            ("加权分位数 120% 3@1", StatisticsError::InvalidProbability),
+            ("加权分位数 50% 4@0,8@0%", StatisticsError::ZeroTotalWeight),
+            ("加权分位数 50% 4@-1/2,8@1", StatisticsError::InvalidWeight),
+            ("加权分位数 50% 4,8@1", StatisticsError::InvalidWeight),
         ] {
             assert_eq!(calculate_statistics(query), Err(expected), "{query}");
         }

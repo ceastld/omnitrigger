@@ -643,6 +643,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 加权平均 80@30%,90@70%",
     },
     Example {
+        icon: Icon::Layers,
+        title: "按累计权重求分位数",
+        query: "统计: 加权分位数 60% 3@40%,1@10%,2@50%",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按固定窗口计算精确移动平均",
         query: "统计: 移动平均 2 1/2,1,2,4",
