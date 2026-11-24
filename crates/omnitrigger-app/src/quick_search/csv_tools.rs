@@ -928,7 +928,7 @@ enum Operation {
     ContiguousGroupColumn {
         name: String,
         groups: Vec<ColumnReference>,
-        position_in_run: bool,
+        measurement: ContiguousMeasurement,
     },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
@@ -2167,8 +2167,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 running: matches!(kind, "组内序号列" | "group-row-number-column"),
             }
         }
-        kind @ ("连续分组列" | "run-id-column" | "段内序号列" | "run-row-number-column") =>
-        {
+        kind @ ("连续分组列"
+        | "run-id-column"
+        | "段内序号列"
+        | "run-row-number-column"
+        | "段内计数列"
+        | "run-length-column") => {
             let ((name, groups), data) = json_argument_and_data::<(String, Vec<ColumnReference>)>(
                 input,
                 CsvError::GroupCountColumnArguments,
@@ -2177,7 +2181,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             Operation::ContiguousGroupColumn {
                 name,
                 groups,
-                position_in_run: matches!(kind, "段内序号列" | "run-row-number-column"),
+                measurement: match kind {
+                    "段内序号列" | "run-row-number-column" => ContiguousMeasurement::Position,
+                    "段内计数列" | "run-length-column" => ContiguousMeasurement::Length,
+                    _ => ContiguousMeasurement::Group,
+                },
             }
         }
         "计算列" | "compute-column" => {
@@ -2830,8 +2838,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::ContiguousGroupColumn {
             name,
             groups,
-            position_in_run,
-        } => contiguous_group_column(&rows, &name, &groups, position_in_run),
+            measurement,
+        } => contiguous_group_column(&rows, &name, &groups, measurement),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -5053,29 +5061,38 @@ fn grouped_count_column(
     })
 }
 
+#[derive(Clone, Copy)]
+enum ContiguousMeasurement {
+    Group,
+    Position,
+    Length,
+}
+
 fn contiguous_group_column(
     rows: &[Vec<String>],
     name: &str,
     groups: &[ColumnReference],
-    position_in_run: bool,
+    measurement: ContiguousMeasurement,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
         return Err(CsvError::GroupCountColumnArguments);
     }
     let groups = resolve_distinct_columns(header, groups, CsvError::GroupCountColumnArguments)?;
-    let mut previous = None;
-    let (mut run, mut position) = (0_usize, 0_usize);
-    write_appended_column(header, records, name, |row| {
-        let key = column_key(row, &groups);
-        if previous.as_ref() != Some(&key) {
-            run += 1;
-            position = 0;
-            previous = Some(key);
-        }
-        position += 1;
-        let number = if position_in_run { position } else { run };
-        Ok(number.to_string())
+    let mut values = records
+        .chunk_by(|left, right| groups.iter().all(|&column| left[column] == right[column]))
+        .enumerate()
+        .flat_map(|(index, group)| {
+            let length = group.len();
+            (1..=length).map(move |position| match measurement {
+                ContiguousMeasurement::Group => index + 1,
+                ContiguousMeasurement::Position => position,
+                ContiguousMeasurement::Length => length,
+            })
+        });
+    write_appended_column(header, records, name, |_| {
+        let value = values.next().expect("每条记录均对应一个段内数值");
+        Ok(value.to_string())
     })
 }
 
@@ -7261,6 +7278,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "duration-number-column"
             | "组内时间戳差列"
             | "group-timestamp-difference-column"
+            | "段内计数列"
+            | "run-length-column"
             | "网段归属列"
             | "cidr-column"
             | "网段名称列"
@@ -12825,6 +12844,17 @@ null"#
         assert_eq!(
             transform_csv("run-row-number-column [\"位置\",[]] 地区\n北\n南").as_deref(),
             Ok("地区,位置\r\n北,1\r\n南,2"),
+        );
+        let query = format!("段内计数列 [\"段长\",[\"部门\",2]]\n{csv}");
+        let expected = "部门,月份,编号,段长\r\n北,11,001,2\r\n北,11,002,2\r\n南,11,003,1\r\n北,11,004,1\r\n北,12,005,1\r\n\"\",12,006,2\r\n\"\",12,007,2";
+        assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(&query)
+            .expect("段内计数列可预览")
+            .unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv("RUN-LENGTH-COLUMN [\"段长\",[]] 部门\n北\n南").as_deref(),
+            Ok("部门,段长\r\n北,2\r\n南,2"),
         );
         assert_eq!(
             transform_csv("run-id-column [\"地区\",[]] 地区"),

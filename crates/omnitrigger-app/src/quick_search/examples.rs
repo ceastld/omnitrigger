@@ -5046,6 +5046,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 段内序号列 [\"位置\",[\"部门\"]]\n部门,金额\n北,1\n北,2\n南,3\n北,4",
     },
     Example {
+        icon: Icon::Layers,
+        title: "给每行追加所属连续段的总记录数",
+        query: "CSV: 段内计数列 [\"段长\",[\"部门\"]]\n部门,金额\n北,1\n北,2\n南,3\n北,4",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "从同组前一行取值并追加到 CSV",
         query: "CSV: 前值列 [\"上期\",2,1,[\"部门\"]] 部门,编号\n研发,001\n销售,101\n研发,002\n销售,\n研发,003",
