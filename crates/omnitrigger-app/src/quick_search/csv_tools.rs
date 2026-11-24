@@ -896,15 +896,6 @@ enum Operation {
     DuplicatesByColumns(Vec<ColumnReference>),
     DuplicatesByNumbers(Vec<ColumnReference>),
     DeduplicateByNumbers(Vec<ColumnReference>),
-    FilterColumn {
-        column: ColumnReference,
-        condition: ColumnCondition,
-        keep_matches: bool,
-    },
-    FilterMultiple {
-        filters: Vec<ColumnFilter>,
-        any: bool,
-    },
     CountByColumns(Vec<ColumnReference>),
     FrequencyByColumns(Vec<ColumnReference>),
     AggregateByColumns {
@@ -2194,85 +2185,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 Operation::DuplicatesByColumns(columns)
             }
         }
-        "筛选" | "filter" | "排除" | "exclude" | "正则筛选" | "regex-filter" | "正则排除"
-        | "regex-exclude" => {
-            let (column, value, data) = column_value_arguments(input)?;
-            input = data;
-            let condition = match operation.as_str() {
-                "筛选" | "filter" | "排除" | "exclude" => ColumnCondition::Exact(value),
-                _ => ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
-            };
-            Operation::FilterColumn {
-                column,
-                condition,
-                keep_matches: matches!(
-                    operation.as_str(),
-                    "筛选" | "filter" | "正则筛选" | "regex-filter"
-                ),
-            }
-        }
-        "数值筛选" | "filter-numeric" => {
-            let (column, rest) =
-                column_reference_argument(input.trim_start(), CsvError::InvalidNumberFilter)?;
-            let (operator, rest) =
-                split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
-            let (threshold, data) =
-                split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
-            let comparison =
-                NumberComparison::parse(operator).ok_or(CsvError::InvalidNumberFilter)?;
-            let threshold =
-                parse_fraction_literal(threshold).map_err(|_| CsvError::InvalidNumber)?;
-            input = data;
-            Operation::FilterColumn {
-                column,
-                condition: ColumnCondition::Number(comparison, threshold),
-                keep_matches: true,
-            }
-        }
-        "多条件筛选" | "filter-all" | "任一条件筛选" | "filter-any" => {
-            let (filters, data) = json_argument_and_data::<Vec<(ColumnReference, String, String)>>(
-                input,
-                CsvError::FilterConditions,
-            )?;
-            if !(1..=MAX_FILTER_CONDITIONS).contains(&filters.len()) {
-                return Err(CsvError::FilterConditions);
-            }
-            let filters = filters
-                .into_iter()
-                .map(|(column, operator, value)| {
-                    let operator = operator.to_ascii_lowercase();
-                    let (condition, expected) = match operator.as_str() {
-                        "文本=" | "text=" => (ColumnCondition::Exact(value), true),
-                        "文本!=" | "text!=" => (ColumnCondition::Exact(value), false),
-                        "正则" | "regex" => (
-                            ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
-                            true,
-                        ),
-                        "正则排除" | "regex-not" => (
-                            ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
-                            false,
-                        ),
-                        _ => {
-                            let comparison = NumberComparison::parse(&operator)
-                                .ok_or(CsvError::FilterConditions)?;
-                            let threshold = parse_fraction_literal(&value)
-                                .map_err(|_| CsvError::InvalidNumber)?;
-                            (ColumnCondition::Number(comparison, threshold), true)
-                        }
-                    };
-                    Ok(ColumnFilter {
-                        column,
-                        condition,
-                        expected,
-                    })
-                })
-                .collect::<Result<Vec<_>, CsvError>>()?;
-            input = data;
-            Operation::FilterMultiple {
-                filters,
-                any: matches!(operation.as_str(), "任一条件筛选" | "filter-any"),
-            }
-        }
         "分组计数" | "group-count" => {
             let (columns, data) = column_reference_arguments(input, CsvError::GroupingColumns)?;
             input = data;
@@ -2863,12 +2775,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::DeduplicateByNumbers(columns) => {
             deduplicate_by_columns(&rows, &columns, numeric_column_key)
         }
-        Operation::FilterColumn {
-            column,
-            condition,
-            keep_matches,
-        } => filter_column(&rows, column, &condition, keep_matches),
-        Operation::FilterMultiple { filters, any } => filter_multiple_columns(&rows, &filters, any),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
         Operation::FrequencyByColumns(columns) => group_frequencies(&rows, &columns)?.csv(),
         Operation::AggregateByColumns {
@@ -5102,33 +5008,120 @@ fn find_duplicate_columns<'a, Key: Eq + Hash>(
     ))
 }
 
-fn filter_column(
-    rows: &[Vec<String>],
-    column: ColumnReference,
-    condition: &ColumnCondition,
-    keep_matches: bool,
-) -> Result<String, CsvError> {
-    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let column = column.resolve(header)?;
-    validate_column_width(&[column], header.len())?;
-    let mut selected = vec![header];
-    for row in records {
-        if condition.matches(&row[column])? == keep_matches {
-            selected.push(row);
+struct CsvFilterQuery<'a> {
+    data: &'a str,
+    filters: Vec<ColumnFilter>,
+    any: bool,
+}
+
+fn csv_filter_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewData, CsvError>> {
+    let operation = operation.to_ascii_lowercase();
+    let parsed = match operation.as_str() {
+        "筛选" | "filter" | "排除" | "exclude" | "正则筛选" | "regex-filter" | "正则排除"
+        | "regex-exclude" => text_csv_filter(&operation, input),
+        "数值筛选" | "filter-numeric" => numeric_csv_filter(input),
+        "多条件筛选" | "filter-all" | "任一条件筛选" | "filter-any" => {
+            combined_csv_filter(
+                input,
+                matches!(operation.as_str(), "任一条件筛选" | "filter-any"),
+            )
         }
+        _ => return None,
+    };
+    Some(parsed.and_then(|query| {
+        let rows = read_table_for_preview(query.data, ',')?;
+        let rows = filter_multiple_columns(rows, &query.filters, query.any)?;
+        Ok((write_rows(&rows, ','), rows))
+    }))
+}
+
+fn text_csv_filter<'a>(operation: &str, input: &'a str) -> Result<CsvFilterQuery<'a>, CsvError> {
+    let (column, value, data) = column_value_arguments(input)?;
+    let condition = match operation {
+        "筛选" | "filter" | "排除" | "exclude" => ColumnCondition::Exact(value),
+        _ => ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
+    };
+    let expected = matches!(operation, "筛选" | "filter" | "正则筛选" | "regex-filter");
+    Ok(CsvFilterQuery {
+        data,
+        filters: vec![ColumnFilter {
+            column,
+            condition,
+            expected,
+        }],
+        any: false,
+    })
+}
+
+fn numeric_csv_filter(input: &str) -> Result<CsvFilterQuery<'_>, CsvError> {
+    let invalid = CsvError::InvalidNumberFilter;
+    let (column, rest) = column_reference_argument(input.trim_start(), invalid)?;
+    let (operator, rest) = split_argument(rest.trim_start()).ok_or(invalid)?;
+    let (threshold, data) = split_argument(rest.trim_start()).ok_or(invalid)?;
+    let comparison = NumberComparison::parse(operator).ok_or(invalid)?;
+    let threshold = parse_fraction_literal(threshold).map_err(|_| CsvError::InvalidNumber)?;
+    Ok(CsvFilterQuery {
+        data,
+        filters: vec![ColumnFilter {
+            column,
+            condition: ColumnCondition::Number(comparison, threshold),
+            expected: true,
+        }],
+        any: false,
+    })
+}
+
+fn combined_csv_filter(input: &str, any: bool) -> Result<CsvFilterQuery<'_>, CsvError> {
+    let (filters, data) = json_argument_and_data::<Vec<(ColumnReference, String, String)>>(
+        input,
+        CsvError::FilterConditions,
+    )?;
+    if !(1..=MAX_FILTER_CONDITIONS).contains(&filters.len()) {
+        return Err(CsvError::FilterConditions);
     }
-    Ok(write_rows(selected, ','))
+    let filters = filters
+        .into_iter()
+        .map(|(column, operator, value)| {
+            let operator = operator.to_ascii_lowercase();
+            let (condition, expected) = match operator.as_str() {
+                "文本=" | "text=" => (ColumnCondition::Exact(value), true),
+                "文本!=" | "text!=" => (ColumnCondition::Exact(value), false),
+                "正则" | "regex" => (
+                    ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
+                    true,
+                ),
+                "正则排除" | "regex-not" => (
+                    ColumnCondition::Regex(compile_regex(&value).map_err(CsvError::Regex)?),
+                    false,
+                ),
+                _ => {
+                    let comparison =
+                        NumberComparison::parse(&operator).ok_or(CsvError::FilterConditions)?;
+                    let threshold =
+                        parse_fraction_literal(&value).map_err(|_| CsvError::InvalidNumber)?;
+                    (ColumnCondition::Number(comparison, threshold), true)
+                }
+            };
+            Ok(ColumnFilter {
+                column,
+                condition,
+                expected,
+            })
+        })
+        .collect::<Result<Vec<_>, CsvError>>()?;
+    Ok(CsvFilterQuery { data, filters, any })
 }
 
 fn filter_multiple_columns(
-    rows: &[Vec<String>],
+    rows: Vec<Vec<String>>,
     filters: &[ColumnFilter],
     any: bool,
-) -> Result<String, CsvError> {
-    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+) -> Result<Vec<Vec<String>>, CsvError> {
+    let mut records = rows.into_iter();
+    let header = records.next().ok_or(CsvError::MissingInput)?;
     let columns = filters
         .iter()
-        .map(|filter| filter.column.resolve(header))
+        .map(|filter| filter.column.resolve(&header))
         .collect::<Result<Vec<_>, _>>()?;
     validate_column_width(&columns, header.len())?;
     let mut selected = vec![header];
@@ -5147,7 +5140,7 @@ fn filter_multiple_columns(
             selected.push(row);
         }
     }
-    Ok(write_rows(selected, ','))
+    Ok(selected)
 }
 
 fn resolve_distinct_columns(
@@ -6961,7 +6954,7 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if let Some(delimiter) = table_preview_delimiter(operation) {
         return Some(read_preview_output(input, delimiter));
     }
-    csv_layout_preview(operation, input)
+    csv_layout_preview(operation, input).or_else(|| csv_filter_preview(operation, input))
 }
 
 fn csv_layout_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewData, CsvError>> {
@@ -10756,6 +10749,40 @@ mod tests {
     }
 
     #[test]
+    fn previews_single_csv_filters_and_preserves_complete_matching_rows() {
+        let data = "编号,金额,备注\n001,1.50,\"甲,乙\"\n002,3/2,茶\n003,2,米";
+        for (operation, expected) in [
+            (
+                r#"筛选 "备注" "甲,乙""#,
+                "编号,金额,备注\r\n001,1.50,\"甲,乙\"",
+            ),
+            (
+                r#"REGEX-EXCLUDE 3 "^(茶|米)$""#,
+                "编号,金额,备注\r\n001,1.50,\"甲,乙\"",
+            ),
+            (
+                "数值筛选 2 >= 3/2",
+                "编号,金额,备注\r\n001,1.50,\"甲,乙\"\r\n002,3/2,茶\r\n003,2,米",
+            ),
+            (
+                r#"排除 "编号" "002""#,
+                "编号,金额,备注\r\n001,1.50,\"甲,乙\"\r\n003,2,米",
+            ),
+            (r#"FILTER 1 "004""#, "编号,金额,备注"),
+        ] {
+            let query = format!("{operation} {data}");
+            let (text, preview) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(text, expected, "{operation}");
+            assert_eq!(
+                transform_csv(&query).as_deref(),
+                Ok(expected),
+                "{operation}"
+            );
+            assert_eq!(preview.row_pages(), usize::from(expected.contains("\r\n")));
+        }
+    }
+
+    #[test]
     fn combines_text_numeric_and_regex_filters_preserving_original_record_order() {
         let input = "编号,状态,金额,备注\r\n001,完成,1.50,\"咖啡,热\"\r\n002,完成,3/2,茶\r\n003,待确认,1e1,\"咖啡\n中杯\"\r\n004,完成,2e1,水";
         for (arguments, expected) in [
@@ -10776,6 +10803,10 @@ mod tests {
                 transform_csv(&format!("{arguments}\n{input}")).as_deref(),
                 Ok(expected),
             );
+            let query = format!("{arguments}\n{input}");
+            let (text, preview) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(text, expected);
+            assert_eq!(preview.row_pages(), usize::from(expected.contains("\r\n")));
         }
         for (query, error) in [
             (r#"多条件筛选 [] A,B"#, CsvError::FilterConditions),
