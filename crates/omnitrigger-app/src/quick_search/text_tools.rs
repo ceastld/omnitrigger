@@ -192,7 +192,23 @@ pub(super) fn is_raw_text_operation(operation: &str) -> bool {
     operation == "原文" || operation.eq_ignore_ascii_case("raw")
 }
 
+pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> {
+    let (operation, text) = input.split_once(char::is_whitespace)?;
+    match operation.to_ascii_lowercase().as_str() {
+        "markdown标题csv" | "markdown-headings-csv" => {
+            let text = input[operation.len()..]
+                .strip_prefix("\r\n")
+                .unwrap_or(text);
+            Some(markdown_headings_csv(text))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
+    if let Some(report) = text_csv_report(input) {
+        return report;
+    }
     let (operation, text) = input
         .split_once(char::is_whitespace)
         .ok_or(TextError::IncompleteTransform)?;
@@ -857,6 +873,59 @@ fn decode_json_string(text: &str) -> Result<String, TextError> {
         return Err(TextError::NullCharacter);
     }
     Ok(decoded)
+}
+
+fn markdown_headings_csv(text: &str) -> Result<String, TextError> {
+    let mut result = String::from("行号,级别,标题");
+    let mut fence = None;
+    for (index, line) in newline_pattern().split(text).enumerate() {
+        let content = line.trim_start_matches(' ');
+        if line.len() - content.len() > 3 {
+            continue;
+        }
+        let Some(&marker) = content.as_bytes().first() else {
+            continue;
+        };
+        if !matches!(marker, b'#' | b'~' | b'`') {
+            continue;
+        }
+        let count = content.bytes().take_while(|&byte| byte == marker).count();
+        let rest = &content[count..];
+        if let Some((opening_marker, opening_count)) = fence {
+            if marker == opening_marker
+                && count >= opening_count
+                && rest.trim_matches([' ', '\t']).is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if marker != b'#' {
+            if count >= 3 && (marker == b'~' || !rest.contains('`')) {
+                fence = Some((marker, count));
+            }
+            continue;
+        }
+        if count > 6 || (!rest.is_empty() && !rest.starts_with([' ', '\t'])) {
+            continue;
+        }
+        let content = rest.trim_end_matches([' ', '\t']);
+        let before_closing = content.trim_end_matches('#');
+        let title = if before_closing.ends_with([' ', '\t']) {
+            before_closing
+        } else {
+            content
+        };
+        let line_number = (index + 1).to_string();
+        let level = count.to_string();
+        let title = title.trim_matches([' ', '\t']);
+        append_bounded_csv_row(
+            &mut result,
+            [line_number.as_str(), level.as_str(), title].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(result)
 }
 
 fn escape_markdown(text: &str) -> String {
@@ -2746,6 +2815,35 @@ mod tests {
         assert_eq!(
             transform_text(r#"JSON还原 "\u0000""#),
             Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn lists_markdown_heading_levels_and_source_lines_outside_fences() {
+        let query = concat!(
+            "Markdown标题CSV\r\n",
+            "  ## 茶,咖啡 ###\r\n",
+            "    # 缩进代码\r",
+            "````rust\n",
+            "# 围栏内容\r\n",
+            "```\r\n",
+            "## 仍在围栏\n",
+            "`````  \n",
+            " # 价格#\n",
+            "~~~\n",
+            "# 波浪围栏\n",
+            "~~~\n",
+            "####### 过多\n",
+            "###无分隔\n",
+            "###### \t",
+        );
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok("行号,级别,标题\r\n1,2,\"茶,咖啡\"\r\n8,1,价格#\r\n14,6,\"\"")
+        );
+        assert_eq!(
+            transform_text("markdown-headings-csv 正文").as_deref(),
+            Ok("行号,级别,标题")
         );
     }
 

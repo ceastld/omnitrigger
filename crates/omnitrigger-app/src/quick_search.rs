@@ -1095,9 +1095,10 @@ impl Results {
                         .map_err(ValueError::Color),
                 ),
                 Scope::TextCount => Self::text_value(count_text(term).map_err(ValueError::Text)),
-                Scope::TextTools => {
-                    Self::text_value(transform_text(term).map_err(ValueError::Text))
-                }
+                Scope::TextTools => match text_tools::text_csv_report(term) {
+                    Some(report) => Self::table_value(report.map_err(ValueError::Text)),
+                    None => Self::text_value(transform_text(term).map_err(ValueError::Text)),
+                },
                 Scope::Json => match json_tools::json_csv_report(term) {
                     Some(report) => Self::table_value(report.map_err(ValueError::Json)),
                     None => Self::text_value(transform_json(term).map_err(ValueError::Json)),

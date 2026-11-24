@@ -3817,6 +3817,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "提取 Markdown 井号标题和原文行号",
+        query: "文本: Markdown标题CSV # 采购清单\n\n## 茶,咖啡\n~~~text\n# 这行是代码\n~~~\n### 数量 ###",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "格式化 JSON",
         query: r#"JSON: 格式化 {"名称":"北京","值":1}"#,
     },
