@@ -4868,6 +4868,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按横坐标跨度求曲线高度的分位数",
+        query: "CSV: 曲线分位数 [[\"时间\",\"高度\"],\"25%\"] 时间,高度\n7,2\n3,2\n6,\n1,0\n0,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将间距不等的完整样点重采样到等距坐标",
         query: "CSV: 等距插值 [[\"时间\",\"高度\"],5] 时间,高度\n3,3\n0,0\n2,\n1,2",
     },
@@ -5844,6 +5849,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "曲线长度",
             "曲线均方根",
             "曲线标准差",
+            "曲线分位数",
             "等距插值",
             "水平交点",
             "超阈跨度",

@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
     hash::Hash,
 };
@@ -248,6 +248,8 @@ pub(super) enum CsvError {
     CoordinateClipPointCount,
     CoordinateVariationPointCount,
     CoordinateLengthPointCount,
+    CoordinateQuantileArguments,
+    CoordinateQuantilePointCount,
     CoordinateDeviationPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
@@ -555,6 +557,10 @@ impl CsvError {
             Self::CoordinateClipPointCount => "曲线截取需要 2 至 64 个完整样点",
             Self::CoordinateVariationPointCount => "曲线变差需要 2 至 64 个完整样点",
             Self::CoordinateLengthPointCount => "曲线长度需要 2 至 64 个完整样点",
+            Self::CoordinateQuantileArguments => {
+                "填写两个坐标列和分位概率，例如 [[\"时间\",\"高度\"],\"25%\"]"
+            }
+            Self::CoordinateQuantilePointCount => "曲线分位数需要 2 至 64 个完整样点",
             Self::CoordinateDeviationPointCount => "曲线统计需要 2 至 64 个完整样点",
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
@@ -1172,6 +1178,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
         "曲线变差" | "curve-total-variation" => return coordinate_total_variation(input),
         "曲线长度" | "curve-length" => return coordinate_curve_length(input),
+        "曲线分位数" | "curve-quantile" => return coordinate_curve_quantile(input),
         "曲线均方根" | "curve-rms" => {
             return coordinate_deviation_statistic(input, CoordinateDeviation::RootMeanSquare)
         }
@@ -6098,6 +6105,80 @@ fn coordinate_deviation_statistic(
     Ok(format_square_root(&squared))
 }
 
+#[derive(Default)]
+struct CurveHeightEvent {
+    level_width: BigRational,
+    density_change: BigRational,
+}
+
+fn coordinate_curve_quantile(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CoordinateQuantileArguments;
+    let ((columns, probability), data) =
+        json_argument_and_data::<([ColumnReference; 2], Box<RawValue>)>(input, invalid)?;
+    let raw = probability.get();
+    let probability = if raw.starts_with('"') {
+        Cow::Owned(serde_json::from_str::<String>(raw).map_err(|_| invalid)?)
+    } else {
+        Cow::Borrowed(raw)
+    };
+    let probability = parse_probability(probability.trim()).map_err(CsvError::Statistics)?;
+    let mut table = read_coordinate_table(
+        data,
+        &columns,
+        invalid,
+        CsvError::CoordinateQuantilePointCount,
+    )?;
+    sort_distinct_coordinates(&mut table.samples)?;
+    let mut heights = BTreeMap::<&BigRational, CurveHeightEvent>::new();
+    for pair in table.samples.windows(2) {
+        let (left_x, left_y) = &pair[0].point;
+        let (right_x, right_y) = &pair[1].point;
+        let width = right_x - left_x;
+        let low = left_y.min(right_y);
+        let high = left_y.max(right_y);
+        // 水平段的横向跨度集中在一个高度，斜线段的跨度均匀分布在端点之间。
+        if low == high {
+            let event = heights.entry(low).or_default();
+            event.level_width += width;
+            ensure_exact_size(&event.level_width).map_err(|_| CsvError::ComputedNumberRange)?;
+        } else {
+            let density = width / (high - low);
+            let start = heights.entry(low).or_default();
+            start.density_change += &density;
+            ensure_exact_size(&start.density_change).map_err(|_| CsvError::ComputedNumberRange)?;
+            let end = heights.entry(high).or_default();
+            end.density_change -= density;
+            ensure_exact_size(&end.density_change).map_err(|_| CsvError::ComputedNumberRange)?;
+        }
+    }
+
+    let first_x = &table.samples[0].point.0;
+    let last_x = &table.samples.last().expect("至少有两个完整坐标").point.0;
+    let target = (last_x - first_x) * probability;
+    ensure_exact_size(&target).map_err(|_| CsvError::ComputedNumberRange)?;
+    let zero = BigRational::default();
+    let mut accumulated = zero.clone();
+    let mut density = zero.clone();
+    let mut previous = *heights.first_key_value().expect("曲线至少有一个高度").0;
+    for (height, event) in heights {
+        let before_level = &accumulated + &density * (height - previous);
+        if target <= before_level && density > zero {
+            let value = previous + (target - accumulated) / density;
+            ensure_exact_size(&value).map_err(|_| CsvError::ComputedNumberRange)?;
+            return Ok(value.to_string());
+        }
+        accumulated = before_level + event.level_width;
+        if target <= accumulated {
+            return Ok(height.to_string());
+        }
+        density += event.density_change;
+        ensure_exact_size(&accumulated).map_err(|_| CsvError::ComputedNumberRange)?;
+        ensure_exact_size(&density).map_err(|_| CsvError::ComputedNumberRange)?;
+        previous = height;
+    }
+    unreachable!("曲线分位数应在样点高度范围内")
+}
+
 fn coordinate_curve_length(input: &str) -> Result<String, CsvError> {
     let mut table = read_coordinate_interval(input, CsvError::CoordinateLengthPointCount)?;
     sort_distinct_coordinates(&mut table.samples)?;
@@ -8043,6 +8124,36 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
             Err(CsvError::CoordinateDifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn inverts_the_exact_height_distribution_including_level_segments() {
+        let data = "x,y\n7,2\n3,2\n6,\n1,0\n0,0";
+        for (probability, expected) in [
+            ("0", "0"),
+            ("\"1/7\"", "0"),
+            ("\"25%\"", "3/4"),
+            ("\"2/7\"", "1"),
+            ("0.5", "2"),
+            ("1", "2"),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("曲线分位数 [[1,2],{probability}] {data}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            transform_csv("curve-quantile [[1,2],\"50%\"] x,y\n0,0\n2,4\n4,0").as_deref(),
+            Ok("2")
+        );
+        assert_eq!(
+            transform_csv("曲线分位数 [[1,2],\"25%\"] x,y\n0,2\n4,-2").as_deref(),
+            Ok("-1")
+        );
+        assert_eq!(
+            transform_csv("曲线分位数 [[1,2],1.1] x,y\n0,0\n2,4"),
+            Err(CsvError::Statistics(StatisticsError::InvalidProbability))
         );
     }
 
