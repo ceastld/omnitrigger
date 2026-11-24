@@ -242,6 +242,7 @@ pub(super) enum CsvError {
     CoordinateDuplicateX,
     CoordinateInterpolationRange,
     CoordinateResampleArguments,
+    CoordinateExtremaPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
     CoordinateDifferenceArguments,
@@ -540,6 +541,7 @@ impl CsvError {
             Self::CoordinateResampleArguments => {
                 "填写两个坐标列和 2 至 64 个采样点，例如 [[\"时间\",\"高度\"],5]"
             }
+            Self::CoordinateExtremaPointCount => "曲线极值需要 2 至 64 个完整样点",
             Self::CoordinateCrossingArguments => {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
@@ -1150,6 +1152,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         "线性插值" | "linear-interpolate" => return interpolate_coordinate_table(input),
         "等距插值" | "resample-linear" => return resample_coordinate_table(input),
+        "曲线极值" | "curve-extrema" => return coordinate_extrema(input),
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
         "曲线差值" | "curve-difference" | "曲线对比图" | "curve-comparison-plot" => {
             let (curves, name) = read_coordinate_curve_comparison(input)?;
@@ -5817,7 +5820,7 @@ enum TrapezoidMeasure {
 }
 
 fn trapezoid_statistic(input: &str, measure: TrapezoidMeasure) -> Result<String, CsvError> {
-    let mut table = read_trapezoid_samples(input)?;
+    let mut table = read_coordinate_interval(input, CsvError::TrapezoidPointCount)?;
     let mut value = integrate_trapezoid_samples(
         &mut table.samples,
         measure == TrapezoidMeasure::Area,
@@ -5832,10 +5835,12 @@ fn trapezoid_statistic(input: &str, measure: TrapezoidMeasure) -> Result<String,
     Ok(value.to_string())
 }
 
-fn read_trapezoid_samples(input: &str) -> Result<CsvCoordinates, CsvError> {
+fn read_coordinate_interval(
+    input: &str,
+    point_count_error: CsvError,
+) -> Result<CsvCoordinates, CsvError> {
     let (argument, data) =
         json_argument_and_data::<Box<RawValue>>(input, CsvError::ScatterColumns)?;
-    let point_count_error = CsvError::TrapezoidPointCount;
     if let Ok(columns) = serde_json::from_str::<[ColumnReference; 2]>(argument.get()) {
         return read_coordinate_table(data, &columns, CsvError::ScatterColumns, point_count_error);
     }
@@ -5874,6 +5879,35 @@ fn read_trapezoid_samples(input: &str) -> Result<CsvCoordinates, CsvError> {
         point: (right, right_y),
     });
     Ok(table)
+}
+
+fn coordinate_extrema(input: &str) -> Result<String, CsvError> {
+    let mut table = read_coordinate_interval(input, CsvError::CoordinateExtremaPointCount)?;
+    sort_distinct_coordinates(&mut table.samples)?;
+    let values = table.samples.iter().map(|sample| &sample.point.1);
+    let min = values.clone().min().expect("至少有两个完整坐标");
+    let max = values.max().expect("至少有两个完整坐标");
+    let mut csv = String::from("类型,起始横坐标,结束横坐标,纵坐标");
+    for run in table
+        .samples
+        .chunk_by(|left, right| left.point.1 == right.point.1)
+    {
+        let (start, y) = &run[0].point;
+        let kind = match (y == min, y == max) {
+            (true, true) => "最小值与最大值",
+            (true, false) => "最小值",
+            (false, true) => "最大值",
+            (false, false) => continue,
+        };
+        let end = &run[run.len() - 1].point.0;
+        let row = [start.to_string(), end.to_string(), y.to_string()];
+        append_bounded_csv_row(
+            &mut csv,
+            std::iter::once(kind).chain(row.iter().map(String::as_str)),
+            CsvError::StatisticsOutputTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn coordinate_line_table(operation: &str, input: &str) -> Option<Result<CsvCoordinates, CsvError>> {
@@ -7737,6 +7771,23 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("曲线差值 [[1,2,3],\"时间\"] {data}")),
             Err(CsvError::CoordinateDifferenceArguments)
+        );
+    }
+
+    #[test]
+    fn reports_exact_curve_extrema_and_plateaus_over_the_selected_coordinate_interval() {
+        let data = "时间,高度\n4,2\n2,2\n0,0\n3,1\n1,2";
+        assert_eq!(
+            transform_csv(&format!("曲线极值 [[1,2],[\"1/2\",3]] {data}")).as_deref(),
+            Ok("类型,起始横坐标,结束横坐标,纵坐标\r\n最小值,1/2,1/2,1\r\n最大值,1,2,2\r\n最小值,3,3,1")
+        );
+        assert_eq!(
+            transform_csv("curve-extrema [1,2] x,y\n0,3\n1,3\n2,3").as_deref(),
+            Ok("类型,起始横坐标,结束横坐标,纵坐标\r\n最小值与最大值,0,2,3")
+        );
+        assert_eq!(
+            transform_csv(&format!("曲线极值 [[1,2],[0,5]] {data}")),
+            Err(CsvError::TrapezoidIntervalRange)
         );
     }
 

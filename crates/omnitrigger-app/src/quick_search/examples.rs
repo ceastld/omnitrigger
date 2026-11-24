@@ -4823,6 +4823,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查找指定区间内的曲线极值和连续平坦段",
+        query: "CSV: 曲线极值 [[\"时间\",\"高度\"],[\"1/2\",3]] 时间,高度\n4,2\n2,2\n0,0\n3,1\n1,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将间距不等的完整样点重采样到等距坐标",
         query: "CSV: 等距插值 [[\"时间\",\"高度\"],5] 时间,高度\n3,3\n0,0\n2,\n1,2",
     },
@@ -5776,6 +5781,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "时间窗平均列",
             "时间窗积分列",
             "线性插值",
+            "曲线极值",
             "等距插值",
             "水平交点",
             "曲线差值",
