@@ -115,6 +115,7 @@ pub(super) enum CsvError {
     JoinArguments,
     JoinColumns,
     JoinTooLarge,
+    HeaderComparisonArguments,
     ColumnComparisonArguments,
     DuplicateComparisonKey,
     ColumnComparisonTooLarge,
@@ -322,6 +323,7 @@ impl CsvError {
             }
             Self::JoinColumns => "两侧连接列须具有相同列数，每一侧至少一列，列不可重复",
             Self::JoinTooLarge => "表格合并结果超过 1 MiB，请缩小表格范围",
+            Self::HeaderComparisonArguments => "用 JSON 字符串数组填写原表和新表，两张表都需要表头",
             Self::ColumnComparisonArguments => {
                 "填写键列与一个或多个对比列，例如 [[\"编号\"],[\"状态\",\"金额\"]]，再填写原表和新表"
             }
@@ -1217,6 +1219,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "全连接" | "full-join" => return join_csv(input, JoinKind::Full),
         "左表匹配" | "semi-join" => return join_csv(input, JoinKind::MatchedLeft),
         "左表独有" | "anti-join" => return join_csv(input, JoinKind::UnmatchedLeft),
+        "表头对比" | "compare-headers" => return compare_csv_headers(input),
         "对比列" | "compare-column" => return compare_csv_column(input, false),
         "数值对比列" | "compare-numeric-column" => return compare_csv_column(input, true),
         "纵向合并" | "stack" => return stack_csv(input),
@@ -3037,6 +3040,65 @@ fn read_csv_pair(data: &str, invalid: CsvError) -> Result<[Vec<Vec<String>>; 2],
         read_rows(left.strip_prefix('\u{feff}').unwrap_or(&left), ',')?,
         read_rows(right.strip_prefix('\u{feff}').unwrap_or(&right), ',')?,
     ])
+}
+
+fn compare_csv_headers(input: &str) -> Result<String, CsvError> {
+    let [old, new] = read_csv_pair(input, CsvError::HeaderComparisonArguments)?;
+    let old = old.first().ok_or(CsvError::MissingInput)?;
+    let new = new.first().ok_or(CsvError::MissingInput)?;
+    let old_positions = named_header_positions(old)?;
+    let new_positions = named_header_positions(new)?;
+    let mut output = String::from("列名,原序号,新序号,变更");
+    for (index, column) in old.iter().enumerate() {
+        let old_index = index + 1;
+        let new_index = new_positions.get(column.as_str()).copied();
+        if new_index == Some(old_index) {
+            continue;
+        }
+        let change = if new_index.is_some() {
+            "位置变化"
+        } else {
+            "删除"
+        };
+        let new_index = new_index.map_or_else(String::new, |index| index.to_string());
+        append_bounded_csv_row(
+            &mut output,
+            [
+                column.as_str(),
+                old_index.to_string().as_str(),
+                new_index.as_str(),
+                change,
+            ]
+            .into_iter(),
+            CsvError::ColumnComparisonTooLarge,
+        )?;
+    }
+    for (index, column) in new.iter().enumerate() {
+        if !old_positions.contains_key(column.as_str()) {
+            append_bounded_csv_row(
+                &mut output,
+                [
+                    column.as_str(),
+                    "",
+                    (index + 1).to_string().as_str(),
+                    "新增",
+                ]
+                .into_iter(),
+                CsvError::ColumnComparisonTooLarge,
+            )?;
+        }
+    }
+    Ok(output)
+}
+
+fn named_header_positions(header: &[String]) -> Result<HashMap<&str, usize>, CsvError> {
+    let mut positions = HashMap::with_capacity(header.len());
+    for (index, column) in header.iter().enumerate() {
+        if column.is_empty() || positions.insert(column.as_str(), index + 1).is_some() {
+            return Err(CsvError::InvalidHeader);
+        }
+    }
+    Ok(positions)
 }
 
 #[derive(Deserialize)]
@@ -6989,6 +7051,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "keep-invalid-rows"
             | "规则统计"
             | "rule-summary"
+            | "表头对比"
+            | "compare-headers"
             | "对比列"
             | "compare-column"
             | "数值对比列"
@@ -9794,6 +9858,24 @@ mod tests {
                 transform_csv(&format!("数值对比列 {tables}")),
                 Err(CsvError::InvalidNumber)
             );
+        }
+    }
+
+    #[test]
+    fn compares_csv_header_positions_and_lists_new_columns_in_new_table_order() {
+        let query = r#"表头对比 ["编号,状态,金额\n001,完成,1.50","金额,编号,备注\n1.50,001,茶"]"#;
+        let expected = "列名,原序号,新序号,变更\r\n编号,1,2,位置变化\r\n状态,2,\"\",删除\r\n金额,3,1,位置变化\r\n备注,\"\",3,新增";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(csv_table_preview(query).unwrap().unwrap().0, expected);
+        assert_eq!(
+            transform_csv(r#"compare-headers ["编号,状态","编号,状态"]"#).as_deref(),
+            Ok("列名,原序号,新序号,变更")
+        );
+        for query in [
+            r#"表头对比 ["编号,编号","编号"]"#,
+            r#"表头对比 ["编号","编号,"]"#,
+        ] {
+            assert_eq!(transform_csv(query), Err(CsvError::InvalidHeader));
         }
     }
 
