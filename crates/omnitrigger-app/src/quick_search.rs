@@ -1179,18 +1179,24 @@ impl Results {
                             },
                         }),
                 ),
-                Scope::Fraction => Self::Value(
-                    simplify_fraction(term)
-                        .map(|text| ResultValue {
-                            kind: ValueKind::ExactCalculation {
-                                // 为括号、运算符和至少一位操作数预留空间。
-                                can_continue: text.len() <= calculator::QUERY_LIMIT - 4
-                                    && parse_fraction_literal(&text).is_ok(),
-                            },
-                            text,
-                        })
-                        .map_err(ValueError::Fraction),
-                ),
+                Scope::Fraction => {
+                    if let Some(report) = fraction::fraction_csv_report(term) {
+                        Self::table_value(report.map_err(ValueError::Fraction))
+                    } else {
+                        Self::Value(
+                            simplify_fraction(term)
+                                .map(|text| ResultValue {
+                                    kind: ValueKind::ExactCalculation {
+                                        // 为括号、运算符和至少一位操作数预留空间。
+                                        can_continue: text.len() <= calculator::QUERY_LIMIT - 4
+                                            && parse_fraction_literal(&text).is_ok(),
+                                    },
+                                    text,
+                                })
+                                .map_err(ValueError::Fraction),
+                        )
+                    }
+                }
                 Scope::Equation => {
                     if let Some(result) = equation::equation_chart(term) {
                         Self::plot_value(result.map_err(ValueError::Equation))
@@ -4888,6 +4894,41 @@ mod tests {
                 assert_eq!(results.refillable_text(), Some(expected), "{query}");
             }
         }
+    }
+
+    #[test]
+    fn previews_exact_fraction_samples_in_both_directions_and_in_pipelines() {
+        for (query, expected) in [
+            (
+                "分数: 精确采样 [-1,1,5] x**2+1/3",
+                "x,y\r\n-1,4/3\r\n-1/2,7/12\r\n0,1/3\r\n1/2,7/12\r\n1,4/3",
+            ),
+            (
+                r#"处理: ["分数: sample-csv [gcd(2,3),-1,3]"] x"#,
+                "x,y\r\n1,1\r\n0,0\r\n-1,-1",
+            ),
+        ] {
+            let results = for_query(query, &[]);
+            assert!(
+                matches!(
+                    &results,
+                    Results::Value(Ok(ResultValue {
+                        kind: ValueKind::Table(_),
+                        ..
+                    }))
+                ),
+                "{query}"
+            );
+            assert_eq!(results.refillable_text(), Some(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("精确采样 [-1,1,129] x"),
+            Err(FractionError::SampleArguments)
+        );
+        assert_eq!(
+            simplify_fraction("精确采样 [-1,1,3] 1/x"),
+            Err(FractionError::ZeroDenominator)
+        );
     }
 
     #[test]

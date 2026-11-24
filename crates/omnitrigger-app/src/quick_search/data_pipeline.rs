@@ -19,7 +19,7 @@ use super::{
     decibel::convert_decibels,
     duration::convert_duration,
     equation::{equation_chart, solve_equation, solve_linear_system},
-    fraction::simplify_fraction,
+    fraction::{fraction_csv_report, simplify_fraction},
     json_tools::{
         json_csv_report, json_lines, parse_json_line, read_json_array, read_unique_object_entries,
         transform_json, JsonError,
@@ -576,6 +576,9 @@ fn prepare_pipeline_preview(
             let report = calculate_date(query, now.date_naive()).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))
         }
+        Scope::Fraction => fraction_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
         Scope::Timestamp if is_timestamp_report(query) => {
             let report = convert_timestamp(query, now.to_utc()).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))

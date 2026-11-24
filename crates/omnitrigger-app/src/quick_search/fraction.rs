@@ -5,6 +5,7 @@ use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::conversion::split_conversion;
+use super::csv_tools::append_bounded_csv_row;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
 
@@ -56,6 +57,8 @@ pub(super) enum FractionError {
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
     TableInputs,
+    SampleArguments,
+    SampleOutputTooLarge,
     SequenceArguments,
     MixedFractionArguments,
     DenominatorLimit,
@@ -103,6 +106,10 @@ impl FractionError {
             Self::TableInputs => {
                 "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
             }
+            Self::SampleArguments => {
+                "填写 [起点,终点,点数] 和算式，例如 [-1,1,5] x**2，支持 2 至 128 个点"
+            }
+            Self::SampleOutputTooLarge => "精确采样结果超过 1 MiB",
             Self::SequenceArguments => "填写首项、公差或公比、项数，例如 1/3,1/6,5，最多 128 项",
             Self::MixedFractionArguments => "填写整数部分和小于 1 的非负分数，例如 -2 1/3",
             Self::DenominatorLimit => {
@@ -206,6 +213,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "取值表" || verb.eq_ignore_ascii_case("table") {
         return fraction_table(expression.trim());
+    }
+    if is_fraction_sample(verb) {
+        return fraction_samples(expression.trim());
     }
     if verb == "等差数列" || verb.eq_ignore_ascii_case("arithmetic-sequence") {
         return fraction_sequence(expression, false);
@@ -593,6 +603,50 @@ fn fraction_table(input: &str) -> Result<String, FractionError> {
         rows.push(format!("{x}\t{y}"));
     }
     Ok(rows.join("\n"))
+}
+
+fn is_fraction_sample(verb: &str) -> bool {
+    verb == "精确采样" || verb.eq_ignore_ascii_case("sample-csv")
+}
+
+pub(super) fn fraction_csv_report(input: &str) -> Option<Result<String, FractionError>> {
+    let normalized = normalize(input);
+    let input = normalized.trim();
+    let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    is_fraction_sample(verb).then(|| fraction_samples(expression.trim()))
+}
+
+fn fraction_samples(input: &str) -> Result<String, FractionError> {
+    let (range, expression) = input
+        .strip_prefix('[')
+        .and_then(|input| input.split_once(']'))
+        .ok_or(FractionError::SampleArguments)?;
+    let range: Vec<_> = split_top_level_commas(range).take(4).collect();
+    let [start, end, count] = range.as_slice() else {
+        return Err(FractionError::SampleArguments);
+    };
+    let count = count
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|count| (2..=MAX_SEQUENCE_VALUES).contains(count))
+        .ok_or(FractionError::SampleArguments)?;
+    let start = calculate_fraction(start)?;
+    let end = calculate_fraction(end)?;
+    let step = (end - &start) / BigInt::from(count - 1);
+    let mut csv = String::from("x,y");
+    for index in 0..count {
+        let x = &start + &step * BigInt::from(index);
+        ensure_exact_size(&x)?;
+        let y = calculate_fraction_with_variables(expression.trim(), Some(&x), None)?;
+        let cells = [x.to_string(), y.to_string()];
+        append_bounded_csv_row(
+            &mut csv,
+            cells.iter().map(String::as_str),
+            FractionError::SampleOutputTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn format_mixed_fraction(value: BigRational) -> String {

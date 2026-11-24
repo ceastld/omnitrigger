@@ -5706,6 +5706,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "为精确算式生成等间距的 x 和 y 表格",
+        query: "分数: 精确采样 [-1,1,5] x**2+1/3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按首项和公差生成精确等差数列",
         query: "分数: 等差数列 1/3,1/6,5",
     },
@@ -6160,6 +6165,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "百分比",
                     "从百分比",
                     "取值表",
+                    "精确采样",
                     "等差数列",
                     "等比数列",
                     "连分数",
