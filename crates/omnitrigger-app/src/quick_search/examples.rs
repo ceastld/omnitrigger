@@ -3222,6 +3222,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看文本原文并保留首尾空白",
+        query: "文本: 原文   第一行\n第二行  ",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按字素簇、码位和编码分别统计文本长度",
         query: "文本: 长度详情 \"👩‍💻 e\u{0301}\"",
     },

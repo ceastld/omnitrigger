@@ -188,10 +188,17 @@ pub(super) fn count_text(input: &str) -> Result<String, TextError> {
     Ok(format!("{characters} 字符 · {} UTF-8 字节", text.len()))
 }
 
+pub(super) fn is_raw_text_operation(operation: &str) -> bool {
+    operation == "原文" || operation.eq_ignore_ascii_case("raw")
+}
+
 pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     let (operation, text) = input
         .split_once(char::is_whitespace)
         .ok_or(TextError::IncompleteTransform)?;
+    if is_raw_text_operation(operation) {
+        return Ok(text.to_owned());
+    }
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
         "依次处理" | "pipeline" => return transform_text_pipeline(text),

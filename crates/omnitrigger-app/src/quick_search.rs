@@ -1618,13 +1618,29 @@ enum InputFileLoadState {
 }
 
 fn accepts_input_file(query: &str) -> bool {
-    matches!(
-        scoped_query(query.trim_start()),
-        Some((
-            Scope::Csv | Scope::Json | Scope::Toml | Scope::TextTools | Scope::DataPipeline,
-            _
-        ))
-    )
+    query.trim().is_empty()
+        || matches!(
+            scoped_query(query.trim_start()),
+            Some((
+                Scope::Csv | Scope::Json | Scope::Toml | Scope::TextTools | Scope::DataPipeline,
+                _
+            ))
+        )
+}
+
+fn input_file_query_prefix(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("csv") => "CSV: 表格预览 ",
+        Some("tsv") => "CSV: 从TSV ",
+        Some("json") => "JSON: 格式化 ",
+        Some("toml") => "TOML: 校验 ",
+        _ => "文本: 原文 ",
+    }
 }
 
 fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String> {
@@ -2188,9 +2204,14 @@ impl QuickSearch {
             return;
         }
         let selection = input.selection();
-        let retained =
-            query[..selection.start].chars().count() + query[selection.end..].chars().count();
-        let character_limit = INPUT_CHARACTER_LIMIT.saturating_sub(retained);
+        let choose_tool = query.trim().is_empty();
+        let character_limit = if choose_tool {
+            INPUT_CHARACTER_LIMIT
+        } else {
+            let retained =
+                query[..selection.start].chars().count() + query[selection.end..].chars().count();
+            INPUT_CHARACTER_LIMIT.saturating_sub(retained)
+        };
         self.input_file_load = InputFileLoadState::InProgress;
         let picker = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
@@ -2209,7 +2230,17 @@ impl QuickSearch {
                     return Ok(None);
                 };
                 cx.background_executor()
-                    .spawn(async move { read_input_file(&path, character_limit) })
+                    .spawn(async move {
+                        let prefix = if choose_tool {
+                            input_file_query_prefix(&path)
+                        } else {
+                            ""
+                        };
+                        let max_text = character_limit.saturating_sub(prefix.chars().count());
+                        let mut text = read_input_file(&path, max_text)?;
+                        text.insert_str(0, prefix);
+                        Ok(text)
+                    })
                     .await
                     .map(Some)
             }
@@ -2225,6 +2256,10 @@ impl QuickSearch {
                         InputFileLoadState::Ready
                     } else {
                         match loaded {
+                            Ok(Some(text)) if choose_tool => {
+                                this.fill_query(text, window, cx);
+                                InputFileLoadState::Ready
+                            }
                             Ok(Some(text)) => {
                                 this.input.update(cx, |input, cx| {
                                     input.replace_text_in_range(None, &text, window, cx);
@@ -6210,6 +6245,37 @@ mod tests {
             std::fs::write(&file, invalid).unwrap();
             assert!(read_input_file(&file, 8).unwrap_err().contains("UTF-16"));
         }
+    }
+
+    #[test]
+    fn opening_input_files_in_empty_search_uses_a_tool_and_preserves_other_text() {
+        for (filename, expected) in [
+            ("销售.CSV", "CSV: 表格预览 "),
+            ("名单.tsv", "CSV: 从TSV "),
+            ("package.JSON", "JSON: 格式化 "),
+            ("配置.toml", "TOML: 校验 "),
+            ("草稿.txt", "文本: 原文 "),
+            ("说明", "文本: 原文 "),
+        ] {
+            assert_eq!(input_file_query_prefix(Path::new(filename)), expected);
+        }
+        assert!(accepts_input_file(""));
+        assert!(accepts_input_file(" \t\r\n"));
+        assert!(!accepts_input_file("2**10"));
+        let text = "  开头\r\n中间\t末尾 \r\n";
+        let query = format!("{}{text}", input_file_query_prefix(Path::new("说明.txt")));
+        assert_eq!(for_query(&query, &[]).refillable_text(), Some(text));
+        assert_eq!(
+            for_query("text tools: RAW \t ", &[]).refillable_text(),
+            Some("\t ")
+        );
+        let data = "编号,金额\r\n001,3.50";
+        let query = format!("{}{data}", input_file_query_prefix(Path::new("销售.CSV")));
+        let result = for_query(&query, &[]);
+        assert!(
+            matches!(&result, Results::Value(Ok(value)) if matches!(value.kind, ValueKind::Table(_)))
+        );
+        assert_eq!(result.refillable_text(), Some(data));
     }
 
     #[test]
