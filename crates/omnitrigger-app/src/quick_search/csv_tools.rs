@@ -22,9 +22,9 @@ use serde_json::value::RawValue;
 
 use super::scientific::{average, median};
 use super::statistics::{
-    interpolate_ordered_quantile, parse_bin_edges, parse_probability, parse_weighted_pair,
-    plot_binned_float_values, plot_binned_unweighted, report_binned_unweighted,
-    unweighted_box_fences, WeightedMean,
+    interpolate_ordered_quantile, parse_bin_edges, parse_probability, parse_statistical_weight,
+    parse_weighted_pair, plot_binned_float_values, plot_binned_unweighted,
+    report_binned_unweighted, unweighted_box_fences, WeightedMean,
 };
 use super::{
     bin_plot::BinPlot,
@@ -276,6 +276,7 @@ pub(super) enum CsvError {
     EmptyStatisticsColumn,
     WeightedMeanArguments,
     WeightedGroupArguments,
+    WeightedFrequencyArguments,
     Statistics(StatisticsError),
     Serialization,
     JsonNumericCells,
@@ -609,6 +610,7 @@ impl CsvError {
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
             Self::WeightedMeanArguments => "依次填写数值列和权重列，例如 [\"成绩\",\"权重\"]",
             Self::WeightedGroupArguments => "依次填写分组列、数值列和权重列，例如 [[\"地区\"],\"成绩\",\"权重\"]",
+            Self::WeightedFrequencyArguments => "填写分组列和权重列，例如 [[\"地区\",\"状态\"],\"权重\"]",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
             Self::JsonNumericCells => "所选列须为 JSON 数字或空白，例如 1.50 或 2e0",
@@ -6973,6 +6975,10 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "分组加权平均" || operation.eq_ignore_ascii_case("group-weighted-mean") {
         return Some(csv_grouped_weighted_mean(input));
     }
+    if operation == "分组加权频数" || operation.eq_ignore_ascii_case("group-weighted-frequency")
+    {
+        return Some(csv_grouped_weighted_frequency(input));
+    }
     if operation == "列值概览" || operation.eq_ignore_ascii_case("value-profile") {
         return Some(csv_value_profile(input));
     }
@@ -7491,6 +7497,74 @@ fn record_weighted_csv_row(
                 error.message()
             },
         })
+}
+
+fn csv_grouped_weighted_frequency(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let invalid = CsvError::WeightedFrequencyArguments;
+    let ((groups, weight), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, ColumnReference)>(input, invalid)?;
+    if groups.is_empty() {
+        return Err(invalid);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let grouped_by = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let weight_column = weight.resolve(header)?;
+    validate_column_width(&[weight_column], header.len())?;
+
+    let mut weights = HashMap::<Vec<&str>, (usize, BigRational)>::new();
+    let mut total = BigRational::default();
+    for (index, row) in records.iter().enumerate() {
+        let (_, group_weight) = weights
+            .entry(column_key(row, &grouped_by))
+            .or_insert_with(|| (index, BigRational::default()));
+        let input_weight = row[weight_column].trim();
+        if input_weight.is_empty() {
+            continue;
+        }
+        let weight = parse_statistical_weight(&normalize(input_weight)).map_err(|error| {
+            CsvError::DataRowValue {
+                row: index + 1,
+                cause: error.message(),
+            }
+        })?;
+        *group_weight += &weight;
+        total += weight;
+        ensure_exact_size(group_weight)
+            .and_then(|()| ensure_exact_size(&total))
+            .map_err(|error| CsvError::DataRowValue {
+                row: index + 1,
+                cause: error.message(),
+            })?;
+    }
+    if !records.is_empty() && total.numer().sign() == Sign::NoSign {
+        return Err(CsvError::Statistics(StatisticsError::ZeroTotalWeight));
+    }
+    let mut weights: Vec<_> = weights.into_iter().collect();
+    weights.sort_unstable_by(|(_, (left_index, left)), (_, (right_index, right))| {
+        right.cmp(left).then_with(|| left_index.cmp(right_index))
+    });
+    let headings = grouped_by
+        .iter()
+        .map(|&column| header[column].clone())
+        .chain(["权重合计".to_owned(), "占比".to_owned()])
+        .collect::<Vec<_>>();
+    let mut csv = String::new();
+    let limit = CsvError::StatisticsOutputTooLarge;
+    append_bounded_csv_row(&mut csv, headings.iter().map(String::as_str), limit)?;
+    let mut summary = vec![headings];
+    for (key, (_, weight)) in weights {
+        let share = &weight / &total;
+        ensure_exact_size(&share).map_err(|_| CsvError::ComputedNumberRange)?;
+        let row = key
+            .into_iter()
+            .map(str::to_owned)
+            .chain([weight.to_string(), share.to_string()])
+            .collect::<Vec<_>>();
+        append_bounded_csv_row(&mut csv, row.iter().map(String::as_str), limit)?;
+        summary.push(row);
+    }
+    Ok((csv, summary))
 }
 
 fn csv_grouped_weighted_mean(input: &str) -> Result<CsvPreviewData, CsvError> {
@@ -10962,6 +11036,32 @@ mod tests {
             transform_csv(&format!("搜索行 \"\" {data}")),
             Ok(write_rows(&rows, ','))
         );
+    }
+
+    #[test]
+    fn groups_csv_weighted_frequencies_by_exact_labels_and_reports_shares() {
+        let query = "分组加权频数 [[\"地区\",2],\"权重\"] 地区,状态,权重\r\n北,完成,0.5\r\n南,完成,3/2\r\n北,完成,25%\r\n西,待办,0\r\n北,待办,";
+        let expected = "地区,状态,权重合计,占比\r\n南,完成,3/2,2/3\r\n北,完成,3/4,1/3\r\n西,待办,0,0\r\n北,待办,0,0";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(
+            csv_table_preview(query)
+                .expect("分组加权频数应支持表格预览")
+                .map(|(text, _)| text)
+                .as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            transform_csv("GROUP-WEIGHTED-FREQUENCY [[1],2] 类别,权重").as_deref(),
+            Ok("类别,权重合计,占比")
+        );
+        assert_eq!(
+            transform_csv("分组加权频数 [[1],2] 类别,权重\n甲,0\n乙,"),
+            Err(CsvError::Statistics(StatisticsError::ZeroTotalWeight))
+        );
+        assert!(matches!(
+            transform_csv("分组加权频数 [[1],2] 类别,权重\n甲,1\n乙,-1/2"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]

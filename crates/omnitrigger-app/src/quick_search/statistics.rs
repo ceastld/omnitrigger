@@ -797,6 +797,10 @@ pub(super) fn parse_weighted_pair(
     weight: &str,
 ) -> Result<(BigRational, BigRational), StatisticsError> {
     let value = calculate_fraction(value).map_err(StatisticsError::Evaluation)?;
+    Ok((value, parse_statistical_weight(weight)?))
+}
+
+pub(super) fn parse_statistical_weight(weight: &str) -> Result<BigRational, StatisticsError> {
     let weight = if let Some(percent) = weight.trim().strip_suffix('%') {
         calculate_fraction(percent).map(|value| value / BigInt::from(100))
     } else {
@@ -806,7 +810,7 @@ pub(super) fn parse_weighted_pair(
     if weight.numer().sign() == Sign::Minus {
         return Err(StatisticsError::InvalidWeight);
     }
-    Ok((value, weight))
+    Ok(weight)
 }
 
 fn report_frequencies(
