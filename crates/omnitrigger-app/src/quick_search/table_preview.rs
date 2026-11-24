@@ -15,16 +15,9 @@ pub(super) struct TablePreview {
 }
 
 impl TablePreview {
-    pub(super) fn from_rows(mut rows: Vec<Vec<String>>) -> Self {
+    pub(super) fn from_rows(rows: Vec<Vec<String>>) -> Self {
         let data_rows = rows.len().saturating_sub(1);
         let columns = rows.first().map_or(0, Vec::len);
-        rows.truncate(MAX_DATA_ROWS + 1);
-        for row in &mut rows {
-            row.truncate(MAX_VISIBLE_COLUMNS);
-            for value in row {
-                *value = display_cell(value);
-            }
-        }
         Self {
             rows,
             data_rows,
@@ -33,35 +26,49 @@ impl TablePreview {
     }
 
     pub(super) fn preview_height(&self) -> f32 {
-        2. + ROW_HEIGHT * self.rows.len() as f32
+        2. + ROW_HEIGHT * self.rows.len().min(MAX_DATA_ROWS + 1) as f32
+    }
+
+    pub(super) fn row_pages(&self) -> usize {
+        self.data_rows.div_ceil(MAX_DATA_ROWS)
+    }
+
+    pub(super) fn column_pages(&self) -> usize {
+        self.columns.div_ceil(MAX_VISIBLE_COLUMNS)
     }
 
     pub(super) fn legend(&self) -> Div {
-        let data_rows = self.data_rows;
-        let columns = self.columns;
-        let title = if data_rows > MAX_DATA_ROWS || columns > MAX_VISIBLE_COLUMNS {
-            format!(
-                "{data_rows} 行 · {columns} 列（预览 {} 行、{} 列）",
-                data_rows.min(MAX_DATA_ROWS),
-                columns.min(MAX_VISIBLE_COLUMNS),
-            )
-        } else {
-            format!("{data_rows} 行 · {columns} 列")
-        };
-        div().min_w_0().truncate().child(title)
+        div()
+            .min_w_0()
+            .truncate()
+            .child(format!("{} 行 · {} 列", self.data_rows, self.columns))
     }
 
-    pub(super) fn render(&self) -> Div {
+    fn visible_rows(&self, row_page: usize, column_page: usize) -> impl Iterator<Item = &[String]> {
+        let first_record = 1 + row_page * MAX_DATA_ROWS;
+        let first_column = column_page * MAX_VISIBLE_COLUMNS;
+        let column_end = self.columns.min(first_column + MAX_VISIBLE_COLUMNS);
+        self.rows
+            .first()
+            .into_iter()
+            .chain(self.rows.iter().skip(first_record).take(MAX_DATA_ROWS))
+            .map(move |row| &row[first_column..column_end])
+    }
+
+    pub(super) fn render(&self, row_page: usize, column_page: usize) -> Div {
+        let rows = self.visible_rows(row_page, column_page);
+        let visible_count = 1 + (self.data_rows - row_page * MAX_DATA_ROWS).min(MAX_DATA_ROWS);
         div()
             .flex()
             .flex_col()
             .w_full()
+            .min_h(px(self.preview_height()))
             .overflow_hidden()
             .rounded(px(6.))
             .border_1()
             .border_color(rgb(theme::BORDER_MID))
             .text_size(px(13.))
-            .children(self.rows.iter().enumerate().map(|(index, row)| {
+            .children(rows.enumerate().map(|(index, row)| {
                 div()
                     .flex()
                     .items_center()
@@ -75,7 +82,7 @@ impl TablePreview {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(theme::TEXT))
                     })
-                    .when(index + 1 < self.rows.len(), |row| {
+                    .when(index + 1 < visible_count, |row| {
                         row.border_b_1().border_color(rgb(theme::BORDER))
                     })
                     .children(row.iter().map(|value| {
@@ -84,7 +91,7 @@ impl TablePreview {
                             .min_w_0()
                             .px(px(8.))
                             .truncate()
-                            .child(value.clone())
+                            .child(display_cell(value))
                     }))
             }))
     }
@@ -108,16 +115,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retains_only_visible_records_and_columns_for_display() {
+    fn pages_records_and_columns_without_losing_the_header_or_last_cells() {
         let data = (0..10)
             .map(|row| (0..8).map(|column| format!("{row},{column}")).collect())
             .collect();
         let preview = TablePreview::from_rows(data);
-        assert_eq!(preview.data_rows, 9);
-        assert_eq!(preview.columns, 8);
-        assert_eq!(preview.rows.len(), 7);
-        assert!(preview.rows.iter().all(|row| row.len() == 6));
-        assert_eq!(preview.rows[6][5], "6,5");
+        assert_eq!(preview.row_pages(), 2);
+        assert_eq!(preview.column_pages(), 2);
+        let first: Vec<_> = preview.visible_rows(0, 0).collect();
+        assert_eq!(first.len(), 7);
+        assert!(first.iter().all(|row| row.len() == 6));
+        assert_eq!(first[6][5], "6,5");
+        let last: Vec<_> = preview.visible_rows(1, 1).collect();
+        assert_eq!(last.len(), 4);
+        assert_eq!(last[0], ["0,6", "0,7"]);
+        assert_eq!(last[1], ["7,6", "7,7"]);
+        assert_eq!(last[3], ["9,6", "9,7"]);
+        let header_only = TablePreview::from_rows(vec![vec!["列名".into()]]);
+        assert_eq!(header_only.row_pages(), 0);
+        assert_eq!(header_only.visible_rows(0, 0).count(), 1);
         assert_eq!(display_cell("带\r\n换\t行"), "带↵换⇥行");
         assert_eq!(
             display_cell(&"长".repeat(MAX_VISIBLE_CELL_CHARACTERS + 1)),

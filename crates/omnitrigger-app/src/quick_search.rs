@@ -1536,11 +1536,35 @@ pub(super) fn request_foreground(
     .detach();
 }
 
+#[derive(Clone, Copy)]
 enum PageChange {
     Previous,
     Next,
     First,
     Last,
+}
+
+impl PageChange {
+    fn target(self, page: usize, last_page: usize) -> usize {
+        match self {
+            Self::Previous => page.saturating_sub(1),
+            Self::Next => (page + 1).min(last_page),
+            Self::First => 0,
+            Self::Last => last_page,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TableAxis {
+    Rows,
+    Columns,
+}
+
+#[derive(Default)]
+struct TablePages {
+    rows: usize,
+    columns: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1622,6 +1646,7 @@ pub(super) struct QuickSearch {
     was_active: bool,
     results: Results,
     expanded_value_pages: Option<Vec<usize>>,
+    table_pages: TablePages,
     selected: usize,
     application_refresh: ApplicationRefresh,
     input_before_help: Option<String>,
@@ -1740,6 +1765,7 @@ impl QuickSearch {
             was_active: window.is_window_active(),
             results,
             expanded_value_pages: None,
+            table_pages: TablePages::default(),
             selected: 0,
             application_refresh: ApplicationRefresh::NotRequested,
             input_before_help: None,
@@ -1827,6 +1853,7 @@ impl QuickSearch {
             let next_height = next.height(MAX_VALUE_LINES);
             self.results = next;
             self.expanded_value_pages = None;
+            self.table_pages = TablePages::default();
             self.selected = 0;
             if previous_height != next_height {
                 window.resize(size(px(WIDTH), px(next_height)));
@@ -2582,6 +2609,18 @@ impl QuickSearch {
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
+                && keystroke.modifiers.shift
+                && matches!(keystroke.key.as_str(), "pageup" | "pagedown")
+            {
+                let page = if keystroke.key == "pageup" {
+                    PageChange::Previous
+                } else {
+                    PageChange::Next
+                };
+                if self.change_table_page(TableAxis::Columns, page, cx) {
+                    cx.stop_propagation();
+                }
+            } else if modifiers == 1
                 && keystroke.modifiers.control
                 && matches!(keystroke.key.as_str(), "pageup" | "pagedown")
             {
@@ -2771,6 +2810,9 @@ impl QuickSearch {
     }
 
     fn change_page(&mut self, movement: PageChange, cx: &mut Context<Self>) -> bool {
+        if self.change_table_page(TableAxis::Rows, movement, cx) {
+            return true;
+        }
         let (count, page_size) = match &self.results {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
@@ -2788,14 +2830,40 @@ impl QuickSearch {
         }
         let page = self.selected / page_size;
         let last_page = (count - 1) / page_size;
-        let next = match movement {
-            PageChange::Previous => page.saturating_sub(1),
-            PageChange::Next => (page + 1).min(last_page),
-            PageChange::First => 0,
-            PageChange::Last => last_page,
-        };
+        let next = movement.target(page, last_page);
         if next != page {
             self.selected = next * page_size;
+            cx.notify();
+        }
+        true
+    }
+
+    fn change_table_page(
+        &mut self,
+        axis: TableAxis,
+        movement: PageChange,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.expanded_value_pages.is_some() {
+            return false;
+        }
+        let Results::Value(Ok(ResultValue {
+            kind: ValueKind::Table(table),
+            ..
+        })) = &self.results
+        else {
+            return false;
+        };
+        let (page, count) = match axis {
+            TableAxis::Rows => (&mut self.table_pages.rows, table.row_pages()),
+            TableAxis::Columns => (&mut self.table_pages.columns, table.column_pages()),
+        };
+        if count < 2 {
+            return false;
+        }
+        let next = movement.target(*page, count - 1);
+        if next != *page {
+            *page = next;
             cx.notify();
         }
         true
@@ -3034,7 +3102,7 @@ impl QuickSearch {
         legend: Div,
         preview: Div,
         copy_label: &'static str,
-        view_label: &'static str,
+        footer: Div,
         cx: &mut Context<Self>,
     ) -> Div {
         div()
@@ -3055,14 +3123,65 @@ impl QuickSearch {
                     ),
             )
             .child(preview)
+            .child(footer)
+    }
+
+    fn visual_preview_footer(view_label: &'static str, cx: &mut Context<Self>) -> Div {
+        Self::result_footer().child(
+            div()
+                .id("visual-result-data")
+                .child(view_label)
+                .cursor_pointer()
+                .hover(|style| style.text_color(rgb(theme::ACCENT)))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_value_preview(window, cx))),
+        )
+    }
+
+    fn table_page_controls(&self, axis: TableAxis, count: usize, cx: &mut Context<Self>) -> Div {
+        let (page, dimension, prev_id, prev_label, prev_key, next_id, next_label, next_key) =
+            match axis {
+                TableAxis::Rows => (
+                    self.table_pages.rows,
+                    "行",
+                    "table-prev-rows",
+                    "上页",
+                    "PageUp 上一行页 · Ctrl+PageUp 首页",
+                    "table-next-rows",
+                    "下页",
+                    "PageDown 下一行页 · Ctrl+PageDown 末页",
+                ),
+                TableAxis::Columns => (
+                    self.table_pages.columns,
+                    "列",
+                    "table-prev-columns",
+                    "左页",
+                    "Shift+PageUp 查看左侧列",
+                    "table-next-columns",
+                    "右页",
+                    "Shift+PageDown 查看右侧列",
+                ),
+            };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(4.))
             .child(
-                Self::selection_hint(view_label)
-                    .id("visual-result-data")
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(rgb(theme::ACCENT)))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.toggle_value_preview(window, cx)),
-                    ),
+                button(prev_id, prev_label, Tone::Ghost, page > 0)
+                    .h(px(20.))
+                    .tooltip(theme::text_tooltip(prev_key.into()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_table_page(axis, PageChange::Previous, cx);
+                    })),
+            )
+            .child(format!("{dimension} {}/{count}", page + 1))
+            .child(
+                button(next_id, next_label, Tone::Ghost, page + 1 < count)
+                    .h(px(20.))
+                    .tooltip(theme::text_tooltip(next_key.into()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_table_page(axis, PageChange::Next, cx);
+                    })),
             )
     }
 
@@ -3074,9 +3193,27 @@ impl QuickSearch {
                 ..
             })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
                 table.legend(),
-                table.render(),
+                table.render(self.table_pages.rows, self.table_pages.columns),
                 "复制 CSV  Enter",
-                "F2 查看原文",
+                Self::visual_preview_footer("F2 查看原文", cx)
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(div().flex_1())
+                    .when(table.row_pages() > 1, |footer| {
+                        footer.child(self.table_page_controls(
+                            TableAxis::Rows,
+                            table.row_pages(),
+                            cx,
+                        ))
+                    })
+                    .when(table.column_pages() > 1, |footer| {
+                        footer.child(self.table_page_controls(
+                            TableAxis::Columns,
+                            table.column_pages(),
+                            cx,
+                        ))
+                    }),
                 cx,
             ),
             Results::Value(Ok(ResultValue {
@@ -3086,7 +3223,7 @@ impl QuickSearch {
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
-                "F2 查看数据",
+                Self::visual_preview_footer("F2 查看数据", cx),
                 cx,
             ),
             Results::Value(Ok(ResultValue {
@@ -3096,7 +3233,7 @@ impl QuickSearch {
                 plot.legend(),
                 plot.render(),
                 "复制摘要  Enter",
-                "F2 查看摘要",
+                Self::visual_preview_footer("F2 查看摘要", cx),
                 cx,
             ),
             Results::Value(Ok(ResultValue {
@@ -3106,7 +3243,7 @@ impl QuickSearch {
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
-                "F2 查看数据",
+                Self::visual_preview_footer("F2 查看数据", cx),
                 cx,
             ),
             Results::Value(Ok(ResultValue {
@@ -3116,7 +3253,7 @@ impl QuickSearch {
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
-                "F2 查看数据",
+                Self::visual_preview_footer("F2 查看数据", cx),
                 cx,
             ),
             Results::Value(Ok(output)) => {
@@ -5033,6 +5170,46 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_table_paging(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        let table = "a,b,c,d,e,f,g,h\n1,2,3,4,5,6,7,8";
+        let data = format!("{table}{}", "\n11,12,13,14,15,16,17,18".repeat(14));
+        let query = format!("CSV: 表格预览 {data}");
+        search.fill_query(&query, window, cx);
+        search.refresh_results(&query, window, cx);
+        let pages = |search: &QuickSearch| (search.table_pages.rows, search.table_pages.columns);
+        let press =
+            |search: &mut QuickSearch, key, window: &mut Window, cx: &mut Context<QuickSearch>| {
+                let event = KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                };
+                search.key_down(&event, window, cx);
+            };
+        assert_eq!(pages(search), (0, 0));
+        press(search, "pagedown", window, cx);
+        assert_eq!(pages(search), (1, 0));
+        press(search, "shift-pagedown", window, cx);
+        assert_eq!(pages(search), (1, 1));
+        press(search, "ctrl-pagedown", window, cx);
+        assert_eq!(pages(search), (2, 1));
+        press(search, "f2", window, cx);
+        assert!(search.expanded_value_pages.is_some());
+        press(search, "pageup", window, cx);
+        assert_eq!(pages(search), (2, 1));
+        press(search, "f2", window, cx);
+        assert_eq!(pages(search), (2, 1));
+        assert!(search.expanded_value_pages.is_none());
+        assert_eq!(search.results.refillable_text(), Some(data.as_str()));
+        search.fill_query("CSV: 表格预览 x,y\n1,2", window, cx);
+        search.refresh_results("CSV: 表格预览 x,y\n1,2", window, cx);
+        assert_eq!(pages(search), (0, 0));
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_result_refill(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -5447,7 +5624,7 @@ mod tests {
                             let help = search.input.read(cx).text();
                             search.refresh_results(&help, window, cx);
                             let examples_match = matches!(&search.results, Results::Help(items)
-                                if !items.is_empty()
+                                if items.first().is_some_and(|&index| EXAMPLES[index].query.starts_with("JSON: 取值 "))
                                     && items.iter().all(|&index| EXAMPLES[index].query.starts_with("JSON:")));
                             search.key_down(&event, window, cx);
                             (help, examples_match, search.input.read(cx).text())
@@ -5622,6 +5799,7 @@ mod tests {
                         })
                         .unwrap();
                     reopened.update(cx, verify_result_refill).unwrap();
+                    reopened.update(cx, verify_table_paging).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             let prefix = "处理:";
@@ -5677,7 +5855,7 @@ mod tests {
             file_navigation,
             file_help,
             [after_held, after_fill, after_edit],
-            (help_input, all_json_examples, restored_input),
+            (help_input, matching_json_examples, restored_input),
             (directory_selection, directory_help, all_duration_examples, restored_directory),
             (
                 bookmark_menu,
@@ -5711,8 +5889,8 @@ mod tests {
         assert_eq!(after_held, "CSV: 截取列");
         assert!(after_fill.starts_with("CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]"));
         assert_eq!(after_edit, "CSV: 截取列 [\"示例\",1,\"1\"]\n标题\n茶");
-        assert_eq!(help_input, "? JSON:");
-        assert!(all_json_examples);
+        assert_eq!(help_input, "? JSON: 取值");
+        assert!(matching_json_examples);
         assert!(directory_selection > 0);
         assert_eq!(directory_help, "? 时长:");
         assert!(all_duration_examples);
