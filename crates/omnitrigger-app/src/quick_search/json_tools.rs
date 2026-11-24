@@ -181,6 +181,7 @@ enum JsonCsvOperation {
     RowsWithHeaders,
     Lines,
     Paths,
+    LinePaths,
     Leaves,
     Keys,
     Values,
@@ -193,6 +194,7 @@ impl JsonCsvOperation {
             "行数组转csv" | "rows-to-csv" => Some(Self::RowsWithHeaders),
             "行转csv" | "jsonl-to-csv" => Some(Self::Lines),
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
+            "行路径转csv" | "jsonl-pointers-to-csv" => Some(Self::LinePaths),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
             "找键csv" | "find-key-csv" => Some(Self::Keys),
             "找值csv" | "find-value-csv" => Some(Self::Values),
@@ -208,6 +210,7 @@ impl JsonCsvOperation {
             Self::RowsWithHeaders
             | Self::Lines
             | Self::Paths
+            | Self::LinePaths
             | Self::Leaves
             | Self::Keys
             | Self::Values => true,
@@ -219,7 +222,8 @@ impl JsonCsvOperation {
             Self::Convert => json_to_csv(source),
             Self::RowsWithHeaders => json_array_rows_with_headers(source),
             Self::Lines => json_lines_to_csv(source),
-            Self::Paths => json_paths_to_csv(source),
+            Self::Paths => json_paths_to_csv(source, read_json_array),
+            Self::LinePaths => json_paths_to_csv(source, read_json_lines),
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
             }
@@ -1547,13 +1551,16 @@ fn json_lines_to_array(source: &str) -> Result<String, JsonError> {
 }
 
 fn json_lines_to_csv(source: &str) -> Result<String, JsonError> {
-    let rows = json_lines(source)
-        .map(|(_, line)| parse_json_line(line))
-        .collect::<Result<Vec<_>, _>>()?;
-    json_object_rows_to_csv(rows).map_err(|error| match error {
+    json_object_rows_to_csv(read_json_lines(source)?).map_err(|error| match error {
         JsonError::CsvRows => JsonError::CsvLineObjects,
         _ => error,
     })
+}
+
+pub(super) fn read_json_lines(source: &str) -> Result<Vec<&RawValue>, JsonError> {
+    json_lines(source)
+        .map(|(_, line)| parse_json_line(line))
+        .collect()
 }
 
 fn parse_json_line(line: &str) -> Result<&RawValue, JsonError> {
@@ -1883,7 +1890,10 @@ fn json_array_rows_with_headers(query: &str) -> Result<String, JsonError> {
     Ok(output)
 }
 
-fn json_paths_to_csv(query: &str) -> Result<String, JsonError> {
+fn json_paths_to_csv(
+    query: &str,
+    read_rows: impl FnOnce(&str) -> Result<Vec<&RawValue>, JsonError>,
+) -> Result<String, JsonError> {
     let (pointers, source) = selected_pointers(query)?;
     let columns = pointers
         .iter()
@@ -1897,7 +1907,7 @@ fn json_paths_to_csv(query: &str) -> Result<String, JsonError> {
     if output.len() > MAX_PRETTY_BYTES {
         return Err(JsonError::CsvOutputTooLarge);
     }
-    for row in read_json_array(source)? {
+    for row in read_rows(source)? {
         let cells = columns
             .iter()
             .map(|keys| match select_pointer_keys(row, keys) {
@@ -2805,6 +2815,31 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn extracts_json_lines_paths_into_ordered_csv_columns() {
+        let options = r#"["/订单/金额","/a~1b","/0"]"#;
+        let records =
+            "{\"订单\":{\"金额\":1.50},\"a/b\":\"茶,咖啡\"}\r\n \t\r\n[9007199254740993]\r\nnull";
+        let query = format!("行路径转CSV {options}\r\n{records}");
+        let expected =
+            "/订单/金额,/a~1b,/0\r\n1.50,\"茶,咖啡\",\"\"\r\n\"\",\"\",9007199254740993\r\n\"\",\"\",\"\"";
+        assert_eq!(transform_json(&query).as_deref(), Ok(expected));
+        assert_eq!(
+            json_csv_report(&query)
+                .expect("路径列应显示为带表头的表格")
+                .as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            transform_json("jsonl-pointers-to-csv [\"/x\"] {\"x\":1}\n{"),
+            Err(JsonError::InvalidLine)
+        );
+        assert_eq!(
+            transform_json(r#"行路径转CSV ["/x"] {"x":1,"x":2}"#),
+            Err(JsonError::DuplicateKey)
+        );
     }
 
     #[test]

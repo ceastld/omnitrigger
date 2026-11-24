@@ -4,6 +4,7 @@ use crate::assets::Icon;
 
 use super::calculator::narrow_ascii_graphic;
 use super::data_pipeline::split_pipeline_input;
+use super::json_tools::read_json_lines;
 use super::operators::json_argument_and_tail;
 use super::scientific::split_name;
 use super::scope::{parse_scope, scoped_query, tool_example_keyword, Scope};
@@ -22,13 +23,16 @@ impl Example {
             return None;
         }
         let (operation, arguments) = term.split_once(char::is_whitespace)?;
+        let operation = operation.to_ascii_lowercase();
         if scope == Scope::Json
             && !matches!(
-                operation.to_ascii_lowercase().as_str(),
+                operation.as_str(),
                 "行数组转csv"
                     | "rows-to-csv"
                     | "路径转csv"
                     | "pointers-to-csv"
+                    | "行路径转csv"
+                    | "jsonl-pointers-to-csv"
                     | "多条件筛选"
                     | "filter-all"
                     | "任一条件筛选"
@@ -49,7 +53,12 @@ impl Example {
             return None;
         }
         let has_data = if scope == Scope::Json {
-            serde_json::from_str::<&serde_json::value::RawValue>(data).is_ok()
+            match operation.as_str() {
+                "行路径转csv" | "jsonl-pointers-to-csv" => {
+                    read_json_lines(data).is_ok_and(|rows| !rows.is_empty())
+                }
+                _ => serde_json::from_str::<&serde_json::value::RawValue>(data).is_ok(),
+            }
         } else {
             data.contains(['\r', '\n']) && !data.trim().is_empty()
         };
@@ -3961,6 +3970,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把逐行 JSON 的指定路径提取为 CSV 列",
+        query: "JSON: 行路径转CSV [\"/订单/商品\",\"/订单/金额\"]\n{\"订单\":{\"商品\":\"茶,咖啡\",\"金额\":1.50}}\n{\"订单\":{\"商品\":\"梨\"}}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定顺序选出 JSON 对象的字段",
         query: r#"JSON: 选键 ["编号","状态"] [{"状态":true,"编号":"001","备注":"茶"},{"编号":"002"}]"#,
     },
@@ -6526,6 +6540,10 @@ mod tests {
             (
                 r#"JSON: 路径转CSV ["/金额"] [{"金额":1.50}]"#,
                 Some(r#"[{"金额":1.50}]"#),
+            ),
+            (
+                "JSON: 行路径转CSV [\"/金额\"]\n{\"金额\":1.50}\n{\"金额\":0}",
+                Some("{\"金额\":1.50}\n{\"金额\":0}"),
             ),
             (
                 r#"JSON: 多条件筛选 [["/x","=",1]] [{"x":1},{"x":2}]"#,
