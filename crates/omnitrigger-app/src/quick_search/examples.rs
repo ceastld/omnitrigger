@@ -5101,6 +5101,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从数值和权重两列求精确加权平均",
+        query: "CSV: 加权平均 [\"成绩\",\"权重\"] 项目,成绩,权重\n试卷,80,30%\n实验,90,70%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "分组查看有效数值、缺失值与精确平均值",
         query: "CSV: 分组数值摘要 [\"地区\"] \"金额\" 地区,金额\n南,1/2\n北,待定\n南,2\n北,",
     },

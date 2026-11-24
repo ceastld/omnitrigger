@@ -22,8 +22,9 @@ use serde_json::value::RawValue;
 
 use super::scientific::{average, median};
 use super::statistics::{
-    interpolate_ordered_quantile, parse_bin_edges, parse_probability, plot_binned_float_values,
-    plot_binned_unweighted, report_binned_unweighted, unweighted_box_fences,
+    interpolate_ordered_quantile, parse_bin_edges, parse_probability, parse_weighted_pair,
+    plot_binned_float_values, plot_binned_unweighted, report_binned_unweighted,
+    unweighted_box_fences, WeightedMean,
 };
 use super::{
     bin_plot::BinPlot,
@@ -273,6 +274,7 @@ pub(super) enum CsvError {
     UnpivotColumns,
     PivotTooLarge,
     EmptyStatisticsColumn,
+    WeightedMeanArguments,
     Statistics(StatisticsError),
     Serialization,
     JsonNumericCells,
@@ -604,6 +606,7 @@ impl CsvError {
             Self::UnpivotColumns => "至少留一列用于展开",
             Self::PivotTooLarge => "透视表结果超过 1 MiB，请缩小数据范围",
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
+            Self::WeightedMeanArguments => "依次填写数值列和权重列，例如 [\"成绩\",\"权重\"]",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
             Self::JsonNumericCells => "所选列须为 JSON 数字或空白，例如 1.50 或 2e0",
@@ -1125,6 +1128,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
+        "加权平均" | "weighted-mean" => return csv_weighted_mean(input),
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
         "函数近似筛选" | "filter-function-near" => return filter_near_function_rows(input),
@@ -7353,6 +7357,36 @@ const NUMERIC_PROFILE_HEADINGS: [&str; 7] = [
     "中位数",
 ];
 
+fn csv_weighted_mean(input: &str) -> Result<String, CsvError> {
+    let ([value, weight], data) =
+        json_argument_and_data::<[ColumnReference; 2]>(input, CsvError::WeightedMeanArguments)?;
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let value = value.resolve(header)?;
+    let weight = weight.resolve(header)?;
+    validate_column_width(&[value, weight], header.len())?;
+
+    let mut mean = WeightedMean::default();
+    for (index, row) in records.iter().enumerate() {
+        let value = &row[value];
+        let weight = &row[weight];
+        if value.trim().is_empty() || weight.trim().is_empty() {
+            continue;
+        }
+        parse_weighted_pair(value, &normalize(weight))
+            .and_then(|pair| mean.record(pair))
+            .map_err(|error| CsvError::DataRowValue {
+                row: index + 1,
+                cause: if error == StatisticsError::InvalidWeight {
+                    "权重须为非负数"
+                } else {
+                    error.message()
+                },
+            })?;
+    }
+    mean.finish().map_err(CsvError::Statistics)
+}
+
 fn numeric_column_profile(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
@@ -10745,6 +10779,26 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("搜索行 \"\" {data}")),
             Ok(write_rows(&rows, ','))
+        );
+    }
+
+    #[test]
+    fn computes_exact_weighted_mean_from_two_csv_columns_and_identifies_errors() {
+        let data = "项目,成绩,权重\n试卷,80,30%\n忽略,,70%\n实验,90,70％";
+        for op in [r#"加权平均 ["成绩","权重"]"#, "weighted-mean [2,3]"] {
+            assert_eq!(transform_csv(&format!("{op} {data}")).as_deref(), Ok("87"));
+        }
+        assert_eq!(
+            transform_csv("加权平均 [1,2] 成绩,权重\n80,0\n90,0%"),
+            Err(CsvError::Statistics(StatisticsError::ZeroTotalWeight))
+        );
+        assert!(matches!(
+            transform_csv("加权平均 [1,2] 成绩,权重\n80,30%\n90,-1"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+        assert_eq!(
+            transform_csv("加权平均 [1] 成绩,权重"),
+            Err(CsvError::WeightedMeanArguments)
         );
     }
 

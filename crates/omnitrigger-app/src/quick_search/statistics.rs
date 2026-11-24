@@ -612,17 +612,37 @@ fn moving_extrema(input: &str, operation: MovingExtrema) -> Result<String, Stati
 }
 
 fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
-    let mut total_weight = BigRational::default();
-    let mut total_value = BigRational::default();
+    let mut mean = WeightedMean::default();
     for term in observation_terms(input)? {
-        let (value, weight) = read_weighted_observation(term)?;
-        total_value = bounded(total_value + value * &weight)?;
-        total_weight = bounded(total_weight + weight)?;
+        mean.record(read_weighted_observation(term)?)?;
     }
-    if total_weight.numer().sign() == Sign::NoSign {
-        return Err(StatisticsError::ZeroTotalWeight);
+    mean.finish()
+}
+
+#[derive(Default)]
+pub(super) struct WeightedMean {
+    total_value: BigRational,
+    total_weight: BigRational,
+}
+
+impl WeightedMean {
+    pub(super) fn record(
+        &mut self,
+        (value, weight): (BigRational, BigRational),
+    ) -> Result<(), StatisticsError> {
+        let total_value = bounded(&self.total_value + value * &weight)?;
+        let total_weight = bounded(&self.total_weight + weight)?;
+        self.total_value = total_value;
+        self.total_weight = total_weight;
+        Ok(())
     }
-    bounded(total_value / total_weight).map(|value| value.to_string())
+
+    pub(super) fn finish(self) -> Result<String, StatisticsError> {
+        if self.total_weight.numer().sign() == Sign::NoSign {
+            return Err(StatisticsError::ZeroTotalWeight);
+        }
+        bounded(self.total_value / self.total_weight).map(|value| value.to_string())
+    }
 }
 
 fn weighted_variance(input: &str) -> Result<BigRational, StatisticsError> {
@@ -721,6 +741,13 @@ fn read_weighted_observation(term: &str) -> Result<(BigRational, BigRational), S
                 .filter(|(_, weight)| !weight.contains('\t'))
         })
         .ok_or(StatisticsError::InvalidWeight)?;
+    parse_weighted_pair(value, weight)
+}
+
+pub(super) fn parse_weighted_pair(
+    value: &str,
+    weight: &str,
+) -> Result<(BigRational, BigRational), StatisticsError> {
     let value = calculate_fraction(value).map_err(StatisticsError::Evaluation)?;
     let weight = if let Some(percent) = weight.trim().strip_suffix('%') {
         calculate_fraction(percent).map(|value| value / BigInt::from(100))
