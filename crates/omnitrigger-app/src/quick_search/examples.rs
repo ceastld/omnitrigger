@@ -915,6 +915,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按泊松分布计算恰好发生指定次数的概率",
+        query: "统计: 泊松概率 2,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按泊松分布计算至多发生指定次数的概率",
+        query: "统计: 泊松累计 2,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按泊松分布计算至少发生指定次数的概率",
+        query: "统计: 泊松至少 2,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看泊松分布的期望方差及标准差",
+        query: "统计: 泊松摘要 1/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算首次成功所需试验次数的期望和方差",
         query: "统计: 几何摘要 25%",
     },
@@ -6694,6 +6714,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "几何累计",
                     "几何至少",
                     "几何分位点",
+                    "泊松概率",
+                    "泊松累计",
+                    "泊松至少",
+                    "泊松摘要",
                     "几何摘要",
                     "超几何概率",
                     "超几何概率表",

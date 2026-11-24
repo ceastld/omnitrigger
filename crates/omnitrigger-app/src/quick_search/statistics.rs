@@ -24,6 +24,7 @@ const MAX_BIN_EDGES: usize = 16;
 pub(super) const MAX_WEIGHTED_QUANTILES: usize = 16;
 const MAX_BINOMIAL_TRIALS: u32 = 128;
 const MAX_GEOMETRIC_TRIALS: u32 = 1024;
+const MAX_POISSON_COUNT: u32 = 128;
 const MAX_HYPERGEOMETRIC_TABLE_ROWS: u32 = 129;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,8 @@ pub(super) enum StatisticsError {
     NegativeBinomialQuantileArguments,
     WaitingQuantileUnbounded,
     NegativeBinomialQuantileLimit,
+    PoissonArguments,
+    PoissonRate,
     ProbabilityTableTooLarge,
     GeometricArguments,
     GeometricSummaryArguments,
@@ -109,6 +112,8 @@ impl StatisticsError {
             }
             Self::WaitingQuantileUnbounded => "单次成功概率小于 1 时，有限次试验的累计概率达不到 100%",
             Self::NegativeBinomialQuantileLimit => "128 次试验内达不到给定累计概率",
+            Self::PoissonArguments => "用逗号填写事件次数和平均发生次数，例如 2,1/2。事件次数为 0 至 128",
+            Self::PoissonRate => "平均发生次数须为非负数，例如 1/2",
             Self::ProbabilityTableTooLarge => "概率表超过 CSV 输出上限",
             Self::GeometricArguments => {
                 "用逗号填写试验次数和单次成功概率，例如 3,25%。次数为 1 至 1024，概率须大于零"
@@ -359,6 +364,14 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "几何摘要" | "geometric-summary" => return geometric_summary(values),
         "几何分位点" | "geometric-quantile" => return geometric_quantile(values),
+        "泊松概率" | "poisson" => return poisson_probability(values, DiscreteEvent::Exactly),
+        "泊松累计" | "poisson-cdf" => {
+            return poisson_probability(values, DiscreteEvent::AtMost)
+        }
+        "泊松至少" | "poisson-at-least" => {
+            return poisson_probability(values, DiscreteEvent::AtLeast)
+        }
+        "泊松摘要" | "poisson-summary" => return poisson_summary(values),
         "超几何概率" | "hypergeometric" => {
             return hypergeometric_probability(values, DiscreteEvent::Exactly)
         }
@@ -1879,6 +1892,73 @@ fn waiting_trial_summary(target: u32, probability: BigRational) -> Result<String
     summarize_probability_distribution(expectation, variance)
 }
 
+fn poisson_rate(input: &str) -> Result<BigRational, StatisticsError> {
+    let rate = calculate_fraction(input.trim()).map_err(StatisticsError::Evaluation)?;
+    if rate.numer().sign() == Sign::Minus {
+        return Err(StatisticsError::PoissonRate);
+    }
+    Ok(rate)
+}
+
+fn poisson_summary(input: &str) -> Result<String, StatisticsError> {
+    let rate = poisson_rate(input)?;
+    summarize_probability_distribution(rate.clone(), rate)
+}
+
+fn poisson_probability(input: &str, event: DiscreteEvent) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::PoissonArguments;
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(count), Some(rate), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(invalid);
+    };
+    let count = count
+        .parse::<u32>()
+        .ok()
+        .filter(|&count| count <= MAX_POISSON_COUNT)
+        .ok_or(invalid)?;
+    let rate = poisson_rate(rate)?;
+    let cumulative = !matches!(event, DiscreteEvent::Exactly);
+    let complement = matches!(event, DiscreteEvent::AtLeast);
+    let last = if complement {
+        let Some(last) = count.checked_sub(1) else {
+            return Ok("1".to_owned());
+        };
+        last
+    } else {
+        count
+    };
+
+    let one = BigRational::from_integer(1.into());
+    let mut term = one.clone();
+    let mut sum = one.clone();
+    for index in 1..=last {
+        term = bounded(term * &rate / BigInt::from(index))?;
+        if cumulative {
+            sum = bounded(sum + &term)?;
+        }
+    }
+    let coefficient = if cumulative { sum } else { term };
+    if rate.numer().sign() == Sign::NoSign {
+        return Ok(if complement {
+            one - coefficient
+        } else {
+            coefficient
+        }
+        .to_string());
+    }
+    let exponential = format!("e^(-{rate})");
+    let probability = if coefficient == one {
+        exponential
+    } else {
+        format!("{coefficient} * {exponential}")
+    };
+    Ok(if complement {
+        format!("1 - {probability}")
+    } else {
+        probability
+    })
+}
+
 fn hypergeometric_probability(
     input: &str,
     event: DiscreteEvent,
@@ -2437,6 +2517,38 @@ mod tests {
             calculate_statistics("几何概率 1,2"),
             Err(StatisticsError::InvalidProbability),
         );
+    }
+
+    #[test]
+    fn leaves_poisson_probabilities_exact_and_supports_both_inclusive_tails() {
+        for (input, expected) in [
+            ("泊松概率 2,1+1", "2 * e^(-2)"),
+            ("POISSON-CDF 2,2", "5 * e^(-2)"),
+            ("泊松至少 2,2", "1 - 3 * e^(-2)"),
+            ("泊松累计 1,1/2", "3/2 * e^(-1/2)"),
+            ("泊松概率 0,1/3", "e^(-1/3)"),
+            ("POISSON-AT-LEAST 0,2", "1"),
+            ("泊松概率 0,0", "1"),
+            ("泊松概率 128,0", "0"),
+            ("泊松累计 128,0", "1"),
+            ("泊松至少 1,0", "0"),
+            ("泊松摘要 1/2", "期望 1/2 · 方差 1/2 · 标准差 √(1/2)"),
+            ("POISSON-SUMMARY 0", "期望 0 · 方差 0 · 标准差 0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for (input, error) in [
+            ("泊松概率 129,2", StatisticsError::PoissonArguments),
+            ("泊松概率 -1,2", StatisticsError::PoissonArguments),
+            ("泊松累计 1,2,3", StatisticsError::PoissonArguments),
+            ("泊松至少 0,-1", StatisticsError::PoissonRate),
+        ] {
+            assert_eq!(calculate_statistics(input), Err(error), "{input}");
+        }
     }
 
     #[test]
