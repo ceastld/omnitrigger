@@ -251,7 +251,7 @@ pub(super) enum CsvError {
     CoordinateDeviationPointCount,
     CoordinateCrossingArguments,
     CoordinateCrossingPointCount,
-    CoordinateThresholdSpanPointCount,
+    CoordinateThresholdMeasurePointCount,
     CoordinateThresholdIntervalPointCount,
     CoordinateDifferenceArguments,
     CoordinateDifferencePointCount,
@@ -560,7 +560,7 @@ impl CsvError {
                 "填写两个坐标列和一个目标纵坐标，例如 [[\"时间\",\"高度\"],0]"
             }
             Self::CoordinateCrossingPointCount => "水平交点需要 2 至 64 行同时含 x 和 y 的数据",
-            Self::CoordinateThresholdSpanPointCount => "超阈跨度需要 2 至 64 个完整样点",
+            Self::CoordinateThresholdMeasurePointCount => "超阈计算需要 2 至 64 个完整样点",
             Self::CoordinateThresholdIntervalPointCount => "超阈区间需要 2 至 64 个完整样点",
             Self::CoordinateDifferenceArguments => {
                 "填写横坐标列、两条曲线的值列及新的差值列名，例如 [[\"时间\",\"实测\",\"基准\"],\"差值\"]"
@@ -1184,7 +1184,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return table.to_csv();
         }
         "水平交点" | "horizontal-crossings" => return coordinate_horizontal_crossings(input),
-        "超阈跨度" | "span-above-threshold" => return coordinate_span_above_threshold(input),
+        "超阈跨度" | "span-above-threshold" => {
+            return coordinate_threshold_measure(input, CoordinateThresholdMeasure::Span)
+        }
+        "超阈面积" | "area-above-threshold" => {
+            return coordinate_threshold_measure(input, CoordinateThresholdMeasure::Area)
+        }
         "超阈区间" | "intervals-above-threshold" => {
             return coordinate_intervals_above_threshold(input)
         }
@@ -5676,9 +5681,18 @@ fn coordinate_horizontal_crossings(input: &str) -> Result<String, CsvError> {
     horizontal_crossings_csv(&table.samples, &target)
 }
 
-fn coordinate_span_above_threshold(input: &str) -> Result<String, CsvError> {
+enum CoordinateThresholdMeasure {
+    Span,
+    Area,
+}
+
+fn coordinate_threshold_measure(
+    input: &str,
+    measure: CoordinateThresholdMeasure,
+) -> Result<String, CsvError> {
     let (table, target) =
-        read_coordinate_level(input, CsvError::CoordinateThresholdSpanPointCount)?;
+        read_coordinate_level(input, CsvError::CoordinateThresholdMeasurePointCount)?;
+    let two = BigInt::from(2u8);
     let mut total = BigRational::default();
     for pair in table.samples.windows(2) {
         let (left_x, left_y) = &pair[0].point;
@@ -5689,10 +5703,18 @@ fn coordinate_span_above_threshold(input: &str) -> Result<String, CsvError> {
         }
         let width = right_x - left_x;
         let low = left_y.min(right_y);
-        total += if low >= &target {
+        let peak = high - &target;
+        let included_width = if low >= &target {
             width
         } else {
-            width * (high - &target) / (high - low)
+            width * &peak / (high - low)
+        };
+        total += match measure {
+            CoordinateThresholdMeasure::Span => included_width,
+            CoordinateThresholdMeasure::Area => {
+                let base = low.max(&target) - &target;
+                included_width * (peak + base) / &two
+            }
         };
         ensure_exact_size(&total).map_err(|_| CsvError::ComputedNumberRange)?;
     }
@@ -8244,6 +8266,27 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("等距插值 [[1,2],65] {data}")),
             Err(CsvError::CoordinateResampleArguments)
+        );
+    }
+
+    #[test]
+    fn integrates_only_the_exact_positive_excess_over_a_threshold() {
+        let data = "x,y\n6,-1\n2,1\n4,1\n3,\n0,-1";
+        assert_eq!(
+            transform_csv(&format!("超阈面积 [[1,2],0] {data}")).as_deref(),
+            Ok("3")
+        );
+        assert_eq!(
+            transform_csv(&format!("area-above-threshold [[1,2],\"1/2\"] {data}")).as_deref(),
+            Ok("5/4")
+        );
+        assert_eq!(
+            transform_csv(&format!("超阈面积 [[1,2],1] {data}")).as_deref(),
+            Ok("0")
+        );
+        assert_eq!(
+            transform_csv("超阈面积 [[1,2],\"-1/4\"] x,y\n-2,1/2\n-1,3/2").as_deref(),
+            Ok("5/4")
         );
     }
 

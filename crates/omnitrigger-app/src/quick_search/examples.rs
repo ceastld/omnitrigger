@@ -4883,6 +4883,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求曲线超出阈值部分的精确面积",
+        query: "CSV: 超阈面积 [[\"时间\",\"高度\"],\"1/2\"] 时间,高度\n6,-1\n2,1\n4,1\n3,\n0,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "列出曲线严格高于阈值的各个区间",
         query: "CSV: 超阈区间 [[\"时间\",\"高度\"],0] 时间,高度\n6,-1\n1,0\n4,0\n3,0\n2,2\n5,1\n0,1",
     },
@@ -5842,6 +5847,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "等距插值",
             "水平交点",
             "超阈跨度",
+            "超阈面积",
             "超阈区间",
             "曲线差值",
             "曲线对比图",
