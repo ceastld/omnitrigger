@@ -6371,6 +6371,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 "csv列",
                 "json数组",
                 "json对象",
+                "json行",
             ]
             .into_iter()
             .any(|operation| {
@@ -6679,12 +6680,14 @@ mod tests {
 
     #[test]
     fn selects_only_data_in_the_row_pipeline_example() {
-        let items = tool_operation_examples(Scope::DataPipeline, "逐行CSV").unwrap();
-        assert_eq!(items.len(), 1);
-        let example = &EXAMPLES[items[0]];
-        let start = example.argument_start().unwrap();
-        assert!(example.query[..start].ends_with("\"分数:\"]\n"));
-        assert_eq!(&example.query[start..], "{\"金额\":0.50}\n{\"金额\":1.25}");
+        for term in ["逐行CSV", "JSON行"] {
+            let items = tool_operation_examples(Scope::DataPipeline, term).unwrap();
+            assert_eq!(items.len(), 1);
+            let example = &EXAMPLES[items[0]];
+            let start = example.argument_start().unwrap();
+            assert!(example.query[..start].ends_with("\"分数:\"]\n"));
+            assert_eq!(&example.query[start..], "{\"金额\":0.50}\n{\"金额\":1.25}");
+        }
     }
 
     #[test]
