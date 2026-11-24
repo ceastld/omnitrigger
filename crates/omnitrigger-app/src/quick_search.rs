@@ -5008,6 +5008,33 @@ mod tests {
     }
 
     #[test]
+    fn reports_individual_exact_weight_shares_for_matching_values() {
+        let expected = "值,权重,比例\r\n1/2,1,1/3\r\n2,2,2/3";
+        for query in [
+            "统计: 加权频数CSV 2@2,0.5@1/4,-1@0,1/2@3/4",
+            "统计: WEIGHTED-FREQUENCY-CSV 2\t2\n0.5\t1/4\n-1\t0\n1/2\t3/4",
+            r#"处理: ["统计: 加权频数CSV"] 2@2,0.5@1/4,-1@0,1/2@3/4"#,
+        ] {
+            let results = for_query(query, &[]);
+            assert!(
+                matches!(
+                    &results,
+                    Results::Value(Ok(ResultValue {
+                        kind: ValueKind::Table(_),
+                        ..
+                    }))
+                ),
+                "{query}"
+            );
+            assert_eq!(results.refillable_text(), Some(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_statistics("加权频数CSV 5@0,2@0"),
+            Err(StatisticsError::ZeroTotalWeight)
+        );
+    }
+
+    #[test]
     fn named_csv_box_plot_ignores_missing_values_and_keeps_an_exact_summary() {
         let data = "编号,金额\nA,1\nB,2\nC,\nD,3\nE,4\nF,8";
         let results = for_query(&format!(r#"CSV: 列箱线图 "金额" {data}"#), &[]);

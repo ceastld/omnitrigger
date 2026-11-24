@@ -145,7 +145,11 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
     let normalized = normalize(query);
     let input = normalized.trim();
     let (operation, values) = operation_and_arguments(input);
-    let (operation, input) = match operation.to_ascii_lowercase().as_str() {
+    let operation = operation.to_ascii_lowercase();
+    if let Some(report) = WeightedFrequencyReport::from_name(&operation) {
+        return weighted_frequency_csv(values.trim(), report);
+    }
+    let (operation, input) = match operation.as_str() {
         "总体" | "population" => (StatisticsOperation::Population, values.trim()),
         "样本" | "sample" => (StatisticsOperation::Sample, values.trim()),
         "四分位" | "quartiles" => (
@@ -238,9 +242,6 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             return weighted_variance(values.trim()).map(|variance| format_square_root(&variance));
         }
         "加权分位数" | "weighted-quantile" => return weighted_quantile(values.trim()),
-        operation if is_weighted_distribution_operation(operation) => {
-            return weighted_cumulative_csv(values.trim());
-        }
         "移动合计" | "moving-sum" => return moving_sum_or_average(values.trim(), false),
         "移动平均" | "moving-average" => return moving_sum_or_average(values.trim(), true),
         "移动样本方差" | "moving-sample-variance" => {
@@ -715,14 +716,25 @@ fn read_weighted_distribution(input: &str) -> Result<WeightedDistribution, Stati
     })
 }
 
-fn is_weighted_distribution_operation(operation: &str) -> bool {
-    operation == "加权累积分布" || operation.eq_ignore_ascii_case("weighted-cdf")
+enum WeightedFrequencyReport {
+    Individual,
+    Cumulative,
+}
+
+impl WeightedFrequencyReport {
+    fn from_name(operation: &str) -> Option<Self> {
+        match operation {
+            "加权频数csv" | "weighted-frequency-csv" => Some(Self::Individual),
+            "加权累积分布" | "weighted-cdf" => Some(Self::Cumulative),
+            _ => None,
+        }
+    }
 }
 
 pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, StatisticsError>> {
     let (operation, _) = operation_and_arguments(query.trim());
     let operation = normalize(operation).to_ascii_lowercase();
-    (is_weighted_distribution_operation(&operation)
+    (WeightedFrequencyReport::from_name(&operation).is_some()
         || matches!(
             operation.as_str(),
             "频数csv"
@@ -736,14 +748,30 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
     .then(|| calculate_statistics(query))
 }
 
-fn weighted_cumulative_csv(input: &str) -> Result<String, StatisticsError> {
+fn weighted_frequency_csv(
+    input: &str,
+    report: WeightedFrequencyReport,
+) -> Result<String, StatisticsError> {
     let distribution = read_weighted_distribution(input)?;
     let mut cumulative = BigRational::default();
-    let mut csv = "值,累计权重,累计比例".to_owned();
+    let mut csv = String::from(match report {
+        WeightedFrequencyReport::Individual => "值,权重,比例",
+        WeightedFrequencyReport::Cumulative => "值,累计权重,累计比例",
+    });
     for (value, weight) in distribution.weights {
-        cumulative = bounded(cumulative + weight)?;
-        let share = bounded(&cumulative / &distribution.total)?;
-        let fields = [value.to_string(), cumulative.to_string(), share.to_string()];
+        let reported_weight = match report {
+            WeightedFrequencyReport::Individual => &weight,
+            WeightedFrequencyReport::Cumulative => {
+                cumulative = bounded(cumulative + &weight)?;
+                &cumulative
+            }
+        };
+        let share = bounded(reported_weight / &distribution.total)?;
+        let fields = [
+            value.to_string(),
+            reported_weight.to_string(),
+            share.to_string(),
+        ];
         append_bounded_csv_row(
             &mut csv,
             fields.iter().map(String::as_str),

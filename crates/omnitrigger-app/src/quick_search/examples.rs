@@ -708,6 +708,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 加权累积分布 4@25%,1/2@1/8,4@1/8,-1@0,2@1/4",
     },
     Example {
+        icon: Icon::Layers,
+        title: "预览每个数值合并后的权重和精确占比",
+        query: "统计: 加权频数CSV 2@2,0.5@1/4,-1@0,1/2@3/4",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按固定窗口计算精确移动平均",
         query: "统计: 移动平均 2 1/2,1,2,4",
@@ -6095,6 +6100,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "加权平均",
             "加权分位数",
             "加权累积分布",
+            "加权频数CSV",
             "加权方差",
             "加权标准差",
         ],
