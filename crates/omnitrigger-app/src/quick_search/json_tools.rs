@@ -261,6 +261,33 @@ fn split_json_operation(query: &str) -> Option<(&str, &str)> {
     Some((operation, source))
 }
 
+pub(super) enum JsonResultFormat {
+    Json,
+    JsonLines,
+    Csv,
+}
+
+pub(super) fn result_format(query: &str, output: &str) -> Option<JsonResultFormat> {
+    let (operation, _) = split_json_operation(query)?;
+    let operation = operation.to_ascii_lowercase();
+    if JsonCsvOperation::from_name(&operation).is_some() {
+        return Some(JsonResultFormat::Csv);
+    }
+    if is_json_lines_output(&operation) {
+        return Some(JsonResultFormat::JsonLines);
+    }
+    if matches!(operation.as_str(), "依次处理" | "pipeline") {
+        return None;
+    }
+    serde_json::from_str::<&RawValue>(output)
+        .is_ok()
+        .then_some(JsonResultFormat::Json)
+}
+
+fn is_json_lines_output(operation: &str) -> bool {
+    matches!(operation, "展开数组" | "to-jsonl")
+}
+
 fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String, JsonError> {
     let (operation, raw_source) = split_json_operation(query).ok_or(JsonError::Incomplete)?;
     let operation = operation.to_ascii_lowercase();
@@ -305,7 +332,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "结构统计" | "structure-stats" => return json_structure_stats(source),
-        "展开数组" | "to-jsonl" => return json_array_to_lines(source),
+        operation if is_json_lines_output(operation) => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
         "校验行" | "validate-jsonl" => return validate_json_lines(raw_source),
         "合并对象" | "merge-objects" => return merge_json_objects(source),

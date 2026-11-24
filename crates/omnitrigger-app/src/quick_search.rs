@@ -216,6 +216,40 @@ struct ResultValue {
 }
 
 impl ResultValue {
+    fn suggested_file_name(&self, query: &str) -> &'static str {
+        use data_pipeline::DataPipelineMode;
+        use json_tools::JsonResultFormat;
+
+        if matches!(
+            &self.kind,
+            ValueKind::Table(_)
+                | ValueKind::Scatter(_)
+                | ValueKind::BinPlot(_)
+                | ValueKind::CorrelationPlot(_)
+        ) {
+            return "搜索结果.csv";
+        }
+        let format = match scoped_query(query.trim_start()) {
+            Some((Scope::Json, term)) => json_tools::result_format(term, &self.text),
+            Some((Scope::DataPipeline, term)) => {
+                match data_pipeline::split_pipeline_input(term).0 {
+                    DataPipelineMode::JsonLines => Some(JsonResultFormat::JsonLines),
+                    DataPipelineMode::JsonArray | DataPipelineMode::JsonObject => {
+                        Some(JsonResultFormat::Json)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        match format {
+            Some(JsonResultFormat::Csv) => "搜索结果.csv",
+            Some(JsonResultFormat::Json) => "搜索结果.json",
+            Some(JsonResultFormat::JsonLines) => "搜索结果.jsonl",
+            None => "搜索结果.txt",
+        }
+    }
+
     fn visual_preview_height(&self) -> Option<f32> {
         match &self.kind {
             ValueKind::Table(table) => Some(table.preview_height()),
@@ -2356,14 +2390,8 @@ impl QuickSearch {
         let Results::Value(Ok(result)) = &self.results else {
             return;
         };
-        let name = match &result.kind {
-            ValueKind::Table(_)
-            | ValueKind::Scatter(_)
-            | ValueKind::BinPlot(_)
-            | ValueKind::CorrelationPlot(_) => "搜索结果.csv",
-            _ => "搜索结果.txt",
-        };
         let original_query = self.input.read(cx).text();
+        let name = result.suggested_file_name(&original_query);
         let text = result.text.clone();
         self.result_save = ResultSaveState::InProgress;
         let receiver = cx.prompt_for_new_path(Path::new(""), Some(name));
@@ -4843,6 +4871,27 @@ mod tests {
             transform_csv("列箱线摘要 2 编号,金额\nA,\nB,待定"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn suggests_the_saved_extension_of_json_results_without_confusing_csv_or_text() {
+        for (query, expected) in [
+            (r#"JSON: 格式化 {"编号":"001"}"#, "搜索结果.json"),
+            ("JSON: TO-JSONL [1.50]", "搜索结果.jsonl"),
+            ("JSON: 展开数组 []", "搜索结果.jsonl"),
+            ("JSON: 转CSV [[1]]", "搜索结果.csv"),
+            ("JSON: 对比CSV [1] [2]", "搜索结果.csv"),
+            ("JSON: 校验行 1", "搜索结果.txt"),
+            ("处理: JSON行 [\"分数:\"]\n0.50\n1.25", "搜索结果.jsonl"),
+            (r#"处理: JSON对象 ["分数:"] {"茶":1.50}"#, "搜索结果.json"),
+            (r#"处理: ["文本: 原文"] 1"#, "搜索结果.txt"),
+            ("2**10", "搜索结果.txt"),
+        ] {
+            let Results::Value(Ok(result)) = for_query(query, &[]) else {
+                panic!("搜索框没有生成可保存的结果：{query}");
+            };
+            assert_eq!(result.suggested_file_name(query), expected, "{query}");
+        }
     }
 
     #[test]
