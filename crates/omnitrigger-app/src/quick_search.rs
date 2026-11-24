@@ -4958,6 +4958,56 @@ mod tests {
     }
 
     #[test]
+    fn previews_csv_rule_reports_and_filtered_records_without_rewriting_csv() {
+        let input = "编号,日期,备注\r\nA,2024-02-29,\"保留,逗号\"\r\nB,2023-02-29,\"上\r\n下\"";
+        for (operation, expected) in [
+            (
+                r#"检查表头 ["编号","日期","备注"]"#,
+                "列号,问题,预期列名,实际列名",
+            ),
+            (
+                "检查日期列 [2]",
+                "数据行,列号,列名,内容\r\n2,2,日期,2023-02-29",
+            ),
+            (
+                r#"检查规则 [["日期","日期"]]"#,
+                "数据行,列号,列名,规则号,规则,内容\r\n2,2,日期,1,日期,2023-02-29",
+            ),
+            (
+                r#"规则统计 [["日期","日期"]]"#,
+                "规则号,列号,列名,规则,通过数,失败数\r\n1,2,日期,日期,1,1",
+            ),
+            (
+                r#"规则保留行 [["日期","日期"]]"#,
+                "编号,日期,备注\r\nA,2024-02-29,\"保留,逗号\"",
+            ),
+            (
+                r#"KEEP-INVALID-ROWS [["日期","日期"]]"#,
+                "编号,日期,备注\r\nB,2023-02-29,\"上\r\n下\"",
+            ),
+        ] {
+            let step = serde_json::to_string(&[format!("CSV: {operation}")]).unwrap();
+            for query in [
+                format!("CSV: {operation} {input}"),
+                format!("处理: {step} {input}"),
+            ] {
+                let results = for_query(&query, &[]);
+                assert!(
+                    matches!(
+                        &results,
+                        Results::Value(Ok(ResultValue {
+                            kind: ValueKind::Table(_),
+                            ..
+                        }))
+                    ),
+                    "{query}"
+                );
+                assert_eq!(results.refillable_text(), Some(expected), "{query}");
+            }
+        }
+    }
+
+    #[test]
     fn named_csv_box_plot_ignores_missing_values_and_keeps_an_exact_summary() {
         let data = "编号,金额\nA,1\nB,2\nC,\nD,3\nE,4\nF,8";
         let results = for_query(&format!(r#"CSV: 列箱线图 "金额" {data}"#), &[]);

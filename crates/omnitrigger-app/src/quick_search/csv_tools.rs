@@ -6920,6 +6920,44 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             (text, table)
         }));
     }
+    if matches!(
+        operation.to_ascii_lowercase().as_str(),
+        "检查表头"
+            | "check-header"
+            | "检查数值列"
+            | "check-numeric-columns"
+            | "检查日期列"
+            | "check-date-columns"
+            | "检查json列"
+            | "check-json-columns"
+            | "检查时间戳列"
+            | "check-timestamp-columns"
+            | "检查长度范围"
+            | "check-length-range"
+            | "检查日期格式"
+            | "check-date-format"
+            | "检查正则列"
+            | "check-regex-columns"
+            | "检查时间范围"
+            | "check-timestamp-range"
+            | "检查数值范围"
+            | "check-numeric-range"
+            | "检查允许值"
+            | "check-allowed-values"
+            | "检查规则"
+            | "check-rules"
+            | "规则保留行"
+            | "keep-valid-rows"
+            | "规则问题行"
+            | "keep-invalid-rows"
+            | "规则统计"
+            | "rule-summary"
+    ) {
+        return Some(transform_csv_operation(operation, data).and_then(|text| {
+            let table = parse_table_preview(&text)?;
+            Ok((text, table))
+        }));
+    }
     Some(
         csv_preview_output(operation, data)?
             .map(|(text, rows)| (text, TablePreview::from_rows(rows))),
