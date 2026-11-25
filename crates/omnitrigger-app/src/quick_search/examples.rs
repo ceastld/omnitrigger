@@ -6988,6 +6988,11 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "把角度按周期归入指定区间",
+        query: "分数: 计算 wrap(-190,-180,180)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把精确分数向下取整",
         query: "分数: 计算 floor(-7/3)",
     },

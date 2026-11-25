@@ -55,6 +55,7 @@ pub(super) enum FractionError {
     InterpolationInterval,
     InterpolationRange,
     ClampBounds,
+    WrapBounds,
     ToleranceArguments,
     QuantileArguments,
     SampleVarianceCount,
@@ -118,6 +119,7 @@ impl FractionError {
             Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
             Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
             Self::ClampBounds => "clamp 的下界须小于或等于上界",
+            Self::WrapBounds => "wrap 的下界须小于上界",
             Self::ToleranceArguments => "isclose 须填写两个数，相对容差为 0 至小于 1，绝对容差须非负",
             Self::QuantileArguments => {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
@@ -1896,6 +1898,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.clamp_function();
         }
+        if name == "wrap" {
+            self.remaining = rest;
+            return self.wrap_function();
+        }
         if matches!(name.as_str(), "lerp" | "invlerp" | "remap" | "midpoint") {
             self.remaining = rest;
             return self.interpolation_function(&name);
@@ -2351,6 +2357,20 @@ impl FractionParser<'_> {
             return Err(FractionError::ClampBounds);
         }
         Ok(value.clamp(lower, upper))
+    }
+
+    fn wrap_function(&mut self) -> Result<BigRational, FractionError> {
+        let [value, lower, upper]: [BigRational; 3] = self
+            .fixed_function_arguments(3)?
+            .try_into()
+            .expect("wrap 有三个参数");
+        if lower >= upper {
+            return Err(FractionError::WrapBounds);
+        }
+        let (_, offset) = quotient_and_remainder(value - &lower, upper - &lower);
+        let result = lower + offset;
+        ensure_exact_size(&result)?;
+        Ok(result)
     }
 
     fn fixed_function_arguments(
@@ -3431,6 +3451,29 @@ mod tests {
             );
         }
         assert!(calculate_fraction("iqr()").is_err());
+    }
+
+    #[test]
+    fn wraps_fractions_into_a_half_open_interval() {
+        for (query, expected) in [
+            ("计算 wrap(-190,-180,180)", "170"),
+            ("计算 wrap(180,-180,180)", "-180"),
+            ("计算 wrap(540,-180,180)", "-180"),
+            ("计算 wrap(7/3,-1/2,1/2)", "1/3"),
+            ("计算 wrap(2/3,1/3,2/3)", "1/3"),
+            ("计算 wrap(1/2,1/3,2/3)", "1/2"),
+            ("计算 wrap(2**80+1,0,360)", "257"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_fraction("wrap(1,2,2)"),
+            Err(FractionError::WrapBounds)
+        );
+        assert_eq!(
+            calculate_fraction("wrap(1,3,2)"),
+            Err(FractionError::WrapBounds)
+        );
     }
 
     #[test]
