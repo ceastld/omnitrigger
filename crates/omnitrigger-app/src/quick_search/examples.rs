@@ -2180,6 +2180,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "应用历史:",
     },
     Example {
+        icon: Icon::Layers,
+        title: "重新打开最近预览过的文本文件",
+        query: "最近预览:",
+    },
+    Example {
         icon: Icon::Keyboard,
         title: "搜索已启用的触发器",
         query: "已启用触发器: ",

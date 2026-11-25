@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
     path::{Component, Path, Prefix},
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -26,6 +28,7 @@ use super::{
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
 const FOLDER_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_NAVIGATION_HISTORY: usize = 16;
+const MAX_RECENT_PREVIEWS: usize = 12;
 const TICKS_PER_DAY: u64 = 864_000_000_000;
 const FILETIME_TICKS_PER_SECOND: u64 = 10_000_000;
 const FILETIME_UNIX_EPOCH_SECONDS: i64 = 11_644_473_600;
@@ -62,6 +65,39 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("修改日期统计", "按本地修改日期计数"),
     ("创建日期统计", "按本地创建日期计数"),
 ];
+
+#[derive(Clone, Default)]
+pub(super) struct RecentFilePreviews(Rc<RefCell<Vec<String>>>);
+
+impl RecentFilePreviews {
+    pub(super) fn record(&self, path: &str) {
+        let mut paths = self.0.borrow_mut();
+        paths.retain(|previous| previous != path);
+        paths.insert(0, path.to_owned());
+        paths.truncate(MAX_RECENT_PREVIEWS);
+    }
+
+    pub(super) fn results(&self, query: &str) -> Results {
+        let query = query.trim().to_lowercase();
+        Results::Destinations(
+            self.0
+                .borrow()
+                .iter()
+                .filter(|path| query.is_empty() || path.to_lowercase().contains(&query))
+                .map(|path| Destination::LocalFile {
+                    name: Path::new(path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(path)
+                        .to_owned(),
+                    path: path.clone(),
+                    is_directory: false,
+                    size_bytes: None,
+                })
+                .collect(),
+        )
+    }
+}
 
 #[derive(Default)]
 pub(super) struct LocalFilesIndex {

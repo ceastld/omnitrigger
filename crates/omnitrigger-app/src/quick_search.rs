@@ -129,7 +129,9 @@ use identifiers::{
 use intervals::{calculate_intervals, IntervalError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
-use local_files::{directory_query, DirectoryLoad, LocalFilesIndex, FOLDER_DEBOUNCE};
+use local_files::{
+    directory_query, DirectoryLoad, LocalFilesIndex, RecentFilePreviews, FOLDER_DEBOUNCE,
+};
 use matrix::{calculate_matrix, MatrixError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
@@ -457,6 +459,7 @@ struct RememberedSearchInput {
 pub(super) struct RecentSearch {
     pub(super) destinations: RecentDestinations,
     pub(super) launched_apps: RecentApplications,
+    file_previews: RecentFilePreviews,
     calculations: RecentValues,
     conversions: RecentValues,
     queries: RecentValues,
@@ -1133,6 +1136,7 @@ impl Results {
                     Self::Destinations(windows_settings::matching_windows_settings(term))
                 }
                 Scope::LocalFiles => local_files.results(term),
+                Scope::RecentFilePreviews => recent.file_previews.results(term),
                 Scope::OpenWindows => open_windows.results(term),
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term);
@@ -2922,11 +2926,20 @@ impl QuickSearch {
     }
 
     fn open_destination(
-        &self,
+        &mut self,
         destination: Destination,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let (Some((Scope::RecentFilePreviews, _)), Destination::LocalFile { path, .. }) =
+            (scoped_query(self.input.read(cx).text_ref()), &destination)
+        {
+            if let Some(index) = self.results.local_file_index(path) {
+                self.selected = index;
+                self.load_selected_text_file(window, cx);
+            }
+            return;
+        }
         if let Destination::OpenWindow(target) = destination {
             let Some(hwnd) = window
                 .window_handle()
@@ -3044,7 +3057,7 @@ impl QuickSearch {
         Some(item)
     }
 
-    fn confirm(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.results {
             Results::Value(Ok(result)) => {
                 let item = self.prepare_value_copy(result, cx);
@@ -3262,6 +3275,9 @@ impl QuickSearch {
                                     if action == FilePreviewAction::Load || inserted != query =>
                                 {
                                     let selection = input.selection_position();
+                                    if action == FilePreviewAction::Load {
+                                        this.index.recent.file_previews.record(&selected_path);
+                                    }
                                     this.result_refill = Some(ResultRefill {
                                         original,
                                         inserted: inserted.clone(),
@@ -5032,6 +5048,8 @@ impl QuickSearch {
 
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
+        let scope = scoped_query(self.input.read(cx).text_ref());
+        let recent_previews = matches!(scope, Some((Scope::RecentFilePreviews, _)));
         match &self.results {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Table(table),
@@ -5395,16 +5413,11 @@ impl QuickSearch {
                 .text_color(rgb(theme::DANGER_TEXT))
                 .child(div().truncate().child(error.clone())),
             Results::Destinations(items) if items.is_empty() => {
-                row.text_color(rgb(theme::TEXT_MUTED)).child(
-                    if matches!(
-                        scoped_query(&self.input.read(cx).text()),
-                        Some((Scope::ApplicationHistory, ""))
-                    ) {
-                        "本次运行还没有从快速搜索打开的应用"
-                    } else {
-                        "未找到匹配项"
-                    },
-                )
+                row.text_color(rgb(theme::TEXT_MUTED)).child(match scope {
+                    Some((Scope::ApplicationHistory, "")) => "本次运行还没有从快速搜索打开的应用",
+                    Some((Scope::RecentFilePreviews, "")) => "本次运行还没有预览过的文本文件",
+                    _ => "未找到匹配项",
+                })
             }
             Results::Destinations(items) => div()
                 .flex()
@@ -5438,15 +5451,20 @@ impl QuickSearch {
                                 ),
                                 Destination::LocalFile {
                                     name,
+                                    path,
                                     is_directory,
                                     size_bytes,
                                     ..
                                 } => (
                                     Icon::Layers,
                                     name.clone(),
-                                    size_bytes
-                                        .map(|bytes| format!("{bytes} 字节"))
-                                        .or_else(|| is_directory.then(|| "文件夹".to_owned())),
+                                    if recent_previews {
+                                        Some(path.clone())
+                                    } else {
+                                        size_bytes
+                                            .map(|bytes| format!("{bytes} 字节"))
+                                            .or_else(|| is_directory.then(|| "文件夹".to_owned()))
+                                    },
                                 ),
                                 Destination::OpenWindow(window) => {
                                     let detail = if window.minimized {
@@ -5556,6 +5574,9 @@ impl QuickSearch {
                                             Destination::LocalFile {
                                                 is_directory: true, ..
                                             } => "Tab 进入 · Enter 复制路径",
+                                            Destination::LocalFile { .. } if recent_previews => {
+                                                "Enter 预览"
+                                            }
                                             Destination::LocalFile { .. } => "Enter 复制路径",
                                             Destination::ActionLibraryQuery(term)
                                             | Destination::TriggerHistoryQuery(term)
@@ -10540,11 +10561,51 @@ mod tests {
                 Results::ConversionTargets(items) if !items.is_empty() => {}
                 Results::Destinations(items)
                     if !items.is_empty()
-                        || scoped_query(example.query) == Some((Scope::ApplicationHistory, "")) => {
-                }
+                        || matches!(
+                            scoped_query(example.query),
+                            Some((Scope::ApplicationHistory | Scope::RecentFilePreviews, ""))
+                        ) => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }
         }
+    }
+
+    #[test]
+    fn reuses_recent_file_previews_across_searches_and_filters_their_paths() {
+        let index = SearchIndex::default();
+        let recent = index.recent.file_previews.clone();
+        for number in 1..=13 {
+            recent.record(&format!(r"C:\Reports\Batch-{number}.csv"));
+        }
+        recent.record(r"C:\Reports\Batch-5.csv");
+        let matches = index.results("最近预览: REPORTS");
+        let Results::Destinations(items) = &matches else {
+            panic!("最近预览应显示文件");
+        };
+        assert_eq!(items.len(), 12);
+        assert_eq!(
+            matches.selected_text_file(0),
+            Some(r"C:\Reports\Batch-5.csv")
+        );
+        assert_eq!(
+            matches.selected_text_file(1),
+            Some(r"C:\Reports\Batch-13.csv")
+        );
+        assert!(matches
+            .local_file_index(r"C:\Reports\Batch-1.csv")
+            .is_none());
+        assert_eq!(
+            index
+                .results("recent previews: Batch-8.csv")
+                .selected_text_file(0),
+            Some(r"C:\Reports\Batch-8.csv")
+        );
+        assert_eq!(
+            SearchIndex::default()
+                .results("最近预览:")
+                .selectable_count(),
+            0
+        );
     }
 
     #[test]
