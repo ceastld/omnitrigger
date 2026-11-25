@@ -149,6 +149,8 @@ pub(super) enum CsvError {
     RegexCaptureColumnsArguments,
     RegexCaptureColumnsInputTooLarge,
     SplitColumnArguments,
+    SplitRowsArguments,
+    SplitRowsTooLarge,
     UnitConversionColumnArguments,
     RadixColumnArguments,
     NumericComparisonColumnArguments,
@@ -402,6 +404,8 @@ impl CsvError {
             Self::SplitColumnArguments => {
                 "填写来源列、至少两个不同的新列名和非空分隔符，例如 [\"地址\",[\"省\",\"市\"],\"/\"]"
             }
+            Self::SplitRowsArguments => "填写来源列和非空分隔符，例如 [\"标签\",\"/\"]",
+            Self::SplitRowsTooLarge => "拆分后的表格超过 1 MiB，请缩小数据范围",
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
             Self::UnitConversionColumnArguments => {
                 "填写新列名、来源列和一个与源数值同类型的目标单位"
@@ -929,6 +933,10 @@ enum Operation {
     SplitColumn {
         source: ColumnReference,
         names: Vec<String>,
+        separator: String,
+    },
+    SplitRows {
+        source: ColumnReference,
         separator: String,
     },
     ComputeColumn {
@@ -1858,6 +1866,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 names,
                 separator,
             }
+        }
+        "拆成行" | "split-to-rows" => {
+            let ((source, separator), data) = json_argument_and_data::<(ColumnReference, String)>(
+                input,
+                CsvError::SplitRowsArguments,
+            )?;
+            input = data;
+            Operation::SplitRows { source, separator }
         }
         kind
         @ ("日期加天列" | "date-offset-column" | "日期加月列" | "date-month-offset-column") =>
@@ -2904,6 +2920,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             names,
             separator,
         } => split_column(&rows, source, &names, &separator),
+        Operation::SplitRows { source, separator } => split_csv_rows(&rows, source, &separator),
         Operation::ComputeColumn {
             name,
             left,
@@ -5965,6 +5982,35 @@ fn split_column(
     Ok(output)
 }
 
+fn split_csv_rows(
+    rows: &[Vec<String>],
+    source: ColumnReference,
+    separator: &str,
+) -> Result<String, CsvError> {
+    if separator.is_empty() || separator.contains('\0') {
+        return Err(CsvError::SplitRowsArguments);
+    }
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let too_large = CsvError::SplitRowsTooLarge;
+    let mut output = String::new();
+    append_bounded_csv_row(&mut output, header.iter().map(String::as_str), too_large)?;
+    for row in records {
+        for part in row[source].split(separator) {
+            let fields = row.iter().enumerate().map(|(column, value)| {
+                if column == source {
+                    part
+                } else {
+                    value.as_str()
+                }
+            });
+            append_bounded_csv_row(&mut output, fields, too_large)?;
+        }
+    }
+    Ok(output)
+}
+
 fn compute_column(
     mut rows: Vec<Vec<String>>,
     name: String,
@@ -8105,6 +8151,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "regex-capture-columns"
             | "正则展开行"
             | "regex-expand-rows"
+            | "拆成行"
+            | "split-to-rows"
             | "工程计数列"
             | "engineering-columns"
             | "按列去重留末"
@@ -12169,6 +12217,41 @@ B,乙
             transform_csv(r#"coalesce-columns ["手机",[2,3]] 编号,手机,座机"#),
             Err(CsvError::HeaderNameConflict)
         );
+    }
+
+    #[test]
+    fn splits_csv_values_into_rows_preserving_fields_order_and_empty_parts() {
+        let query = concat!(
+            "拆成行 [\"标签\",\"::\"] 编号,标签,备注\n",
+            "001,茶::咖啡,\"保留,逗号\"\n002,::山::,尾\n003,,空",
+        );
+        let expected = concat!(
+            "编号,标签,备注\r\n001,茶,\"保留,逗号\"\r\n001,咖啡,\"保留,逗号\"\r\n",
+            "002,\"\",尾\r\n002,山,尾\r\n002,\"\",尾\r\n003,\"\",空",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(csv_table_preview(query).unwrap().unwrap().0, expected);
+        assert_eq!(
+            transform_csv("split-to-rows [1,\"\\n\"] 标签,编号\n\"甲\n乙\",09").as_deref(),
+            Ok("标签,编号\r\n甲,09\r\n乙,09"),
+        );
+        assert_eq!(
+            transform_csv("拆成行 [1,\"/\"] 标签").as_deref(),
+            Ok("标签")
+        );
+        for (query, error) in [
+            ("拆成行 [1,\"\"] 标签", CsvError::SplitRowsArguments),
+            ("拆成行 [1,\"\\u0000\"] 标签", CsvError::SplitRowsArguments),
+            ("拆成行 [2,\"/\"] 标签", CsvError::ColumnOutOfRange),
+        ] {
+            assert_eq!(transform_csv(query), Err(error));
+        }
+        let too_large = format!(
+            "拆成行 [1,\"/\"] 标签,说明\n{}x,{}",
+            "x/".repeat(1024),
+            "A".repeat(1024)
+        );
+        assert_eq!(transform_csv(&too_large), Err(CsvError::SplitRowsTooLarge));
     }
 
     #[test]

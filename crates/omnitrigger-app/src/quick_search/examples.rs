@@ -5125,6 +5125,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按分隔符将一格中的标签拆成多行",
+        query: "CSV: 拆成行 [\"标签\",\"/\"] 编号,标签\n001,茶/咖啡\n002,果汁\n003,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用数量和单价算出新的一列",
         query:
             "CSV: 计算列 [\"金额\",\"数量\",\"*\",\"单价\"] 商品,数量,单价\n茶,3,2.50\n咖啡,2,1/3",
