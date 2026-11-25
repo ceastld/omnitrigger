@@ -5060,6 +5060,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "为每组记录追加指定时间窗口内的合计",
+        query: "CSV: 时间窗口合计列 [\"合计\",\"时刻\",\"金额\",[\"设备\"],\"2ns\"] 设备,时刻,金额\nA,3ns,\nB,4ns,\nA,1ns,1/3\nA,3ns,0.5\nA,4ns,-0.5",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "为每组记录追加指定时间窗口内的平均值",
+        query: "CSV: 时间窗口平均列 [\"平均\",\"时刻\",\"金额\",[\"设备\"],\"2ns\"] 设备,时刻,金额\nA,3ns,\nB,4ns,\nA,1ns,1/3\nA,3ns,0.5\nA,4ns,-0.5",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "查看每组最早最晚的时刻及实际跨度",
         query: "CSV: 分组时间戳摘要 [[\"设备\"],\"时刻\"] 设备,时刻\nA,2026-03-08T03:30:00-04:00\nB,2ns\nC,\nA,2026-03-08T01:30:00-05:00\nB,1ns",
     },

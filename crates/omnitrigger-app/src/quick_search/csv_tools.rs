@@ -154,6 +154,7 @@ pub(super) enum CsvError {
     GroupTimestampDifferenceColumnArguments,
     GroupTimestampSessionArguments,
     GroupTimestampWindowArguments,
+    GroupTimestampWindowValueArguments,
     GroupTimestampSummaryArguments,
     TimestampZoneColumnArguments,
     TimestampAlignmentColumnArguments,
@@ -416,6 +417,9 @@ impl CsvError {
             }
             Self::GroupTimestampWindowArguments => {
                 "填写新列名、时间戳列、分组列和非负窗口时长，例如 [\"次数\",\"时刻\",[\"设备\"],\"30分钟\"]"
+            }
+            Self::GroupTimestampWindowValueArguments => {
+                "填写新列名、时间戳列、数值列、分组列和非负窗口时长，例如 [\"合计\",\"时刻\",\"金额\",[\"设备\"],\"30分钟\"]"
             }
             Self::GroupTimestampSummaryArguments => {
                 "填写分组列和时间戳列，例如 [[\"设备\"],\"时刻\"]"
@@ -2139,7 +2143,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         "会话编号列" | "timestamp-session-column" => return append_timestamp_sessions(input),
         "时间窗口计数列" | "timestamp-window-count-column" => {
-            return append_timestamp_window_counts(input)
+            return append_timestamp_window(input, TimestampWindowStatistic::Count)
+        }
+        "时间窗口合计列" | "timestamp-window-sum-column" => {
+            return append_timestamp_window(input, TimestampWindowStatistic::Sum)
+        }
+        "时间窗口平均列" | "timestamp-window-average-column" => {
+            return append_timestamp_window(input, TimestampWindowStatistic::Average)
         }
         "时刻差列" | "clock-difference-column" => {
             let ((name, start, end), data) =
@@ -4996,12 +5006,38 @@ fn append_timestamp_sessions(input: &str) -> Result<String, CsvError> {
     })
 }
 
-fn append_timestamp_window_counts(input: &str) -> Result<String, CsvError> {
-    let invalid = CsvError::GroupTimestampWindowArguments;
-    let ((name, source, groups, span), data) =
-        json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>, String)>(
-            input, invalid,
-        )?;
+#[derive(Clone, Copy)]
+enum TimestampWindowStatistic {
+    Count,
+    Sum,
+    Average,
+}
+
+fn append_timestamp_window(
+    input: &str,
+    statistic: TimestampWindowStatistic,
+) -> Result<String, CsvError> {
+    let invalid = match statistic {
+        TimestampWindowStatistic::Count => CsvError::GroupTimestampWindowArguments,
+        _ => CsvError::GroupTimestampWindowValueArguments,
+    };
+    let (name, source, amount, groups, span, data) =
+        if matches!(statistic, TimestampWindowStatistic::Count) {
+            let ((name, source, groups, span), data) =
+                json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>, String)>(
+                    input, invalid,
+                )?;
+            (name, source, None, groups, span, data)
+        } else {
+            let ((name, source, amount, groups, span), data) = json_argument_and_data::<(
+                String,
+                ColumnReference,
+                ColumnReference,
+                Vec<ColumnReference>,
+                String,
+            )>(input, invalid)?;
+            (name, source, Some(amount), groups, span, data)
+        };
     let window = duration_nanoseconds(&normalize(&span)).map_err(|_| invalid)?;
     if name.trim().is_empty() || name.contains('\0') || window < 0 {
         return Err(invalid);
@@ -5010,6 +5046,13 @@ fn append_timestamp_window_counts(input: &str) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let source = source.resolve(header)?;
     validate_column_width(&[source], header.len())?;
+    let amount = amount
+        .map(|column| {
+            let index = column.resolve(header)?;
+            validate_column_width(&[index], header.len())?;
+            Ok::<_, CsvError>(index)
+        })
+        .transpose()?;
     let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
     let mut timelines: HashMap<_, Vec<_>> = HashMap::new();
     for (index, row) in records.iter().enumerate() {
@@ -5021,33 +5064,68 @@ fn append_timestamp_window_counts(input: &str) -> Result<String, CsvError> {
             row: index + 1,
             cause: error.message(),
         })?;
+        let value = amount
+            .map(|column| row[column].trim())
+            .filter(|cell| !cell.is_empty())
+            .map(parse_fraction_literal)
+            .transpose()
+            .map_err(|error| CsvError::DataRowValue {
+                row: index + 1,
+                cause: error.message(),
+            })?;
         timelines
             .entry(column_key(row, &groups))
             .or_default()
-            .push((time, index));
+            .push((time, index, value));
     }
-    let mut counts = vec![0; records.len()];
+    let mut results = vec![String::new(); records.len()];
+    let mut result_bytes = 0;
     for timeline in timelines.values_mut() {
-        timeline.sort_unstable();
+        timeline.sort_unstable_by_key(|(time, index, _)| (*time, *index));
         let mut first = 0;
         let mut end = 0;
+        let mut sum = BigRational::default();
+        let mut value_count = 0;
         for simultaneous in timeline.chunk_by(|left, right| left.0 == right.0) {
             let time = simultaneous[0].0;
-            while absolute_elapsed_nanoseconds(timeline[first].0, time) > window {
+            while first < end && absolute_elapsed_nanoseconds(timeline[first].0, time) > window {
+                if let Some(value) = &timeline[first].2 {
+                    sum -= value;
+                    ensure_exact_size(&sum).map_err(|_| CsvError::ComputedNumberRange)?;
+                    value_count -= 1;
+                }
                 first += 1;
             }
             end += simultaneous.len();
-            for &(_, index) in simultaneous {
-                counts[index] = end - first;
+            for (_, _, value) in simultaneous {
+                if let Some(value) = value {
+                    sum += value;
+                    ensure_exact_size(&sum).map_err(|_| CsvError::ComputedNumberRange)?;
+                    value_count += 1;
+                }
+            }
+            let result = match statistic {
+                TimestampWindowStatistic::Count => (end - first).to_string(),
+                _ if value_count == 0 => String::new(),
+                TimestampWindowStatistic::Sum => sum.to_string(),
+                TimestampWindowStatistic::Average => {
+                    let mean = &sum / BigInt::from(value_count);
+                    ensure_exact_size(&mean).map_err(|_| CsvError::ComputedNumberRange)?;
+                    mean.to_string()
+                }
+            };
+            result_bytes += result.len() * simultaneous.len();
+            if result_bytes > MAX_EXPANDED_CSV_BYTES {
+                return Err(CsvError::AddedColumnTooLarge);
+            }
+            for &(_, index, _) in simultaneous {
+                results[index].clone_from(&result);
             }
         }
     }
-    let mut counts = counts.into_iter();
+    let mut results = results.into_iter();
     write_appended_column(header, records, &name, |_| {
-        Ok(match counts.next().unwrap_or(0) {
-            0 => String::new(),
-            count => count.to_string(),
-        })
+        Ok(results.next().unwrap_or_default())
     })
 }
 
@@ -7806,6 +7884,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "timestamp-session-column"
             | "时间窗口计数列"
             | "timestamp-window-count-column"
+            | "时间窗口合计列"
+            | "timestamp-window-sum-column"
+            | "时间窗口平均列"
+            | "timestamp-window-average-column"
             | "百分位排名列"
             | "percent-rank-column"
             | "降序百分位排名列"
@@ -13646,6 +13728,37 @@ null"#
         );
         assert!(matches!(
             transform_csv("时间窗口计数列 [\"次数\",1,[],\"1ns\"] 时刻\n0s\n坏值"),
+            Err(CsvError::DataRowValue { row: 2, .. }),
+        ));
+    }
+
+    #[test]
+    fn aggregates_exact_values_in_timestamp_windows_without_reordering_rows() {
+        let data =
+            "设备,时刻,金额\nA,3ns,\nB,4ns,\nA,1ns,1/3\nA,3ns,0.5\nA,4ns,-0.50\nA,8ns,\nB,,坏值";
+        let columns = r#"["窗口","时刻","金额",["设备"],"2ns"]"#;
+        for (command, expected) in [
+            (
+                "时间窗口合计列",
+                "设备,时刻,金额,窗口\r\nA,3ns,\"\",5/6\r\nB,4ns,\"\",\"\"\r\nA,1ns,1/3,1/3\r\nA,3ns,0.5,5/6\r\nA,4ns,-0.50,0\r\nA,8ns,\"\",\"\"\r\nB,\"\",坏值,\"\"",
+            ),
+            (
+                "时间窗口平均列",
+                "设备,时刻,金额,窗口\r\nA,3ns,\"\",5/12\r\nB,4ns,\"\",\"\"\r\nA,1ns,1/3,1/3\r\nA,3ns,0.5,5/12\r\nA,4ns,-0.50,0\r\nA,8ns,\"\",\"\"\r\nB,\"\",坏值,\"\"",
+            ),
+        ] {
+            let query = format!("{command} {columns} {data}");
+            assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+            let (text, table) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(text, expected);
+            assert_eq!(table.row_pages(), 2);
+        }
+        assert_eq!(
+            transform_csv("timestamp-window-sum-column [\"窗口\",1,2,[],\"0ns\"] 时刻,金额\n0s,9007199254740993\n1970-01-01T08:00:00+08:00,1\n1ns,-1").as_deref(),
+            Ok("时刻,金额,窗口\r\n0s,9007199254740993,9007199254740994\r\n1970-01-01T08:00:00+08:00,1,9007199254740994\r\n1ns,-1,-1")
+        );
+        assert!(matches!(
+            transform_csv("时间窗口平均列 [\"平均\",1,2,[],\"1ns\"] 时刻,金额\n0s,3\n1ns,坏值"),
             Err(CsvError::DataRowValue { row: 2, .. }),
         ));
     }
