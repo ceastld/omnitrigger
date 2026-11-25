@@ -161,6 +161,7 @@ enum DisplayTargets<'a> {
     Epoch(TimestampUnit),
 }
 
+#[derive(Clone, Copy)]
 enum TimestampAlignment {
     Floor,
     Ceil,
@@ -628,13 +629,25 @@ fn align_timestamp(
     let (step, value) = input
         .split_once('@')
         .ok_or(TimestampError::AlignmentArguments)?;
-    let step = elapsed_duration(step)
+    let step = timestamp_alignment_step(step)?;
+    let time = interval_endpoint(value.trim(), Some(now))?;
+    align_instant(time, step, alignment)
+}
+
+fn timestamp_alignment_step(input: &str) -> Result<i128, TimestampError> {
+    elapsed_duration(input)
         .ok()
         .filter(|duration| !duration.is_zero())
-        .ok_or(TimestampError::AlignmentArguments)?;
-    let time = interval_endpoint(value.trim(), Some(now))?;
+        .map(|duration| duration.as_nanos() as i128)
+        .ok_or(TimestampError::AlignmentArguments)
+}
+
+fn align_instant(
+    time: DateTime<Utc>,
+    step: i128,
+    alignment: TimestampAlignment,
+) -> Result<DateTime<Utc>, TimestampError> {
     let nanos = unix_nanos(time);
-    let step = step.as_nanos() as i128;
     let remainder = nanos.rem_euclid(step);
     let use_later_boundary = match alignment {
         TimestampAlignment::Floor => false,
@@ -796,6 +809,24 @@ pub(super) fn timestamp_zone_converter(
         format_display_time(time, unit.date_format(), &zone, &|time| {
             time.with_timezone(&Local).fixed_offset()
         })
+    })
+}
+
+pub(super) fn timestamp_alignment_converter(
+    step: &str,
+    direction: &str,
+) -> Result<impl Fn(&str) -> Result<String, TimestampError>, TimestampError> {
+    let step = timestamp_alignment_step(&normalize(step))?;
+    let direction = match normalize(direction).trim().to_ascii_lowercase().as_str() {
+        "向下" | "floor" => TimestampAlignment::Floor,
+        "向上" | "ceil" => TimestampAlignment::Ceil,
+        "就近" | "nearest" => TimestampAlignment::Nearest,
+        _ => return Err(TimestampError::AlignmentArguments),
+    };
+    Ok(move |input: &str| {
+        let time = align_instant(absolute_timestamp(input)?, step, direction)?;
+        let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
+        Ok(time.to_rfc3339_opts(unit.date_format(), true))
     })
 }
 

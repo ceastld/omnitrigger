@@ -4980,6 +4980,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "将每行时间戳对齐到固定的时间区间边界",
+        query: "CSV: 时间戳对齐列 [\"区间开始\",\"时刻\",\"15分钟\",\"向下\"] 编号,时刻\nA,-1s\nB,1970-01-01T08:17:30+08:00\nC,900s\nD,",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按表格分组累计不同写法的实际时长",
         query: "CSV: 分组时长合计 [\"人员\"] \"时长\" 人员,时长\n北,01:30\n南,PT45S\n北,30.25秒\n空,\n南,-15秒\n负,-1ns",
     },

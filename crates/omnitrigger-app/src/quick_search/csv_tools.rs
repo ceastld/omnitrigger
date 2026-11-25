@@ -72,7 +72,7 @@ use super::{
     },
     timestamp::{
         absolute_elapsed_nanoseconds, absolute_timestamp, format_absolute_elapsed,
-        timestamp_clock_difference, timestamp_zone_converter,
+        timestamp_alignment_converter, timestamp_clock_difference, timestamp_zone_converter,
     },
     url_encoding::url_parameter_values,
     vector::squared_euclidean_distance,
@@ -155,6 +155,7 @@ pub(super) enum CsvError {
     GroupTimestampSessionArguments,
     GroupTimestampSummaryArguments,
     TimestampZoneColumnArguments,
+    TimestampAlignmentColumnArguments,
     DurationNumberColumnArguments,
     CidrColumnArguments,
     CidrLookup(CidrError),
@@ -416,6 +417,9 @@ impl CsvError {
             }
             Self::TimestampZoneColumnArguments => {
                 "填写新列名、来源列和目标时区，例如 [\"标准时间\",\"时间\",\"UTC\"]"
+            }
+            Self::TimestampAlignmentColumnArguments => {
+                "填写新列名、时间戳列、正时间步长和对齐方向，例如 [\"区间开始\",\"时刻\",\"15分钟\",\"向下\"]"
             }
             Self::DurationNumberColumnArguments => {
                 "填写新列名、时长列和目标单位，例如 [\"分钟\",\"时长\",\"min\"]"
@@ -2015,6 +2019,23 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 return Err(invalid);
             }
             let convert = exact_duration_converter(&target).map_err(|_| invalid)?;
+            return append_transformed_csv_column(data, &name, source, |row, value| {
+                convert(value).map_err(|error| CsvError::DataRowValue {
+                    row,
+                    cause: error.message(),
+                })
+            });
+        }
+        "时间戳对齐列" | "timestamp-align-column" => {
+            let invalid = CsvError::TimestampAlignmentColumnArguments;
+            let ((name, source, step, direction), data) =
+                json_argument_and_data::<(String, ColumnReference, String, String)>(
+                    input, invalid,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(invalid);
+            }
+            let convert = timestamp_alignment_converter(&step, &direction).map_err(|_| invalid)?;
             return append_transformed_csv_column(data, &name, source, |row, value| {
                 convert(value).map_err(|error| CsvError::DataRowValue {
                     row,
@@ -7535,6 +7556,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "serial-datetime-column"
             | "组内时间戳差列"
             | "group-timestamp-difference-column"
+            | "时间戳对齐列"
+            | "timestamp-align-column"
             | "组内时间戳偏移列"
             | "group-timestamp-offset-column"
             | "会话编号列"
@@ -13437,6 +13460,36 @@ null"#
             transform_csv(r#"网段名称列 ["名称",1,["192.0.2.0/24"]] 地址"#),
             Err(CsvError::CidrColumnArguments)
         );
+    }
+
+    #[test]
+    fn aligns_each_timestamp_to_utc_boundaries_with_its_original_row() {
+        let query = "时间戳对齐列 [\"区间开始\",\"时刻\",\"15分钟\",\"向下\"] 编号,时刻\nA,-1s\nB,1970-01-01T08:17:30+08:00\nC,900s\nD,";
+        let expected = concat!(
+            "编号,时刻,区间开始\r\n",
+            "A,-1s,1969-12-31T23:45:00Z\r\n",
+            "B,1970-01-01T08:17:30+08:00,1970-01-01T00:15:00Z\r\n",
+            "C,900s,1970-01-01T00:15:00Z\r\n",
+            "D,\"\",\"\"",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (preview, _) = csv_table_preview(query)
+            .expect("时间戳对齐列应可预览")
+            .unwrap();
+        assert_eq!(preview, expected);
+        assert_eq!(
+            transform_csv("TIMESTAMP-ALIGN-COLUMN [\"边界\",1,\"2ns\",\"nearest\"] 时刻\n-5ns")
+                .as_deref(),
+            Ok("时刻,边界\r\n-5ns,1969-12-31T23:59:59.999999996Z")
+        );
+        assert_eq!(
+            transform_csv("时间戳对齐列 [\"边界\",1,\"0秒\",\"向上\"] 时刻"),
+            Err(CsvError::TimestampAlignmentColumnArguments)
+        );
+        assert!(matches!(
+            transform_csv("时间戳对齐列 [\"边界\",1,\"1s\",\"向上\"] 时刻\n1ns\n无效"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
