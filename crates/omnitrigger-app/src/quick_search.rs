@@ -1757,6 +1757,7 @@ impl Results {
                 }
                 let hints = usize::from(value.continuation_hint().is_some())
                     + usize::from(value.exact_decimal_preview().is_some())
+                    + usize::from(matches!(&value.kind, ValueKind::CsvValidationError(_)))
                     + usize::from(self.value_preview_expandable());
                 158. + value_extra_height(&value.text, value_line_limit) + hints as f32 * 24.
             }
@@ -2045,6 +2046,7 @@ pub(super) struct QuickSearch {
     result_refill: Option<ResultRefill>,
     file_search_return: Option<FileSearchReturn>,
     result_save: ResultSaveState,
+    result_copied: bool,
     input_file_load: InputFileLoadState,
     previous_input: RememberedSearchInput,
     bookmark_limit_reached: bool,
@@ -2125,6 +2127,7 @@ impl QuickSearch {
                 return;
             }
             let query = input.text();
+            this.result_copied = false;
             if matches!(&this.result_save, ResultSaveState::Finished { query: saved, .. } if saved != &query) {
                 this.result_save = ResultSaveState::Ready;
             }
@@ -2187,6 +2190,7 @@ impl QuickSearch {
             result_refill: None,
             file_search_return: None,
             result_save: ResultSaveState::Ready,
+            result_copied: false,
             input_file_load: InputFileLoadState::Ready,
             previous_input,
             bookmark_limit_reached: false,
@@ -2294,6 +2298,7 @@ impl QuickSearch {
             self.input_before_table_search = None;
         }
         if self.results != next {
+            self.result_copied = false;
             let previous_height = self.results.height(self.value_line_limit());
             let next_height = next.height(MAX_VALUE_LINES);
             self.results = next;
@@ -2583,15 +2588,30 @@ impl QuickSearch {
         true
     }
 
+    fn prepare_value_copy(&self, value: &ResultValue, cx: &Context<Self>) -> ClipboardItem {
+        self.remember_value(cx);
+        self.index
+            .recent
+            .queries
+            .record_exact(&self.input.read(cx).text(), "");
+        ClipboardItem::new_string(value.text.clone())
+    }
+
+    fn prepare_in_place_copy(&mut self, cx: &mut Context<Self>) -> Option<ClipboardItem> {
+        let Results::Value(Ok(value)) = &self.results else {
+            return None;
+        };
+        let item = self.prepare_value_copy(value, cx);
+        self.result_copied = true;
+        cx.notify();
+        Some(item)
+    }
+
     fn confirm(&self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.results {
             Results::Value(Ok(result)) => {
-                self.remember_value(cx);
-                self.index
-                    .recent
-                    .queries
-                    .record_exact(&self.input.read(cx).text(), "");
-                cx.write_to_clipboard(ClipboardItem::new_string(result.text.clone()));
+                let item = self.prepare_value_copy(result, cx);
+                cx.write_to_clipboard(item);
                 window.remove_window();
             }
             Results::Destinations(items) => {
@@ -3434,6 +3454,15 @@ impl QuickSearch {
                 }
             {
                 cx.stop_propagation();
+            } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "enter" {
+                if event.is_held {
+                    if matches!(self.results, Results::Value(Ok(_))) {
+                        cx.stop_propagation();
+                    }
+                } else if let Some(item) = self.prepare_in_place_copy(cx) {
+                    cx.write_to_clipboard(item);
+                    cx.stop_propagation();
+                }
             } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "enter" {
                 if !event.is_held {
                     self.input.update(cx, |input, cx| {
@@ -4022,7 +4051,16 @@ impl QuickSearch {
             })
     }
 
+    fn copy_button_label(&self, label: &'static str) -> &'static str {
+        if self.result_copied {
+            "已复制"
+        } else {
+            label
+        }
+    }
+
     fn render_visual_preview(
+        &self,
         legend: Div,
         preview: Div,
         copy_label: &'static str,
@@ -4041,9 +4079,14 @@ impl QuickSearch {
                     .justify_between()
                     .child(legend)
                     .child(
-                        button("copy-visual-result", copy_label, Tone::Primary, true)
-                            .flex_none()
-                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                        button(
+                            "copy-visual-result",
+                            self.copy_button_label(copy_label),
+                            Tone::Primary,
+                            true,
+                        )
+                        .flex_none()
+                        .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     ),
             )
             .child(preview)
@@ -4187,7 +4230,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Table(table),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
+            })) if self.expanded_value_pages.is_none() => self.render_visual_preview(
                 table.legend(),
                 table.render(self.table_pages.rows, self.table_pages.columns),
                 "复制 CSV  Enter",
@@ -4197,7 +4240,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Scatter(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
+            })) if self.expanded_value_pages.is_none() => self.render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
@@ -4207,7 +4250,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::BoxPlot(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
+            })) if self.expanded_value_pages.is_none() => self.render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制摘要  Enter",
@@ -4217,7 +4260,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::BinPlot(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
+            })) if self.expanded_value_pages.is_none() => self.render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
@@ -4227,7 +4270,7 @@ impl QuickSearch {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::CorrelationPlot(plot),
                 ..
-            })) if self.expanded_value_pages.is_none() => Self::render_visual_preview(
+            })) if self.expanded_value_pages.is_none() => self.render_visual_preview(
                 plot.legend(),
                 plot.render(),
                 "复制 CSV  Enter",
@@ -4316,24 +4359,41 @@ impl QuickSearch {
                             .bg(gpui::rgba(color))
                     }))
                     .child(value)
-                    .when(self.csv_error_range(cx).is_some(), |row| {
-                        row.child(
-                            button("locate-csv-error", "定位错误 Alt+Enter", Tone::Ghost, true)
-                                .flex_none()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.select_input_error(false, window, cx);
-                                })),
-                        )
-                    })
                     .child(
-                        button("copy-calculation", "复制  Enter", Tone::Primary, true)
-                            .flex_none()
-                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                        button(
+                            "copy-calculation",
+                            self.copy_button_label("复制  Enter"),
+                            Tone::Primary,
+                            true,
+                        )
+                        .flex_none()
+                        .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     );
                 div()
                     .flex()
                     .flex_col()
                     .child(row)
+                    .when(
+                        matches!(&output.kind, ValueKind::CsvValidationError(_)),
+                        |result| {
+                            result.child(
+                                Self::result_footer().child(
+                                    button(
+                                        "locate-csv-error",
+                                        "定位错误 Alt+Enter",
+                                        Tone::Ghost,
+                                        true,
+                                    )
+                                    .h(px(18.))
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.select_input_error(false, window, cx);
+                                        },
+                                    )),
+                                ),
+                            )
+                        },
+                    )
                     .when_some(output.exact_decimal_preview(), |result, decimal| {
                         result.child(
                             Self::result_footer()
@@ -6398,6 +6458,18 @@ mod tests {
     }
 
     #[test]
+    fn reserves_footer_space_for_csv_validation_repair() {
+        let query = "CSV: 校验 a,b\n1,\"未闭合";
+        let result = for_query(query, &[]);
+        let report = result.refillable_text().unwrap().to_owned();
+        assert!(report.contains("第 2 条记录 · 第 2 列"));
+        assert_eq!(
+            result.height(MAX_VALUE_LINES),
+            Results::text_value(Ok(report)).height(MAX_VALUE_LINES) + 24.
+        );
+    }
+
+    #[test]
     fn csv_table_preview_keeps_original_csv_for_copy_and_later_pipeline_steps() {
         let input = "编号,金额,备注\r\n001,3.50,\"甲,乙\"\r\n002,2,\"带\r\n换行\"";
         let direct = for_query(&format!("CSV: 表格预览 {input}"), &[]);
@@ -7054,6 +7126,36 @@ mod tests {
             assert_eq!(&query[input.selection()], invalid);
             assert_eq!(input.text(), query);
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn verify_result_copy_in_place(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        let query = "CSV: 表格预览 编号,备注\r\n001,\"茶\n梨\"";
+        search.fill_query(query, window, cx);
+        search.refresh_results(query, window, cx);
+        let start = query.find("CSV").unwrap();
+        search
+            .input
+            .update(cx, |input, cx| input.select_range(start..start + 3, cx));
+        let held = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("ctrl-enter").unwrap(),
+            is_held: true,
+        };
+        search.key_down(&held, window, cx);
+        assert!(!search.result_copied);
+        let item = search.prepare_in_place_copy(cx).unwrap();
+        assert_eq!(item.text().as_deref(), Some("编号,备注\r\n001,\"茶\n梨\""));
+        assert_eq!(search.copy_button_label("复制"), "已复制");
+        let input = search.input.read(cx);
+        assert_eq!(input.text(), query);
+        assert_eq!(input.selection(), start..start + 3);
+        search.fill_query("2**10", window, cx);
+        search.refresh_results("2**10", window, cx);
+        assert_eq!(search.copy_button_label("复制"), "复制");
     }
 
     #[cfg(target_os = "windows")]
@@ -7989,6 +8091,7 @@ mod tests {
                         })
                         .unwrap();
                     reopened.update(cx, verify_table_paging).unwrap();
+                    reopened.update(cx, verify_result_copy_in_place).unwrap();
                     reopened.update(cx, verify_input_error_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
