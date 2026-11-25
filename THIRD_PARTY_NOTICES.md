@@ -15,6 +15,7 @@
 | getrandom | 桌面桥接随机令牌与脚本工程稳定标识，复用锁定的 0.3.4 | MIT OR Apache-2.0 |
 | unicode-segmentation | 文本编辑的字素边界 | MIT OR Apache-2.0 |
 | unicode-normalization | 快速搜索的 Unicode 规范化，固定 0.1.26，包含上游 Unicode 数据许可 | (MIT OR Apache-2.0) AND Unicode-3.0 |
+| unicode-width | 快速搜索的 Unicode 显示列宽，复用锁定的 0.2.2 | MIT OR Apache-2.0 |
 | percent-encoding | 快速搜索的 URL 参数值编解码，复用锁定的 2.3.2 | MIT OR Apache-2.0 |
 | base64 | 快速搜索的 Base64 与 Base64URL 文本编解码，复用锁定的 0.22.1 | MIT OR Apache-2.0 |
 | num-bigint / num-rational | 快速搜索的精确分数运算，复用锁定的 0.4.8 和 0.4.2 | MIT OR Apache-2.0 |

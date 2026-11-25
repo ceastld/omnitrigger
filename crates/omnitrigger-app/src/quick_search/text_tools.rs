@@ -18,6 +18,7 @@ use regex::{Matches, Regex, RegexBuilder};
 use sha2::{Digest, Sha256, Sha512};
 use unicode_normalization::{char::canonical_combining_class, UnicodeNormalization};
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::{
     calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET},
@@ -243,6 +244,8 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
         || is_line_lengths_csv_operation(operation)
         || operation.eq_ignore_ascii_case("展开制表符")
         || operation.eq_ignore_ascii_case("expand-tabs")
+        || operation.eq_ignore_ascii_case("按显示宽度展开制表符")
+        || operation.eq_ignore_ascii_case("expand-display-tabs")
 }
 
 pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> {
@@ -293,7 +296,12 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "按行分组csv" | "chunk-lines-csv" => return chunk_lines_as_csv(text),
         "拆分成行" | "split-lines" => return split_lines(text),
         "转换换行" | "convert-line-endings" => return convert_line_endings(text),
-        "展开制表符" | "expand-tabs" => return expand_text_tabs(text),
+        "展开制表符" | "expand-tabs" => {
+            return expand_text_tabs(text, |run| run.chars().count())
+        }
+        "按显示宽度展开制表符" | "expand-display-tabs" => {
+            return expand_text_tabs(text, UnicodeWidthStr::width)
+        }
         "正则拆分成行" | "regex-split-lines" => {
             let (pattern, text) = regex_text_argument(text)?;
             return Ok(pattern.split(text).collect::<Vec<_>>().join("\n"));
@@ -785,7 +793,7 @@ fn convert_line_endings(input: &str) -> Result<String, TextError> {
         .into_owned())
 }
 
-fn expand_text_tabs(input: &str) -> Result<String, TextError> {
+fn expand_text_tabs(input: &str, measure: impl Fn(&str) -> usize) -> Result<String, TextError> {
     let input = input.trim_start();
     let (width, _) = input
         .split_once(char::is_whitespace)
@@ -802,25 +810,28 @@ fn expand_text_tabs(input: &str) -> Result<String, TextError> {
         .ok_or(TextError::InvalidTabWidth)?;
     let mut result = String::with_capacity(text.len().min(MAX_EXPANDED_TEXT_BYTES));
     let mut column = 0;
-    for ch in text.chars() {
-        if ch == '\t' {
+    let mut run_start = 0;
+    let separators = text.match_indices(['\t', '\r', '\n', '\u{2028}', '\u{2029}']);
+    for (index, separator) in separators.chain(std::iter::once((text.len(), ""))) {
+        let run = &text[run_start..index];
+        if separator == "\t" {
+            column += measure(run);
             let spaces = width - column % width;
-            if spaces > MAX_EXPANDED_TEXT_BYTES - result.len() {
+            if run.len().saturating_add(spaces) > MAX_EXPANDED_TEXT_BYTES - result.len() {
                 return Err(TextError::ResultTooLarge);
             }
+            result.push_str(run);
             result.extend(std::iter::repeat_n(' ', spaces));
             column += spaces;
         } else {
-            if result.len() + ch.len_utf8() > MAX_EXPANDED_TEXT_BYTES {
+            if run.len() + separator.len() > MAX_EXPANDED_TEXT_BYTES - result.len() {
                 return Err(TextError::ResultTooLarge);
             }
-            result.push(ch);
-            if matches!(ch, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
-                column = 0;
-            } else {
-                column += 1;
-            }
+            result.push_str(run);
+            result.push_str(separator);
+            column = 0;
         }
+        run_start = index + separator.len();
     }
     Ok(result)
 }
@@ -3066,6 +3077,30 @@ mod tests {
         );
         assert_eq!(
             transform_text(&format!("expand-tabs {} \t", usize::MAX)),
+            Err(TextError::ResultTooLarge)
+        );
+    }
+
+    #[test]
+    fn expands_tabs_using_unicode_display_width_for_complete_sequences() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 按显示宽度展开制表符 4 中\t👩‍💻\tX\r\ne\u{301}\tY\u{2029}A\t ",
+        )
+        .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok("中  👩‍💻  X\r\ne\u{301}   Y\u{2029}A    ")
+        );
+        assert_eq!(
+            transform_text("expand-display-tabs 4 １２\tX\t").as_deref(),
+            Ok("１２    X   ")
+        );
+        assert_eq!(
+            transform_text("expand-display-tabs 4 中文").as_deref(),
+            Ok("中文")
+        );
+        assert_eq!(
+            transform_text(&format!("expand-display-tabs {} 中\t", usize::MAX)),
             Err(TextError::ResultTooLarge)
         );
     }

@@ -4207,6 +4207,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按 Unicode 显示列宽对齐中文和表情",
+        query: "文本: 按显示宽度展开制表符 8 名称\t数量\n绿茶\t3\n☕️\t1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "去掉多行共有的缩进",
         query: "文本: 去公共缩进 \"    任务\n      子任务\n    完成\"",
     },
