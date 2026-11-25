@@ -1806,6 +1806,19 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.weighted_quantile_function(name == "wpercentile");
         }
+        if name == "relchange" {
+            self.remaining = rest;
+            let [before, after]: [BigRational; 2] = self
+                .fixed_function_arguments(2)?
+                .try_into()
+                .expect("relchange 有两个参数");
+            if before.numer().sign() == Sign::NoSign {
+                return Err(FractionError::ZeroDenominator);
+            }
+            let rate = (after - &before) / before;
+            ensure_exact_size(&rate)?;
+            return Ok(rate);
+        }
         if name == "clamp" {
             self.remaining = rest;
             return self.clamp_function();
@@ -2783,6 +2796,28 @@ mod tests {
             parse_fraction_literal(&padded),
             Ok(BigRational::new(15.into(), 2.into()))
         );
+    }
+
+    #[test]
+    fn computes_relative_change_from_exact_nested_expressions() {
+        for (query, expected) in [
+            ("relchange(1/3,1/2)", "1/2"),
+            ("relchange(2**80,3*2**79)*100", "50"),
+            ("RELCHANGE(200,150)", "-1/4"),
+            ("relchange(-2,-3)", "1/2"),
+            ("relchange(10,0)", "-1"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_fraction("relchange(0,1)"),
+            Err(FractionError::ZeroDenominator)
+        );
+        assert!(calculate_fraction("relchange(1,2,3)").is_err());
     }
 
     #[test]

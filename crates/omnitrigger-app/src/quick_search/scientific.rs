@@ -100,6 +100,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "root" => return Some(NamedValue::Aggregate(nth_root)),
         "invlerp" => return Some(NamedValue::Aggregate(interpolation_progress)),
         "remap" => return Some(NamedValue::Aggregate(remap_range)),
+        "relchange" => return Some(NamedValue::Aggregate(relative_change)),
         "clamp" => {
             return Some(NamedValue::Aggregate(|values| match values {
                 [value, min, max] if min <= max => value.clamp(*min, *max),
@@ -157,6 +158,21 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn relative_change(values: &[f64]) -> f64 {
+    let &[before, after] = values else {
+        return f64::NAN;
+    };
+    if before == 0. {
+        return f64::NAN;
+    }
+    let difference = after - before;
+    if difference.is_finite() {
+        difference / before
+    } else {
+        after / before - 1.
+    }
 }
 
 fn atan2(values: &[f64]) -> f64 {

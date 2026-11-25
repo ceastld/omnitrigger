@@ -717,6 +717,23 @@ mod tests {
     }
 
     #[test]
+    fn handles_relative_change_when_subtraction_overflows() {
+        for (query, expected) in [
+            ("relchange(200,150)", "-0.25"),
+            ("relchange(1e308,-1e308)", "-2"),
+            ("relchange(-1e308,1e308)", "-2"),
+            ("RELCHANGE(1e-300,2e-300)", "1"),
+        ] {
+            assert!(looks_like_calculation(query));
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate("relchange(0,1)"),
+            Err(CalculationError::FunctionDomain)
+        );
+    }
+
+    #[test]
     fn rounds_at_decimal_places_and_preserves_precision_for_small_inputs() {
         for (query, expected) in [
             ("round(2.675,2)", "2.67"),

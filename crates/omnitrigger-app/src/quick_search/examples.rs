@@ -6270,6 +6270,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在普通算式中计算相对变化",
+        query: "relchange(200,150)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在精确算式中计算相对变化",
+        query: "分数: 计算 relchange(1/3,1/2)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用精确分数求变化率并显示循环节",
         query: "百分比: 精确变化 3 到 4",
     },
