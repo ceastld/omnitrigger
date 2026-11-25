@@ -894,7 +894,12 @@ enum Operation {
     JsonWildcardColumn(String, ColumnReference, Vec<Option<String>>),
     UrlParameterColumn(String, ColumnReference, String),
     JsonExpandRows(String, ColumnReference, Vec<String>),
-    SpreadsheetDateColumn(String, ColumnReference, SpreadsheetDateSystem, bool),
+    SpreadsheetDateColumn(
+        String,
+        ColumnReference,
+        SpreadsheetDateSystem,
+        SpreadsheetColumnTransform,
+    ),
     DatePatternColumn {
         name: String,
         source: ColumnReference,
@@ -1019,6 +1024,13 @@ impl ColumnReference {
             Self::Name(name) => header_column(header, name),
         }
     }
+}
+
+enum SpreadsheetColumnTransform {
+    DateToSerial,
+    SerialToDate,
+    TimeToSerial,
+    SerialToTime,
 }
 
 enum ColumnArithmetic {
@@ -1887,7 +1899,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         kind @ ("表格序号列"
         | "spreadsheet-serial-column"
         | "序号转日期列"
-        | "serial-date-column") => {
+        | "serial-date-column"
+        | "表格时刻序号列"
+        | "spreadsheet-time-serial-column"
+        | "序号转日期时刻列"
+        | "serial-datetime-column") => {
             let invalid = CsvError::SpreadsheetDateColumnArguments;
             let ((name, source, year), data) =
                 json_argument_and_data::<(String, ColumnReference, u16)>(input, invalid)?;
@@ -1895,9 +1911,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 return Err(invalid);
             }
             let system = SpreadsheetDateSystem::from_year(year).ok_or(invalid)?;
-            let from_serial = matches!(kind, "序号转日期列" | "serial-date-column");
+            let mode = match kind {
+                "序号转日期列" | "serial-date-column" => {
+                    SpreadsheetColumnTransform::SerialToDate
+                }
+                "表格时刻序号列" | "spreadsheet-time-serial-column" => {
+                    SpreadsheetColumnTransform::TimeToSerial
+                }
+                "序号转日期时刻列" | "serial-datetime-column" => {
+                    SpreadsheetColumnTransform::SerialToTime
+                }
+                _ => SpreadsheetColumnTransform::DateToSerial,
+            };
             input = data;
-            Operation::SpreadsheetDateColumn(name, source, system, from_serial)
+            Operation::SpreadsheetDateColumn(name, source, system, mode)
         }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
@@ -2796,15 +2823,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 })
             })
         }
-        Operation::SpreadsheetDateColumn(name, source, system, from_serial) => {
+        Operation::SpreadsheetDateColumn(name, source, system, mode) => {
             append_from_one_column(&rows, &name, source, |value| {
                 let value = normalize(value);
-                if from_serial {
-                    system.date_from_serial(&value).map(|date| date.to_string())
-                } else {
-                    parse_complete_date(&value)
+                match mode {
+                    SpreadsheetColumnTransform::SerialToDate => {
+                        system.date_from_serial(&value).map(|date| date.to_string())
+                    }
+                    SpreadsheetColumnTransform::DateToSerial => parse_complete_date(&value)
                         .and_then(|date| system.serial_from_date(date))
-                        .map(|serial| serial.to_string())
+                        .map(|serial| serial.to_string()),
+                    SpreadsheetColumnTransform::TimeToSerial => {
+                        system.time_serial_from_text(&value)
+                    }
+                    SpreadsheetColumnTransform::SerialToTime => system.time_from_serial(&value),
                 }
                 .map_err(|error| error.message())
             })
@@ -7321,6 +7353,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "group-duration-sum"
             | "时长数值列"
             | "duration-number-column"
+            | "表格时刻序号列"
+            | "spreadsheet-time-serial-column"
+            | "序号转日期时刻列"
+            | "serial-datetime-column"
             | "组内时间戳差列"
             | "group-timestamp-difference-column"
             | "组内时间戳偏移列"
@@ -12243,6 +12279,28 @@ mod tests {
             transform_csv("日期解析列 [\"日\",1,\"%Q\"]\n日期"),
             Err(CsvError::DateFormatColumnPattern)
         );
+    }
+
+    #[test]
+    fn appends_spreadsheet_time_serials_with_exact_subday_precision() {
+        let to = "表格时刻序号列 [\"序号\",\"时刻\",1904]\n设备,时刻\nA,1904-01-01 06:00\nB,\nC,1904-01-01 00:00:00.000000001";
+        let expected = concat!(
+            "设备,时刻,序号\r\n",
+            "A,1904-01-01 06:00,0.25\r\n",
+            "B,\"\",\"\"\r\n",
+            "C,1904-01-01 00:00:00.000000001,1/86400000000000",
+        );
+        assert_eq!(transform_csv(to).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(to).expect("序号列应可预览").unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv("序号转日期时刻列 [\"时刻\",2,1900] 设备,序号\nA,45351.5\nB,").as_deref(),
+            Ok("设备,序号,时刻\r\nA,45351.5,2024-02-29 12:00:00\r\nB,\"\",\"\""),
+        );
+        assert!(matches!(
+            transform_csv("serial-datetime-column [\"时刻\",2,1900] 设备,序号\nA,45351.5\nB,60.5"),
+            Err(CsvError::DataRowValue { row: 2, .. }),
+        ));
     }
 
     #[test]

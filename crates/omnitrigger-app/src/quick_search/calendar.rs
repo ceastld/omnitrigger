@@ -699,33 +699,10 @@ fn spreadsheet_time_serial(
     let invalid = DateError::SpreadsheetTimeSerialArguments;
     let (system, argument) = spreadsheet_serial_arguments(input, invalid)?;
     if from_serial {
-        let serial = parse_fraction_literal(argument).map_err(|_| invalid)?;
-        if serial.numer().sign() == Sign::Minus {
-            return Err(DateError::SpreadsheetSerialRange);
-        }
-        let day =
-            i64::try_from(serial.to_integer()).map_err(|_| DateError::SpreadsheetSerialRange)?;
-        let date = system.date_from_day(day)?;
-        let nanos = serial.fract() * BigInt::from(NANOS_PER_DAY);
-        let precision = DateError::SpreadsheetTimeSerialPrecision;
-        if !nanos.is_integer() {
-            return Err(precision);
-        }
-        let nanos = u128::try_from(nanos.to_integer()).map_err(|_| precision)?;
-        return Ok(format!("{date} {}", format_clock_duration(nanos, "")));
+        return system.time_from_serial(argument);
     }
     let (date, rest) = date_operand(argument, today)?;
-    let nanos = time_of_day(rest).map_err(|_| invalid)?;
-    let day = system.serial_from_date(date)?;
-    let nanos_per_day = BigInt::from(NANOS_PER_DAY);
-    let value = BigRational::new(
-        BigInt::from(day) * &nanos_per_day + BigInt::from(nanos),
-        nanos_per_day,
-    );
-    Ok(repeating_decimal(&value)
-        .ok()
-        .filter(|decimal| !decimal.contains('('))
-        .unwrap_or_else(|| value.to_string()))
+    system.time_serial_from_parts(date, rest)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -735,6 +712,43 @@ pub(super) enum SpreadsheetDateSystem {
 }
 
 impl SpreadsheetDateSystem {
+    pub(super) fn time_from_serial(self, input: &str) -> Result<String, DateError> {
+        let invalid = DateError::SpreadsheetTimeSerialArguments;
+        let serial = parse_fraction_literal(input).map_err(|_| invalid)?;
+        if serial.numer().sign() == Sign::Minus {
+            return Err(DateError::SpreadsheetSerialRange);
+        }
+        let day =
+            i64::try_from(serial.to_integer()).map_err(|_| DateError::SpreadsheetSerialRange)?;
+        let date = self.date_from_day(day)?;
+        let nanos = serial.fract() * BigInt::from(NANOS_PER_DAY);
+        let precision = DateError::SpreadsheetTimeSerialPrecision;
+        if !nanos.is_integer() {
+            return Err(precision);
+        }
+        let nanos = u128::try_from(nanos.to_integer()).map_err(|_| precision)?;
+        Ok(format!("{date} {}", format_clock_duration(nanos, "")))
+    }
+
+    pub(super) fn time_serial_from_text(self, input: &str) -> Result<String, DateError> {
+        let (date, rest) = absolute_date_operand(input)?;
+        self.time_serial_from_parts(date, rest)
+    }
+
+    fn time_serial_from_parts(self, date: NaiveDate, clock: &str) -> Result<String, DateError> {
+        let nanos = time_of_day(clock).map_err(|_| DateError::SpreadsheetTimeSerialArguments)?;
+        let day = self.serial_from_date(date)?;
+        let nanos_per_day = BigInt::from(NANOS_PER_DAY);
+        let value = BigRational::new(
+            BigInt::from(day) * &nanos_per_day + BigInt::from(nanos),
+            nanos_per_day,
+        );
+        Ok(repeating_decimal(&value)
+            .ok()
+            .filter(|decimal| !decimal.contains('('))
+            .unwrap_or_else(|| value.to_string()))
+    }
+
     pub(super) fn from_year(year: u16) -> Option<Self> {
         match year {
             1900 => Some(Self::Excel1900),
