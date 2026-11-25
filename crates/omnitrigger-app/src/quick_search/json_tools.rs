@@ -16,7 +16,7 @@ use super::fraction::{ensure_exact_size, parse_fraction_literal};
 use super::operators::{FieldSortOrder, NumberComparison, MAX_SORT_FIELDS};
 use super::statistics::{median_sorted_values, MAX_VALUES};
 use super::text_tools::compare_natural;
-use super::{input_line_column, is_validation_operation, InputValidationReport};
+use super::{input_line_column, is_validation_operation, InputTableReport, InputValidationReport};
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
@@ -257,7 +257,7 @@ impl JsonCsvOperation {
             Self::LineGroupCounts => count_json_line_groups_csv(source),
             Self::LineGroupSummaries => summarize_json_line_groups_csv(source),
             Self::LineGroupMedians => median_json_line_groups_csv(source),
-            Self::ValidateLines => validate_json_lines_csv(source),
+            Self::ValidateLines => validate_json_lines_csv(source).map(|report| report.csv),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
@@ -296,6 +296,20 @@ pub(super) fn json_validation_report(
         return None;
     };
     Some(report.map(|report| report.offset_error_span(query.len() - source.len())))
+}
+
+pub(super) fn json_validation_table(query: &str) -> Option<Result<InputTableReport, JsonError>> {
+    let (operation, source) = split_json_operation(query)?;
+    if !matches!(
+        JsonCsvOperation::from_name(&operation.to_ascii_lowercase()),
+        Some(JsonCsvOperation::ValidateLines)
+    ) {
+        return None;
+    }
+    Some(
+        validate_json_lines_csv(source)
+            .map(|report| report.offset_input_errors(query.len() - source.len())),
+    )
 }
 
 pub(super) fn is_jsonl_validation_operation(operation: &str) -> bool {
@@ -1979,27 +1993,34 @@ pub(super) fn parse_json_line(line: &str) -> Result<&RawValue, JsonError> {
 }
 
 pub(super) fn json_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
-    source.lines().enumerate().filter_map(|(index, line)| {
-        (!line.trim_matches([' ', '\t', '\r']).is_empty()).then_some((index + 1, line))
-    })
+    json_lines_with_spans(source).map(|(number, _, line)| (number, line))
+}
+
+fn json_lines_with_spans(source: &str) -> impl Iterator<Item = (usize, Range<usize>, &str)> {
+    let mut start = 0;
+    source
+        .split_inclusive('\n')
+        .enumerate()
+        .filter_map(move |(index, raw)| {
+            let line = match raw.strip_suffix('\n') {
+                Some(line) => line.strip_suffix('\r').unwrap_or(line),
+                None => raw,
+            };
+            let range = start..start + line.len();
+            start += raw.len();
+            (!line.trim_matches([' ', '\t', '\r']).is_empty()).then_some((index + 1, range, line))
+        })
 }
 
 fn validate_json_lines(source: &str) -> Result<InputValidationReport, JsonError> {
     let mut valid = 0;
     let mut errors = Vec::new();
     let mut error_span = None;
-    for (line_number, line) in json_lines(source) {
+    for (line_number, range, line) in json_lines_with_spans(source) {
         match serde_json::from_str::<&RawValue>(line) {
             Ok(_) => valid += 1,
             Err(error) => {
-                error_span.get_or_insert_with(|| {
-                    let start: usize = source
-                        .split_inclusive('\n')
-                        .take(line_number - 1)
-                        .map(str::len)
-                        .sum();
-                    start..start + line.len()
-                });
+                error_span.get_or_insert(range);
                 let reason = json_line_error_reason(&error);
                 errors.push(format!("第 {line_number} 行 · {reason}"));
             }
@@ -2015,25 +2036,29 @@ fn validate_json_lines(source: &str) -> Result<InputValidationReport, JsonError>
     })
 }
 
-fn validate_json_lines_csv(source: &str) -> Result<String, JsonError> {
+fn validate_json_lines_csv(source: &str) -> Result<InputTableReport, JsonError> {
     let headers = "行号,状态,类型,原因";
-    let mut result = String::from(headers);
-    for (line_number, line) in json_lines(source) {
+    let mut csv = String::from(headers);
+    let mut input_errors = Vec::new();
+    for (line_number, range, line) in json_lines_with_spans(source) {
         let (status, kind, reason) = match serde_json::from_str::<&RawValue>(line) {
             Ok(value) => ("有效", json_type_name(value), ""),
-            Err(error) => ("无效", "", json_line_error_reason(&error)),
+            Err(error) => {
+                input_errors.push(range);
+                ("无效", "", json_line_error_reason(&error))
+            }
         };
         let line_number = line_number.to_string();
         append_bounded_csv_row(
-            &mut result,
+            &mut csv,
             [line_number.as_str(), status, kind, reason].into_iter(),
             JsonError::CsvOutputTooLarge,
         )?;
     }
-    if result.len() == headers.len() {
+    if csv.len() == headers.len() {
         return Err(JsonError::Incomplete);
     }
-    Ok(result)
+    Ok(InputTableReport { csv, input_errors })
 }
 
 fn json_line_error_reason(error: &serde_json::Error) -> &'static str {
@@ -3349,6 +3374,14 @@ mod tests {
                 .as_deref(),
             Ok(expected)
         );
+        let report = json_validation_table(query).unwrap().unwrap();
+        assert_eq!(report.csv, expected);
+        let invalid: Vec<_> = report
+            .input_errors
+            .into_iter()
+            .map(|range| &query[range])
+            .collect();
+        assert_eq!(invalid, ["错误文本", "{\"编号\":"]);
         assert_eq!(
             transform_json("validate-jsonl-csv\r\n\t\r\n"),
             Err(JsonError::Incomplete)

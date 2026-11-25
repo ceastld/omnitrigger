@@ -227,6 +227,21 @@ struct ResultValue {
     kind: ValueKind,
 }
 
+struct InputTableReport {
+    csv: String,
+    input_errors: Vec<Range<usize>>,
+}
+
+impl InputTableReport {
+    fn offset_input_errors(mut self, offset: usize) -> Self {
+        for range in &mut self.input_errors {
+            range.start += offset;
+            range.end += offset;
+        }
+        self
+    }
+}
+
 struct InputValidationReport {
     text: String,
     error_span: Option<Range<usize>>,
@@ -973,19 +988,11 @@ impl Results {
                                         ValueError::BatchCalculation(BatchError::Empty),
                                     )
                                 };
-                            Self::Value(
+                            Self::input_table_value(
                                 report
                                     .map_err(ValueError::Csv)
-                                    .and_then(|report| report.ok_or(missing_input))
-                                    .and_then(|report| {
-                                        let table = csv_tools::parse_table_preview(&report.csv)
-                                            .map_err(ValueError::Csv)?
-                                            .with_input_errors(report.input_errors);
-                                        Ok(ResultValue {
-                                            text: report.csv,
-                                            kind: ValueKind::Table(table),
-                                        })
-                                    }),
+                                    .and_then(|report| report.ok_or(missing_input)),
+                                raw_query.trim_end().len() - input.len(),
                             )
                         }
                     }
@@ -1259,6 +1266,11 @@ impl Results {
                             report
                                 .map(|report| ResultValue::from_validation(report, scope))
                                 .map_err(ValueError::Json),
+                        )
+                    } else if let Some(report) = json_tools::json_validation_table(term) {
+                        Self::input_table_value(
+                            report.map_err(ValueError::Json),
+                            raw_query.trim_end().len() - term.len(),
                         )
                     } else if let Some(report) = json_tools::json_csv_report(term) {
                         Self::table_value(report.map_err(ValueError::Json))
@@ -1594,6 +1606,19 @@ impl Results {
         Self::Value(result.map(|(text, plot)| ResultValue {
             text,
             kind: ValueKind::Scatter(plot),
+        }))
+    }
+
+    fn input_table_value(result: Result<InputTableReport, ValueError>, offset: usize) -> Self {
+        Self::Value(result.and_then(|report| {
+            let report = report.offset_input_errors(offset);
+            let table = csv_tools::parse_table_preview(&report.csv)
+                .map_err(ValueError::Csv)?
+                .with_input_errors(report.input_errors);
+            Ok(ResultValue {
+                text: report.csv,
+                kind: ValueKind::Table(table),
+            })
         }))
     }
 
@@ -3560,23 +3585,18 @@ impl QuickSearch {
         batch_line_range(input, line).map(|range| start + range.start..start + range.end)
     }
 
-    fn batch_report_error_range(&self, cx: &App) -> Option<Range<usize>> {
+    fn table_input_error_range(&self, cx: &App) -> Option<Range<usize>> {
         let errors = self.results.table_preview()?.input_errors();
         let first = errors.first()?;
-        let input = self.input.read(cx);
-        let query = input.text_ref();
-        let (Scope::BatchCalculation, term) = scoped_query(query)? else {
-            return None;
-        };
-        let (_, batch) = batch_calculation_input(term);
-        let offset = query.trim_end().len() - batch.len();
-        let selection = input.selection();
-        let next = errors
-            .iter()
-            .skip_while(|range| (offset + range.start..offset + range.end) != selection)
-            .nth(1)
-            .unwrap_or(first);
-        Some(offset + next.start..offset + next.end)
+        let selection = self.input.read(cx).selection();
+        Some(
+            errors
+                .iter()
+                .skip_while(|range| *range != &selection)
+                .nth(1)
+                .unwrap_or(first)
+                .clone(),
+        )
     }
 
     fn validation_error_range(&self, cx: &App) -> Option<Range<usize>> {
@@ -3605,7 +3625,7 @@ impl QuickSearch {
     ) -> bool {
         let Some(range) = self
             .batch_error_range(cx)
-            .or_else(|| self.batch_report_error_range(cx))
+            .or_else(|| self.table_input_error_range(cx))
             .or_else(|| self.validation_error_range(cx))
         else {
             return false;
@@ -4445,7 +4465,7 @@ impl QuickSearch {
             )
             .when(!table.input_errors().is_empty(), |footer| {
                 footer.child(
-                    button("locate-batch-report-error", "定位错误", Tone::Ghost, true)
+                    button("locate-input-table-error", "定位错误", Tone::Ghost, true)
                         .h(px(TABLE_PAGER_HEIGHT))
                         .px(px(8.))
                         .tooltip(theme::text_tooltip("Alt+Enter 定位下一处错误".into()))
@@ -7518,9 +7538,19 @@ mod tests {
             assert_eq!(&query[input.selection()], invalid);
             assert_eq!(input.text(), query);
         }
-        for query in [
-            "  批量计算： 明细 2**8\r\n\r1/0\u{2028}avg(1,3)\nsqrt(-1)  ",
-            "batch calculation: exact-report 2**80\n1/0\r\n\r7/6\nsqrt(-1)",
+        for (query, invalid) in [
+            (
+                "  批量计算： 明细 2**8\r\n\r1/0\u{2028}avg(1,3)\nsqrt(-1)  ",
+                ["1/0", "sqrt(-1)", "1/0"],
+            ),
+            (
+                "batch calculation: exact-report 2**80\n1/0\r\n\r7/6\nsqrt(-1)",
+                ["1/0", "sqrt(-1)", "1/0"],
+            ),
+            (
+                " JSON： 校验行CSV\r\nnull\r\n\r\n {坏}  \r\n[1,2]\r\n  [",
+                [" {坏}  ", "  [", " {坏}  "],
+            ),
         ] {
             search.fill_query(query, window, cx);
             search.refresh_results(query, window, cx);
@@ -7528,7 +7558,7 @@ mod tests {
                 keystroke: gpui::Keystroke::parse("alt-enter").unwrap(),
                 is_held: false,
             };
-            for expected in ["1/0", "sqrt(-1)", "1/0"] {
+            for expected in invalid {
                 search.key_down(&event, window, cx);
                 assert_eq!(&query[search.input.read(cx).selection()], expected);
                 event.is_held = true;

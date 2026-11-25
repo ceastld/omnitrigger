@@ -30,7 +30,11 @@ const SHORTCUTS: &[[&str; 3]] = &[
     ["CSV 校验", "Alt+Enter", "定位首处语法或列数错误"],
     ["TSV 校验", "Alt+Enter", "定位首处语法或列数错误"],
     ["JSON 校验", "Alt+Enter", "定位首处语法错误"],
-    ["JSON Lines 校验", "Alt+Enter", "选中第一条无效记录"],
+    [
+        "JSON Lines 校验",
+        "Alt+Enter",
+        "选中无效记录，明细表可逐项定位",
+    ],
     ["TOML 校验", "Alt+Enter", "定位首处语法错误"],
     ["结果", "Enter", "复制结果并关闭搜索框"],
     ["结果", "Ctrl+Enter", "复制结果并保持搜索框打开"],

@@ -9,6 +9,7 @@ use super::{
     decibel::convert_decibels,
     solid::calculate_solid,
     tempo::calculate_tempo,
+    InputTableReport,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,15 +109,10 @@ pub(super) fn map_batch_csv<E>(
     ))
 }
 
-pub(super) struct CalculationReport {
-    pub(super) csv: String,
-    pub(super) input_errors: Vec<Range<usize>>,
-}
-
 pub(super) fn batch_calculation_report(
     input: &str,
     mut calculate: impl FnMut(&str) -> Result<String, &'static str>,
-) -> Result<Option<CalculationReport>, CsvError> {
+) -> Result<Option<InputTableReport>, CsvError> {
     const HEADER: &str = "行号,算式,结果,错误";
     let mut csv = HEADER.to_owned();
     let mut input_errors = Vec::new();
@@ -136,7 +132,7 @@ pub(super) fn batch_calculation_report(
             CsvError::PipelineOutputTooLarge,
         )?;
     }
-    Ok((csv.len() > HEADER.len()).then_some(CalculationReport { csv, input_errors }))
+    Ok((csv.len() > HEADER.len()).then_some(InputTableReport { csv, input_errors }))
 }
 
 fn nonempty_batch_lines(input: &str) -> impl Iterator<Item = (usize, Range<usize>, &str)> {
