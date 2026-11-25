@@ -954,10 +954,12 @@ fn combine_date_ranges(
     today: NaiveDate,
     operation: DateRangeOperation,
 ) -> Result<String, DateError> {
-    let (minimum, invalid) = if matches!(operation, DateRangeOperation::Coverage) {
-        (1, DateError::DateCoverageArguments)
+    let (minimum, invalid, input, exceptions) = if matches!(operation, DateRangeOperation::Coverage)
+    {
+        let (ranges, exceptions) = split_workday_exceptions(input);
+        (1, DateError::DateCoverageArguments, ranges, exceptions)
     } else {
-        (2, DateError::InvalidDateRanges)
+        (2, DateError::InvalidDateRanges, input, None)
     };
     let terms = input.trim().split([';', '\n']);
     if !(minimum..=MAX_DATE_RANGES).contains(&terms.clone().count()) {
@@ -1006,11 +1008,13 @@ fn combine_date_ranges(
     }
     merged.push(current);
     if matches!(operation, DateRangeOperation::Coverage) {
+        let exceptions = parse_workday_exceptions(exceptions)?;
         let mut days = 0;
         let mut workdays = 0;
         for (start, end) in merged {
             days += end.signed_duration_since(start).num_days() + 1;
-            workdays += inclusive_workdays(start, end);
+            workdays +=
+                inclusive_workdays(start, end) + workday_adjustment(&exceptions, start..=end);
         }
         return Ok(format!("{days} 天 · {workdays} 工作日"));
     }
@@ -2428,6 +2432,14 @@ mod tests {
                 "coverage-days 2024-03-03 to 2024-03-03\n2024-03-02 to 2024-03-02",
                 "2 天 · 0 工作日",
             ),
+            (
+                r#"覆盖天数 昨天至2024-03-01; 今天至2024-03-03 例外 [["2024-02-29","2024-03-01"],["2024-03-02","2024-03-09"]]"#,
+                "5 天 · 2 工作日",
+            ),
+            (
+                r#"coverage-days 2024-03-01 to 2024-03-01; 2024-03-04 to 2024-03-04 except [["2024-03-01"],["2024-03-02","2024-03-04"]]"#,
+                "2 天 · 1 工作日",
+            ),
             ("覆盖天数 9999-12-31 至 9999-12-31", "1 天 · 1 工作日"),
         ] {
             assert_eq!(
@@ -2447,6 +2459,13 @@ mod tests {
         assert_eq!(
             calculate_date("覆盖天数 今天", today),
             Err(DateError::DateCoverageArguments)
+        );
+        assert_eq!(
+            calculate_date(
+                r#"覆盖天数 昨天至明天 例外 [["2024-02-29"],["2024-02-29"]]"#,
+                today
+            ),
+            Err(DateError::WorkdayExceptions)
         );
         let excessive = format!(
             "覆盖天数 {}今天至今天",
