@@ -9,7 +9,7 @@ use super::fraction::calculate_fraction;
 use super::ratio_allocation::{allocate_shares, split_allocation, RatioAllocationError};
 
 pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
-const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
+pub(super) const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
 const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
 // 去掉末尾的零后，精度由单位纳秒数中的因子 2 和 5 决定。一天含有 16 个因子 2。
 const MAX_FRACTION_DIGITS: usize = 16;
@@ -457,7 +457,7 @@ fn signed_duration(input: &str) -> Result<(i128, bool), DurationError> {
     Ok((total, show_seconds))
 }
 
-fn time_of_day(input: &str) -> Result<u128, DurationError> {
+pub(super) fn time_of_day(input: &str) -> Result<u128, DurationError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(DurationError::Incomplete);

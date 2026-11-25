@@ -2971,6 +2971,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "把日期和钟表时刻换算为电子表格序号",
+        query: "日期: 表格时刻序号 2024-02-29 12:00",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把带小数的电子表格序号还原为日期和时刻",
+        query: "日期: 从表格时刻序号 45351.5",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
     },
@@ -6473,6 +6483,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "星期统计",
             "表格序号",
             "从表格序号",
+            "表格时刻序号",
+            "从表格时刻序号",
         ],
         Scope::Radix => &[
             "字节序",

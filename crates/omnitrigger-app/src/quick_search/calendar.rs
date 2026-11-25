@@ -5,8 +5,12 @@ use std::{
 };
 
 use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta, Weekday};
+use num_bigint::{BigInt, Sign};
+use num_rational::BigRational;
 
 use super::calculator::normalize;
+use super::duration::{format_clock_duration, time_of_day, NANOS_PER_DAY};
+use super::fraction::{parse_fraction_literal, repeating_decimal};
 
 const MAX_LISTED_DATES: usize = 366;
 const MAX_DATE_RANGES: usize = 32;
@@ -43,6 +47,8 @@ pub(super) enum DateError {
     RangeSplitArguments,
     WeekdayCountArguments,
     SpreadsheetSerialArguments,
+    SpreadsheetTimeSerialArguments,
+    SpreadsheetTimeSerialPrecision,
     SpreadsheetSerialRange,
     SpreadsheetLeapPlaceholder,
     InvalidDateInterval,
@@ -107,6 +113,10 @@ impl DateError {
             Self::SpreadsheetSerialArguments => {
                 "填写日期或整数序号，可用 1900 @ 或 1904 @ 选择日期系统"
             }
+            Self::SpreadsheetTimeSerialArguments => {
+                "填写日期和时刻，或填写带小数的序号，例如 2024-02-29 12:00 或 45351.5"
+            }
+            Self::SpreadsheetTimeSerialPrecision => "请填写可精确换算到纳秒的日期时刻序号",
             Self::SpreadsheetSerialRange => "日期须在所选系统的起始日与 9999-12-31 之间",
             Self::SpreadsheetLeapPlaceholder => {
                 "1900 系统的序号 60 是兼容占位，对应无效日期 1900-02-29"
@@ -647,17 +657,8 @@ fn spreadsheet_serial(
     today: NaiveDate,
     from_serial: bool,
 ) -> Result<String, DateError> {
-    let (system, argument) = input.split_once('@').unwrap_or(("1900", input));
-    let system = system
-        .trim()
-        .parse()
-        .ok()
-        .and_then(SpreadsheetDateSystem::from_year)
-        .ok_or(DateError::SpreadsheetSerialArguments)?;
-    let argument = argument.trim();
-    if argument.is_empty() {
-        return Err(DateError::SpreadsheetSerialArguments);
-    }
+    let invalid = DateError::SpreadsheetSerialArguments;
+    let (system, argument) = spreadsheet_serial_arguments(input, invalid)?;
     if from_serial {
         return system
             .date_from_serial(argument)
@@ -665,11 +666,66 @@ fn spreadsheet_serial(
     }
     let (date, rest) = date_operand(argument, today)?;
     if !rest.is_empty() {
-        return Err(DateError::SpreadsheetSerialArguments);
+        return Err(invalid);
     }
     system
         .serial_from_date(date)
         .map(|serial| serial.to_string())
+}
+
+fn spreadsheet_serial_arguments(
+    input: &str,
+    invalid: DateError,
+) -> Result<(SpreadsheetDateSystem, &str), DateError> {
+    let (system, argument) = input.split_once('@').unwrap_or(("1900", input));
+    let system = system
+        .trim()
+        .parse()
+        .ok()
+        .and_then(SpreadsheetDateSystem::from_year)
+        .ok_or(invalid)?;
+    let argument = argument.trim();
+    if argument.is_empty() {
+        return Err(invalid);
+    }
+    Ok((system, argument))
+}
+
+fn spreadsheet_time_serial(
+    input: &str,
+    today: NaiveDate,
+    from_serial: bool,
+) -> Result<String, DateError> {
+    let invalid = DateError::SpreadsheetTimeSerialArguments;
+    let (system, argument) = spreadsheet_serial_arguments(input, invalid)?;
+    if from_serial {
+        let serial = parse_fraction_literal(argument).map_err(|_| invalid)?;
+        if serial.numer().sign() == Sign::Minus {
+            return Err(DateError::SpreadsheetSerialRange);
+        }
+        let day =
+            i64::try_from(serial.to_integer()).map_err(|_| DateError::SpreadsheetSerialRange)?;
+        let date = system.date_from_day(day)?;
+        let nanos = serial.fract() * BigInt::from(NANOS_PER_DAY);
+        let precision = DateError::SpreadsheetTimeSerialPrecision;
+        if !nanos.is_integer() {
+            return Err(precision);
+        }
+        let nanos = u128::try_from(nanos.to_integer()).map_err(|_| precision)?;
+        return Ok(format!("{date} {}", format_clock_duration(nanos, "")));
+    }
+    let (date, rest) = date_operand(argument, today)?;
+    let nanos = time_of_day(rest).map_err(|_| invalid)?;
+    let day = system.serial_from_date(date)?;
+    let nanos_per_day = BigInt::from(NANOS_PER_DAY);
+    let value = BigRational::new(
+        BigInt::from(day) * &nanos_per_day + BigInt::from(nanos),
+        nanos_per_day,
+    );
+    Ok(repeating_decimal(&value)
+        .ok()
+        .filter(|decimal| !decimal.contains('('))
+        .unwrap_or_else(|| value.to_string()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -700,6 +756,10 @@ impl SpreadsheetDateSystem {
             .trim()
             .parse::<i64>()
             .map_err(|_| DateError::SpreadsheetSerialArguments)?;
+        self.date_from_day(serial)
+    }
+
+    fn date_from_day(self, serial: i64) -> Result<NaiveDate, DateError> {
         let excel_leap_day = self == Self::Excel1900;
         if excel_leap_day && serial == 60 {
             return Err(DateError::SpreadsheetLeapPlaceholder);
@@ -1602,6 +1662,12 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         }
         "表格序号" | "excel-serial" => return spreadsheet_serial(rest, today, false),
         "从表格序号" | "from-excel-serial" => return spreadsheet_serial(rest, today, true),
+        "表格时刻序号" | "excel-time-serial" => {
+            return spreadsheet_time_serial(rest, today, false)
+        }
+        "从表格时刻序号" | "from-excel-time-serial" => {
+            return spreadsheet_time_serial(rest, today, true);
+        }
         _ => {}
     }
     if let Some((year, day)) = year_day_parts(input) {
@@ -1791,6 +1857,48 @@ mod tests {
             calculate_date("按周拆分CSV 2020-01-01 至 2030-01-01", today),
             Err(DateError::TooManyWeekRanges)
         );
+    }
+
+    #[test]
+    fn converts_spreadsheet_dates_with_exact_fractions_of_a_day() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (query, expected) in [
+            ("表格时刻序号 2024-02-29 12:00", "45351.5"),
+            ("从表格时刻序号 45351.5", "2024-02-29 12:00:00"),
+            ("表格时刻序号 1904 @ 1904-01-01 06:00", "0.25"),
+            ("from-excel-time-serial 1904 @ 0.25", "1904-01-01 06:00:00"),
+            (
+                "表格时刻序号 1904 @ 1904-01-01 00:00:00.000000001",
+                "1/86400000000000",
+            ),
+            (
+                "从表格时刻序号 1904 @ 1/86400000000000",
+                "1904-01-01 00:00:00.000000001",
+            ),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("从表格时刻序号 60.5", DateError::SpreadsheetLeapPlaceholder),
+            (
+                "从表格时刻序号 1904 @ -0.25",
+                DateError::SpreadsheetSerialRange,
+            ),
+            (
+                "从表格时刻序号 1904 @ 1/864000000000000",
+                DateError::SpreadsheetTimeSerialPrecision,
+            ),
+            (
+                "表格时刻序号 2024-02-29 24:00",
+                DateError::SpreadsheetTimeSerialArguments,
+            ),
+        ] {
+            assert_eq!(calculate_date(query, today), Err(error), "{query}");
+        }
     }
 
     #[test]
