@@ -6390,6 +6390,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求等差数列的前几项之和",
+        query: "分数: 等差求和 1/3,1/6,5",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求等比数列的前几项之和",
+        query: "分数: 等比求和 1,-1/2,4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求有理数的有限连分数",
         query: "分数: 连分数 355/113",
     },
@@ -6866,6 +6876,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "割线式",
                     "等差数列",
                     "等比数列",
+                    "等差求和",
+                    "等比求和",
                     "连分数",
                     "收敛分数",
                     "从连分数",

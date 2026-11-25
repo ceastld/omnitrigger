@@ -231,6 +231,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "等差数列" || verb.eq_ignore_ascii_case("arithmetic-sequence") {
         return fraction_sequence(expression, false);
     }
+    if verb == "等差求和" || verb.eq_ignore_ascii_case("arithmetic-sum") {
+        return fraction_sequence_sum(expression, false);
+    }
     if verb == "平均变化率" || verb.eq_ignore_ascii_case("secant") {
         return fraction_secant(expression.trim()).map(|line| line.slope.to_string());
     }
@@ -242,6 +245,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "等比数列" || verb.eq_ignore_ascii_case("geometric-sequence") {
         return fraction_sequence(expression, true);
+    }
+    if verb == "等比求和" || verb.eq_ignore_ascii_case("geometric-sum") {
+        return fraction_sequence_sum(expression, true);
     }
     if verb == "连分数" || verb.eq_ignore_ascii_case("continued-fraction") {
         return continued_fraction(calculate_fraction(expression.trim())?);
@@ -830,6 +836,28 @@ fn approximate_fraction(value: BigRational, max_denominator: u32) -> BigRational
 }
 
 fn fraction_sequence(input: &str, geometric: bool) -> Result<String, FractionError> {
+    let mut values = Vec::new();
+    visit_fraction_sequence(input, geometric, |value| {
+        values.push(value.to_string());
+        Ok(())
+    })?;
+    Ok(values.join("\n"))
+}
+
+fn fraction_sequence_sum(input: &str, geometric: bool) -> Result<String, FractionError> {
+    let mut total = BigRational::default();
+    visit_fraction_sequence(input, geometric, |value| {
+        total += value;
+        ensure_exact_size(&total)
+    })?;
+    Ok(total.to_string())
+}
+
+fn visit_fraction_sequence(
+    input: &str,
+    geometric: bool,
+    mut visit: impl FnMut(&BigRational) -> Result<(), FractionError>,
+) -> Result<(), FractionError> {
     let terms: Vec<_> = split_top_level_commas(input).take(4).collect();
     let [first, change, count] = terms.as_slice() else {
         return Err(FractionError::SequenceArguments);
@@ -842,7 +870,7 @@ fn fraction_sequence(input: &str, geometric: bool) -> Result<String, FractionErr
         .ok_or(FractionError::SequenceArguments)?;
     let mut value = calculate_fraction(first)?;
     let change = calculate_fraction(change)?;
-    let mut values = vec![value.to_string()];
+    visit(&value)?;
     for _ in 1..count {
         if geometric {
             value *= &change;
@@ -850,9 +878,9 @@ fn fraction_sequence(input: &str, geometric: bool) -> Result<String, FractionErr
             value += &change;
         }
         ensure_exact_size(&value)?;
-        values.push(value.to_string());
+        visit(&value)?;
     }
-    Ok(values.join("\n"))
+    Ok(())
 }
 
 fn continued_fraction(value: BigRational) -> Result<String, FractionError> {
@@ -2104,6 +2132,25 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn sums_exact_arithmetic_and_geometric_progressions() {
+        for (query, expected) in [
+            ("等差求和 1/3,1/6,5", "10/3"),
+            ("arithmetic-sum comb(4,2),-1/2,3", "33/2"),
+            ("等比求和 1,-1/2,4", "5/8"),
+            ("geometric-sum 2,1,128", "256"),
+            ("等比求和 2,0,3", "2"),
+            ("等比求和 1,-1,128", "0"),
+            ("等比求和 1/7,1e2000,1", "1/7"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("等差求和 1,2,129"),
+            Err(FractionError::SequenceArguments),
+        );
     }
 
     #[test]
