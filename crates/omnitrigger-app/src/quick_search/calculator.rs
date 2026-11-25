@@ -1181,6 +1181,10 @@ mod tests {
     fn interpolates_and_limits_values_in_ranges() {
         for (query, expected) in [
             ("lerp(10,20,0.25)", "12.5"),
+            ("midpoint(5,13)", "9"),
+            ("midpoint(1e308,1e308)", "1e308"),
+            ("midpoint(-1e308,1e308)", "0"),
+            ("midpoint(5e-324,5e-324)/5e-324", "1"),
             ("lerp(20,10,percent(25))", "17.5"),
             ("lerp(-1e308,1e308,0.75)", "5e307"),
             ("lerp(1e308,1,1)", "1"),
@@ -1199,6 +1203,7 @@ mod tests {
         }
         for query in [
             "lerp(1,2)",
+            "midpoint(1,2,3)",
             "remap(1,0,2,100)",
             "remap(3,0,2,0,100)",
             "remap(1,1,1,0,100)",

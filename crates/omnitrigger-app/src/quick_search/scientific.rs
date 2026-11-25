@@ -129,6 +129,12 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             }));
         }
         "lerp" => return Some(NamedValue::Aggregate(linear_interpolation)),
+        "midpoint" => {
+            return Some(NamedValue::Aggregate(|values| match *values {
+                [left, right] => left.midpoint(right),
+                _ => f64::NAN,
+            }));
+        }
         "fma" => {
             return Some(NamedValue::Aggregate(|values| match values {
                 [left, right, addend] => left.mul_add(*right, *addend),

@@ -3513,6 +3513,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求两个端点的中点",
+        query: "midpoint(5,13)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将数值映射到另一个区间",
         query: "remap(512,0,1024,0,100)",
     },
@@ -6806,6 +6811,11 @@ README"#,
         icon: Icon::Terminal,
         title: "用精确分数在两个区间之间映射",
         query: "分数: 计算 remap(1/3,0,1,10,20)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确求两个分数的中点",
+        query: "分数: 计算 midpoint(-7/3,3/5)",
     },
     Example {
         icon: Icon::Terminal,

@@ -1896,7 +1896,7 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.clamp_function();
         }
-        if matches!(name.as_str(), "lerp" | "invlerp" | "remap") {
+        if matches!(name.as_str(), "lerp" | "invlerp" | "remap" | "midpoint") {
             self.remaining = rest;
             return self.interpolation_function(&name);
         }
@@ -2365,9 +2365,18 @@ impl FractionParser<'_> {
     }
 
     fn interpolation_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
-        let count = if name == "remap" { 5 } else { 3 };
+        let count = match name {
+            "remap" => 5,
+            "midpoint" => 2,
+            _ => 3,
+        };
         let values = self.fixed_function_arguments(count)?;
         match (name, values.as_slice()) {
+            ("midpoint", [left, right]) => {
+                let midpoint = (left + right) / BigInt::from(2);
+                ensure_exact_size(&midpoint)?;
+                Ok(midpoint)
+            }
             ("lerp", [start, end, progress]) => interpolate_fraction(start, end, progress),
             ("invlerp", [start, end, value]) => fraction_progress(start, end, value),
             ("remap", [value, start, end, output_start, output_end]) => {
@@ -3413,6 +3422,8 @@ mod tests {
     fn interpolates_progress_and_remaps_intervals_using_exact_fractions() {
         for (query, expected) in [
             ("计算 lerp(0,10,1/3)", "10/3"),
+            ("计算 midpoint(-7/3,3/5)", "-13/15"),
+            ("计算 midpoint(1e2400,1e2400)/1e2400", "1"),
             ("计算 LERP(2,2,1/2)", "2"),
             ("计算 invlerp(10,0,7)", "3/10"),
             ("计算 remap(1/3,0,1,10,20)", "40/3"),
