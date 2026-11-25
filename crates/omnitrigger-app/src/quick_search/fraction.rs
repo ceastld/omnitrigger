@@ -1923,7 +1923,7 @@ impl FractionParser<'_> {
         }
         if matches!(
             name.as_str(),
-            "sqrt" | "abs" | "isqrt" | "floor" | "ceil" | "trunc"
+            "sqrt" | "abs" | "isqrt" | "floor" | "ceil" | "trunc" | "fract"
         ) {
             self.remaining = rest;
             if !self.consume('(') {
@@ -1939,6 +1939,7 @@ impl FractionParser<'_> {
                 "floor" => return Ok(value.floor()),
                 "ceil" => return Ok(value.ceil()),
                 "trunc" => return Ok(BigRational::from_integer(value.to_integer())),
+                "fract" => return Ok(value.fract()),
                 "isqrt" if !negative && value.is_integer() => {
                     return Ok(BigRational::from_integer(
                         value.numer().magnitude().sqrt().into(),
@@ -3020,6 +3021,10 @@ mod tests {
             ("计算 floor(-7/3)", "-3"),
             ("计算 ceil(-7/3)", "-2"),
             ("计算 trunc(-7/3)", "-2"),
+            ("计算 fract(-7/3)", "-1/3"),
+            ("计算 fract(7/3)", "1/3"),
+            ("计算 fract(-9007199254740993.9)", "-9/10"),
+            ("计算 fract(-2)", "0"),
             ("计算 floor(7/3)", "2"),
             ("计算 ceil(7/3)", "3"),
             ("计算 trunc(7/3)", "2"),

@@ -177,6 +177,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "floor" => f64::floor,
         "ceil" => f64::ceil,
         "trunc" => f64::trunc,
+        "fract" => |value| value.fract().copysign(value),
         "factorial" | "fact" => |n| permutations(&[n, n]),
         "popcount" | "bit_count" => {
             |n| nonnegative_integer(n).map_or(f64::NAN, |value| f64::from(value.count_ones()))

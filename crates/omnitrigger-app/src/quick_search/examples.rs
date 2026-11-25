@@ -3742,6 +3742,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "trunc(-1.8)",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "取带符号的小数部分",
+        query: "fract(-1.75)",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算数据速率",
         query: "8Mbps to MB/s",
@@ -6876,6 +6881,11 @@ README"#,
         icon: Icon::Terminal,
         title: "截去精确分数的小数部分",
         query: "分数: 计算 trunc(-7/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确求分数向零取整后剩余的部分",
+        query: "分数: 计算 fract(-7/3)",
     },
     Example {
         icon: Icon::Terminal,

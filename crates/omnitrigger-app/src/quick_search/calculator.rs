@@ -669,6 +669,7 @@ mod tests {
             ("round(3.5)", "4"),
             ("round(-2.5)", "-2"),
             ("trunc(-1.8)", "-1"),
+            ("fract(-1.75)", "-0.75"),
             ("-sqrt(4)^2", "-4"),
         ] {
             assert!(looks_like_calculation(query), "{query}");
@@ -1013,6 +1014,9 @@ mod tests {
             ("signbit(-5e-324)", 1.0),
             ("signbit(copysign(0,-1))", 1.0),
             ("signbit(abs(-0))", 0.0),
+            ("fract(-2)", -0.0),
+            ("fract(-0)", -0.0),
+            ("fract(-5e-324)", -5e-324),
         ] {
             assert_eq!(
                 evaluate(query).unwrap().to_bits(),
