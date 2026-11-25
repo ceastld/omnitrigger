@@ -28,6 +28,7 @@ use super::{
 };
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_WINDOWS_COMMAND_UNITS: usize = 32_766;
 pub(super) const MAX_PADDING_WIDTH: usize = 4096;
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const MAX_REGEX_FREQUENCY_INPUT_BYTES: usize = 16 * 1024;
@@ -80,6 +81,9 @@ pub(super) enum TextError {
     IncompleteTextArgument,
     InvalidTextArgument,
     InvalidLineTemplate,
+    WindowsArguments,
+    WindowsArgumentNull,
+    WindowsCommandLimit,
     IncompleteLineComparison,
     InvalidLineComparison,
     TooManyDiffLines,
@@ -141,6 +145,9 @@ impl TextError {
             Self::IncompleteTextArgument => "输入带引号的内容和原文",
             Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
             Self::InvalidLineTemplate => "模板用 {行} 和 {序号} 填入内容，用 {{ 和 }} 输出花括号",
+            Self::WindowsArguments => "用 JSON 字符串数组填写 Windows 程序参数",
+            Self::WindowsArgumentNull => "Windows 命令行参数不能包含空字符 U+0000",
+            Self::WindowsCommandLimit => "参数段超过 Windows 命令行的长度上限",
             Self::IncompleteLineComparison => "输入两组加引号的文本，组间用空格分开",
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
             Self::TooManyDiffLines => "逐行比较最多支持每组 512 行",
@@ -482,8 +489,27 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "html还原" | "html-unescape" => Ok(unescape_html(text)),
         "markdown转义" | "markdown-escape" => Ok(escape_markdown(text)),
         "markdown还原" | "markdown-unescape" => Ok(unescape_markdown(text)),
+        "windows参数" | "windows-arguments" => windows_arguments(text),
         _ => Err(TextError::UnknownOperation),
     }
+}
+
+fn windows_arguments(input: &str) -> Result<String, TextError> {
+    let arguments: Vec<String> =
+        serde_json::from_str(input).map_err(|_| TextError::WindowsArguments)?;
+    if arguments.iter().any(|argument| argument.contains('\0')) {
+        return Err(TextError::WindowsArgumentNull);
+    }
+    let command = crate::profiles::join_arguments(&arguments);
+    if command
+        .encode_utf16()
+        .take(MAX_WINDOWS_COMMAND_UNITS + 1)
+        .count()
+        > MAX_WINDOWS_COMMAND_UNITS
+    {
+        return Err(TextError::WindowsCommandLimit);
+    }
+    Ok(command)
 }
 
 fn transform_text_pipeline(input: &str) -> Result<String, TextError> {
@@ -3608,6 +3634,28 @@ mod tests {
         assert_eq!(
             transform_text("Base64解码 AA=="),
             Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn formats_windows_program_arguments_including_empty_strings_and_trailing_slashes() {
+        assert_eq!(
+            transform_text(r#"Windows参数 ["--input","C:\\带 空格\\","say \"Hi\"",""]"#).as_deref(),
+            Ok(r#"--input "C:\带 空格\\" "say \"Hi\"" """#)
+        );
+        assert_eq!(transform_text("windows-arguments []").as_deref(), Ok(""));
+        assert_eq!(
+            transform_text(r#"Windows参数 ["a\u0000b"]"#),
+            Err(TextError::WindowsArgumentNull)
+        );
+        assert_eq!(
+            transform_text("Windows参数 [42]"),
+            Err(TextError::WindowsArguments)
+        );
+        let oversized = format!("Windows参数 [\"{}\"]", "😺".repeat(16_384));
+        assert_eq!(
+            transform_text(&oversized),
+            Err(TextError::WindowsCommandLimit)
         );
     }
 

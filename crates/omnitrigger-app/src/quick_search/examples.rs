@@ -4576,6 +4576,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 JSON 字符串数组拼成 Windows 程序参数",
+        query: r#"文本: Windows参数 ["--input","C:\\项目\\报告 01.txt",""]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "还原 Markdown 的反斜杠转义",
         query: r"文本: Markdown还原 \*茶\* \[咖啡\]",
     },

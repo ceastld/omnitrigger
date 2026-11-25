@@ -619,7 +619,7 @@ fn quote_argument(argument: &str) -> String {
     out
 }
 
-fn join_arguments(arguments: &[String]) -> String {
+pub(super) fn join_arguments(arguments: &[String]) -> String {
     arguments
         .iter()
         .map(|argument| quote_argument(argument))
