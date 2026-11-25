@@ -11,7 +11,10 @@ pub(super) struct RecentValues(Rc<RefCell<Vec<InputSuggestion>>>);
 
 impl RecentValues {
     pub(super) fn record(&self, expression: &str, result: &str) {
-        let expression = expression.trim();
+        self.record_exact(expression.trim(), result);
+    }
+
+    pub(super) fn record_exact(&self, expression: &str, result: &str) {
         let mut items = self.0.borrow_mut();
         items.retain(|item| item.expression != expression);
         items.insert(

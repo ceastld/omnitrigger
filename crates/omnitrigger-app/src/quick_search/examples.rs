@@ -3570,6 +3570,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "换算历史: ",
     },
     Example {
+        icon: Icon::Clock,
+        title: "找回复制或填回结果时使用过的查询",
+        query: "查询历史: ",
+    },
+    Example {
         icon: Icon::Layers,
         title: "找回用 Ctrl+D 收藏的查询",
         query: "收藏:",

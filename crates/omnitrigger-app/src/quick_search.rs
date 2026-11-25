@@ -194,6 +194,7 @@ enum Results {
     Help(Vec<usize>),
     Calculations(Vec<InputSuggestion>),
     Conversions(Vec<InputSuggestion>),
+    Queries(Vec<InputSuggestion>),
     ConversionTargets(Vec<InputSuggestion>),
     FileOptions(Vec<InputSuggestion>),
     FilterOptions(Vec<InputSuggestion>),
@@ -348,6 +349,7 @@ pub(super) struct RecentSearch {
     pub(super) launched_apps: RecentApplications,
     calculations: RecentValues,
     conversions: RecentValues,
+    queries: RecentValues,
     examples: RecentExamples,
     bookmarks: QueryBookmarks,
     applications: ApplicationCache,
@@ -870,6 +872,7 @@ impl Results {
                     }
                 }
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
+                Scope::QueryHistory => Self::Queries(recent.queries.matching(term)),
                 Scope::BatchConversion => {
                     if let Some(arguments) = batch_arguments(term, "对照", "csv") {
                         Self::table_value(
@@ -1508,6 +1511,7 @@ impl Results {
             Self::DirectoryInput(item) if selected == 0 => Some(&item.expression),
             Self::Calculations(items)
             | Self::Conversions(items)
+            | Self::Queries(items)
             | Self::ConversionTargets(items)
             | Self::FileOptions(items)
             | Self::FilterOptions(items)
@@ -1635,6 +1639,7 @@ impl Results {
             | Self::Bookmarks(items)
             | Self::Calculations(items)
             | Self::Conversions(items)
+            | Self::Queries(items)
                 if !items.is_empty() =>
             {
                 132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
@@ -2390,6 +2395,10 @@ impl QuickSearch {
         match &self.results {
             Results::Value(Ok(result)) => {
                 self.remember_value(cx);
+                self.index
+                    .recent
+                    .queries
+                    .record_exact(&self.input.read(cx).text(), "");
                 cx.write_to_clipboard(ClipboardItem::new_string(result.text.clone()));
                 window.remove_window();
             }
@@ -2420,6 +2429,10 @@ impl QuickSearch {
         }
         if !is_held {
             let text = table.page_csv(self.table_pages.rows, self.table_pages.columns);
+            self.index
+                .recent
+                .queries
+                .record_exact(&self.input.read(cx).text(), "");
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             window.remove_window();
         }
@@ -2664,6 +2677,7 @@ impl QuickSearch {
             self.fill_query(refill.original, window, cx);
         } else if let Some(text) = self.results.refillable_text() {
             let original = self.input.read(cx).text();
+            self.index.recent.queries.record_exact(&original, "");
             let inserted = text.to_owned();
             self.result_refill = Some(ResultRefill {
                 original,
@@ -3201,6 +3215,7 @@ impl QuickSearch {
                     Results::Help(items) => items.len(),
                     Results::Calculations(items)
                     | Results::Conversions(items)
+                    | Results::Queries(items)
                     | Results::ConversionTargets(items)
                     | Results::FileOptions(items)
                     | Results::FilterOptions(items)
@@ -3244,7 +3259,8 @@ impl QuickSearch {
             | Results::FilterOptions(items)
             | Results::Bookmarks(items)
             | Results::Calculations(items)
-            | Results::Conversions(items) => (items.len(), EXAMPLE_PAGE_SIZE),
+            | Results::Conversions(items)
+            | Results::Queries(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             Results::Help(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             Results::Value(Ok(_)) => (self.expanded_value_pages.as_ref().map_or(0, Vec::len), 1),
             _ => return false,
@@ -3446,6 +3462,7 @@ impl QuickSearch {
         let start = self.selected / page_size * page_size;
         let visible = items.iter().enumerate().skip(start).take(page_size);
         let bookmarks = matches!(self.results, Results::Bookmarks(_));
+        let query_history = matches!(self.results, Results::Queries(_));
         div()
             .flex()
             .flex_col()
@@ -3460,7 +3477,7 @@ impl QuickSearch {
                         item.result.clone().into(),
                         Some(input_preview(expression.clone()).to_string()),
                     ),
-                    None if bookmarks => (input_preview(expression.clone()), None),
+                    None if bookmarks || query_history => (input_preview(expression.clone()), None),
                     None => (
                         expression.clone().into(),
                         Some(format!("= {}", item.result)),
@@ -3877,6 +3894,12 @@ impl QuickSearch {
                 .child("未找到用过的算式"),
             Results::Calculations(items) => {
                 self.render_input_suggestions(items, Icon::Terminal, EXAMPLE_PAGE_SIZE, cx)
+            }
+            Results::Queries(items) if items.is_empty() => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("未找到已使用的查询"),
+            Results::Queries(items) => {
+                self.render_input_suggestions(items, Icon::Clock, EXAMPLE_PAGE_SIZE, cx)
             }
             Results::Conversions(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
@@ -5064,6 +5087,30 @@ mod tests {
             index.results("算式历史:"),
             Results::Calculations(items) if items.len() == 1 && items[0].expression == "2**10"
         ));
+    }
+
+    #[test]
+    fn query_history_filters_confirmed_queries_and_restores_the_exact_input() {
+        let index = SearchIndex::default();
+        let original = "文本: 原文   甲\r\n乙\t ";
+        let current = index.results("查询历史:");
+        assert!(matches!(current, Results::Queries(items) if items.is_empty()));
+        index.recent.calculations.record("2**10", "1024");
+        index.recent.queries.record_exact(original, "");
+        index
+            .recent
+            .queries
+            .record_exact("JSON: 紧凑 {\"字段\":2}", "");
+        index.recent.queries.record_exact(original, "");
+        let list = index.results("查询历史:");
+        assert_eq!(list.suggested_input(0), Some(original));
+        assert_eq!(list.suggested_input(1), Some("JSON: 紧凑 {\"字段\":2}"));
+        assert_eq!(list.suggested_input(2), None);
+        assert_eq!(
+            index.results("query history: 原文 乙").suggested_input(0),
+            Some(original)
+        );
+        assert_eq!(index.results("查询历史: 1024").suggested_input(0), None);
     }
 
     #[test]
@@ -7446,6 +7493,7 @@ mod tests {
                 Results::Value(Ok(_))
                 | Results::Calculations(_)
                 | Results::Conversions(_)
+                | Results::Queries(_)
                 | Results::Bookmarks(_) => {}
                 Results::ApplicationsLoading
                 | Results::OpenWindowsLoading
