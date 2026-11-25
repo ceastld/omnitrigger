@@ -114,16 +114,70 @@ pub(super) fn query_argument_range(query: &str) -> Option<Range<usize>> {
 
 fn calculator_argument_range(query: &str) -> Option<Range<usize>> {
     let query = query.trim_end();
-    let (expression, exact) = match scoped_query(query) {
-        Some((Scope::Fraction, term)) => (fraction_command_expression(term)?, true),
-        Some(_) => return None,
-        None => (query.trim_start(), false),
-    };
+    let (expression, exact) = calculator_expression(query)?;
     let end = query.len();
-    if let Some(arguments) = standalone_function_arguments(expression) {
-        return Some(end - 1 - arguments.len()..end - 1);
+    if let Some(range) = standalone_function_range(query, expression) {
+        return Some(range);
     }
     (exact && !expression.is_empty()).then_some(end - expression.len()..end)
+}
+
+fn calculator_expression(query: &str) -> Option<(&str, bool)> {
+    match scoped_query(query) {
+        Some((Scope::Fraction, term)) => Some((fraction_command_expression(term)?, true)),
+        Some(_) => None,
+        None => Some((query.trim_start(), false)),
+    }
+}
+
+fn standalone_function_range(query: &str, expression: &str) -> Option<Range<usize>> {
+    let arguments = standalone_function_arguments(expression)?;
+    let (end, _) = query.char_indices().next_back()?;
+    Some(end - arguments.len()..end)
+}
+
+pub(super) fn neighboring_function_argument(
+    query: &str,
+    selection: Range<usize>,
+    backwards: bool,
+) -> Option<Range<usize>> {
+    let query = query.trim_end();
+    let (expression, _) = calculator_expression(query)?;
+    let inside = standalone_function_range(query, expression)?;
+    let mut arguments = Vec::new();
+    let mut start = inside.start;
+    let mut depth = 0usize;
+    let trimmed_range = |start: usize, end: usize| {
+        let text = &query[start..end];
+        let trimmed = text.trim_start();
+        let start = end - trimmed.len();
+        start..start + trimmed.trim_end().len()
+    };
+    for (offset, ch) in query[inside.clone()].char_indices() {
+        match narrow_ascii_graphic(ch) {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                arguments.push(trimmed_range(start, inside.start + offset));
+                start = inside.start + offset + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    arguments.push(trimmed_range(start, inside.end));
+    if backwards {
+        arguments
+            .iter()
+            .rev()
+            .find(|range| range.end <= selection.start && **range != selection)
+            .or_else(|| arguments.last())
+    } else {
+        arguments
+            .iter()
+            .find(|range| range.start >= selection.end && **range != selection)
+            .or_else(|| arguments.first())
+    }
+    .cloned()
 }
 
 fn query_argument_start(query: &str) -> Option<usize> {
@@ -8008,16 +8062,26 @@ pub(super) fn fraction_function_examples(query: &str) -> Option<Vec<usize>> {
 }
 
 fn standalone_function_arguments(expression: &str) -> Option<&str> {
-    let (name, rest) = split_name(expression);
-    if !name.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
+    if !expression
+        .chars()
+        .next()
+        .is_some_and(|ch| narrow_ascii_graphic(ch).is_ascii_alphabetic())
+    {
         return None;
     }
-    let arguments = rest.trim_start().strip_prefix('(')?.strip_suffix(')')?;
+    let arguments = expression
+        .trim_start_matches(|ch| {
+            let ch = narrow_ascii_graphic(ch);
+            ch.is_ascii_alphanumeric() || matches!(ch, 'π' | 'Π' | '_')
+        })
+        .trim_start()
+        .strip_prefix(['(', '（'])?
+        .strip_suffix([')', '）'])?;
     let mut depth = 0usize;
-    for byte in arguments.bytes() {
-        match byte {
-            b'(' => depth += 1,
-            b')' => depth = depth.checked_sub(1)?,
+    for ch in arguments.chars().map(narrow_ascii_graphic) {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.checked_sub(1)?,
             _ => {}
         }
     }
@@ -8202,6 +8266,29 @@ mod tests {
             });
             assert_eq!(selected, expected, "{query}");
         }
+    }
+
+    #[test]
+    fn navigates_top_level_arguments_without_splitting_nested_calls() {
+        let query = " 分数：计算 ｌｅｒｐ（root(1/8,3)， 4/5 ，0.5）  ";
+        let next = |selection, backwards| {
+            neighboring_function_argument(query, selection, backwards).unwrap()
+        };
+        let first = next(query.len()..query.len(), false);
+        let second = next(first.clone(), false);
+        let third = next(second.clone(), false);
+        assert_eq!(&query[first.clone()], "root(1/8,3)");
+        assert_eq!(&query[second.clone()], "4/5");
+        assert_eq!(&query[third.clone()], "0.5");
+        assert_eq!(next(third, false), first);
+        assert_eq!(next(second, true), first);
+        assert_eq!(&query[next(first, true)], "0.5");
+        let query = "lerp(1, ,3)";
+        let empty = neighboring_function_argument(query, 5..6, false).unwrap();
+        assert!(empty.is_empty());
+        let next = neighboring_function_argument(query, empty, false).unwrap();
+        assert_eq!(&query[next], "3");
+        assert!(neighboring_function_argument("sin(1)+sin(2)", 0..0, false).is_none());
     }
 
     #[test]

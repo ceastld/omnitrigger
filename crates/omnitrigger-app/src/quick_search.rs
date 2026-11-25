@@ -116,7 +116,8 @@ use duration::{
 use equation::{solve_equation_output, solve_linear_system, EquationError, EquationOutput};
 use examples::{
     example_help_query, fraction_function_examples, function_examples, matching_examples,
-    query_argument_range, tool_index_examples, tool_operation_examples, Example, EXAMPLES,
+    neighboring_function_argument, query_argument_range, tool_index_examples,
+    tool_operation_examples, Example, EXAMPLES,
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
@@ -4091,6 +4092,23 @@ impl QuickSearch {
                 && self.select_query_arguments(event.is_held, window, cx)
             {
                 cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.alt
+                && keystroke.modifiers.shift
+                && matches!(keystroke.key.as_str(), "left" | "right")
+            {
+                let input = self.input.read(cx);
+                if let Some(range) = neighboring_function_argument(
+                    input.text_ref(),
+                    input.selection(),
+                    keystroke.key == "left",
+                ) {
+                    if !event.is_held {
+                        self.input
+                            .update(cx, |input, cx| input.select_range(range, cx));
+                    }
+                    cx.stop_propagation();
+                }
             } else if keystroke.modifiers.control
                 && ((modifiers == 2 && keystroke.modifiers.shift && keystroke.key == "f")
                     || (modifiers == 1 && keystroke.key == "h"))
@@ -9620,6 +9638,29 @@ mod tests {
                             assert_eq!(&input.text_ref()[input.selection()], "81+19");
                         })
                         .unwrap();
+                    let query = "分数: 计算 lerp(root(1/8,3), 4/5, 0.5)";
+                    reopened
+                        .update(cx, |search, window, cx| search.fill_query(query, window, cx))
+                        .unwrap();
+                    for (key, expected) in [
+                        ("alt-shift-right", "root(1/8,3)"),
+                        ("alt-shift-right", "4/5"),
+                        ("alt-shift-left", "root(1/8,3)"),
+                        ("alt-shift-left", "0.5"),
+                    ] {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(&input.text_ref()[input.selection()], expected, "{key}");
+                                assert_eq!(input.text_ref(), query);
+                            })
+                            .unwrap();
+                    }
                     let multiline = "CSV: 表格预览 名称,数量\r\n绿茶,1\n米,2";
                     let line_start = multiline.find("绿茶").unwrap();
                     let line_end = line_start + "绿茶,1".len();
