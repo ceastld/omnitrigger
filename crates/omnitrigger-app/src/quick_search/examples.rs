@@ -6150,6 +6150,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看网址参数的表格并区分空值和无等号参数",
+        query: "URL: 参数CSV https://example.invalid/?q=%E8%8C%B6+1&q=b%2Bc&flag&flag=",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "提取指定 URL 查询参数的全部值",
         query: r#"URL: 取参数 "tag" https://example.invalid/?tag=a+1&page=2&tag=b%2Bc&tag="#,
     },

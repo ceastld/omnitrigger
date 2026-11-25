@@ -92,7 +92,7 @@ impl UrlEncodingError {
             Self::InvalidFragmentArgument => "用双引号填写锚点文字，再输入完整 URL",
             Self::MissingFragment => "该 URL 没有 # 锚点",
             Self::InvalidWebAddressRow { .. } => "每个非空行须填写一个完整的 HTTP 或 HTTPS 网址",
-            Self::ReportTooLarge => "网址统计结果超过 CSV 上限",
+            Self::ReportTooLarge => "网址 CSV 结果超过 1 MiB，请缩小输入",
         }
     }
 }
@@ -174,15 +174,15 @@ enum UrlGroupBy {
 
 pub(super) fn url_csv_report(input: &str) -> Option<Result<String, UrlEncodingError>> {
     let (operation, value) = input.split_once(char::is_whitespace)?;
-    let by = match operation.to_ascii_lowercase().as_str() {
-        "主机统计csv" | "host-counts-csv" => UrlGroupBy::Host,
-        "源统计csv" | "origin-counts-csv" => UrlGroupBy::Origin,
-        _ => return None,
-    };
     let value = input[operation.len()..]
         .strip_prefix("\r\n")
         .unwrap_or(value);
-    Some(group_web_addresses(value, by))
+    Some(match operation.to_ascii_lowercase().as_str() {
+        "参数csv" | "params-csv" => query_parameters_csv(value.trim()),
+        "主机统计csv" | "host-counts-csv" => group_web_addresses(value, UrlGroupBy::Host),
+        "源统计csv" | "origin-counts-csv" => group_web_addresses(value, UrlGroupBy::Origin),
+        _ => return None,
+    })
 }
 
 fn group_web_addresses(source: &str, by: UrlGroupBy) -> Result<String, UrlEncodingError> {
@@ -729,14 +729,41 @@ fn decode_query_pairs_raw(
     query: &str,
     decode: impl Fn(&str) -> Result<String, UrlEncodingError>,
 ) -> Result<Vec<[String; 2]>, UrlEncodingError> {
+    query_parameters(query)
+        .map(|(name, value, _)| Ok([decode(name)?, decode(value)?]))
+        .collect()
+}
+
+fn query_parameters(query: &str) -> impl Iterator<Item = (&str, &str, bool)> {
     query
         .split('&')
         .filter(|part| !part.is_empty())
-        .map(|part| {
-            let (name, value) = part.split_once('=').unwrap_or((part, ""));
-            Ok([decode(name)?, decode(value)?])
+        .map(|part| match part.split_once('=') {
+            Some((name, value)) => (name, value, true),
+            None => (part, "", false),
         })
-        .collect()
+}
+
+fn query_parameters_csv(source: &str) -> Result<String, UrlEncodingError> {
+    if source.is_empty() {
+        return Err(UrlEncodingError::Incomplete);
+    }
+    let mut report = String::from("名称,值,有等号");
+    for (name, value, has_equals) in query_parameters(query_text(source)) {
+        let name = decode_form_value(name)?;
+        let value = decode_form_value(value)?;
+        append_bounded_csv_row(
+            &mut report,
+            [
+                name.as_str(),
+                value.as_str(),
+                if has_equals { "是" } else { "否" },
+            ]
+            .into_iter(),
+            UrlEncodingError::ReportTooLarge,
+        )?;
+    }
+    Ok(report)
 }
 
 fn encode_parameters(input: &str) -> Result<String, UrlEncodingError> {
@@ -1322,6 +1349,30 @@ mod tests {
         assert_eq!(
             convert_url_component("排序参数 https://example.invalid/?%2G=1"),
             Err(UrlEncodingError::InvalidEscape)
+        );
+    }
+
+    #[test]
+    fn previews_ordered_query_parameters_and_distinguishes_flags_from_empty_values() {
+        let query = "参数CSV https://example.invalid/?q=%E8%8C%B6+1&flag&&q=b%2Bc&flag=&note=a%2Cb%0Ac&=x#tail";
+        let expected = "名称,值,有等号\r\nq,茶 1,是\r\nflag,\"\",否\r\nq,b+c,是\r\nflag,\"\",是\r\nnote,\"a,b\nc\",是\r\n\"\",x,是";
+        assert_eq!(url_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(convert_url_component(query).as_deref(), Ok(expected));
+        assert_eq!(
+            convert_url_component("PARAMS-CSV\r\n?flag#part").as_deref(),
+            Ok("名称,值,有等号\r\nflag,\"\",否")
+        );
+        assert_eq!(
+            convert_url_component("params-csv https://example.invalid/#part").as_deref(),
+            Ok("名称,值,有等号")
+        );
+        assert_eq!(
+            convert_url_component("参数CSV ?q=%ZZ"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
+        assert_eq!(
+            convert_url_component("参数CSV ?%00=x"),
+            Err(UrlEncodingError::NullCharacter)
         );
     }
 
