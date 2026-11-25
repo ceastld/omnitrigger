@@ -45,6 +45,7 @@ pub(super) enum DateError {
     DateSeriesArguments,
     InvalidDateRanges,
     RangeSplitArguments,
+    DateSpanArguments,
     WeekdayCountArguments,
     SpreadsheetSerialArguments,
     SpreadsheetTimeSerialArguments,
@@ -100,6 +101,7 @@ impl DateError {
             Self::RangeSplitArguments => {
                 "用“至”连接开始日期和结束日期，例如 2024-01-31 至 2024-03-02"
             }
+            Self::DateSpanArguments => "填写两个完整日期，例如 2024-01-31 至 2025-03-02",
             Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天或每隔 2 个工作日",
             Self::WorkdayExceptions => {
                 "工作日例外需要两个日期数组，先休息日再补班日，每个日期只填一次"
@@ -650,6 +652,28 @@ fn date_range_operands(
         .ok_or(separator_error)?;
     let (end, remaining) = date_operand(rest.trim_start(), today)?;
     Ok((start, end, remaining))
+}
+
+fn calendar_date_span(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let invalid = DateError::DateSpanArguments;
+    let (start, end, remaining) = date_range_operands(input.trim_start(), today, invalid)?;
+    if !remaining.is_empty() {
+        return Err(invalid);
+    }
+    let reversed = start > end;
+    let (earlier, later) = if reversed { (end, start) } else { (start, end) };
+    let mut whole_months = ((later.year() - earlier.year()) * 12 + later.month0() as i32
+        - earlier.month0() as i32) as u64;
+    let mut anchor = shift_calendar_months(earlier, whole_months, false)?;
+    if anchor > later {
+        whole_months -= 1;
+        anchor = shift_calendar_months(earlier, whole_months, false)?;
+    }
+    let days = (later - anchor).num_days();
+    let years = whole_months / 12;
+    let months = whole_months % 12;
+    let span = format!("{years} 年 {months} 个月 {days} 天");
+    Ok(if reversed { format!("-({span})") } else { span })
 }
 
 fn spreadsheet_serial(
@@ -1650,6 +1674,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     }
     match operation.to_ascii_lowercase().as_str() {
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
+        "年月日差" | "calendar-span" => return calendar_date_span(rest, today),
         "月初序列" | "month-start-series" => {
             return date_boundary_series(rest, today, 1, false)
         }
@@ -2718,6 +2743,33 @@ mod tests {
         ] {
             assert_eq!(calculate_date(query, today), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn decomposes_calendar_date_spans_with_clamped_months_and_signed_order() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("年月日差 2024-01-31 至 2025-03-02", "1 年 1 个月 2 天"),
+            ("年月日差 2024-01-31 到 2024-02-29", "0 年 1 个月 0 天"),
+            ("年月日差 2024-01-31 到 2024-02-28", "0 年 0 个月 28 天"),
+            ("年月日差 2024-02-29 到 2025-02-28", "1 年 0 个月 0 天"),
+            (
+                "calendar-span 2024-03-01 to 2024-01-31",
+                "-(0 年 1 个月 1 天)",
+            ),
+            ("年月日差 今天 到 明天", "0 年 0 个月 1 天"),
+            ("年月日差 9999-12-31 到 9999-12-31", "0 年 0 个月 0 天"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("年月日差 2024-01-31 到 2024-02-29 工作日", today),
+            Err(DateError::DateSpanArguments),
+        );
     }
 
     #[test]

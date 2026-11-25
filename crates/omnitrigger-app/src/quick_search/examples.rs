@@ -3146,6 +3146,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按整月和余下天数计算日期差",
+        query: "日期: 年月日差 2024-01-31 至 2025-03-02",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按工作日推算日期",
         query: "日期: 2026-11-20 + 1工作日",
     },
@@ -6679,6 +6684,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "格式化",
             "解析",
             "月历",
+            "年月日差",
             "工作日序号",
             "工作日位置",
             "工作日序列",
