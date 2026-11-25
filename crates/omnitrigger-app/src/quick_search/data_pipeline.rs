@@ -46,7 +46,7 @@ use super::{
     text_tools::{text_csv_report, transform_text},
     timestamp::{convert_timestamp, is_timestamp_report},
     toml_tools::{toml_csv_report, transform_toml},
-    url_encoding::convert_url_component,
+    url_encoding::{convert_url_component, url_csv_report},
 };
 
 const MAX_PIPELINE_STEPS: usize = 8;
@@ -577,6 +577,9 @@ fn prepare_pipeline_preview(
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
         Scope::TextTools => text_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
+        Scope::UrlEncoding => url_csv_report(query).map(|report| {
             report_preview(report.map_err(|cause| cause.message()), error, csv_error)
         }),
         Scope::Path => path_csv_report(query).map(|report| {

@@ -185,6 +185,7 @@ pub(super) fn url_csv_report(input: &str) -> Option<Result<String, UrlEncodingEr
         .unwrap_or(value);
     Some(match operation.to_ascii_lowercase().as_str() {
         "参数csv" | "params-csv" => query_parameters_csv(value.trim()),
+        "参数差异csv" | "diff-params-csv" => query_changes_csv(value.trim()),
         "主机统计csv" | "host-counts-csv" => group_web_addresses(value, UrlGroupBy::Host),
         "源统计csv" | "origin-counts-csv" => group_web_addresses(value, UrlGroupBy::Origin),
         _ => return None,
@@ -692,7 +693,7 @@ pub(super) fn url_parameter_values(source: &str, name: &str) -> Result<String, U
     Ok(serde_json::to_string(&values).expect("字符串数组可序列化"))
 }
 
-fn compare_url_queries(input: &str) -> Result<String, UrlEncodingError> {
+fn query_changes(input: &str) -> Result<BTreeMap<[String; 2], i32>, UrlEncodingError> {
     let [before, after] = url_pair(input, UrlEncodingError::InvalidQueryDiffPair)?;
     let mut changes = BTreeMap::new();
     for (address, change) in [(before, -1_i32), (after, 1)] {
@@ -702,10 +703,13 @@ fn compare_url_queries(input: &str) -> Result<String, UrlEncodingError> {
             *changes.entry(pair).or_insert(0) += change;
         }
     }
+    changes.retain(|_, change| *change != 0);
+    Ok(changes)
+}
 
-    let lines: Vec<_> = changes
+fn compare_url_queries(input: &str) -> Result<String, UrlEncodingError> {
+    let lines: Vec<_> = query_changes(input)?
         .into_iter()
-        .filter(|(_, change)| *change != 0)
         .map(|(pair, change)| {
             let operation = if change > 0 { "新增" } else { "移除" };
             let pair = serde_json::to_string(&pair).expect("参数名称和值可以序列化为 JSON");
@@ -722,6 +726,20 @@ fn compare_url_queries(input: &str) -> Result<String, UrlEncodingError> {
     } else {
         Ok(lines.join("\n"))
     }
+}
+
+fn query_changes_csv(input: &str) -> Result<String, UrlEncodingError> {
+    let mut csv = String::from("操作,名称,值,次数");
+    for ([name, value], change) in query_changes(input)? {
+        let operation = if change > 0 { "新增" } else { "移除" };
+        let count = change.unsigned_abs().to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [operation, name.as_str(), value.as_str(), count.as_str()].into_iter(),
+            UrlEncodingError::ReportTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn decode_query_pairs(
@@ -816,6 +834,33 @@ mod tests {
                 Err(UrlEncodingError::InvalidWebAddressRow { row: 3 })
             );
         }
+    }
+
+    #[test]
+    fn exports_url_parameter_changes_as_a_table_with_exact_fields_and_counts() {
+        let operands = r#"["https://example.invalid/a?page=1&flag","https://example.invalid/b?page=2&flag=&tag=a%2Cb&tag=a%2Cb"]"#;
+        assert_eq!(
+            convert_url_component(&format!("参数差异CSV {operands}")).as_deref(),
+            Ok("操作,名称,值,次数\r\n移除,page,1,1\r\n新增,page,2,1\r\n新增,tag,\"a,b\",2")
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"diff-params-csv ["https://a.invalid/?x=a+b","https://b.invalid/?x=a%20b"]"#,
+            )
+            .as_deref(),
+            Ok("操作,名称,值,次数")
+        );
+        let at = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap();
+        let (output, preview) = super::super::data_pipeline::transform_data_pipeline(
+            &format!(r#"["URL: 参数差异CSV"] {operands}"#),
+            at,
+        )
+        .unwrap();
+        assert!(matches!(
+            preview,
+            Some(super::super::data_pipeline::PipelinePreview::Table(_))
+        ));
+        assert!(output.ends_with("新增,tag,\"a,b\",2"));
     }
 
     #[test]

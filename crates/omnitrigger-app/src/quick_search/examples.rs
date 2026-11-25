@@ -6773,6 +6773,11 @@ README"#,
     },
     Example {
         icon: Icon::Browser,
+        title: "在表格中比较网址参数和重复次数",
+        query: r#"URL: 参数差异CSV ["https://example.invalid/a?page=1","https://example.invalid/b?page=2&tag=a%2Cb&tag=a%2Cb"]"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "将相对链接解析成完整 URL",
         query: r#"URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]"#,
     },

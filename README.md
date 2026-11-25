@@ -695,6 +695,7 @@
 - 用 `URL: 排序参数` 加上网址，可按解码后的名称排列查询参数。名称按 UTF‑16 码元比较，同名项保留原有顺序。各参数的编码和网址片段照原样保留。 [WHATWG 参数排序规则](https://url.spec.whatwg.org/#dom-urlsearchparams-sort)
 - 用 `URL: 去重参数` 加上网址，可移除解码后名称和值都相同的重复项，保留首次出现的写法和顺序。`a+b` 与 `a%20b` 解码后相同，同名但值不同的参数会保留。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 用 `URL: 参数差异 ["原网址","新网址"]` 比较解码后的查询参数，按名称和值列出新增和移除项。参数顺序和网址其他部分不参与比较，重复项按出现次数计算。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
+- 用 `URL: 参数差异CSV` 可在表格里查看相同的比较结果。新增或移除的名称、值和次数各有一列，结果可直接复制或作为 `处理:` 的最后一步。
 - 输入 `URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]` 得到 `https://example.invalid/docs/guide?lang=zh#intro`。基准网址末尾的斜杠决定相对路径从哪个目录解析。 [Rust URL 相对链接解析](https://docs.rs/url/2.5.8/url/struct.Url.html#method.join)
 - 输入 `URL: 相对 ["https://example.invalid/docs/api/","https://example.invalid/docs/guide?lang=zh#intro"]` 得到 `../guide?lang=zh#intro`。两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息，生成的链接可以用原基准网址拼接还原。 [Rust URL 相对链接生成](https://docs.rs/url/2.5.8/url/struct.Url.html#method.make_relative)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)
