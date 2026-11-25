@@ -1879,6 +1879,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "进制: 位比对 0xA5,0xAD",
     },
     Example {
+        icon: Icon::Layers,
+        title: "查看变化位的原值和新值",
+        query: "进制: 位比对CSV 0b1010,0b1100",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "在指定位宽内按字节倒序",
         query: "进制: 字节倒序 32 @ 0x12345678",
@@ -6470,6 +6475,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "读格雷码",
             "汉明距离",
             "位比对",
+            "位比对CSV",
             "表格列号",
             "罗马数字",
             "小数",

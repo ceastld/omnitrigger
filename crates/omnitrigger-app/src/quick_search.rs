@@ -130,7 +130,7 @@ use percentage::{compare_percentages, PercentageError};
 use pitch::{convert_pitch, PitchError};
 use polygon::{calculate_polygon, PolygonError};
 use presets::matching_presets;
-use radix::{convert_arbitrary_radix, RadixError};
+use radix::{convert_arbitrary_radix, radix_csv_report, RadixError};
 use ratio_allocation::{allocate_ratio, RatioAllocationError};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::{QueryBookmarks, RecentDestinations, RecentExamples};
@@ -978,14 +978,17 @@ impl Results {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
                     }
                 }
-                Scope::Radix => Self::Value(
-                    convert_arbitrary_radix(term)
-                        .map(|text| ResultValue {
-                            text,
-                            kind: ValueKind::Conversion(None),
-                        })
-                        .map_err(ValueError::Radix),
-                ),
+                Scope::Radix => match radix_csv_report(term) {
+                    Some(report) => Self::table_value(report.map_err(ValueError::Radix)),
+                    None => Self::Value(
+                        convert_arbitrary_radix(term)
+                            .map(|text| ResultValue {
+                                text,
+                                kind: ValueKind::Conversion(None),
+                            })
+                            .map_err(ValueError::Radix),
+                    ),
+                },
                 Scope::Applications => applications.results(term),
                 Scope::ApplicationHistory => recent.launched_apps.results(term),
                 Scope::Folders => Self::Destinations(matching_folders(term)),

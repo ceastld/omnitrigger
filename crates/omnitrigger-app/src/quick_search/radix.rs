@@ -1,4 +1,4 @@
-use std::num::IntErrorKind;
+use std::{fmt::Write as _, num::IntErrorKind};
 
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
@@ -222,6 +222,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     }
     if operation == "位比对" || operation.eq_ignore_ascii_case("compare-bits") {
         return compare_bits(arguments, true);
+    }
+    if is_bit_comparison_csv(operation) {
+        return bit_comparison_csv(arguments);
     }
     if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
         return convert_sheet_column(arguments);
@@ -499,13 +502,31 @@ fn convert_gray_code(input: &str, decode: bool) -> Result<String, RadixError> {
     Ok(format!("0b{gray:0>width$b}", width = width as usize))
 }
 
-fn compare_bits(input: &str, show_positions: bool) -> Result<String, RadixError> {
+fn is_bit_comparison_csv(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("位比对CSV")
+        || operation.eq_ignore_ascii_case("compare-bits-csv")
+}
+
+pub(super) fn radix_csv_report(query: &str) -> Option<Result<String, RadixError>> {
+    let (operation, arguments) = query.trim().split_once(char::is_whitespace)?;
+    is_bit_comparison_csv(&normalize(operation)).then(|| bit_comparison_csv(&normalize(arguments)))
+}
+
+fn read_bit_pair(input: &str) -> Result<(BigUint, BigUint), RadixError> {
     let invalid = RadixError::BitComparisonArguments;
     let (left, right) = input.split_once(',').ok_or(invalid)?;
     if left.trim().is_empty() || right.trim().is_empty() {
         return Err(invalid);
     }
-    let differences = unsigned_bit_value(left, invalid)? ^ unsigned_bit_value(right, invalid)?;
+    Ok((
+        unsigned_bit_value(left, invalid)?,
+        unsigned_bit_value(right, invalid)?,
+    ))
+}
+
+fn compare_bits(input: &str, show_positions: bool) -> Result<String, RadixError> {
+    let (left, right) = read_bit_pair(input)?;
+    let differences = left ^ right;
     let count = differences.count_ones();
     if !show_positions {
         return Ok(count.to_string());
@@ -520,6 +541,18 @@ fn compare_bits(input: &str, show_positions: bool) -> Result<String, RadixError>
             .join(",")
     };
     Ok(format!("不同位数 {count}\n不同位号 {positions}"))
+}
+
+fn bit_comparison_csv(input: &str) -> Result<String, RadixError> {
+    let (left, right) = read_bit_pair(input)?;
+    let differences = &left ^ &right;
+    let mut csv = String::from("位号,原位,新位");
+    for index in (0..differences.bits()).filter(|&index| differences.bit(index)) {
+        let before = u8::from(left.bit(index));
+        let after = u8::from(right.bit(index));
+        let _ = write!(csv, "\r\n{index},{before},{after}");
+    }
+    Ok(csv)
 }
 
 fn bit_width(input: &str, error: RadixError) -> Result<u64, RadixError> {
@@ -758,6 +791,30 @@ mod tests {
         assert_eq!(
             convert_arbitrary_radix(&format!("位比对 0,0x8{}", "0".repeat(2047))).as_deref(),
             Ok("不同位数 1\n不同位号 8191"),
+        );
+    }
+
+    #[test]
+    fn lists_only_changed_bits_with_original_and_new_values_in_csv() {
+        let query = "位比对CSV 0b1010,0b1100";
+        let expected = "位号,原位,新位\r\n1,1,0\r\n2,0,1";
+        assert_eq!(convert_arbitrary_radix(query).as_deref(), Ok(expected));
+        assert_eq!(radix_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            convert_arbitrary_radix("COMPARE-BITS-CSV 10,0xA").as_deref(),
+            Ok("位号,原位,新位"),
+        );
+        assert_eq!(
+            convert_arbitrary_radix("位比对CSV 1,0x100").as_deref(),
+            Ok("位号,原位,新位\r\n0,1,0\r\n8,0,1"),
+        );
+        assert_eq!(
+            convert_arbitrary_radix(&format!("位比对CSV 0,0x8{}", "0".repeat(2047))).as_deref(),
+            Ok("位号,原位,新位\r\n8191,0,1"),
+        );
+        assert_eq!(
+            convert_arbitrary_radix("位比对CSV 1,-1"),
+            Err(RadixError::BitComparisonArguments),
         );
     }
 

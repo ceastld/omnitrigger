@@ -31,7 +31,7 @@ use super::{
     path_tools::path_component,
     percentage::compare_percentages,
     pitch::convert_pitch,
-    radix::convert_arbitrary_radix,
+    radix::{convert_arbitrary_radix, radix_csv_report},
     scatter_plot::ScatterPlot,
     scope::{scoped_query, Scope},
     solid::calculate_solid,
@@ -583,6 +583,9 @@ fn prepare_pipeline_preview(
             Some(report_preview(report, error, csv_error))
         }
         Scope::Fraction => fraction_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
+        Scope::Radix => radix_csv_report(query).map(|report| {
             report_preview(report.map_err(|cause| cause.message()), error, csv_error)
         }),
         Scope::Timestamp if is_timestamp_report(query) => {
@@ -1193,6 +1196,10 @@ mod tests {
             (
                 "[\"文本: 定宽转CSV [2,1]\"] 01北,茶\nx",
                 "列1,列2,余下\r\n01,北,\",茶\"\r\nx,\"\",\"\"",
+            ),
+            (
+                "[\"进制: 位比对CSV\"] 0b1010,0b1100",
+                "位号,原位,新位\r\n1,1,0\r\n2,0,1",
             ),
         ] {
             let (text, preview) = transform_data_pipeline(query, now).unwrap();
