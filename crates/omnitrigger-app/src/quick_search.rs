@@ -5268,6 +5268,10 @@ mod tests {
             Results::Value(Err(error)) if error.message().as_ref() == "第 2 行：不能除以零"
         ));
         assert!(matches!(
+            for_query("batch calculation: 2^10\r\n\r3^2\u{2028}1/0", &[]),
+            Results::Value(Err(error)) if error.message().as_ref() == "第 4 行：不能除以零"
+        ));
+        assert!(matches!(
             for_query("批量计算: 分数 1/3+1/6\n2**80", &[]),
             Results::Value(Ok(value)) if value.text == "1/2\n1208925819614629174706176"
         ));
@@ -7268,6 +7272,7 @@ mod tests {
     ) {
         for (query, invalid) in [
             ("批量计算: 1+2\r\n\r\n  1/0  \r\n4+5", "1/0"),
+            ("批量计算: 1+2\r\u{2028}  1/0  \u{2029}4+5", "1/0"),
             ("批量计算： 分数对照 1/2\r\n  2//0  \r\n3/4", "2//0"),
             (
                 " CSV：校验 \u{feff}编号,备注\r\n001,\"茶\n梨\"\r\n002,\"未闭合 ",

@@ -1,4 +1,6 @@
-use std::ops::Range;
+use std::{iter, ops::Range, sync::OnceLock};
+
+use regex::Regex;
 
 use super::{
     cidr::calculate_cidr,
@@ -49,16 +51,9 @@ pub(super) fn batch_calculation_input(input: &str) -> (BatchCalculationKind, &st
 }
 
 pub(super) fn batch_line_range(input: &str, line: usize) -> Option<Range<usize>> {
-    let mut offset = 0;
-    for (index, part) in input.split_inclusive('\n').enumerate() {
-        if index + 1 == line {
-            let trimmed = part.trim();
-            let start = offset + part.len() - part.trim_start().len();
-            return (!trimmed.is_empty()).then_some(start..start + trimmed.len());
-        }
-        offset += part.len();
-    }
-    None
+    nonempty_batch_lines(input)
+        .find(|&(number, _, _)| number == line)
+        .map(|(_, range, _)| range)
 }
 
 pub(super) enum BatchToolOutput {
@@ -119,7 +114,7 @@ pub(super) fn batch_calculation_report(
 ) -> Result<Option<String>, CsvError> {
     const HEADER: &str = "行号,算式,结果,错误";
     let mut output = HEADER.to_owned();
-    for (line, query) in nonempty_batch_lines(input) {
+    for (line, _, query) in nonempty_batch_lines(input) {
         let line = line.to_string();
         let result = calculate(query);
         let (result, error) = match &result {
@@ -135,11 +130,28 @@ pub(super) fn batch_calculation_report(
     Ok((output.len() > HEADER.len()).then_some(output))
 }
 
-fn nonempty_batch_lines(input: &str) -> impl Iterator<Item = (usize, &str)> {
-    input.lines().enumerate().filter_map(|(index, line)| {
-        let query = line.trim();
-        (!query.is_empty()).then_some((index + 1, query))
-    })
+fn nonempty_batch_lines(input: &str) -> impl Iterator<Item = (usize, Range<usize>, &str)> {
+    static BREAKS: OnceLock<Regex> = OnceLock::new();
+    let breaks = BREAKS
+        .get_or_init(|| Regex::new(r"\r\n|[\r\n\u{2028}\u{2029}]").expect("固定的换行表达式有效"));
+    let mut start = 0;
+    breaks
+        .find_iter(input)
+        .map(|line_break| line_break.range())
+        .chain(iter::once(input.len()..input.len()))
+        .enumerate()
+        .filter_map(move |(index, ending)| {
+            let line = &input[start..ending.start];
+            let rest = line.trim_start();
+            let query_start = ending.start - rest.len();
+            let query = rest.trim_end();
+            start = ending.end;
+            (!query.is_empty()).then_some((
+                index + 1,
+                query_start..query_start + query.len(),
+                query,
+            ))
+        })
 }
 
 fn batch_results<E>(
@@ -147,7 +159,7 @@ fn batch_results<E>(
     mut operation: impl FnMut(&str) -> Result<String, E>,
 ) -> Result<Vec<String>, BatchError<E>> {
     let mut values = Vec::new();
-    for (line, query) in nonempty_batch_lines(input) {
+    for (line, _, query) in nonempty_batch_lines(input) {
         let value = operation(query).map_err(|cause| BatchError::Row { line, cause })?;
         values.push(value);
     }
@@ -155,4 +167,28 @@ fn batch_results<E>(
         return Err(BatchError::Empty);
     }
     Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uses_the_same_line_numbers_for_batch_results_and_input_selections() {
+        let input = "甲\r\n \r乙\u{2028}\u{2029} 丙 \n🍵";
+        assert_eq!(
+            map_batch_lines(input, |line| Ok::<_, ()>(line.to_owned())).as_deref(),
+            Ok("甲\n乙\n丙\n🍵")
+        );
+        for (number, text) in [(1, "甲"), (3, "乙"), (5, "丙"), (6, "🍵")] {
+            assert_eq!(&input[batch_line_range(input, number).unwrap()], text);
+        }
+        for number in [0, 2, 4, 7] {
+            assert!(batch_line_range(input, number).is_none());
+        }
+        assert_eq!(
+            batch_calculation_report(input, |line| Ok(line.to_owned())).unwrap().as_deref(),
+            Some("行号,算式,结果,错误\r\n1,甲,甲,\"\"\r\n3,乙,乙,\"\"\r\n5,丙,丙,\"\"\r\n6,🍵,🍵,\"\""),
+        );
+    }
 }
