@@ -55,6 +55,7 @@ pub(super) enum JsonError {
     ExpectedObject,
     ExpectedCollection,
     ExpectedArray,
+    ArraySliceArguments,
     ExpectedArrayAtPointer,
     ExpectedObjectItem,
     DefaultFieldArguments,
@@ -129,6 +130,9 @@ impl JsonError {
             Self::ExpectedObject => "请输入 JSON 对象",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
             Self::ExpectedArray => "请输入 JSON 数组",
+            Self::ArraySliceArguments => {
+                "填写 [起始下标,结束下标] 或 [起始下标,结束下标,非零步长]，可用 null 省略参数"
+            }
             Self::ExpectedArrayAtPointer => "每一项的指定 JSON 路径都须对应数组",
             Self::ExpectedObjectItem => "数组中的每一项都应是 JSON 对象",
             Self::DefaultFieldArguments => {
@@ -379,6 +383,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "结构统计" | "structure-stats" => return json_structure_stats(source),
+        "切片" | "slice" => return slice_json_array(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
         "校验行" | "validate-jsonl" => return validate_json_lines(raw_source),
@@ -1823,6 +1828,48 @@ pub(super) fn read_json_array(source: &str) -> Result<Vec<&RawValue>, JsonError>
         return Err(JsonError::ExpectedArray);
     }
     serde_json::from_str(source).map_err(json_parse_error)
+}
+
+fn slice_json_array(query: &str) -> Result<String, JsonError> {
+    let invalid = JsonError::ArraySliceArguments;
+    let (parameters, source) = json_value_and_source(query, invalid)?;
+    let parameters =
+        serde_json::from_str::<Vec<Option<i64>>>(parameters.get()).map_err(|_| invalid)?;
+    let (start, stop, step) = match parameters.as_slice() {
+        [start, stop] => (*start, *stop, 1),
+        [start, stop, step] => (*start, *stop, step.unwrap_or(1)),
+        _ => return Err(invalid),
+    };
+    if step == 0 {
+        return Err(invalid);
+    }
+    let values = read_json_array(source)?;
+    let length = values.len() as i64;
+    let reverse = step < 0;
+    let (minimum, maximum) = if reverse {
+        (-1, length - 1)
+    } else {
+        (0, length)
+    };
+    let resolve = |bound: Option<i64>, default| {
+        bound.map_or(default, |bound| {
+            let index = if bound < 0 { bound + length } else { bound };
+            index.clamp(minimum, maximum)
+        })
+    };
+    let (first, last) = if reverse {
+        (maximum, minimum)
+    } else {
+        (minimum, maximum)
+    };
+    let mut index = resolve(start, first);
+    let stop = resolve(stop, last);
+    let mut selected = Vec::new();
+    while if reverse { index > stop } else { index < stop } {
+        selected.push(values[index as usize].get());
+        index = index.saturating_add(step);
+    }
+    Ok(format!("[{}]", selected.join(",")))
 }
 
 fn json_array_to_lines(source: &str) -> Result<String, JsonError> {
@@ -4162,6 +4209,46 @@ mod tests {
         assert_eq!(
             write_json_pointer_results(&wide, PointerSelection::Leaves, PointerOutput::Csv),
             Err(JsonError::CsvOutputTooLarge)
+        );
+    }
+
+    #[test]
+    fn slices_arrays_with_python_indices_and_keeps_the_raw_elements() {
+        let data = r#"[0,1.20e+2,9007199254740993,"茶",{ "x":null }]"#;
+        for (parameters, expected) in [
+            ("[1,4,2]", r#"[1.20e+2,"茶"]"#),
+            ("[-2,null]", r#"["茶",{ "x":null }]"#),
+            ("[null,null,-2]", r#"[{ "x":null },9007199254740993,0]"#),
+            ("[null,-1,-1]", "[]"),
+            ("[0,null,null]", data),
+            ("[8,-10]", "[]"),
+            ("[100,-100,-9223372036854775808]", r#"[{ "x":null }]"#),
+            ("[-9223372036854775808,100,9223372036854775807]", "[0]"),
+        ] {
+            assert_eq!(
+                transform_json(&format!("切片 {parameters} {data}")).as_deref(),
+                Ok(expected),
+                "{parameters}"
+            );
+        }
+        assert_eq!(
+            transform_json("SLICE [null,null,-1] []").as_deref(),
+            Ok("[]")
+        );
+        assert_eq!(
+            transform_json(r#"依次处理 ["切片 [1,3]","长度"] [1,2,3,4]"#).as_deref(),
+            Ok("2")
+        );
+        for parameters in ["[0]", "[0,2,0]", "[0,3,1,9]", "[0,3,1.5]"] {
+            assert_eq!(
+                transform_json(&format!("切片 {parameters} {data}")),
+                Err(JsonError::ArraySliceArguments),
+                "{parameters}"
+            );
+        }
+        assert_eq!(
+            transform_json(r#"切片 [0,1] {"0":1}"#),
+            Err(JsonError::ExpectedArray)
         );
     }
 

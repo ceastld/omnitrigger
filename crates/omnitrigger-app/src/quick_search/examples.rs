@@ -4364,6 +4364,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按下标和步长从 JSON 数组取项",
+        query: r#"JSON: 切片 [1,4,2] ["茶",1.20e+2,"米",9007199254740993,"梨"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 JSONL 合并成数组",
         query: "JSON: 合并行 {\"城市\":\"北京\"}\n{\"城市\":\"上海\"}",
     },
