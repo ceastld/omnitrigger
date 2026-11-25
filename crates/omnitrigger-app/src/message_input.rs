@@ -407,6 +407,7 @@ impl MessageInput {
         cx.notify();
     }
 
+    #[cfg(all(test, target_os = "windows"))]
     pub(super) fn move_cursor_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.content.is_char_boundary(offset) {
             self.move_to(offset, false, cx);

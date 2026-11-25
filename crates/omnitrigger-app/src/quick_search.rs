@@ -2028,6 +2028,7 @@ enum ApplicationRefresh {
 
 const SEARCH_PLACEHOLDER: &str = "搜索页面、触发器，或输入算式";
 const INPUT_PROMPT_HEIGHT: f32 = 148.;
+const INPUT_REPLACE_HEIGHT: f32 = 200.;
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
 const TABLE_CELL_COMMAND: &str = "CSV: 取单元格 ";
@@ -2069,7 +2070,18 @@ struct ResultRefill {
 
 struct InputFind {
     input: Entity<MessageInput>,
+    replacement: Option<InputReplacement>,
     _changes: Subscription,
+}
+
+struct InputReplacement {
+    input: Entity<MessageInput>,
+    _changes: Subscription,
+}
+
+fn input_replacement_fits(text: &str, needle: &str, replacement: &str, count: usize) -> bool {
+    let unchanged = text.chars().count() - count * needle.chars().count();
+    unchanged + count * replacement.chars().count() <= INPUT_CHARACTER_LIMIT
 }
 
 fn find_input_range(
@@ -2487,7 +2499,7 @@ impl QuickSearch {
         self.activate_input(window, cx);
     }
 
-    fn open_input_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_input_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.input_find.is_some()
             || self.line_jump.is_some()
             || self.bookmark_name_edit.is_some()
@@ -2518,10 +2530,55 @@ impl QuickSearch {
         let changes = cx.observe_in(&input, window, |_, _, _, cx| cx.notify());
         self.input_find = Some(InputFind {
             input,
+            replacement: replace.then(|| {
+                let input = cx.new(|cx| {
+                    let mut input = MessageInput::new(cx)
+                        .embedded()
+                        .with_character_limit(INPUT_CHARACTER_LIMIT);
+                    input.set_placeholder("输入替换文字，留空则删除");
+                    input
+                });
+                let changes = cx.observe_in(&input, window, |_, _, _, cx| cx.notify());
+                InputReplacement {
+                    input,
+                    _changes: changes,
+                }
+            }),
             _changes: changes,
         });
-        window.resize(size(px(WIDTH), px(INPUT_PROMPT_HEIGHT)));
+        let height = if replace {
+            INPUT_REPLACE_HEIGHT
+        } else {
+            INPUT_PROMPT_HEIGHT
+        };
+        window.resize(size(px(WIDTH), px(height)));
         self.activate_input(window, cx);
+    }
+
+    fn replace_input_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(find) = &self.input_find else {
+            return;
+        };
+        let Some(replacement) = &find.replacement else {
+            return;
+        };
+        let needle = find.input.read(cx);
+        let replacement = replacement.input.read(cx);
+        if needle.is_composing() || replacement.is_composing() || needle.text_ref().is_empty() {
+            return;
+        }
+        let (needle, replacement) = (needle.text_ref(), replacement.text_ref());
+        let text = self.input.read(cx).text_ref();
+        let count = text.matches(needle).count();
+        if count == 0 || !input_replacement_fits(text, needle, replacement, count) {
+            return;
+        }
+        let len = text.encode_utf16().count();
+        let edited = text.replace(needle, replacement);
+        self.input.update(cx, |input, cx| {
+            input.replace_text_in_range(Some(0..len), &edited, window, cx);
+        });
+        self.finish_input_find(None, window, cx);
     }
 
     fn finish_input_find(
@@ -3869,12 +3926,39 @@ impl QuickSearch {
         if let Some(find) = &self.input_find {
             let key = &event.keystroke;
             let modifiers = key.modifiers.number_of_modifiers();
-            let cancels = key.key == "escape" && modifiers == 0;
-            let confirms =
-                key.key == "enter" && (modifiers == 0 || (modifiers == 1 && key.modifiers.shift));
-            if !find.input.read(cx).is_composing() && (cancels || confirms) {
+            let replacement = find.replacement.as_ref().map(|entry| &entry.input);
+            if find.input.read(cx).is_composing()
+                || replacement.is_some_and(|entry| entry.read(cx).is_composing())
+            {
+                return;
+            }
+            if let Some(replacement) = replacement.filter(|_| {
+                key.key == "tab" && (modifiers == 0 || (modifiers == 1 && key.modifiers.shift))
+            }) {
                 if !event.is_held {
-                    self.finish_input_find(confirms.then_some(key.modifiers.shift), window, cx);
+                    let needle = find.input.focus_handle(cx);
+                    let next = if needle.is_focused(window) {
+                        replacement.focus_handle(cx)
+                    } else {
+                        needle
+                    };
+                    window.focus(&next);
+                    cx.notify();
+                }
+                cx.stop_propagation();
+                return;
+            }
+            let cancels = key.key == "escape" && modifiers == 0;
+            let confirms = key.key == "enter"
+                && (modifiers == 0
+                    || (replacement.is_none() && modifiers == 1 && key.modifiers.shift));
+            if cancels || confirms {
+                if !event.is_held {
+                    if confirms && replacement.is_some() {
+                        self.replace_input_matches(window, cx);
+                    } else {
+                        self.finish_input_find(confirms.then_some(key.modifiers.shift), window, cx);
+                    }
                 }
                 cx.stop_propagation();
             }
@@ -3994,13 +4078,12 @@ impl QuickSearch {
                 && self.select_query_arguments(event.is_held, window, cx)
             {
                 cx.stop_propagation();
-            } else if modifiers == 2
-                && keystroke.modifiers.control
-                && keystroke.modifiers.shift
-                && keystroke.key == "f"
+            } else if keystroke.modifiers.control
+                && ((modifiers == 2 && keystroke.modifiers.shift && keystroke.key == "f")
+                    || (modifiers == 1 && keystroke.key == "h"))
             {
                 if !event.is_held {
-                    self.open_input_find(window, cx);
+                    self.open_input_find(keystroke.key == "h", window, cx);
                 }
                 if self.input_find.is_some() {
                     cx.stop_propagation();
@@ -5480,15 +5563,27 @@ impl QuickSearch {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let needle = find.input.read(cx).text_ref();
+        let text = self.input.read(cx).text_ref();
         let count = if needle.is_empty() {
             0
         } else {
-            self.input.read(cx).text_ref().matches(needle).count()
+            text.matches(needle).count()
         };
+        let replacement = find.replacement.as_ref();
+        let fits = replacement.is_none_or(|replacement| {
+            input_replacement_fits(text, needle, replacement.input.read(cx).text_ref(), count)
+        });
         let status = if needle.is_empty() {
             "输入关键词后查找".to_owned()
+        } else if !fits {
+            format!("替换后将超过 {INPUT_CHARACTER_LIMIT} 字符")
         } else {
             format!("{count} 处匹配")
+        };
+        let title = if replacement.is_some() {
+            "替换输入"
+        } else {
+            "查找输入"
         };
         Self::frame(cx)
             .child(
@@ -5496,7 +5591,7 @@ impl QuickSearch {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("查找输入"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(
                         button("cancel-input-find", "Esc 返回", Tone::Ghost, true)
                             .h(px(24.))
@@ -5506,45 +5601,66 @@ impl QuickSearch {
                     ),
             )
             .child(Self::render_prompt_field(&find.input, window, cx))
+            .when_some(replacement, |frame, replacement| {
+                frame.child(Self::render_prompt_field(&replacement.input, window, cx))
+            })
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .child(div().text_color(rgb(theme::TEXT_MUTED)).child(status))
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(
-                                button(
-                                    "previous-input-match",
-                                    "上一个  Shift+Enter",
-                                    Tone::Ghost,
-                                    count > 0,
-                                )
-                                .h(px(28.))
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.finish_input_find(Some(true), window, cx);
-                                    },
-                                )),
+                    .when(replacement.is_some(), |row| {
+                        row.child(
+                            button(
+                                "replace-input-matches",
+                                "全部替换  Enter",
+                                Tone::Primary,
+                                count > 0 && fits,
                             )
-                            .child(
-                                button(
-                                    "next-input-match",
-                                    "下一个  Enter",
-                                    Tone::Primary,
-                                    count > 0,
+                            .h(px(28.))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.replace_input_matches(window, cx);
+                                },
+                            )),
+                        )
+                    })
+                    .when(replacement.is_none(), |row| {
+                        row.child(
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .child(
+                                    button(
+                                        "previous-input-match",
+                                        "上一个  Shift+Enter",
+                                        Tone::Ghost,
+                                        count > 0,
+                                    )
+                                    .h(px(28.))
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.finish_input_find(Some(true), window, cx);
+                                        },
+                                    )),
                                 )
-                                .h(px(28.))
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.finish_input_find(Some(false), window, cx);
-                                    },
-                                )),
-                            ),
-                    ),
+                                .child(
+                                    button(
+                                        "next-input-match",
+                                        "下一个  Enter",
+                                        Tone::Primary,
+                                        count > 0,
+                                    )
+                                    .h(px(28.))
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.finish_input_find(Some(false), window, cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                    }),
             )
     }
 
@@ -5754,16 +5870,19 @@ impl Render for QuickSearch {
                                 })),
                         )
                     })
-                    .when_some(refill_action, |header, label| {
-                        header.child(
-                            button("refill-quick-search-result", label, Tone::Ghost, true)
-                                .h(px(24.))
-                                .px(px(10.))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.refill_result(window, cx);
-                                })),
-                        )
-                    })
+                    .when_some(
+                        refill_action.filter(|_| !self.is_table_cell_lookup()),
+                        |header, label| {
+                            header.child(
+                                button("refill-quick-search-result", label, Tone::Ghost, true)
+                                    .h(px(24.))
+                                    .px(px(10.))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.refill_result(window, cx);
+                                    })),
+                            )
+                        },
+                    )
                     .when_some(bookmark_action, |header, (label, hint)| {
                         header.child(
                             // 操作改变时使用新的按钮标识，结束上一次的悬停提示。
@@ -8178,6 +8297,58 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_input_replace(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        let key = |key, is_held| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+            is_held,
+        };
+        let query = "文本: 原文 😀A+\r\nA+\u{2028}a+";
+        let start = query.find("A+").unwrap();
+        let selection = start..start + 2;
+        search.fill_query(query, window, cx);
+        search
+            .input
+            .update(cx, |input, cx| input.select_range(selection.clone(), cx));
+        search.key_down(&key("ctrl-h", false), window, cx);
+        let find = search.input_find.as_ref().unwrap();
+        assert_eq!(find.input.read(cx).text_ref(), "A+");
+        let replacement = find.replacement.as_ref().unwrap().input.clone();
+        search.key_down(&key("tab", false), window, cx);
+        assert!(replacement.focus_handle(cx).is_focused(window));
+        replacement.update(cx, |input, cx| {
+            input.set_text("北".repeat(INPUT_CHARACTER_LIMIT), cx)
+        });
+        search.key_down(&key("enter", false), window, cx);
+        assert!(search.input_find.is_some());
+        assert_eq!(search.input.read(cx).text_ref(), query);
+        replacement.update(cx, |input, cx| input.set_text("北", cx));
+        search.key_down(&key("enter", true), window, cx);
+        assert!(search.input_find.is_some());
+        search.key_down(&key("enter", false), window, cx);
+        assert!(search.input_find.is_none());
+        assert_eq!(
+            search.input.read(cx).text_ref(),
+            "文本: 原文 😀北\r\n北\u{2028}a+"
+        );
+        search.key_down(&key("ctrl-z", false), window, cx);
+        assert_eq!(search.input.read(cx).text_ref(), query);
+        assert_eq!(search.input.read(cx).selection(), selection);
+        search.key_down(&key("ctrl-h", false), window, cx);
+        search.key_down(&key("escape", false), window, cx);
+        assert_eq!(search.input.read(cx).text_ref(), query);
+        search.key_down(&key("ctrl-h", false), window, cx);
+        search.key_down(&key("enter", false), window, cx);
+        assert_eq!(
+            search.input.read(cx).text_ref(),
+            "文本: 原文 😀\r\n\u{2028}a+"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_result_copy_in_place(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -9353,6 +9524,7 @@ mod tests {
                     reopened.update(cx, verify_input_error_selection).unwrap();
                     reopened.update(cx, verify_go_to_input_line).unwrap();
                     reopened.update(cx, verify_input_find).unwrap();
+                    reopened.update(cx, verify_input_replace).unwrap();
                     reopened.update(cx, verify_query_argument_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_table_cell_lookup).unwrap();
