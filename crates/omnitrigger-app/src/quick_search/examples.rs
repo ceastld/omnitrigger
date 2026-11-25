@@ -5030,6 +5030,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "为每组记录追加指定时间窗口内的计数",
+        query: "CSV: 时间窗口计数列 [\"次数\",\"时刻\",[\"设备\"],\"30分钟\"] 设备,时刻\nA,1800s\nB,0s\nA,0s\nA,1800s\nA,3601s\nB,120s",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "查看每组最早最晚的时刻及实际跨度",
         query: "CSV: 分组时间戳摘要 [[\"设备\"],\"时刻\"] 设备,时刻\nA,2026-03-08T03:30:00-04:00\nB,2ns\nC,\nA,2026-03-08T01:30:00-05:00\nB,1ns",
     },

@@ -153,6 +153,7 @@ pub(super) enum CsvError {
     TimestampDifferenceColumnArguments,
     GroupTimestampDifferenceColumnArguments,
     GroupTimestampSessionArguments,
+    GroupTimestampWindowArguments,
     GroupTimestampSummaryArguments,
     TimestampZoneColumnArguments,
     TimestampAlignmentColumnArguments,
@@ -412,6 +413,9 @@ impl CsvError {
             }
             Self::GroupTimestampSessionArguments => {
                 "填写新列名、时间戳列、分组列和非负间隔，例如 [\"会话\",\"时刻\",[\"设备\"],\"30分钟\"]"
+            }
+            Self::GroupTimestampWindowArguments => {
+                "填写新列名、时间戳列、分组列和非负窗口时长，例如 [\"次数\",\"时刻\",[\"设备\"],\"30分钟\"]"
             }
             Self::GroupTimestampSummaryArguments => {
                 "填写分组列和时间戳列，例如 [[\"设备\"],\"时刻\"]"
@@ -2134,6 +2138,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return append_group_timestamp_offsets(input, GroupTimestampReference::First)
         }
         "会话编号列" | "timestamp-session-column" => return append_timestamp_sessions(input),
+        "时间窗口计数列" | "timestamp-window-count-column" => {
+            return append_timestamp_window_counts(input)
+        }
         "时刻差列" | "clock-difference-column" => {
             let ((name, start, end), data) =
                 json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
@@ -4989,6 +4996,61 @@ fn append_timestamp_sessions(input: &str) -> Result<String, CsvError> {
     })
 }
 
+fn append_timestamp_window_counts(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::GroupTimestampWindowArguments;
+    let ((name, source, groups, span), data) =
+        json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>, String)>(
+            input, invalid,
+        )?;
+    let window = duration_nanoseconds(&normalize(&span)).map_err(|_| invalid)?;
+    if name.trim().is_empty() || name.contains('\0') || window < 0 {
+        return Err(invalid);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let mut timelines: HashMap<_, Vec<_>> = HashMap::new();
+    for (index, row) in records.iter().enumerate() {
+        let cell = row[source].trim();
+        if cell.is_empty() {
+            continue;
+        }
+        let time = absolute_timestamp(cell).map_err(|error| CsvError::DataRowValue {
+            row: index + 1,
+            cause: error.message(),
+        })?;
+        timelines
+            .entry(column_key(row, &groups))
+            .or_default()
+            .push((time, index));
+    }
+    let mut counts = vec![0; records.len()];
+    for timeline in timelines.values_mut() {
+        timeline.sort_unstable();
+        let mut first = 0;
+        let mut end = 0;
+        for simultaneous in timeline.chunk_by(|left, right| left.0 == right.0) {
+            let time = simultaneous[0].0;
+            while absolute_elapsed_nanoseconds(timeline[first].0, time) > window {
+                first += 1;
+            }
+            end += simultaneous.len();
+            for &(_, index) in simultaneous {
+                counts[index] = end - first;
+            }
+        }
+    }
+    let mut counts = counts.into_iter();
+    write_appended_column(header, records, &name, |_| {
+        Ok(match counts.next().unwrap_or(0) {
+            0 => String::new(),
+            count => count.to_string(),
+        })
+    })
+}
+
 fn append_from_one_column(
     rows: &[Vec<String>],
     name: &str,
@@ -7742,6 +7804,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "group-timestamp-offset-column"
             | "会话编号列"
             | "timestamp-session-column"
+            | "时间窗口计数列"
+            | "timestamp-window-count-column"
             | "百分位排名列"
             | "percent-rank-column"
             | "降序百分位排名列"
@@ -13555,6 +13619,34 @@ null"#
         assert!(matches!(
             transform_csv("组内时间戳差列 [\"间隔\",2,[1]] 设备,时刻\nA,1s\nB,\nA,2026-11-01 01:30 America/New_York"),
             Err(CsvError::DataRowValue { row: 3, .. }),
+        ));
+    }
+
+    #[test]
+    fn counts_each_groups_timestamp_window_with_inclusive_boundaries_and_ties() {
+        let query = concat!(
+            "时间窗口计数列 [\"近1ns\",\"时刻\",[\"设备\"],\"1ns\"] 设备,时刻\n",
+            "A,4ns\nA,2ns\nA,3ns\nB,3ns\nA,3ns\nA,\nB,2ns",
+        );
+        let expected = concat!(
+            "设备,时刻,近1ns\r\nA,4ns,3\r\nA,2ns,1\r\nA,3ns,3\r\nB,3ns,2\r\n",
+            "A,3ns,3\r\nA,\"\",\"\"\r\nB,2ns,1",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (text, table) = csv_table_preview(query).unwrap().unwrap();
+        assert_eq!(text, expected);
+        assert_eq!(table.row_pages(), 2);
+        assert_eq!(
+            transform_csv(concat!(
+                "timestamp-window-count-column [\"次数\",1,[],\"0ns\"] 时刻\n",
+                "0s\n1970-01-01T08:00:00+08:00\n1ns",
+            ))
+            .as_deref(),
+            Ok("时刻,次数\r\n0s,2\r\n1970-01-01T08:00:00+08:00,2\r\n1ns,1")
+        );
+        assert!(matches!(
+            transform_csv("时间窗口计数列 [\"次数\",1,[],\"1ns\"] 时刻\n0s\n坏值"),
+            Err(CsvError::DataRowValue { row: 2, .. }),
         ));
     }
 
