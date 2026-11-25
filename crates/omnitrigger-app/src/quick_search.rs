@@ -2127,6 +2127,12 @@ enum RefillKind {
     File { path: String },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilePreviewAction {
+    Load,
+    Refresh,
+}
+
 struct FileSearchReturn {
     query: String,
     path: String,
@@ -3184,12 +3190,6 @@ impl QuickSearch {
     }
 
     fn load_selected_text_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file_operation_in_progress()
-            || self.bookmark_name_edit.is_some()
-            || self.input.read(cx).is_composing()
-        {
-            return;
-        }
         let Some(path) = self
             .results
             .selected_text_file(self.selected)
@@ -3197,7 +3197,32 @@ impl QuickSearch {
         else {
             return;
         };
-        let original = self.input.read(cx).text();
+        self.read_text_file_preview(path, FilePreviewAction::Load, window, cx);
+    }
+
+    fn file_preview_path(&self) -> Option<&str> {
+        match &self.result_refill.as_ref()?.kind {
+            RefillKind::File { path } => Some(path),
+            RefillKind::Result { .. } => None,
+        }
+    }
+
+    fn read_text_file_preview(
+        &mut self,
+        path: String,
+        action: FilePreviewAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.input.read(cx);
+        if self.file_operation_in_progress()
+            || self.bookmark_name_edit.is_some()
+            || input.is_composing()
+        {
+            return;
+        }
+        let query = input.text();
+        let revision = input.edit_revision();
         self.input_file_load = InputFileLoadState::InProgress;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -3212,22 +3237,50 @@ impl QuickSearch {
                     let input = this.input.read(cx);
                     if !input.is_composing()
                         && this.bookmark_name_edit.is_none()
-                        && input.text() == original
-                        && this.results.selected_text_file(this.selected)
-                            == Some(selected_path.as_str())
+                        && this.line_jump.is_none()
+                        && this.input_find.is_none()
+                        && input.edit_revision() == revision
                     {
-                        match loaded {
-                            Ok(inserted) => {
-                                this.result_refill = Some(ResultRefill {
-                                    original,
-                                    inserted: inserted.clone(),
-                                    kind: RefillKind::File {
-                                        path: selected_path,
-                                    },
-                                });
-                                this.fill_query(inserted, window, cx);
+                        let original = match action {
+                            FilePreviewAction::Load => this
+                                .results
+                                .selected_text_file(this.selected)
+                                .filter(|path| *path == selected_path)
+                                .map(|_| query.clone()),
+                            FilePreviewAction::Refresh => this
+                                .result_refill
+                                .as_ref()
+                                .filter(|refill| {
+                                    refill.inserted == query
+                                        && this.file_preview_path() == Some(selected_path.as_str())
+                                })
+                                .map(|refill| refill.original.clone()),
+                        };
+                        if let Some(original) = original {
+                            match loaded {
+                                Ok(inserted)
+                                    if action == FilePreviewAction::Load || inserted != query =>
+                                {
+                                    let selection = input.selection_position();
+                                    this.result_refill = Some(ResultRefill {
+                                        original,
+                                        inserted: inserted.clone(),
+                                        kind: RefillKind::File {
+                                            path: selected_path,
+                                        },
+                                    });
+                                    this.fill_query(inserted, window, cx);
+                                    if action == FilePreviewAction::Refresh {
+                                        this.input.update(cx, |input, cx| {
+                                            input.restore_selection(selection, cx);
+                                        });
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    this.input_file_load = InputFileLoadState::Failed(error)
+                                }
                             }
-                            Err(error) => this.input_file_load = InputFileLoadState::Failed(error),
                         }
                     }
                     cx.notify();
@@ -4353,6 +4406,18 @@ impl QuickSearch {
                 }
             }
             "f5" => {
+                if let Some(path) = self.file_preview_path() {
+                    if !event.is_held {
+                        self.read_text_file_preview(
+                            path.to_owned(),
+                            FilePreviewAction::Refresh,
+                            window,
+                            cx,
+                        );
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 let query = self.input.read(cx).text();
                 match scoped_query(query.trim()) {
                     Some((Scope::LocalFiles | Scope::OpenWindows | Scope::Applications, _))
@@ -5859,11 +5924,17 @@ impl Render for QuickSearch {
                         )
                     })
                     .when(
-                        !naming_bookmark && (selected_text_file || accepts_input_file(&query)),
+                        !naming_bookmark
+                            && (selected_text_file
+                                || self.file_preview_path().is_some()
+                                || accepts_input_file(&query)),
                         |header| {
                             let (label, hint) = match &self.input_file_load {
                                 InputFileLoadState::Ready if selected_text_file => {
                                     ("载入所选 F3", "F3 在搜索框中载入所选本地文本")
+                                }
+                                InputFileLoadState::Ready if self.file_preview_path().is_some() => {
+                                    ("重读 F5", "F5 重新读取当前预览的本地文件")
                                 }
                                 InputFileLoadState::Ready => {
                                     ("载入", "Ctrl+O 在光标处插入 UTF-8 或 UTF-16 文本")
@@ -5887,6 +5958,13 @@ impl Render for QuickSearch {
                                     move |this, _, window, cx| {
                                         if selected_text_file {
                                             this.load_selected_text_file(window, cx);
+                                        } else if let Some(path) = this.file_preview_path() {
+                                            this.read_text_file_preview(
+                                                path.to_owned(),
+                                                FilePreviewAction::Refresh,
+                                                window,
+                                                cx,
+                                            );
                                         } else {
                                             this.load_input_file(window, cx);
                                         }
