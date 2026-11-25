@@ -185,6 +185,7 @@ pub(super) fn url_csv_report(input: &str) -> Option<Result<String, UrlEncodingEr
         .unwrap_or(value);
     Some(match operation.to_ascii_lowercase().as_str() {
         "参数csv" | "params-csv" => query_parameters_csv(value.trim()),
+        "重复参数csv" | "duplicate-params-csv" => duplicate_query_parameters_csv(value.trim()),
         "参数差异csv" | "diff-params-csv" => query_changes_csv(value.trim()),
         "主机统计csv" | "host-counts-csv" => group_web_addresses(value, UrlGroupBy::Host),
         "源统计csv" | "origin-counts-csv" => group_web_addresses(value, UrlGroupBy::Origin),
@@ -790,6 +791,44 @@ fn query_parameters_csv(source: &str) -> Result<String, UrlEncodingError> {
     Ok(report)
 }
 
+fn duplicate_query_parameters_csv(source: &str) -> Result<String, UrlEncodingError> {
+    if source.is_empty() {
+        return Err(UrlEncodingError::Incomplete);
+    }
+    let mut groups = BTreeMap::new();
+    for (index, (name, value, has_equals)) in query_parameters(query_text(source)).enumerate() {
+        let name = decode_form_value(name)?;
+        let value = decode_form_value(value)?;
+        let (_, values) = groups
+            .entry(name)
+            .or_insert_with(|| (index + 1, Vec::new()));
+        values.push(has_equals.then_some(value));
+    }
+    let mut duplicates: Vec<_> = groups
+        .into_iter()
+        .filter(|(_, (_, values))| values.len() > 1)
+        .collect();
+    duplicates.sort_unstable_by_key(|(_, (position, _))| *position);
+    let mut csv = String::from("名称,次数,首次位置,值JSON");
+    for (name, (position, values)) in duplicates {
+        let count = values.len().to_string();
+        let position = position.to_string();
+        let values = serde_json::to_string(&values).expect("参数值数组可以序列化为 JSON");
+        append_bounded_csv_row(
+            &mut csv,
+            [
+                name.as_str(),
+                count.as_str(),
+                position.as_str(),
+                values.as_str(),
+            ]
+            .into_iter(),
+            UrlEncodingError::ReportTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
 fn encode_parameters(input: &str) -> Result<String, UrlEncodingError> {
     let pairs = serde_json::from_str::<Vec<[String; 2]>>(input).map_err(|error| {
         if error.is_eof() {
@@ -861,6 +900,25 @@ mod tests {
             Some(super::super::data_pipeline::PipelinePreview::Table(_))
         ));
         assert!(output.ends_with("新增,tag,\"a,b\",2"));
+    }
+
+    #[test]
+    fn groups_only_duplicate_parameter_names_and_preserves_flag_and_value_order() {
+        assert_eq!(
+            convert_url_component(
+                "重复参数CSV https://example.invalid/?tag=a+b&flag&%74ag=a%2Bb&flag=&solo=x",
+            )
+            .as_deref(),
+            Ok(concat!(
+                "名称,次数,首次位置,值JSON",
+                "\r\ntag,2,1,\"[\"\"a b\"\",\"\"a+b\"\"]\"",
+                "\r\nflag,2,2,\"[null,\"\"\"\"]\"",
+            ))
+        );
+        assert_eq!(
+            convert_url_component("duplicate-params-csv ?Tag=1&tag=2").as_deref(),
+            Ok("名称,次数,首次位置,值JSON")
+        );
     }
 
     #[test]

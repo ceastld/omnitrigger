@@ -683,6 +683,7 @@
 - 输入 `URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc` 可逐行查看解码后的名称和值。也可粘贴查询串，结果按原有顺序保留重名参数。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 用 `URL: 参数JSON` 可把查询参数转成 `[["tag","a 1"],["tag","b+c"]]` 这样的名称和值数组。用 `URL: 生成查询串` 加上数组，可按表单编码生成 `tag=a+1&tag=b%2Bc`。两种操作都保留参数顺序和重名项。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 用 `URL: 参数CSV` 加上网址或查询串，可预览解码后的名称和值，保留原顺序及重名项。「有等号」列可区分 `flag` 和 `flag=`。用 `Ctrl+F` 可在表格内查找，按回车复制 CSV。
+- 用 `URL: 重复参数CSV` 可查找解码后同名的参数。各组按名称首次出现的顺序列出次数、首次位置和按原顺序排列的值。值数组用 `null` 表示无等号的参数，用 `""` 表示带等号的空值。
 - 用 `URL: 取参数 "tag"` 加上完整网址或查询串，可得到该名称的全部值，结果为 JSON 数组。名称按解码后内容匹配并区分大小写，空值保留原位置，没有匹配时返回 `[]`。
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
 - 用 `URL: 路径分段 https://example.invalid/docs/a%2Fb/` 得到 `["docs","a/b",""]`。用 `URL: 设路径 ["新文档","a/b",""]` 加上网址，可替换路径并保留查询串与片段。末尾的空段保留斜杠，段内的斜杠会编码为 `%2F`。 [Rust URL 路径段](https://docs.rs/url/2.5.8/url/struct.Url.html#method.path_segments)

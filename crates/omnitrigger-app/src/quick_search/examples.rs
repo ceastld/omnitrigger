@@ -6692,6 +6692,11 @@ README"#,
         query: "URL: 参数CSV https://example.invalid/?q=%E8%8C%B6+1&q=b%2Bc&flag&flag=",
     },
     Example {
+        icon: Icon::Browser,
+        title: "查找网址中同名参数的次数和各次值",
+        query: "URL: 重复参数CSV https://example.invalid/?tag=a+b&flag&tag=a%2Bb&flag=&solo=x",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "提取指定 URL 查询参数的全部值",
         query: r#"URL: 取参数 "tag" https://example.invalid/?tag=a+1&page=2&tag=b%2Bc&tag="#,
