@@ -606,9 +606,21 @@ fn format_float_bits(
         FpCategory::Subnormal => "次正规数",
         FpCategory::Normal => "正规数",
     };
-    format!(
-        "数值,类别,十六进制,符号位,指数位,尾数位\r\n{value},{category},0x{bits:0hex_width$X},{sign},{exponent:0exponent_width$b},{fraction:0fraction_width$b}"
-    )
+    let mut report = format!(
+        "字段,值\r\n数值,{value}\r\n类别,{category}\r\n十六进制,0x{bits:0hex_width$X}\r\n符号位、指数位,{sign} {exponent:0exponent_width$b}"
+    );
+    let fraction = format!("{fraction:0fraction_width$b}");
+    if fraction_width == 52 {
+        let (high, low) = fraction.split_at(26);
+        write!(
+            report,
+            "\r\n尾数位（高26位）,{high}\r\n尾数位（低26位）,{low}"
+        )
+        .expect("写入 String 不会出错");
+    } else {
+        write!(report, "\r\n尾数位,{fraction}").expect("写入 String 不会出错");
+    }
+    report
 }
 
 fn gray_code_table(input: &str) -> Result<String, RadixError> {
@@ -905,17 +917,33 @@ mod tests {
     #[test]
     fn inspects_single_and_double_precision_bits_including_special_values() {
         let single = "浮点位 32 @ 0.1";
-        let expected = "数值,类别,十六进制,符号位,指数位,尾数位\r\n0.1,正规数,0x3DCCCCCD,0,01111011,10011001100110011001101";
+        let expected = concat!(
+            "字段,值\r\n数值,0.1\r\n类别,正规数\r\n十六进制,0x3DCCCCCD\r\n",
+            "符号位、指数位,0 01111011\r\n尾数位,10011001100110011001101",
+        );
         assert_eq!(convert_arbitrary_radix(single).as_deref(), Ok(expected));
         assert_eq!(radix_csv_report(single).unwrap().as_deref(), Ok(expected));
         assert_eq!(
             convert_arbitrary_radix("READ-FLOAT-BITS 32 @ 0x7FC00001").as_deref(),
-            Ok("数值,类别,十六进制,符号位,指数位,尾数位\r\nNaN,NaN,0x7FC00001,0,11111111,10000000000000000000001")
+            Ok(concat!(
+                "字段,值\r\n数值,NaN\r\n类别,NaN\r\n十六进制,0x7FC00001\r\n",
+                "符号位、指数位,0 11111111\r\n尾数位,10000000000000000000001",
+            ))
         );
         let negative_zero = convert_arbitrary_radix("读浮点位 64 @ 0x8000000000000000").unwrap();
-        assert!(negative_zero.contains("\r\n-0,零,0x8000000000000000,1,00000000000,"));
+        assert_eq!(
+            negative_zero,
+            concat!(
+                "字段,值\r\n数值,-0\r\n类别,零\r\n十六进制,0x8000000000000000\r\n",
+                "符号位、指数位,1 00000000000\r\n尾数位（高26位）,00000000000000000000000000\r\n",
+                "尾数位（低26位）,00000000000000000000000000",
+            )
+        );
         let subnormal = convert_arbitrary_radix("读浮点位 32 @ 0b1").unwrap();
-        assert!(subnormal.ends_with(",次正规数,0x00000001,0,00000000,00000000000000000000001"));
+        assert!(subnormal.ends_with(concat!(
+            "类别,次正规数\r\n十六进制,0x00000001\r\n",
+            "符号位、指数位,0 00000000\r\n尾数位,00000000000000000000001",
+        )));
         assert_eq!(
             convert_arbitrary_radix("读浮点位 32 @ 0x100000000"),
             Err(RadixError::FloatBitsWidthExceeded)
