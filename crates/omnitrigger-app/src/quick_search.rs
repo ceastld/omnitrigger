@@ -2198,6 +2198,7 @@ impl QuickSearch {
             let mut input = MessageInput::new(cx)
                 .embedded()
                 .with_preserved_whitespace()
+                .with_line_position()
                 .with_undo_history()
                 .with_character_limit(INPUT_CHARACTER_LIMIT + 1);
             input.set_placeholder(SEARCH_PLACEHOLDER);

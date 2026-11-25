@@ -111,6 +111,7 @@ pub struct MessageInput {
     blur_subscription: Option<gpui::Subscription>,
     embedded: bool,
     pass_empty_arrows: bool,
+    show_line_position: bool,
 }
 
 impl MessageInput {
@@ -133,6 +134,7 @@ impl MessageInput {
             blur_subscription: None,
             embedded: false,
             pass_empty_arrows: false,
+            show_line_position: false,
         }
     }
 
@@ -145,6 +147,11 @@ impl MessageInput {
     /// 内容为空时不消费左右键，交给外层处理选择。
     pub fn pass_arrows_when_empty(mut self) -> Self {
         self.pass_empty_arrows = true;
+        self
+    }
+
+    pub(super) fn with_line_position(mut self) -> Self {
+        self.show_line_position = true;
         self
     }
 
@@ -739,7 +746,7 @@ impl Render for MessageInput {
                     cx.notify();
                 }));
         }
-        div()
+        let field = div()
             .id("omnitrigger-message-input")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
@@ -786,8 +793,32 @@ impl Render for MessageInput {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
-            .child(MessageLine { input: cx.entity() })
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up));
+        let line = MessageLine { input: cx.entity() };
+        let position = self
+            .show_line_position
+            .then(|| logical_line_position(&self.content, self.head))
+            .flatten();
+        if let Some((number, total)) = position {
+            field
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(div().flex_1().min_w_0().overflow_hidden().child(line))
+                .child(
+                    div()
+                        .id("logical-line-position")
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .cursor(CursorStyle::Arrow)
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .text_size(px(11.))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(format!("第 {number}/{total} 行")),
+                )
+        } else {
+            field.child(line)
+        }
     }
 }
 
@@ -1063,6 +1094,25 @@ pub(super) fn input_preview(text: impl Into<SharedString>) -> SharedString {
     visible_input(&text.into()).0
 }
 
+fn is_logical_line_break(ch: char) -> bool {
+    matches!(ch, '\r' | '\n' | '\u{2028}' | '\u{2029}')
+}
+
+fn logical_line_position(text: &str, cursor: usize) -> Option<(usize, usize)> {
+    let mut number = 1;
+    let mut total = 1;
+    for (offset, ch) in text.char_indices() {
+        if !is_logical_line_break(ch)
+            || (ch == '\r' && text.as_bytes().get(offset + 1) == Some(&b'\n'))
+        {
+            continue;
+        }
+        total += 1;
+        number += usize::from(offset < cursor);
+    }
+    (total > 1).then_some((number, total))
+}
+
 fn logical_line_range(text: &str, cursor: usize) -> Range<usize> {
     let bytes = text.as_bytes();
     // 把 CRLF 当作一个换行，落在两字符之间的光标仍属于上一行。
@@ -1071,13 +1121,12 @@ fn logical_line_range(text: &str, cursor: usize) -> Range<usize> {
     } else {
         cursor
     };
-    let is_line_break = |ch| matches!(ch, '\r' | '\n' | '\u{2028}' | '\u{2029}');
     let start = text[..cursor]
         .char_indices()
-        .rfind(|&(_, ch)| is_line_break(ch))
+        .rfind(|&(_, ch)| is_logical_line_break(ch))
         .map_or(0, |(offset, ch)| offset + ch.len_utf8());
     let end = text[cursor..]
-        .find(is_line_break)
+        .find(is_logical_line_break)
         .map_or(text.len(), |offset| cursor + offset);
     start..end
 }
@@ -1223,6 +1272,23 @@ fn to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_the_active_line_and_total_with_blank_and_mixed_lines() {
+        assert_eq!(logical_line_position("", 0), None);
+        assert_eq!(logical_line_position("甲👩‍💻", 3), None);
+        let text = "甲\r\n\r乙\u{2028}丙\u{2029}";
+        for (cursor, line) in [
+            (0, 1),
+            ("甲\r".len(), 1),
+            ("甲\r\n".len(), 2),
+            ("甲\r\n\r".len(), 3),
+            ("甲\r\n\r乙\u{2028}".len(), 4),
+            (text.len(), 5),
+        ] {
+            assert_eq!(logical_line_position(text, cursor), Some((line, 5)));
+        }
+    }
 
     #[test]
     fn finds_logical_lines_with_mixed_newlines_and_unicode() {
