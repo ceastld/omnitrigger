@@ -777,10 +777,14 @@ impl WeightedMean {
     }
 
     pub(super) fn finish(self) -> Result<String, StatisticsError> {
+        self.value().map(|value| value.to_string())
+    }
+
+    pub(super) fn value(self) -> Result<BigRational, StatisticsError> {
         if self.total_weight.numer().sign() == Sign::NoSign {
             return Err(StatisticsError::ZeroTotalWeight);
         }
-        bounded(self.total_value / self.total_weight).map(|value| value.to_string())
+        bounded(self.total_value / self.total_weight)
     }
 
     pub(super) fn total_weight(&self) -> &BigRational {

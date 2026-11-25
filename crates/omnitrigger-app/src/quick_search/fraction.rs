@@ -9,7 +9,9 @@ use super::csv_tools::append_bounded_csv_row;
 use super::linear_fit::format_power_expression;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
-use super::statistics::{interpolate_ordered_quantile, median_sorted_values};
+use super::statistics::{
+    interpolate_ordered_quantile, median_sorted_values, StatisticsError, WeightedMean,
+};
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_MODULAR_POWER_BITS: u64 = 1024;
@@ -50,6 +52,7 @@ pub(super) enum FractionError {
     InterpolationRange,
     ClampBounds,
     QuantileArguments,
+    WeightedAverageArguments,
     AlignmentArguments,
     RationalSquareRoot,
     RootDegree,
@@ -106,6 +109,7 @@ impl FractionError {
             Self::QuantileArguments => {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
             }
+            Self::WeightedAverageArguments => "wavg 须成对填写数值和非负权重，且至少一个权重大于零",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::RootDegree => "root 的次数须为 1 至 1024 的整数",
@@ -1707,6 +1711,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.quantile_function(name == "percentile");
         }
+        if name == "wavg" {
+            self.remaining = rest;
+            return self.weighted_average_function();
+        }
         if name == "clamp" {
             self.remaining = rest;
             return self.clamp_function();
@@ -1988,6 +1996,26 @@ impl FractionParser<'_> {
             &values[rank as usize]
         })
         .map_err(|_| FractionError::ExactRange)
+    }
+
+    fn weighted_average_function(&mut self) -> Result<BigRational, FractionError> {
+        let mut values = self.list_function_arguments()?.into_iter();
+        if !values.len().is_multiple_of(2) {
+            return Err(FractionError::WeightedAverageArguments);
+        }
+        let mut mean = WeightedMean::default();
+        while let Some(value) = values.next() {
+            let weight = values.next().expect("每个数值都有对应权重");
+            if weight.numer().sign() == Sign::Minus {
+                return Err(FractionError::WeightedAverageArguments);
+            }
+            mean.record((value, weight))
+                .map_err(|_| FractionError::ExactRange)?;
+        }
+        mean.value().map_err(|error| match error {
+            StatisticsError::ZeroTotalWeight => FractionError::WeightedAverageArguments,
+            _ => FractionError::ExactRange,
+        })
     }
 
     fn clamp_function(&mut self) -> Result<BigRational, FractionError> {
@@ -2610,6 +2638,32 @@ mod tests {
             ("计算 trunc(-2)*floor(1/3)", "0"),
         ] {
             assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn computes_exact_weighted_averages_inside_calculator_expressions() {
+        for (query, expected) in [
+            ("wavg(1/3,2,1/6,1)*18", "5"),
+            ("wavg(80,2,90,3)", "86"),
+            (
+                "wavg(9007199254740993,1,9007199254740992,1)",
+                "18014398509481985/2",
+            ),
+            ("wavg(20,0,1/7,2)", "1/7"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        for query in ["wavg(1)", "wavg(1,-1,2,3)", "wavg(1,0,2,0)"] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::WeightedAverageArguments),
+                "{query}"
+            );
         }
     }
 
