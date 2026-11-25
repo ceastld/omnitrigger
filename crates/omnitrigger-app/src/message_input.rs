@@ -73,6 +73,7 @@ pub struct MessageInput {
     mode: TextMode,
     focus: FocusHandle,
     content: SharedString,
+    edit_revision: u64,
     placeholder: SharedString,
     anchor: usize,
     head: usize,
@@ -93,6 +94,7 @@ impl MessageInput {
             mode: TextMode::SingleLine,
             focus: cx.focus_handle(),
             content: SharedString::default(),
+            edit_revision: 0,
             placeholder: "触发时显示的文字".into(),
             anchor: 0,
             head: 0,
@@ -121,6 +123,10 @@ impl MessageInput {
 
     pub fn text(&self) -> String {
         self.content.to_string()
+    }
+
+    pub(super) fn edit_revision(&self) -> u64 {
+        self.edit_revision
     }
 
     pub(super) fn is_composing(&self) -> bool {
@@ -156,6 +162,7 @@ impl MessageInput {
             text.to_string()
         };
         self.content = prepare_input(&text, self.character_limit, self.mode).into();
+        self.edit_revision = self.edit_revision.wrapping_add(1);
         // 载入已有消息时从开头显示，避免长消息只露出结尾。
         self.anchor = 0;
         self.head = 0;
@@ -384,6 +391,7 @@ impl MessageInput {
             self.mode,
         );
         self.content = replacement.text.into();
+        self.edit_revision = self.edit_revision.wrapping_add(1);
         self.marked = (marked && !replacement.inserted.is_empty()).then_some(replacement.inserted);
         self.anchor = replacement.selection.start;
         self.head = replacement.selection.end;

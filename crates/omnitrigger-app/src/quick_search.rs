@@ -1973,6 +1973,7 @@ fn read_selected_text_query(path: &str) -> Result<String, String> {
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
+    input_revision: u64,
     workspace: WeakEntity<Workspace>,
     index: SearchIndex,
     was_active: bool,
@@ -2051,12 +2052,18 @@ impl QuickSearch {
             input
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
+            let input = input.read(cx);
+            let revision = input.edit_revision();
+            if this.input_revision == revision {
+                return;
+            }
+            this.input_revision = revision;
             if this.bookmark_name_edit.is_some() {
                 this.results = Results::BookmarkNameInput(None);
                 cx.notify();
                 return;
             }
-            let query = input.read(cx).text();
+            let query = input.text();
             if matches!(&this.result_save, ResultSaveState::Finished { query: saved, .. } if saved != &query) {
                 this.result_save = ResultSaveState::Ready;
             }
@@ -2097,6 +2104,7 @@ impl QuickSearch {
         Self {
             theme_mode,
             input,
+            input_revision: 0,
             workspace,
             index,
             was_active: window.is_window_active(),
@@ -7474,6 +7482,32 @@ mod tests {
                     reopened.update(cx, verify_table_paging).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
+                    let query = "分数: 计算 ans+1";
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            search.index.recent.calculations.record("4+5", "9");
+                            search.fill_query(query, window, cx);
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, _, cx| {
+                            assert_eq!(search.results.refillable_text(), Some("10"));
+                            search.index.recent.calculations.record("8+9", "17");
+                            search.input.update(cx, |input, cx| input.move_cursor_to(0, cx));
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            assert_eq!(search.input.read(cx).selection(), 0..0);
+                            assert_eq!(search.results.refillable_text(), Some("10"));
+                            search.fill_query(query, window, cx);
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, _, _| {
+                            assert_eq!(search.results.refillable_text(), Some("18"));
+                        })
+                        .unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             let index = EXAMPLES.iter()
