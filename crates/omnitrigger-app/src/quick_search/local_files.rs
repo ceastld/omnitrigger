@@ -77,6 +77,10 @@ impl RecentFilePreviews {
         paths.truncate(MAX_RECENT_PREVIEWS);
     }
 
+    pub(super) fn remove(&self, path: &str) {
+        self.0.borrow_mut().retain(|previous| previous != path);
+    }
+
     pub(super) fn results(&self, query: &str) -> Results {
         let query = query.trim().to_lowercase();
         Results::Destinations(

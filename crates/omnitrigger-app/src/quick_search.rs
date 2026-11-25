@@ -3776,6 +3776,22 @@ impl QuickSearch {
         cx.notify();
     }
 
+    fn remove_selected_file_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.file_operation_in_progress() {
+            return;
+        }
+        let selected = self.selected;
+        let Some(path) = self.results.local_file_path(selected) else {
+            return;
+        };
+        self.index.recent.file_previews.remove(path);
+        self.input_file_load = InputFileLoadState::Ready;
+        let query = self.input.read(cx).text();
+        self.refresh_results(&query, window, cx);
+        self.selected = selected.min(self.results.selectable_count().saturating_sub(1));
+        cx.notify();
+    }
+
     fn is_bookmark_query(query: &str) -> bool {
         matches!(scoped_query(query), Some((Scope::Bookmarks, _)))
     }
@@ -4381,15 +4397,21 @@ impl QuickSearch {
                 {
                     cx.stop_propagation();
                 }
-            } else if modifiers == 1
-                && keystroke.modifiers.alt
-                && keystroke.key == "delete"
-                && matches!(self.results, Results::Queries(_))
-            {
-                if !event.is_held {
-                    self.remove_selected_query_history(window, cx);
+            } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "delete" {
+                if matches!(self.results, Results::Queries(_)) {
+                    if !event.is_held {
+                        self.remove_selected_query_history(window, cx);
+                    }
+                    cx.stop_propagation();
+                } else if matches!(
+                    scoped_query(self.input.read(cx).text_ref()),
+                    Some((Scope::RecentFilePreviews, _))
+                ) {
+                    if !event.is_held {
+                        self.remove_selected_file_preview(window, cx);
+                    }
+                    cx.stop_propagation();
                 }
-                cx.stop_propagation();
             } else if modifiers == 1
                 && keystroke.modifiers.alt
                 && matches!(keystroke.key.as_str(), "up" | "down")
@@ -5651,9 +5673,17 @@ impl QuickSearch {
                                             .when_some(detail, |label, detail| {
                                                 label.child(
                                                     div()
+                                                        .id(("search-destination-detail", index))
                                                         .truncate()
                                                         .text_size(px(11.))
                                                         .text_color(rgb(theme::TEXT_MUTED))
+                                                        .when(recent_previews, |detail_label| {
+                                                            detail_label.tooltip(
+                                                                theme::text_tooltip(
+                                                                    detail.clone().into(),
+                                                                ),
+                                                            )
+                                                        })
                                                         .child(detail),
                                                 )
                                             }),
@@ -5700,6 +5730,31 @@ impl QuickSearch {
                                                     .on_click(cx.listener(|this, _, window, cx| {
                                                         cx.stop_propagation();
                                                         this.reveal_selected_file(window, cx);
+                                                    })),
+                                                )
+                                            },
+                                        )
+                                        .when(
+                                            recent_previews,
+                                            |row| {
+                                                row.child(
+                                                    button(
+                                                        "remove-file-preview-history",
+                                                        "移除",
+                                                        Tone::Ghost,
+                                                        !self.file_operation_in_progress(),
+                                                    )
+                                                    .h(px(25.))
+                                                    .px(px(6.))
+                                                    .flex_none()
+                                                    .tooltip(theme::text_tooltip(
+                                                        "Alt+Delete 移除这条预览记录".into(),
+                                                    ))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        this.remove_selected_file_preview(
+                                                            window, cx,
+                                                        );
                                                     })),
                                                 )
                                             },
@@ -10748,6 +10803,14 @@ mod tests {
                 .results("最近预览:")
                 .selectable_count(),
             0
+        );
+        recent.remove(r"C:\Reports\Batch-5.csv");
+        recent.remove(r"C:\Reports\Batch-1.csv");
+        let matches = index.results("最近预览: REPORTS");
+        assert_eq!(matches.selectable_count(), 11);
+        assert_eq!(
+            matches.selected_text_file(0),
+            Some(r"C:\Reports\Batch-13.csv")
         );
     }
 
