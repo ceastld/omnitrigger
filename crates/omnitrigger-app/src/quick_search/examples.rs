@@ -256,6 +256,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算整倍和半倍 π 的正弦",
+        query: "sinpi(1000000000000.5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算整倍和半倍 π 的余弦",
+        query: "cospi(1.5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算 π 的倍数的正切",
+        query: "tanpi(1000000000000.25)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算归一化 sinc 函数",
         query: "sinc(0.5)",
     },

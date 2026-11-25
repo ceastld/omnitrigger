@@ -189,10 +189,13 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             |n| nonnegative_integer(n).map_or(f64::NAN, |value| f64::from(value.count_ones()))
         }
         "sin" => f64::sin,
+        "sinpi" => sin_pi,
         "sinc" => normalized_sinc,
         "sinc_rad" => sinc_radians,
         "cos" => f64::cos,
+        "cospi" => cos_pi,
         "tan" => f64::tan,
+        "tanpi" => tan_pi,
         "sinh" => f64::sinh,
         "cosh" => f64::cosh,
         "tanh" => f64::tanh,
@@ -256,17 +259,11 @@ fn normalized_sinc(value: f64) -> f64 {
     if value == 0. {
         return 1.;
     }
-    let integer = value.round();
-    let offset = value - integer;
-    if offset == 0. {
-        return 0.;
-    }
-    // 先减去最近的整数，再乘 π，保留接近整数时的微小差值。
-    let reduced = (PI * offset).sin() / (PI * value);
-    if integer.rem_euclid(2.) == 0. {
-        reduced
+    let sine = sin_pi(value);
+    if sine == 0. {
+        0.
     } else {
-        -reduced
+        sine / (PI * value)
     }
 }
 
@@ -275,6 +272,49 @@ fn sinc_radians(angle: f64) -> f64 {
         1.
     } else {
         angle.sin() / angle
+    }
+}
+
+fn reduce_pi_argument(value: f64) -> (f64, bool) {
+    let integer = value.round();
+    // 先减去最近的整数，再乘 π，保留接近整数时的微小差值。
+    (value - integer, integer.rem_euclid(2.) != 0.)
+}
+
+fn sin_pi(value: f64) -> f64 {
+    let (offset, odd) = reduce_pi_argument(value);
+    let sine = (PI * offset).sin();
+    if odd {
+        -sine
+    } else {
+        sine
+    }
+}
+
+fn tan_pi(value: f64) -> f64 {
+    let (offset, _) = reduce_pi_argument(value);
+    let magnitude = offset.abs();
+    if magnitude == 0.5 {
+        f64::NAN
+    } else if magnitude > 0.25 {
+        (PI * (0.5 - magnitude)).tan().recip().copysign(offset)
+    } else {
+        (PI * offset).tan()
+    }
+}
+
+fn cos_pi(value: f64) -> f64 {
+    let (offset, odd) = reduce_pi_argument(value);
+    let offset = offset.abs();
+    let cosine = if offset > 0.25 {
+        (PI * (0.5 - offset)).sin()
+    } else {
+        (PI * offset).cos()
+    };
+    if odd {
+        -cosine
+    } else {
+        cosine
     }
 }
 

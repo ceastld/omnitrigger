@@ -807,6 +807,35 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_pi_scaled_trigonometry_at_large_and_near_axis_arguments() {
+        for (query, expected) in [
+            ("sinpi(1e308)", "0"),
+            ("sinpi(3)", "0"),
+            ("sinpi(1000000000000.5)", "1"),
+            ("sinpi(1000000000001.5)", "-1"),
+            ("sinpi(-2.5)", "-1"),
+            ("cospi(4503599627370497)", "-1"),
+            ("cospi(1e308)", "1"),
+            ("cospi(1000000000000.5)", "0"),
+            ("cospi(-1.5)", "0"),
+            ("tanpi(1000000000000.25)", "1"),
+            ("tanpi(1000000000000.75)", "-1"),
+            ("tanpi(1e308)", "0"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        let near_axis = evaluate("cospi(0.4999999999999999)").unwrap();
+        assert!((near_axis - 3.487868498008632e-16).abs() < 1e-30);
+        assert!(calculate("cospi(0,1)").is_err());
+        assert_eq!(
+            calculate("tanpi(1.5)"),
+            Err(CalculationError::FunctionDomain)
+        );
+        let near_pole = evaluate("tanpi(0.4999999999999999)").unwrap();
+        assert!((near_pole / 2.8670805696113295e15 - 1.).abs() < 1e-14);
+    }
+
+    #[test]
     fn evaluates_degree_trigonometry_at_regular_angles_and_axes() {
         for (query, expected) in [
             ("sind(30)", "0.5"),
