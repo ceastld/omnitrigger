@@ -298,6 +298,9 @@ impl ResultValue {
         }
         let format = match scoped_query(query.trim_start()) {
             Some((Scope::Json, term)) => json_tools::result_format(term, &self.text),
+            Some((Scope::Toml, term)) if toml_tools::produces_toml(term) => {
+                return "搜索结果.toml";
+            }
             Some((Scope::Toml, term)) if toml_tools::produces_json(term) => {
                 Some(JsonResultFormat::Json)
             }
@@ -7007,6 +7010,7 @@ mod tests {
             ("JSON: 校验行 1", "搜索结果.txt"),
             ("TOML: 取值 /port port = 8000", "搜索结果.json"),
             ("TOML: 转JSON port = 8000", "搜索结果.json"),
+            (r#"TOML: 从JSON {"port":8000}"#, "搜索结果.toml"),
             ("TOML: 校验 port = 8000", "搜索结果.txt"),
             ("处理: JSON行 [\"分数:\"]\n0.50\n1.25", "搜索结果.jsonl"),
             (r#"处理: JSON对象 ["分数:"] {"茶":1.50}"#, "搜索结果.json"),

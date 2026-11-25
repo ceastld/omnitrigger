@@ -4,12 +4,14 @@ use super::{
     csv_tools::append_bounded_csv_row,
     input_line_column, is_validation_operation,
     json_tools::{
-        append_pointer_key, json_array_index, json_pointer_tokens, pointer_and_source, JsonError,
+        append_pointer_key, json_array_index, json_pointer_tokens, pointer_and_source,
+        read_json_array, read_unique_object_entries, JsonError,
     },
     InputValidationReport,
 };
 
 const MAX_TOML_BYTES: usize = 1024 * 1024;
+const MAX_JSON_DEPTH: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TomlError {
@@ -24,6 +26,12 @@ pub(super) enum TomlError {
     InvalidPointer,
     MissingPointer,
     Serialization,
+    Json(JsonError),
+    JsonNull,
+    JsonIntegerRange,
+    JsonFloatRange,
+    JsonDepth,
+    TomlSerialization,
     TooLarge,
     CsvNullCharacter,
 }
@@ -32,12 +40,18 @@ impl TomlError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入 TOML 内容，例如 TOML: 校验 port = 8000",
-            Self::UnknownOperation => "用 校验、取值、转JSON 或 叶子CSV 处理 TOML",
+            Self::UnknownOperation => "用 校验、取值、转JSON、从JSON 或 叶子CSV 处理 TOML",
             Self::Invalid { .. } => "请检查 TOML 语法",
             Self::NonFiniteFloat => "JSON 无法表示 TOML 中的 inf 或 nan",
             Self::InvalidPointer => "填写有效路径，例如 /server/port，空路径可写成 \"\"",
             Self::MissingPointer => "TOML 没有该路径，数组下标从 0 开始",
             Self::Serialization => "无法生成 JSON",
+            Self::Json(error) => error.message(),
+            Self::JsonNull => "TOML 无法表示 JSON 的 null，请先提供明确的值",
+            Self::JsonIntegerRange => "JSON 整数超出 TOML 支持的有符号 64 位范围",
+            Self::JsonFloatRange => "JSON 小数超出双精度浮点数可表示的范围",
+            Self::JsonDepth => "JSON 嵌套超过 128 层",
+            Self::TomlSerialization => "无法生成 TOML",
             Self::TooLarge => "TOML 输入或转换结果超过 1 MiB",
             Self::CsvNullCharacter => "CSV 路径和单元格不能包含空字符 U+0000",
         }
@@ -51,6 +65,7 @@ pub(super) fn syntax_error_message(line: usize, column: usize) -> String {
 enum TomlOperation {
     Validate,
     Json,
+    FromJson,
     LeavesCsv,
 }
 
@@ -61,6 +76,7 @@ impl TomlOperation {
         }
         match operation.to_ascii_lowercase().as_str() {
             "转json" | "to-json" => Ok(Self::Json),
+            "从json" | "from-json" => Ok(Self::FromJson),
             "叶子csv" | "leaves-csv" => Ok(Self::LeavesCsv),
             "" => Err(TomlError::Incomplete),
             _ => Err(TomlError::UnknownOperation),
@@ -89,6 +105,11 @@ fn is_selection(operation: &str) -> bool {
 pub(super) fn produces_json(input: &str) -> bool {
     let (operation, _) = split_toml_input(input);
     is_selection(operation) || matches!(TomlOperation::parse(operation), Ok(TomlOperation::Json))
+}
+
+pub(super) fn produces_toml(input: &str) -> bool {
+    let (operation, _) = split_toml_input(input);
+    matches!(TomlOperation::parse(operation), Ok(TomlOperation::FromJson))
 }
 
 pub(super) fn toml_validation_report(
@@ -153,14 +174,69 @@ fn parse_toml_table(source: &str) -> Result<toml::Table, TomlError> {
 }
 
 fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, TomlError> {
-    let table = parse_toml_table(source)?;
     match operation {
-        TomlOperation::Validate => return Ok(format!("TOML 有效 · {} 个顶层键", table.len())),
-        TomlOperation::LeavesCsv => return toml_leaves_csv(table),
-        TomlOperation::Json => {}
+        TomlOperation::Validate => {
+            let table = parse_toml_table(source)?;
+            Ok(format!("TOML 有效 · {} 个顶层键", table.len()))
+        }
+        TomlOperation::LeavesCsv => toml_leaves_csv(parse_toml_table(source)?),
+        TomlOperation::Json => write_toml_json(toml::Value::Table(parse_toml_table(source)?)),
+        TomlOperation::FromJson => {
+            let table = json_table(source.trim_start(), 0)?;
+            let output =
+                toml::to_string_pretty(&table).map_err(|_| TomlError::TomlSerialization)?;
+            if output.len() > MAX_TOML_BYTES {
+                return Err(TomlError::TooLarge);
+            }
+            Ok(output)
+        }
     }
+}
 
-    write_toml_json(toml::Value::Table(table))
+fn json_table(input: &str, depth: usize) -> Result<toml::Table, TomlError> {
+    read_unique_object_entries(input)
+        .map_err(TomlError::Json)?
+        .into_iter()
+        .map(|(key, value)| Ok((key, value_from_json(value.get(), depth + 1)?)))
+        .collect()
+}
+
+fn value_from_json(input: &str, depth: usize) -> Result<toml::Value, TomlError> {
+    use toml::Value as TomlValue;
+    if depth > MAX_JSON_DEPTH {
+        return Err(TomlError::JsonDepth);
+    }
+    match input.as_bytes().first() {
+        Some(b'{') => json_table(input, depth).map(TomlValue::Table),
+        Some(b'[') => read_json_array(input)
+            .map_err(TomlError::Json)?
+            .into_iter()
+            .map(|value| value_from_json(value.get(), depth + 1))
+            .collect::<Result<_, _>>()
+            .map(TomlValue::Array),
+        Some(b'"') => serde_json::from_str(input)
+            .map(TomlValue::String)
+            .map_err(|_| TomlError::Json(JsonError::Invalid)),
+        Some(b't') => Ok(TomlValue::Boolean(true)),
+        Some(b'f') => Ok(TomlValue::Boolean(false)),
+        Some(b'n') => Err(TomlError::JsonNull),
+        _ if input.contains(['.', 'e', 'E']) => {
+            let value = input
+                .parse::<f64>()
+                .map_err(|_| TomlError::JsonFloatRange)?;
+            let mantissa = input.split(['e', 'E']).next().unwrap_or(input);
+            let underflowed =
+                value == 0. && mantissa.bytes().any(|digit| matches!(digit, b'1'..=b'9'));
+            if !value.is_finite() || underflowed {
+                return Err(TomlError::JsonFloatRange);
+            }
+            Ok(TomlValue::Float(value))
+        }
+        _ => input
+            .parse()
+            .map(TomlValue::Integer)
+            .map_err(|_| TomlError::JsonIntegerRange),
+    }
 }
 
 fn select_toml_value(input: &str) -> Result<String, TomlError> {
@@ -276,6 +352,44 @@ fn json_value(value: toml::Value) -> Result<Value, TomlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_json_objects_to_toml_with_exact_integer_bounds() {
+        let source = r#"{"server":{"名称":"北","ports":[8000,8001]},"id":9007199254740993,"min":-9223372036854775808,"max":9223372036854775807,"array":[true,-0.0,"2024-02-29",{"k":"hello\nworld"}]}"#;
+        let text = transform_toml(&format!("从JSON {source}")).unwrap();
+        let table = text.parse::<toml::Table>().unwrap();
+        assert_eq!(table["id"].as_integer(), Some(9007199254740993));
+        assert_eq!(table["min"].as_integer(), Some(i64::MIN));
+        assert_eq!(table["max"].as_integer(), Some(i64::MAX));
+        let items = table["array"].as_array().unwrap();
+        assert_eq!(items[1].as_float().unwrap().to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(items[2].as_str(), Some("2024-02-29"));
+        let json = transform_toml(&format!("转JSON {text}")).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&json).unwrap(),
+            serde_json::from_str::<Value>(source).unwrap()
+        );
+        for (source, expected) in [
+            ("[]", TomlError::Json(JsonError::ExpectedObject)),
+            (r#"{"x":[null]}"#, TomlError::JsonNull),
+            (
+                r#"{"x":{"a":1,"a":2}}"#,
+                TomlError::Json(JsonError::DuplicateKey),
+            ),
+            (r#"{"x":9223372036854775808}"#, TomlError::JsonIntegerRange),
+            (
+                r#"{"x":-18446744073709551616}"#,
+                TomlError::JsonIntegerRange,
+            ),
+            (r#"{"x":1e400}"#, TomlError::JsonFloatRange),
+            (r#"{"x":1e-400}"#, TomlError::JsonFloatRange),
+        ] {
+            assert_eq!(
+                transform_toml(&format!("from-json {source}")),
+                Err(expected)
+            );
+        }
+    }
 
     #[test]
     fn validates_toml_and_preserves_source_line_and_column_in_errors() {

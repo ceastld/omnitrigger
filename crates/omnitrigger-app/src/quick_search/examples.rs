@@ -4595,6 +4595,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 JSON 对象转换为 TOML 配置",
+        query: r#"TOML: 从JSON {"server":{"host":"localhost","ports":[8000,8001]},"enabled":true}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用表格查看 TOML 路径、类型和数值",
         query: "TOML: 叶子CSV date = 2024-02-29\n[\"a/b\"]\nnote = '茶,咖啡'\nport = 8000",
     },
