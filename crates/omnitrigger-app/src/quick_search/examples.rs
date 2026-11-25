@@ -3268,6 +3268,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "将公历日期转换为年积日",
+        query: "日期: 年积日 2024-02-29",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "将年积日转回公历日期",
+        query: "日期: 年积日 2024-060",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询本周的日期范围",
         query: "日期: 本周",
     },
@@ -7215,6 +7225,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "列出",
             "格式化",
             "解析",
+            "年积日",
             "月历",
             "年月日差",
             "工作日序号",

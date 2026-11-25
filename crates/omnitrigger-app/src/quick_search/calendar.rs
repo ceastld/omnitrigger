@@ -33,6 +33,7 @@ pub(super) enum DateError {
     InvalidWeek,
     InvalidQuarter,
     InvalidYearDay,
+    InvalidOrdinalDate,
     InvalidWeekdayOccurrence,
     MissingWeekdayOccurrence,
     InvalidWeekdaySeries,
@@ -78,6 +79,7 @@ impl DateError {
             Self::InvalidWeek => "请输入有效的 ISO 周号或周日期，例如 2026-W47 或 2026-W47-6",
             Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
             Self::InvalidYearDay => "请输入该年有效的天数，例如 2024 第60天",
+            Self::InvalidOrdinalDate => "填写日历日期或有效的年积日，例如 2024-02-29 或 2024-060",
             Self::InvalidWeekdayOccurrence => {
                 "请输入第 1 至第 5 个或最后一个星期几，例如 日期: 2026-11 最后一个星期四"
             }
@@ -1704,6 +1706,33 @@ fn convert_date_pattern(input: &str, today: NaiveDate, parse: bool) -> Result<St
     Ok(result)
 }
 
+fn convert_ordinal_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(DateError::InvalidOrdinalDate);
+    }
+    if let Some((year, ordinal)) = input
+        .split_once('-')
+        .filter(|(_, ordinal)| ordinal.len() == 3)
+        .and_then(|(year, ordinal)| Some((iso_year(year)?, ordinal)))
+    {
+        if !ordinal.bytes().all(|digit| digit.is_ascii_digit()) {
+            return Err(DateError::InvalidOrdinalDate);
+        }
+        let date = ordinal
+            .parse()
+            .ok()
+            .and_then(|ordinal| NaiveDate::from_yo_opt(year, ordinal))
+            .ok_or(DateError::InvalidOrdinalDate)?;
+        return Ok(date.to_string());
+    }
+    let (date, rest) = date_operand(input, today)?;
+    if !rest.is_empty() {
+        return Err(DateError::InvalidOrdinalDate);
+    }
+    Ok(date.format("%Y-%j").to_string())
+}
+
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let original = input.trim();
     if let Some((operation, argument)) = original.split_once(char::is_whitespace) {
@@ -1728,6 +1757,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     match operation.to_ascii_lowercase().as_str() {
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
         "年月日差" | "calendar-span" => return calendar_date_span(rest, today),
+        "年积日" | "ordinal-date" => return convert_ordinal_date(rest, today),
         "月初序列" | "month-start-series" => {
             return date_boundary_series(rest, today, 1, false)
         }
@@ -2606,6 +2636,38 @@ mod tests {
         }
         let year = calculate_date("列出 2024-01-01 到 2024-12-31 每天", today).unwrap();
         assert_eq!(year.lines().count(), MAX_LISTED_DATES);
+    }
+
+    #[test]
+    fn converts_ordinal_dates_with_leap_year_and_canonical_day_width_checks() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (query, expected) in [
+            ("年积日 2024-02-29", "2024-060"),
+            ("年积日 今天", "2024-060"),
+            ("年积日 2024-060", "2024-02-29"),
+            ("ordinal-date 2024-366", "2024-12-31"),
+            ("年积日 ２０２３－０６０", "2023-03-01"),
+            ("ordinal-date 2024-01-01", "2024-001"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "年积日",
+            "年积日 2023-366",
+            "年积日 2024-000",
+            "年积日 2024-+01",
+            "年积日 2024-367",
+        ] {
+            assert_eq!(
+                calculate_date(query, today),
+                Err(DateError::InvalidOrdinalDate),
+                "{query}"
+            );
+        }
     }
 
     #[test]
