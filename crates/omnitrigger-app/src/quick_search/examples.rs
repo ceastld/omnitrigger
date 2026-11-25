@@ -6515,6 +6515,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用精确算式计算样本方差",
+        query: "分数: 计算 variance(1/3,1,5/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用精确算式计算样本标准差",
+        query: "分数: 计算 stdev(1/3,1,5/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在精确算式中计算加权平均值",
         query: "分数: 计算 wavg(1/3,2,1/6,1)",
     },

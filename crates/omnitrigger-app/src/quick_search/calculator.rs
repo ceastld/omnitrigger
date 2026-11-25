@@ -947,11 +947,19 @@ mod tests {
             ("pstdev(-1e308,1e308)", "1e308"),
             ("stdev(-1e308,1e308)", "1.4142135623731e308"),
             ("pstdev(-1e-300,1e-300)", "1e-300"),
+            ("variance(1,3,5)", "4"),
+            ("pvariance(2,4,6,8)", "5"),
+            ("pvariance(5)", "0"),
+            ("pvariance(-1e150,1e150)", "1e300"),
         ] {
             assert!(looks_like_calculation(query), "{query}");
             assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
         }
         assert_eq!(calculate("stdev(1)"), Err(CalculationError::FunctionDomain));
+        assert_eq!(
+            calculate("variance(1)"),
+            Err(CalculationError::FunctionDomain)
+        );
     }
 
     #[test]

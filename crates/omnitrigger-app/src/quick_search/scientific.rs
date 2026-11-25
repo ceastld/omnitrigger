@@ -41,6 +41,16 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
                 standard_deviation(values, 0)
             }))
         }
+        "variance" => {
+            return Some(NamedValue::Aggregate(|values| {
+                standard_deviation(values, 1).powi(2)
+            }))
+        }
+        "pvariance" => {
+            return Some(NamedValue::Aggregate(|values| {
+                standard_deviation(values, 0).powi(2)
+            }))
+        }
         "gcd" => return Some(NamedValue::Aggregate(greatest_common_divisor)),
         "lcm" => return Some(NamedValue::Aggregate(least_common_multiple)),
         "round" => return Some(NamedValue::Aggregate(round_to_places)),

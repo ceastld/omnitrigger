@@ -1347,6 +1347,20 @@ fn unweighted_observations(
     Ok(values.into_iter().map(|value| (value, 1)).collect())
 }
 
+pub(super) fn variance_unweighted(
+    values: Vec<BigRational>,
+    sample: bool,
+) -> Result<Option<BigRational>, StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    let divisor = count - u64::from(sample);
+    if divisor == 0 {
+        return Ok(None);
+    }
+    let average = bounded(observation_sum(&values)? / BigInt::from(count))?;
+    variance_about(&values, &average, divisor).map(Some)
+}
+
 fn observation_sum(values: &[(BigRational, u64)]) -> Result<BigRational, StatisticsError> {
     values
         .iter()
@@ -1418,8 +1432,7 @@ fn summarize(
     );
     let variance_divisor = count - u64::from(sample);
     if variance_divisor > 0 {
-        let deviation_sum = squared_deviation_sum(&values, &average)?;
-        let variance = bounded(deviation_sum / BigInt::from(variance_divisor))?;
+        let variance = variance_about(&values, &average, variance_divisor)?;
         let label = if sample { "样本" } else { "总体" };
         result.push_str(&format!(
             "\n{label}方差 {variance} · 标准差 {}",
@@ -1549,6 +1562,14 @@ fn replace_with_absolute_deviations(
         })?;
     }
     Ok(())
+}
+
+fn variance_about(
+    values: &[(BigRational, u64)],
+    center: &BigRational,
+    divisor: u64,
+) -> Result<BigRational, StatisticsError> {
+    bounded(squared_deviation_sum(values, center)? / BigInt::from(divisor))
 }
 
 fn squared_deviation_sum(

@@ -11,7 +11,8 @@ use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
 use super::statistics::{
     absolute_deviation_unweighted, interpolate_ordered_quantile, median_sorted_values,
-    weighted_quantile_value, StatisticsError, WeightedDistribution, WeightedMean,
+    variance_unweighted, weighted_quantile_value, StatisticsError, WeightedDistribution,
+    WeightedMean,
 };
 
 const MAX_POWER_EXPONENT: u32 = 1024;
@@ -53,6 +54,8 @@ pub(super) enum FractionError {
     InterpolationRange,
     ClampBounds,
     QuantileArguments,
+    SampleVarianceCount,
+    RationalStandardDeviation,
     WeightedAverageArguments,
     WeightedQuantileArguments,
     PositiveMeanArguments,
@@ -114,6 +117,8 @@ impl FractionError {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
             }
             Self::WeightedAverageArguments => "wavg 须成对填写数值和非负权重，且至少一个权重大于零",
+            Self::SampleVarianceCount => "样本方差和样本标准差至少需要两个数值",
+            Self::RationalStandardDeviation => "这些数值的标准差无法表示为分数，可求方差或使用普通计算查看近似标准差",
             Self::WeightedQuantileArguments => {
                 "wquantile 须先填 0 至 1 的概率，wpercentile 须先填 0 至 100 的百分位。随后成对填写数值和非负权重，至少一个权重大于零"
             }
@@ -1777,6 +1782,10 @@ impl FractionParser<'_> {
             return absolute_deviation_unweighted(values, name == "mad")
                 .map_err(|_| FractionError::ExactRange);
         }
+        if matches!(name.as_str(), "variance" | "pvariance" | "stdev" | "pstdev") {
+            self.remaining = rest;
+            return self.variance_function(&name);
+        }
         if name == "wavg" {
             self.remaining = rest;
             return self.weighted_average_function();
@@ -2144,6 +2153,19 @@ impl FractionParser<'_> {
         weighted_quantile_value(&distribution, probability)
             .cloned()
             .map_err(map_error)
+    }
+
+    fn variance_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+        let values = self.list_function_arguments()?;
+        let sample = matches!(name, "variance" | "stdev");
+        let variance = variance_unweighted(values, sample)
+            .map_err(|_| FractionError::ExactRange)?
+            .ok_or(FractionError::SampleVarianceCount)?;
+        if matches!(name, "stdev" | "pstdev") {
+            return exact_rational_root(&variance, 2)
+                .map_err(|_| FractionError::RationalStandardDeviation);
+        }
+        Ok(variance)
     }
 
     fn clamp_function(&mut self) -> Result<BigRational, FractionError> {
@@ -2847,6 +2869,33 @@ mod tests {
         assert_eq!(
             calculate_fraction(&at_length_limit).unwrap().to_string(),
             "0"
+        );
+    }
+
+    #[test]
+    fn computes_exact_variance_and_standard_deviation_in_expressions() {
+        for (query, expected) in [
+            ("variance(1/3,1,5/3)", "4/9"),
+            ("stdev(1/3,1,5/3)*3", "2"),
+            ("pvariance(1/3,5/3)", "4/9"),
+            ("PSTDEV(9007199254740993,9007199254740991)", "1"),
+            ("pstdev(5/3)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        for query in ["variance(1)", "stdev(1)"] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::SampleVarianceCount)
+            );
+        }
+        assert_eq!(
+            calculate_fraction("stdev(1,2)"),
+            Err(FractionError::RationalStandardDeviation)
         );
     }
 
