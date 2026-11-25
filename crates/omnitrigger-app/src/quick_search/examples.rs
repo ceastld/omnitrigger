@@ -3441,6 +3441,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "大数相消时保留浮点加法中的小数值",
+        query: "fsum(1e16,1,-1e16)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算皮尔逊相关系数",
         query: "corr(1,2,2,4,3,6)",
     },

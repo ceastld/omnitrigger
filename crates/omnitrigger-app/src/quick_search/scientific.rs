@@ -1,5 +1,7 @@
 use std::f64::consts::{E, PI};
 
+use num_bigint::{BigInt, Sign};
+
 use super::{calculator::MAX_SAFE_INTEGER, fraction::common_divisor};
 
 pub(super) enum NamedValue {
@@ -20,6 +22,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "pi" | "π" | "Π" => return Some(NamedValue::Constant(PI)),
         "e" => return Some(NamedValue::Constant(E)),
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
+        "fsum" => return Some(NamedValue::Aggregate(exact_float_sum)),
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
@@ -435,6 +438,62 @@ fn permutations(values: &[f64]) -> f64 {
         }
     }
     result as f64
+}
+
+fn exact_float_sum(values: &[f64]) -> f64 {
+    const FRACTION_BITS: u32 = f64::MANTISSA_DIGITS - 1;
+    const HIDDEN_BIT: u64 = 1 << FRACTION_BITS;
+    const FRACTION_MASK: u64 = HIDDEN_BIT - 1;
+    const EXPONENT_MASK: u64 = 0x7ff;
+    const SIGN_BIT: u64 = 1 << 63;
+
+    // 每个有限的二进制浮点数都是 2^-1074 的整数倍。
+    let mut total = BigInt::default();
+    for &value in values {
+        let bits = value.to_bits();
+        let exponent = (bits >> FRACTION_BITS) & EXPONENT_MASK;
+        let fraction = bits & FRACTION_MASK;
+        let mantissa = if exponent == 0 {
+            fraction
+        } else {
+            fraction | HIDDEN_BIT
+        };
+        let units = BigInt::from(mantissa) << exponent.saturating_sub(1);
+        if bits & SIGN_BIT == 0 {
+            total += units;
+        } else {
+            total -= units;
+        }
+    }
+
+    let sign = if total.sign() == Sign::Minus {
+        SIGN_BIT
+    } else {
+        0
+    };
+    let magnitude = total.magnitude();
+    let width = magnitude.bits();
+    let shift = width.saturating_sub(u64::from(f64::MANTISSA_DIGITS));
+    let mut mantissa = (magnitude >> shift).iter_u64_digits().next().unwrap_or(0);
+    if width <= u64::from(FRACTION_BITS) {
+        return f64::from_bits(sign | mantissa);
+    }
+
+    // 在压缩到 53 位时只舍入一次，中点取偶数。
+    if shift != 0
+        && magnitude.bit(shift - 1)
+        && (mantissa & 1 != 0
+            || magnitude
+                .trailing_zeros()
+                .is_some_and(|zeros| zeros < shift - 1))
+    {
+        mantissa += 1;
+    }
+    let exponent = shift + 1 + (mantissa >> f64::MANTISSA_DIGITS);
+    if exponent >= EXPONENT_MASK {
+        return f64::from_bits(sign | (EXPONENT_MASK << FRACTION_BITS));
+    }
+    f64::from_bits(sign | (exponent << FRACTION_BITS) | (mantissa & FRACTION_MASK))
 }
 
 pub(super) fn average(values: &[f64]) -> f64 {

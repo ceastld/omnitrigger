@@ -1767,7 +1767,7 @@ impl FractionParser<'_> {
         }
         if matches!(
             name.as_str(),
-            "sum" | "prod" | "product" | "avg" | "mean" | "median" | "hmean" | "gmean"
+            "sum" | "fsum" | "prod" | "product" | "avg" | "mean" | "median" | "hmean" | "gmean"
         ) {
             self.remaining = rest;
             return self.aggregate_function(&name);
@@ -2103,7 +2103,7 @@ impl FractionParser<'_> {
         }
         let result = match name {
             "hmean" => BigRational::from_integer(count.into()) / total,
-            "sum" => total,
+            "sum" | "fsum" => total,
             _ => total / BigInt::from(count),
         };
         ensure_exact_size(&result)?;
@@ -2977,6 +2977,13 @@ mod tests {
             calculate_fraction("stdev(1,2)"),
             Err(FractionError::RationalStandardDeviation)
         );
+    }
+
+    #[test]
+    fn sums_rational_arguments_to_fsum_without_averaging() {
+        for (query, expected) in [("fsum(1/3,1/6)", "1/2"), ("FSUM(2**80,1/7,-2**80)*7", "1")] {
+            assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
+        }
     }
 
     #[test]

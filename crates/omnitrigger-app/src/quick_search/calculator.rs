@@ -855,6 +855,34 @@ mod tests {
     }
 
     #[test]
+    fn sums_float_arguments_with_one_final_rounding() {
+        for (query, expected) in [
+            ("fsum(1e16,1,-1e16)", "1"),
+            ("FSUM(1e308,1e308,-1e308)", "1e308"),
+            ("fsum(1e308,1e308,-1e308,-1e308,1e-308)", "1e-308"),
+            ("fsum(-1e308,-1e308,1e308,1e308,-1e-308)", "-1e-308"),
+            ("fsum(5e-324,-5e-324)", "0"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, ulps) in [
+            ("fsum(1,2**-53)", 0),
+            ("fsum(1,2**-53,5e-324)", 1),
+            ("fsum(1,3*2**-53)", 2),
+        ] {
+            assert_eq!(evaluate(query).unwrap().to_bits(), 1.0_f64.to_bits() + ulps);
+        }
+        assert_eq!(
+            evaluate("fsum(1e308,1e308)"),
+            Err(CalculationError::OutOfRange)
+        );
+        assert_eq!(
+            evaluate("fsum(-1e308,-1e308)"),
+            Err(CalculationError::OutOfRange)
+        );
+    }
+
+    #[test]
     fn averages_values_by_nonnegative_weights_without_overflow() {
         for (query, expected) in [
             ("wavg(80,2,90,3)", "86"),
