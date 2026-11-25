@@ -1982,7 +1982,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             Operation::TimestampDifferenceColumn(name, start, end)
         }
         "组内时间戳差列" | "group-timestamp-difference-column" => {
-            return append_group_timestamp_differences(input)
+            return append_group_timestamp_offsets(input, GroupTimestampReference::Previous)
+        }
+        "组内时间戳偏移列" | "group-timestamp-offset-column" => {
+            return append_group_timestamp_offsets(input, GroupTimestampReference::First)
         }
         "时刻差列" | "clock-difference-column" => {
             let ((name, start, end), data) =
@@ -4587,7 +4590,15 @@ fn append_cidr_column(input: &str, use_name: bool) -> Result<String, CsvError> {
     })
 }
 
-fn append_group_timestamp_differences(input: &str) -> Result<String, CsvError> {
+enum GroupTimestampReference {
+    Previous,
+    First,
+}
+
+fn append_group_timestamp_offsets(
+    input: &str,
+    reference: GroupTimestampReference,
+) -> Result<String, CsvError> {
     let invalid = CsvError::GroupTimestampDifferenceColumnArguments;
     let ((name, source, groups), data) =
         json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(input, invalid)?;
@@ -4599,7 +4610,7 @@ fn append_group_timestamp_differences(input: &str) -> Result<String, CsvError> {
     let source = source.resolve(header)?;
     validate_column_width(&[source], header.len())?;
     let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
-    let mut last = HashMap::new();
+    let mut timestamps = HashMap::new();
     let mut row_number = 0;
     write_appended_column(header, records, &name, |row| {
         row_number += 1;
@@ -4612,10 +4623,17 @@ fn append_group_timestamp_differences(input: &str) -> Result<String, CsvError> {
             cause,
         };
         let current = absolute_timestamp(cell).map_err(|error| at_row(error.message()))?;
-        let Some(previous) = last.insert(column_key(row, &groups), current) else {
-            return Ok(String::new());
+        let key = column_key(row, &groups);
+        let origin = match reference {
+            GroupTimestampReference::Previous => {
+                let Some(previous) = timestamps.insert(key, current) else {
+                    return Ok(String::new());
+                };
+                previous
+            }
+            GroupTimestampReference::First => *timestamps.entry(key).or_insert(current),
         };
-        format_absolute_elapsed(previous, current).map_err(|error| at_row(error.message()))
+        format_absolute_elapsed(origin, current).map_err(|error| at_row(error.message()))
     })
 }
 
@@ -7288,6 +7306,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "duration-number-column"
             | "组内时间戳差列"
             | "group-timestamp-difference-column"
+            | "组内时间戳偏移列"
+            | "group-timestamp-offset-column"
             | "段内计数列"
             | "run-length-column"
             | "网段归属列"
@@ -12795,6 +12815,30 @@ null"#
             transform_csv("组内时间戳差列 [\"间隔\",2,[1]] 设备,时刻\nA,1s\nB,\nA,2026-11-01 01:30 America/New_York"),
             Err(CsvError::DataRowValue { row: 3, .. }),
         ));
+    }
+
+    #[test]
+    fn appends_signed_elapsed_times_since_each_groups_first_valid_timestamp() {
+        let query = "组内时间戳偏移列 [\"偏移\",\"时刻\",[\"设备\"]] 设备,时刻\nA,3s\nB,10ns\nA,8s\nA,\nB,5ns\nA,1s";
+        let expected = concat!(
+            "设备,时刻,偏移\r\n",
+            "A,3s,00:00:00\r\n",
+            "B,10ns,00:00:00\r\n",
+            "A,8s,00:00:05\r\n",
+            "A,\"\",\"\"\r\n",
+            "B,5ns,-00:00:00.000000005\r\n",
+            "A,1s,-00:00:02",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(query).expect("时长列应可预览").unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv(
+                "GROUP-TIMESTAMP-OFFSET-COLUMN [\"偏移\",2,[]] 设备,时刻\nA,\nB,3s\nC,1s\nA,8s"
+            )
+            .as_deref(),
+            Ok("设备,时刻,偏移\r\nA,\"\",\"\"\r\nB,3s,00:00:00\r\nC,1s,-00:00:02\r\nA,8s,00:00:05"),
+        );
     }
 
     #[test]

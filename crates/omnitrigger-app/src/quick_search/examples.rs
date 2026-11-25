@@ -4887,6 +4887,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算每行距本组首个有效时刻的时长",
+        query: "CSV: 组内时间戳偏移列 [\"偏移\",\"时刻\",[\"设备\"]] 设备,时刻\nA,3s\nB,10ns\nA,8s\nA,\nB,5ns\nA,1s",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "查看每组最早最晚的时刻及实际跨度",
         query: "CSV: 分组时间戳摘要 [[\"设备\"],\"时刻\"] 设备,时刻\nA,2026-03-08T03:30:00-04:00\nB,2ns\nC,\nA,2026-03-08T01:30:00-05:00\nB,1ns",
     },
