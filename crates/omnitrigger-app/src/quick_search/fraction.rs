@@ -53,6 +53,7 @@ pub(super) enum FractionError {
     ClampBounds,
     QuantileArguments,
     WeightedAverageArguments,
+    HarmonicMeanArguments,
     AlignmentArguments,
     RationalSquareRoot,
     RootDegree,
@@ -110,6 +111,7 @@ impl FractionError {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
             }
             Self::WeightedAverageArguments => "wavg 须成对填写数值和非负权重，且至少一个权重大于零",
+            Self::HarmonicMeanArguments => "hmean 的每个参数须为正数",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::RootDegree => "root 的次数须为 1 至 1024 的整数",
@@ -1718,7 +1720,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.extreme_value(name == "min");
         }
-        if matches!(name.as_str(), "sum" | "avg" | "mean" | "median") {
+        if matches!(
+            name.as_str(),
+            "sum" | "prod" | "product" | "avg" | "mean" | "median" | "hmean"
+        ) {
             self.remaining = rest;
             return self.aggregate_function(&name);
         }
@@ -1981,17 +1986,31 @@ impl FractionParser<'_> {
             values.sort_unstable();
             return median_sorted_values(&values);
         }
+        if matches!(name, "prod" | "product") {
+            let mut product = BigRational::from_integer(1.into());
+            for value in values {
+                product *= value;
+                ensure_exact_size(&product)?;
+            }
+            return Ok(product);
+        }
+        let harmonic = name == "hmean";
         let count = values.len();
         let mut total = BigRational::default();
         for value in values {
-            total += value;
+            if harmonic && value.numer().sign() != Sign::Plus {
+                return Err(FractionError::HarmonicMeanArguments);
+            }
+            total += if harmonic { value.recip() } else { value };
             ensure_exact_size(&total)?;
         }
-        if name != "sum" {
-            total /= BigInt::from(count);
-            ensure_exact_size(&total)?;
-        }
-        Ok(total)
+        let result = match name {
+            "hmean" => BigRational::from_integer(count.into()) / total,
+            "sum" => total,
+            _ => total / BigInt::from(count),
+        };
+        ensure_exact_size(&result)?;
+        Ok(result)
     }
 
     fn quantile_function(&mut self, percentage: bool) -> Result<BigRational, FractionError> {
@@ -2738,6 +2757,35 @@ mod tests {
         assert_eq!(
             calculate_fraction("sum(1e2000,1e-2000)"),
             Err(FractionError::ExactRange)
+        );
+    }
+
+    #[test]
+    fn combines_exact_products_and_harmonic_means_in_calculator_expressions() {
+        for (query, expected) in [
+            ("prod(1/3,1/2,5/7)", "5/42"),
+            ("PRODUCT(9007199254740993,2,1/3)", "6004799503160662"),
+            ("prod(-2,0,5)", "0"),
+            ("prod(-2)", "-2"),
+            ("hmean(1/3,1/6)*9", "2"),
+            ("hmean(9007199254740993)", "9007199254740993"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        for query in ["hmean(1,0)", "hmean(-1/2,3)"] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::HarmonicMeanArguments)
+            );
+        }
+        assert!(calculate_fraction("prod()").is_err());
+        assert_eq!(
+            calculate_fraction("prod(1e2000,1e2000)"),
+            Err(FractionError::ExactRange),
         );
     }
 

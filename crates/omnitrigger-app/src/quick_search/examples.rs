@@ -3306,6 +3306,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "将多个倍率相乘",
+        query: "prod(1.05,1.02,1.01)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算加权平均值",
         query: "wavg(80,2,90,3)",
     },
@@ -6437,6 +6442,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "求多个分数或小数的精确合计",
         query: "分数: 计算 sum(1e-3,1/4,3/4)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将多个分数相乘",
+        query: "分数: 计算 prod(1/3,1/2,5/7)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求多个正分数的精确调和平均值",
+        query: "分数: 计算 hmean(1/3,1/6)",
     },
     Example {
         icon: Icon::Terminal,

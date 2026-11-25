@@ -20,6 +20,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "pi" | "π" | "Π" => return Some(NamedValue::Constant(PI)),
         "e" => return Some(NamedValue::Constant(E)),
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
+        "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
         "gmean" => return Some(NamedValue::Aggregate(geometric_mean)),
