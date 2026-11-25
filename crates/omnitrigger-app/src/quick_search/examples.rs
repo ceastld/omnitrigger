@@ -4020,6 +4020,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"文本: 差异上下文CSV [1,1] "远处\n表头\n旧值\n保留\n较远" "远处\n表头\n新值\n保留\n较远""#,
     },
     Example {
+        icon: Icon::Layers,
+        title: "查看文本连续变更的起始行和行数",
+        query: r#"文本: 差异块CSV "表头\n旧值\n保留\n删掉" "新增\n表头\n新值\n保留""#,
+    },
+    Example {
         icon: Icon::Terminal,
         title: "计算两段文字在字素簇层面的编辑距离",
         query: r#"文本: 编辑距离 "猫👩‍💻" "猫🧑‍💻""#,

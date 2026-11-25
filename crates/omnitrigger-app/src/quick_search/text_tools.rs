@@ -233,6 +233,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "markdown标题csv" | "markdown-headings-csv" => Some(markdown_headings_csv(text)),
         "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
         "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
+        "差异块csv" | "diff-blocks-csv" => Some(diff_blocks_csv(text)),
         "正则替换明细csv" | "regex-replacement-csv" => Some(regex_replacement_csv(text)),
         "正则频数csv" | "regex-frequency-csv" => Some(regex_group_frequency_csv(text)),
         _ => None,
@@ -1943,10 +1944,18 @@ pub(super) fn grapheme_edit_distance(
     Ok(distances[second.len()])
 }
 
+#[derive(PartialEq, Eq)]
 enum LineChange {
     Unchanged,
     Removed,
     Added,
+}
+
+struct LineDiffRow<'a> {
+    change: LineChange,
+    line: &'a str,
+    left: usize,
+    right: usize,
 }
 
 fn diff_context_csv(input: &str) -> Result<String, TextError> {
@@ -1955,19 +1964,54 @@ fn diff_context_csv(input: &str) -> Result<String, TextError> {
     diff_lines(pair, LineOutput::Csv, Some(context))
 }
 
-fn diff_lines(
-    input: &str,
-    output: LineOutput,
-    context: Option<(usize, usize)>,
-) -> Result<String, TextError> {
+fn diff_blocks_csv(input: &str) -> Result<String, TextError> {
     let (before, after) = read_text_pair(input)?;
+    let changes = diff_line_changes(&before, &after)?;
+    let mut result = String::from("原起行,删除行数,新起行,新增行数");
+    for block in changes.chunk_by(|left, right| {
+        (left.change == LineChange::Unchanged) == (right.change == LineChange::Unchanged)
+    }) {
+        let first = &block[0];
+        if first.change == LineChange::Unchanged {
+            continue;
+        }
+        let removed = block
+            .iter()
+            .filter(|row| row.change == LineChange::Removed)
+            .count();
+        let original = first.left + usize::from(first.change == LineChange::Added);
+        let modified = first.right + usize::from(first.change == LineChange::Removed);
+        let fields =
+            [original, removed, modified, block.len() - removed].map(|value| value.to_string());
+        append_bounded_csv_row(
+            &mut result,
+            fields.iter().map(String::as_str),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(result)
+}
+
+fn diff_line_changes<'a>(
+    before: &'a str,
+    after: &'a str,
+) -> Result<Vec<LineDiffRow<'a>>, TextError> {
     let before: Vec<_> = before.lines().take(MAX_DIFF_LINES + 1).collect();
     let after: Vec<_> = after.lines().take(MAX_DIFF_LINES + 1).collect();
     if before.len() > MAX_DIFF_LINES || after.len() > MAX_DIFF_LINES {
         return Err(TextError::TooManyDiffLines);
     }
-    if matches!(output, LineOutput::Text) && before == after {
-        return Ok("两组文本各行相同".to_owned());
+    if before == after {
+        return Ok(before
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| LineDiffRow {
+                change: LineChange::Unchanged,
+                line,
+                left: index + 1,
+                right: index + 1,
+            })
+            .collect());
     }
     let columns = after.len() + 1;
     let index = |left, right| left * columns + right;
@@ -2003,13 +2047,35 @@ fn diff_lines(
                 right += 1;
                 (LineChange::Added, line)
             };
-        changes.push((change, line, left, right));
+        changes.push(LineDiffRow {
+            change,
+            line,
+            left,
+            right,
+        });
+    }
+    Ok(changes)
+}
+
+fn diff_lines(
+    input: &str,
+    output: LineOutput,
+    context: Option<(usize, usize)>,
+) -> Result<String, TextError> {
+    let (before, after) = read_text_pair(input)?;
+    let changes = diff_line_changes(&before, &after)?;
+    if matches!(output, LineOutput::Text)
+        && changes
+            .iter()
+            .all(|row| row.change == LineChange::Unchanged)
+    {
+        return Ok("两组文本各行相同".to_owned());
     }
     let included = context.map(|(preceding, following)| {
         let mut included = vec![false; changes.len()];
         let mut through = 0;
-        for (index, (change, _, _, _)) in changes.iter().enumerate() {
-            if matches!(change, LineChange::Unchanged) {
+        for (index, row) in changes.iter().enumerate() {
+            if row.change == LineChange::Unchanged {
                 continue;
             }
             let start = index.saturating_sub(preceding).max(through);
@@ -2026,7 +2092,16 @@ fn diff_lines(
         LineOutput::Text => String::new(),
         LineOutput::Csv => "操作,原行号,新行号,内容".to_owned(),
     };
-    for (index, (change, line, left, right)) in changes.into_iter().enumerate() {
+    for (
+        index,
+        LineDiffRow {
+            change,
+            line,
+            left,
+            right,
+        },
+    ) in changes.into_iter().enumerate()
+    {
         if included.as_ref().is_some_and(|shown| !shown[index]) {
             continue;
         }
@@ -2456,6 +2531,22 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected));
         }
+    }
+
+    #[test]
+    fn summarizes_each_contiguous_line_change_as_a_csv_block() {
+        let query = r#"差异块CSV "表头\n旧值\n保留\n删掉" "新增\n表头\n新值\n保留""#;
+        let expected = "原起行,删除行数,新起行,新增行数\r\n1,0,1,1\r\n2,1,3,1\r\n4,1,5,0";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text(r#"diff-blocks-csv "一\n二" "一\n二\n末尾""#).as_deref(),
+            Ok("原起行,删除行数,新起行,新增行数\r\n3,0,3,1"),
+        );
+        assert_eq!(
+            transform_text(r#"差异块CSV "相同\r\n" "相同""#).as_deref(),
+            Ok("原起行,删除行数,新起行,新增行数"),
+        );
     }
 
     #[test]
