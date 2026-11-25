@@ -880,6 +880,7 @@ enum Operation {
         source: ColumnReference,
         pattern: String,
         group: String,
+        expand_rows: bool,
     },
     RegexCaptureColumns {
         source: ColumnReference,
@@ -1751,7 +1752,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::FirstNonemptyColumn(name, columns)
         }
-        "正则提取列" | "regex-capture-column" => {
+        kind @ ("正则提取列" | "regex-capture-column" | "正则展开行" | "regex-expand-rows") =>
+        {
             let ((name, source, pattern, group), data) =
                 json_argument_and_data::<(String, ColumnReference, String, String)>(
                     input,
@@ -1763,6 +1765,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 source,
                 pattern,
                 group,
+                expand_rows: matches!(kind, "正则展开行" | "regex-expand-rows"),
             }
         }
         "正则提取多列" | "regex-capture-columns" => {
@@ -2735,7 +2738,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             source,
             pattern,
             group,
-        } => regex_capture_column(&rows, &name, source, &pattern, &group),
+            expand_rows,
+        } => regex_capture_column(&rows, &name, source, &pattern, &group, expand_rows),
         Operation::RegexCaptureColumns {
             source,
             pattern,
@@ -4384,6 +4388,7 @@ fn regex_capture_column(
     source: ColumnReference,
     pattern: &str,
     group: &str,
+    expand_rows: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -4391,8 +4396,23 @@ fn regex_capture_column(
     }
     let source = source.resolve(header)?;
     validate_column_width(&[source], header.len())?;
+    if expand_rows
+        && records.iter().map(|row| row[source].len()).sum::<usize>() > MAX_REGEX_COLUMN_INPUT_BYTES
+    {
+        return Err(CsvError::RegexCaptureColumnsInputTooLarge);
+    }
     let pattern = compile_regex(pattern).map_err(CsvError::Regex)?;
     let group = regex_group_index(&pattern, group).map_err(CsvError::Regex)?;
+    if expand_rows {
+        let pattern = &pattern;
+        return write_expanded_column(header, records, name, move |row| {
+            let mut matches = pattern.captures_iter(&row[source]).peekable();
+            let unmatched = matches.peek().is_none();
+            let cells = matches
+                .map(move |captures| captures.get(group).map_or("", |matched| matched.as_str()));
+            Ok(cells.chain(unmatched.then_some("")))
+        });
+    }
     write_appended_column(header, records, name, |row| {
         let field = &row[source];
         Ok(pattern
@@ -7700,6 +7720,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-numeric-column"
             | "正则提取多列"
             | "regex-capture-columns"
+            | "正则展开行"
+            | "regex-expand-rows"
             | "对比全部列"
             | "compare-all-columns"
             | "分组时长合计"
@@ -11484,6 +11506,33 @@ mod tests {
         assert_eq!(
             transform_csv(r#"拼接列 ["省",[1,2],"-"] 省,市"#),
             Err(CsvError::HeaderNameConflict)
+        );
+    }
+
+    #[test]
+    fn expands_each_non_overlapping_capture_and_preserves_unmatched_csv_rows() {
+        let query = r#"正则展开行 ["编号","原文","[A-Z](?:=([0-9]+))?","1"]
+原文,标签
+A=007 B=99,甲
+B,乙
+无,丙"#;
+        let expected =
+            "原文,标签,编号\r\nA=007 B=99,甲,007\r\nA=007 B=99,甲,99\r\nB,乙,\"\"\r\n无,丙,\"\"";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (text, table) = csv_table_preview(query).unwrap().unwrap();
+        assert_eq!(text, expected);
+        assert_eq!(table.page_csv(0, 0), expected);
+        assert_eq!(
+            transform_csv("regex-expand-rows [\"匹配\",1,\"猫|🐱\",\"0\"]\n原文\n🐱猫").as_deref(),
+            Ok("原文,匹配\r\n🐱猫,🐱\r\n🐱猫,猫"),
+        );
+        let oversized = format!(
+            "正则展开行 [\"新列\",1,\"x\",\"0\"]\n来源\n{}",
+            "x".repeat(MAX_REGEX_COLUMN_INPUT_BYTES + 1)
+        );
+        assert_eq!(
+            transform_csv(&oversized),
+            Err(CsvError::RegexCaptureColumnsInputTooLarge),
         );
     }
 
