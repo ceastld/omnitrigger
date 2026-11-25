@@ -514,7 +514,9 @@ fn reflected_gray_code(value: &BigUint) -> BigUint {
     value ^ (value >> 1u8)
 }
 
-fn radix_report_operation(operation: &str) -> Option<fn(&str) -> Result<String, RadixError>> {
+type RadixReport = fn(&str) -> Result<String, RadixError>;
+
+fn radix_report_operation(operation: &str) -> Option<RadixReport> {
     if operation.eq_ignore_ascii_case("位比对CSV")
         || operation.eq_ignore_ascii_case("compare-bits-csv")
     {
