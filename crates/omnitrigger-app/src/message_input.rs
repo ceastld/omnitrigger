@@ -37,6 +37,7 @@ actions!(
         SelectHome,
         SelectEnd,
         SelectAll,
+        OpenLineJump,
         Copy,
         Cut,
         Paste,
@@ -343,6 +344,21 @@ impl MessageInput {
 
     pub(super) fn select_current_line(&mut self, cx: &mut Context<Self>) {
         self.select_range(logical_line_range(&self.content, self.head), cx);
+    }
+
+    pub(super) fn line_position(&self) -> Option<(usize, usize)> {
+        logical_line_position(&self.content, self.head)
+    }
+
+    pub(super) fn go_to_line(&mut self, number: usize, cx: &mut Context<Self>) -> bool {
+        let Some(offset) = number
+            .checked_sub(1)
+            .and_then(|index| logical_line_starts(&self.content).nth(index))
+        else {
+            return false;
+        };
+        self.move_to(offset, false, cx);
+        true
     }
 
     pub(super) fn jump_logical_line(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
@@ -797,7 +813,7 @@ impl Render for MessageInput {
         let line = MessageLine { input: cx.entity() };
         let position = self
             .show_line_position
-            .then(|| logical_line_position(&self.content, self.head))
+            .then(|| self.line_position())
             .flatten();
         if let Some((number, total)) = position {
             field
@@ -810,10 +826,14 @@ impl Render for MessageInput {
                         .id("logical-line-position")
                         .flex_none()
                         .whitespace_nowrap()
-                        .cursor(CursorStyle::Arrow)
+                        .cursor_pointer()
                         .text_color(rgb(theme::TEXT_MUTED))
                         .text_size(px(11.))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenLineJump), cx);
+                        })
+                        .tooltip(theme::text_tooltip("跳到输入行 Ctrl+G".into()))
                         .child(format!("第 {number}/{total} 行")),
                 )
         } else {
@@ -1100,17 +1120,22 @@ fn is_logical_line_break(ch: char) -> bool {
 
 fn logical_line_position(text: &str, cursor: usize) -> Option<(usize, usize)> {
     let mut number = 1;
-    let mut total = 1;
-    for (offset, ch) in text.char_indices() {
-        if !is_logical_line_break(ch)
-            || (ch == '\r' && text.as_bytes().get(offset + 1) == Some(&b'\n'))
-        {
-            continue;
-        }
+    let mut total = 0;
+    for start in logical_line_starts(text) {
         total += 1;
-        number += usize::from(offset < cursor);
+        if start <= cursor {
+            number = total;
+        }
     }
     (total > 1).then_some((number, total))
+}
+
+fn logical_line_starts(text: &str) -> impl Iterator<Item = usize> + '_ {
+    std::iter::once(0).chain(text.char_indices().filter_map(|(offset, ch)| {
+        (is_logical_line_break(ch)
+            && (ch != '\r' || text.as_bytes().get(offset + 1) != Some(&b'\n')))
+        .then_some(offset + ch.len_utf8())
+    }))
 }
 
 fn logical_line_range(text: &str, cursor: usize) -> Range<usize> {
@@ -1278,6 +1303,16 @@ mod tests {
         assert_eq!(logical_line_position("", 0), None);
         assert_eq!(logical_line_position("甲👩‍💻", 3), None);
         let text = "甲\r\n\r乙\u{2028}丙\u{2029}";
+        assert_eq!(
+            logical_line_starts(text).collect::<Vec<_>>(),
+            [
+                0,
+                "甲\r\n".len(),
+                "甲\r\n\r".len(),
+                text.find('丙').unwrap(),
+                text.len()
+            ]
+        );
         for (cursor, line) in [
             (0, 1),
             ("甲\r".len(), 1),
