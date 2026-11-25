@@ -7252,6 +7252,25 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
 }
 
 pub(super) fn function_examples(query: &str) -> Option<Vec<usize>> {
+    matching_function_examples(query, |example| Some(example.query))
+}
+
+pub(super) fn fraction_function_examples(query: &str) -> Option<Vec<usize>> {
+    let query = search_key(query);
+    matching_function_examples(fraction_command_expression(&query)?, |example| {
+        fraction_command_expression(example.query.strip_prefix("分数: ")?)
+    })
+}
+
+fn fraction_command_expression(input: &str) -> Option<&str> {
+    let (verb, expression) = input.split_once(char::is_whitespace)?;
+    (verb == "计算" || verb.eq_ignore_ascii_case("calc")).then(|| expression.trim())
+}
+
+fn matching_function_examples(
+    query: &str,
+    expression: fn(&Example) -> Option<&str>,
+) -> Option<Vec<usize>> {
     let query = search_key(query);
     let (name, exact) = query
         .strip_suffix('(')
@@ -7268,7 +7287,7 @@ pub(super) fn function_examples(query: &str) -> Option<Vec<usize>> {
         .iter()
         .enumerate()
         .filter_map(|(index, example)| {
-            let (function, tail) = split_name(example.query);
+            let (function, tail) = split_name(expression(example)?);
             let name_matches = function == name || (!exact && function.starts_with(name));
             (tail.starts_with('(') && name_matches).then_some((function != name, index))
         })

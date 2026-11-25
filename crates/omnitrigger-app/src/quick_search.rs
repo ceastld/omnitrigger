@@ -110,8 +110,8 @@ use decibel::{convert_decibels, DecibelError};
 use duration::{convert_duration, convert_exact_duration, is_clock_duration, DurationError};
 use equation::{solve_equation_output, solve_linear_system, EquationError, EquationOutput};
 use examples::{
-    example_help_query, function_examples, matching_examples, tool_index_examples,
-    tool_operation_examples, Example, EXAMPLES,
+    example_help_query, fraction_function_examples, function_examples, matching_examples,
+    tool_index_examples, tool_operation_examples, Example, EXAMPLES,
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
@@ -1207,7 +1207,9 @@ impl Results {
                         }),
                 ),
                 Scope::Fraction => {
-                    if let Some(report) = fraction::fraction_csv_report(term) {
+                    if let Some(examples) = fraction_function_examples(term) {
+                        Self::Help(examples)
+                    } else if let Some(report) = fraction::fraction_csv_report(term) {
                         Self::table_value(report.map_err(ValueError::Fraction))
                     } else {
                         Self::Value(
@@ -7465,6 +7467,32 @@ mod tests {
             matches!(for_query("sqrt(9)", &[]), Results::Value(Ok(value)) if value.text == "3")
         );
         assert!(for_query("sq(", &[]).suggested_input(0).is_none());
+    }
+
+    #[test]
+    fn offers_templates_for_exact_calculator_functions_inside_fraction_queries() {
+        for query in [
+            "分数: 计算 roo",
+            "分数: 计算 root(",
+            "分数： ＣＡＬＣ ＲＯＯＴ（",
+        ] {
+            assert_eq!(
+                for_query(query, &[]).suggested_input(0),
+                Some("分数: 计算 root(-125/343,3)"),
+                "{query}"
+            );
+        }
+        assert!(matches!(
+            for_query("分数: 计算 root(-125/343,3)", &[]),
+            Results::Value(Ok(value)) if value.text == "-5/7"
+        ));
+        assert!(for_query("分数: 计算 roo(", &[])
+            .suggested_input(0)
+            .is_none());
+        assert_eq!(
+            for_query("root(", &[]).suggested_input(0),
+            Some("root(-32,5)")
+        );
     }
 
     #[test]
