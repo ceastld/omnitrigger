@@ -3348,14 +3348,15 @@ impl QuickSearch {
                     self.save_result(window, cx);
                 }
                 cx.stop_propagation();
-            } else if modifiers == 1
-                && keystroke.modifiers.shift
+            } else if keystroke.modifiers.shift
+                && (modifiers == 1 || (modifiers == 2 && keystroke.modifiers.control))
                 && matches!(keystroke.key.as_str(), "pageup" | "pagedown")
             {
-                let page = if keystroke.key == "pageup" {
-                    PageChange::Previous
-                } else {
-                    PageChange::Next
+                let page = match (keystroke.key == "pageup", keystroke.modifiers.control) {
+                    (true, false) => PageChange::Previous,
+                    (false, false) => PageChange::Next,
+                    (true, true) => PageChange::First,
+                    (false, true) => PageChange::Last,
                 };
                 if self.change_table_page(TableAxis::Columns, page, cx) {
                     cx.stop_propagation();
@@ -3915,10 +3916,10 @@ impl QuickSearch {
                     "列",
                     "table-prev-columns",
                     "左页",
-                    "Shift+PageUp 查看左侧列",
+                    "Shift+PageUp 左页 · Ctrl+Shift+PageUp 第一组列",
                     "table-next-columns",
                     "右页",
-                    "Shift+PageDown 查看右侧列",
+                    "Shift+PageDown 右页 · Ctrl+Shift+PageDown 最后一组列",
                 ),
             };
         div()
@@ -6812,8 +6813,11 @@ mod tests {
         window: &mut Window,
         cx: &mut Context<QuickSearch>,
     ) {
-        let table = "a,b,c,d,e,f,g,h\n1,2,3,4,5,6,7,8";
-        let data = format!("{table}{}", "\n11,12,13,14,15,16,17,18".repeat(14));
+        let table = "a,b,c,d,e,f,g,h,i,j,k,l,m\n1,2,3,4,5,6,7,8,9,10,11,12,13";
+        let data = format!(
+            "{table}{}",
+            "\n11,12,13,14,15,16,17,18,19,20,21,22,23".repeat(14)
+        );
         let query = format!("CSV: 表格预览 {data}");
         search.fill_query(&query, window, cx);
         search.refresh_results(&query, window, cx);
@@ -6831,11 +6835,18 @@ mod tests {
         assert_eq!(pages(search), (1, 0));
         press(search, "shift-pagedown", window, cx);
         assert_eq!(pages(search), (1, 1));
+        press(search, "ctrl-shift-pageup", window, cx);
+        assert_eq!(pages(search), (1, 0));
+        press(search, "ctrl-shift-pagedown", window, cx);
+        assert_eq!(pages(search), (1, 2));
+        press(search, "shift-pageup", window, cx);
+        assert_eq!(pages(search), (1, 1));
         press(search, "ctrl-pagedown", window, cx);
         assert_eq!(pages(search), (2, 1));
         press(search, "f2", window, cx);
         assert!(search.expanded_value_pages.is_some());
         press(search, "pageup", window, cx);
+        press(search, "ctrl-shift-pagedown", window, cx);
         assert_eq!(pages(search), (2, 1));
         press(search, "f2", window, cx);
         assert_eq!(pages(search), (2, 1));
