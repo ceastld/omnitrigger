@@ -834,6 +834,27 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_weighted_population_spread_with_large_values_and_weights() {
+        for (query, expected) in [
+            ("wpvariance(0,1,4,3)", "3"),
+            ("wpstdev(-3,1,3,1)", "3"),
+            ("wpvariance(9e307,0,2,1)", "0"),
+            ("wpvariance(1,1e308,3,1e308)", "1"),
+            ("wpstdev(-1e308,1,1e308,1)", "1e308"),
+            ("wpvariance(1e308,1e-308,0,1e308)", "1"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "wpstdev(1,0,2,0)",
+            "wpvariance(1,-1,2,2)",
+            "wpvariance(1,1,2)",
+        ] {
+            assert_eq!(calculate(query), Err(CalculationError::FunctionDomain));
+        }
+    }
+
+    #[test]
     fn averages_values_by_nonnegative_weights_without_overflow() {
         for (query, expected) in [
             ("wavg(80,2,90,3)", "86"),

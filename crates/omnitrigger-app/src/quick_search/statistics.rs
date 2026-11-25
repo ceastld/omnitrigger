@@ -799,22 +799,7 @@ impl WeightedMean {
 }
 
 fn weighted_variance(input: &str) -> Result<BigRational, StatisticsError> {
-    let distribution = read_weighted_distribution(input)?;
-    let total_value = distribution
-        .weights
-        .iter()
-        .try_fold(BigRational::default(), |total, (value, weight)| {
-            bounded(total + value * weight)
-        })?;
-    let mean = bounded(total_value / &distribution.total)?;
-    let sum_of_squares = distribution.weights.into_iter().try_fold(
-        BigRational::default(),
-        |total, (value, weight)| {
-            let distance = value - &mean;
-            bounded(total + &distance * &distance * weight)
-        },
-    )?;
-    bounded(sum_of_squares / distribution.total)
+    read_weighted_distribution(input)?.population_variance()
 }
 
 fn weighted_quantile(input: &str) -> Result<String, StatisticsError> {
@@ -892,6 +877,27 @@ impl WeightedDistribution {
         self.weights.insert(value, group_weight);
         self.total = total;
         Ok(())
+    }
+
+    pub(super) fn population_variance(self) -> Result<BigRational, StatisticsError> {
+        if self.weights.is_empty() {
+            return Err(StatisticsError::ZeroTotalWeight);
+        }
+        let total_value = self
+            .weights
+            .iter()
+            .try_fold(BigRational::default(), |total, (value, weight)| {
+                bounded(total + value * weight)
+            })?;
+        let mean = bounded(total_value / &self.total)?;
+        let sum_of_squares = self.weights.into_iter().try_fold(
+            BigRational::default(),
+            |total, (value, weight)| {
+                let distance = value - &mean;
+                bounded(total + &distance * &distance * weight)
+            },
+        )?;
+        bounded(sum_of_squares / self.total)
     }
 
     pub(super) fn quantiles_csv(

@@ -58,6 +58,7 @@ pub(super) enum FractionError {
     RationalStandardDeviation,
     RationalRootMeanSquare,
     WeightedAverageArguments,
+    WeightedSpreadArguments,
     WeightedQuantileArguments,
     PositiveMeanArguments,
     RationalGeometricMean,
@@ -118,6 +119,7 @@ impl FractionError {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
             }
             Self::WeightedAverageArguments => "wavg 须成对填写数值和非负权重，且至少一个权重大于零",
+            Self::WeightedSpreadArguments => "wpvariance 和 wpstdev 须成对填写数值和非负权重，且至少一个权重大于零",
             Self::SampleVarianceCount => "样本方差和样本标准差至少需要两个数值",
             Self::RationalStandardDeviation => "这些数值的标准差无法表示为分数，可求方差或使用普通计算查看近似标准差",
             Self::RationalRootMeanSquare => "这些数值的均方根无法表示为分数，可用 meansquare 求均方值",
@@ -1805,6 +1807,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.weighted_average_function();
         }
+        if matches!(name.as_str(), "wpvariance" | "wpstdev") {
+            self.remaining = rest;
+            return self.weighted_population_spread(name == "wpstdev");
+        }
         if matches!(name.as_str(), "wquantile" | "wpercentile") {
             self.remaining = rest;
             return self.weighted_quantile_function(name == "wpercentile");
@@ -2160,27 +2166,51 @@ impl FractionParser<'_> {
         if percentage {
             probability /= BigInt::from(100);
         }
-        if probability.numer().sign() == Sign::Minus
-            || probability.numer() > probability.denom()
-            || values.len() < 2
-            || !values.len().is_multiple_of(2)
-        {
+        if probability.numer().sign() == Sign::Minus || probability.numer() > probability.denom() {
             return Err(FractionError::WeightedQuantileArguments);
         }
-        let map_error = |error| match error {
-            StatisticsError::InvalidWeight | StatisticsError::ZeroTotalWeight => {
-                FractionError::WeightedQuantileArguments
-            }
-            _ => FractionError::ExactRange,
-        };
+        let invalid = FractionError::WeightedQuantileArguments;
+        let distribution = Self::weighted_distribution(values, invalid)?;
+        weighted_quantile_value(&distribution, probability)
+            .cloned()
+            .map_err(|error| Self::weighted_statistics_error(error, invalid))
+    }
+
+    fn weighted_population_spread(&mut self, root: bool) -> Result<BigRational, FractionError> {
+        let invalid = FractionError::WeightedSpreadArguments;
+        let values = self.list_function_arguments()?.into_iter();
+        let variance = Self::weighted_distribution(values, invalid)?
+            .population_variance()
+            .map_err(|error| Self::weighted_statistics_error(error, invalid))?;
+        if root {
+            return exact_rational_root(&variance, 2)
+                .map_err(|_| FractionError::RationalStandardDeviation);
+        }
+        Ok(variance)
+    }
+
+    fn weighted_distribution(
+        mut values: std::vec::IntoIter<BigRational>,
+        invalid: FractionError,
+    ) -> Result<WeightedDistribution, FractionError> {
+        if values.len() < 2 || !values.len().is_multiple_of(2) {
+            return Err(invalid);
+        }
         let mut distribution = WeightedDistribution::default();
         while let Some(value) = values.next() {
             let weight = values.next().expect("每个数值都有对应权重");
-            distribution.record((value, weight)).map_err(map_error)?;
+            distribution
+                .record((value, weight))
+                .map_err(|error| Self::weighted_statistics_error(error, invalid))?;
         }
-        weighted_quantile_value(&distribution, probability)
-            .cloned()
-            .map_err(map_error)
+        Ok(distribution)
+    }
+
+    fn weighted_statistics_error(error: StatisticsError, invalid: FractionError) -> FractionError {
+        match error {
+            StatisticsError::InvalidWeight | StatisticsError::ZeroTotalWeight => invalid,
+            _ => FractionError::ExactRange,
+        }
     }
 
     fn variance_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
@@ -2976,6 +3006,28 @@ mod tests {
             calculate_fraction("sumsq(1e2000)"),
             Err(FractionError::ExactRange)
         );
+    }
+
+    #[test]
+    fn computes_weighted_population_variance_inside_exact_expressions() {
+        for (query, expected) in [
+            ("wpvariance(1/3,2,7/3,1)", "8/9"),
+            ("wpstdev(-3,1,3,1)*2", "6"),
+            ("wpvariance(90,0,2,1)", "0"),
+            ("wpvariance(0,1/2,4,3/2)", "3"),
+        ] {
+            assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
+        }
+        assert_eq!(
+            calculate_fraction("wpstdev(0,1,4,3)"),
+            Err(FractionError::RationalStandardDeviation)
+        );
+        for query in ["wpstdev(2,0)", "wpvariance(1,-1,2,2)", "wpvariance(1,1,2)"] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::WeightedSpreadArguments)
+            );
+        }
     }
 
     #[test]

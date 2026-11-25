@@ -23,6 +23,12 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
+        "wpvariance" => {
+            return Some(NamedValue::Aggregate(|values| {
+                weighted_population_deviation(values).powi(2)
+            }))
+        }
+        "wpstdev" => return Some(NamedValue::Aggregate(weighted_population_deviation)),
         "gmean" => return Some(NamedValue::Aggregate(geometric_mean)),
         "hmean" => return Some(NamedValue::Aggregate(harmonic_mean)),
         "sumsq" => {
@@ -474,6 +480,38 @@ fn weighted_average(values: &[f64]) -> f64 {
         };
     }
     mean.clamp(minimum, maximum)
+}
+
+fn weighted_population_deviation(values: &[f64]) -> f64 {
+    let pairs = values.chunks_exact(2);
+    if !pairs.remainder().is_empty() || pairs.clone().any(|pair| pair[1] < 0.) {
+        return f64::NAN;
+    }
+    let active = pairs.filter(|pair| pair[1] > 0.);
+    let max_weight = active.clone().map(|pair| pair[1]).fold(0., f64::max);
+    if max_weight == 0. {
+        return f64::NAN;
+    }
+    let (center, scale) = centered_scale(active.clone().map(|pair| pair[0]));
+    if scale == 0. {
+        return 0.;
+    }
+    let mut weighted_total = 0.;
+    let mut total_weight = 0.;
+    let scaled = |value: f64| (value - center) / scale;
+    for pair in active.clone() {
+        let weight = pair[1] / max_weight;
+        weighted_total += weight * scaled(pair[0]);
+        total_weight += weight;
+    }
+    let mean = weighted_total / total_weight;
+    let weight_root = max_weight.sqrt();
+    // 先对每个权重开方，极小的权重比仍能参与均方根。
+    let norm = active.fold(0.0_f64, |norm, pair| {
+        let deviation = (scaled(pair[0]) - mean) * (pair[1].sqrt() / weight_root);
+        norm.hypot(deviation)
+    });
+    (norm / total_weight.sqrt()).min(1.) * scale
 }
 
 fn positive_bounds(values: &[f64]) -> Option<(f64, f64)> {

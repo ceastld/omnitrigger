@@ -6590,6 +6590,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在精确算式中计算加权总体方差",
+        query: "分数: 计算 wpvariance(1/3,2,7/3,1)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在算式中计算加权总体标准差",
+        query: "wpstdev(-3,1,3,1)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在精确算式中计算加权分位数",
         query: "分数: 计算 wquantile(1/2,4,2,1,1,2,1)",
     },
