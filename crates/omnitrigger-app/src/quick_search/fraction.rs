@@ -1652,7 +1652,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.bitwise_function(&name);
         }
-        if matches!(name.as_str(), "sqrt" | "abs" | "isqrt") {
+        if matches!(
+            name.as_str(),
+            "sqrt" | "abs" | "isqrt" | "floor" | "ceil" | "trunc"
+        ) {
             self.remaining = rest;
             if !self.consume('(') {
                 return Err(self.expected_token());
@@ -1664,6 +1667,9 @@ impl FractionParser<'_> {
             let negative = value.numer().sign() == Sign::Minus;
             match name.as_str() {
                 "abs" => return Ok(if negative { -value } else { value }),
+                "floor" => return Ok(value.floor()),
+                "ceil" => return Ok(value.ceil()),
+                "trunc" => return Ok(BigRational::from_integer(value.to_integer())),
                 "isqrt" if !negative && value.is_integer() => {
                     return Ok(BigRational::from_integer(
                         value.numer().magnitude().sqrt().into(),
@@ -2461,6 +2467,24 @@ mod tests {
             parse_fraction_literal(&padded),
             Ok(BigRational::new(15.into(), 2.into()))
         );
+    }
+
+    #[test]
+    fn rounds_exact_fractions_to_integers_in_the_requested_direction() {
+        for (query, expected) in [
+            ("计算 floor(-7/3)", "-3"),
+            ("计算 ceil(-7/3)", "-2"),
+            ("计算 trunc(-7/3)", "-2"),
+            ("计算 floor(7/3)", "2"),
+            ("计算 ceil(7/3)", "3"),
+            ("计算 trunc(7/3)", "2"),
+            ("计算 floor(9007199254740993.9)", "9007199254740993"),
+            ("计算 CEIL(-9007199254740993.9)", "-9007199254740993"),
+            ("计算 trunc(-9007199254740993.9)", "-9007199254740993"),
+            ("计算 trunc(-2)*floor(1/3)", "0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]

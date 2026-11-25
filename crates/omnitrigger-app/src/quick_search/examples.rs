@@ -6410,6 +6410,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把精确分数向下取整",
+        query: "分数: 计算 floor(-7/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把精确分数向上取整",
+        query: "分数: 计算 ceil(7/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "截去精确分数的小数部分",
+        query: "分数: 计算 trunc(-7/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求大整数的最大公约数",
         query: "分数: 计算 gcd(-3 * 2**80, 5 * 2**80)",
     },
