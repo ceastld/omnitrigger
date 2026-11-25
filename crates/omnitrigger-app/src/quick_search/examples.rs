@@ -6240,6 +6240,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按有效数字输出工程计数法",
+        query: "分数: 工程计数法 0.000012345 to 4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "精确舍入到最近的步长倍数",
         query: "分数: 就近对齐 2.675 to 0.05",
     },
@@ -6851,6 +6856,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && [
                     "循环小数",
                     "有效数字",
+                    "工程计数法",
                     "百分比",
                     "从百分比",
                     "取值表",

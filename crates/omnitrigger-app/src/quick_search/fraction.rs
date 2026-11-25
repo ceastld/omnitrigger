@@ -315,7 +315,8 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
         }
         return calculate_fraction(source).map(|value| rounded_decimal(value, places));
     }
-    if verb == "有效数字" || verb.eq_ignore_ascii_case("significant-digits") {
+    let engineering = verb == "工程计数法" || verb.eq_ignore_ascii_case("engineering-notation");
+    if engineering || verb == "有效数字" || verb.eq_ignore_ascii_case("significant-digits") {
         let (source, digits) =
             split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
         let digits = digits.trim();
@@ -325,7 +326,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
             .ok()
             .filter(|digits| (1..=MAX_DECIMAL_PLACES).contains(digits))
             .ok_or(FractionError::SignificantDigits)?;
-        return calculate_fraction(source).map(|value| format_significant_digits(value, digits));
+        let exponent_step = if engineering { 3 } else { 1 };
+        return calculate_fraction(source)
+            .map(|value| format_significant_notation(value, digits, exponent_step));
     }
     if input.contains('(') {
         return from_repeating_decimal(input).map(|value| value.to_string());
@@ -1047,6 +1050,10 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
 }
 
 pub(super) fn format_significant_digits(value: BigRational, digits: u32) -> String {
+    format_significant_notation(value, digits, 1)
+}
+
+fn format_significant_notation(value: BigRational, digits: u32, exponent_step: i32) -> String {
     let numerator = value.numer().magnitude();
     let denominator = value.denom().magnitude();
     let places = digits - 1;
@@ -1074,7 +1081,16 @@ pub(super) fn format_significant_digits(value: BigRational, digits: u32) -> Stri
         rounded /= 10u8;
         exponent += 1;
     }
-    let coefficient = format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places);
+    let coefficient_shift = exponent.rem_euclid(exponent_step) as u32;
+    exponent -= coefficient_shift as i32;
+    if coefficient_shift > places {
+        rounded *= BigUint::from(10u8).pow(coefficient_shift - places);
+    }
+    let coefficient = format_scaled_decimal(
+        rounded,
+        value.numer().sign() == Sign::Minus,
+        places.saturating_sub(coefficient_shift),
+    );
     format!("{coefficient}e{exponent}")
 }
 
@@ -2576,6 +2592,26 @@ mod tests {
         ] {
             assert_eq!(simplify_fraction(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn formats_engineering_notation_after_rounding_exact_significant_digits() {
+        for (query, expected) in [
+            ("工程计数法 12345 to 4", "12.34e3"),
+            ("工程计数法 0.000012345 转 ４位", "12.34e-6"),
+            ("工程计数法 9.995 to 3", "10.0e0"),
+            ("engineering-notation -999.5 to 3", "-1.00e3"),
+            ("工程计数法 120.01 to 2", "120e0"),
+            ("工程计数法 0 to 3", "0.00e0"),
+            ("工程计数法 10**1000 to 3", "10.0e999"),
+            ("工程计数法 1/10**1000 to 3", "100e-1002"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("工程计数法 1 to 101"),
+            Err(FractionError::SignificantDigits),
+        );
     }
 
     #[test]
