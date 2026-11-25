@@ -5187,6 +5187,19 @@ mod tests {
     }
 
     #[test]
+    fn previews_exact_duration_unit_tables_directly_and_as_the_final_pipeline_step() {
+        let expected = "单位,数值\r\nms,1000\r\ns,1\r\nmin,1/60";
+        for query in [
+            r#"时长: 单位表 ["ms","s","min"] 1秒"#,
+            r#"处理: ["时长: 单位表 [\"ms\",\"s\",\"min\"]"] 1秒"#,
+        ] {
+            let result = for_query(query, &[]);
+            assert!(result.table_preview().is_some(), "{query}");
+            assert_eq!(result.refillable_text(), Some(expected), "{query}");
+        }
+    }
+
+    #[test]
     fn previews_duration_quantiles_as_tables_in_search_and_pipelines() {
         let expected = "分位数,时长\r\n25%,00:00:01.75\r\n0.5,00:00:02.5\r\n3/4,00:00:03.25";
         for query in [
@@ -8126,6 +8139,7 @@ mod tests {
                     "时长: 中位数 01:25,02:40,00:55",
                     "时长: 分位数 75% 3s,1s,2s,4s",
                     "时长: 分位表 [\"25%\",0.5,\"3/4\"] 3s,1s,2s,4s",
+                    "时长: 单位表 [\"ms\",\"s\",\"min\"] 1秒",
                     "时长: 最短 01:25,02:40,00:55",
                     "时长: 最长 01:25,02:40,00:55",
                     "时长: 极差 01:25,02:40,00:55",

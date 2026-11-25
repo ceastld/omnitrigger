@@ -2205,6 +2205,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "把同一个时长换算为多个精确单位",
+        query: r#"时长: 单位表 ["ms","s","min"] 1秒"#,
+    },
+    Example {
+        icon: Icon::Clock,
         title: "从一组时长中找出最短值",
         query: "时长: 最短 01:25,02:40,00:55",
     },
@@ -6910,6 +6915,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "中位数",
             "分位数",
             "分位表",
+            "单位表",
             "最短",
             "最长",
             "极差",

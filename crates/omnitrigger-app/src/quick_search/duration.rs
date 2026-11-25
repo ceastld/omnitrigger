@@ -20,6 +20,7 @@ const MAX_FRACTION_DIGITS: usize = 16;
 const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
 const MAX_DURATION_QUANTILE_TERMS: usize = 128;
 const MAX_DURATION_QUANTILE_LEVELS: usize = 16;
+const MAX_DURATION_UNIT_TARGETS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DurationError {
@@ -37,6 +38,7 @@ pub(super) enum DurationError {
     InvalidFrequency,
     InvalidQuantileArguments,
     InvalidQuantileTableArguments,
+    InvalidUnitTableArguments,
     InvalidScaleFactor,
     InvalidRoundingArguments,
     InvalidAllocation,
@@ -70,6 +72,9 @@ impl DurationError {
             Self::InvalidQuantileTableArguments => {
                 "填写 1 至 16 个概率的 JSON 数组和时长列表，例如 [\"25%\",0.5,\"3/4\"] 1s,2s,3s,4s"
             }
+            Self::InvalidUnitTableArguments => {
+                "填写 1 至 16 个时长单位的 JSON 数组和要换算的时长，例如 [\"ms\",\"s\",\"min\"] 1秒"
+            }
             Self::InvalidScaleFactor => "用 @ 分隔时长和缩放系数，系数可写 2/3、50% 或精确算式",
             Self::InvalidRoundingArguments => "用 @ 分隔时长和正的舍入步长，例如 01:07:30 @ 15分钟",
             Self::InvalidAllocation => "用 @ 分隔总时长和配比，例如 01:30:00 @ 1:2",
@@ -94,6 +99,11 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         let (_, arguments) = input.split_once(char::is_whitespace).ok_or(invalid)?;
         return format_exact_duration(arguments);
     }
+    if matches!(operation, "单位表" | "units-csv") {
+        let invalid = DurationError::InvalidUnitTableArguments;
+        let (_, arguments) = input.split_once(char::is_whitespace).ok_or(invalid)?;
+        return duration_unit_table(arguments);
+    }
     let (input, output) = match split_conversion(input) {
         Some((source, output)) => (source, Some(output)),
         None => (input, None),
@@ -108,7 +118,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     if matches!(operation, "分摊" | "allocate") {
         return allocate_duration(values, output);
     }
-    if is_duration_report(operation) {
+    if matches!(operation, "分位表" | "quantiles-csv") {
         return duration_quantiles_table(values, output);
     }
     let (total, show_seconds) = match operation {
@@ -437,7 +447,7 @@ pub(super) fn is_duration_report(query: &str) -> bool {
     query.split_whitespace().next().is_some_and(|operation| {
         matches!(
             normalize(operation).to_ascii_lowercase().as_str(),
-            "分位表" | "quantiles-csv"
+            "分位表" | "quantiles-csv" | "单位表" | "units-csv"
         )
     })
 }
@@ -627,6 +637,25 @@ fn numeric_duration_unit(output: &str) -> Option<(&'static str, u128, Option<usi
 
 fn exact_duration_number(nanos: i128, divisor: u128) -> BigRational {
     BigRational::new(nanos.into(), divisor.into())
+}
+
+fn duration_unit_table(input: &str) -> Result<String, DurationError> {
+    let invalid = DurationError::InvalidUnitTableArguments;
+    let (units, value) =
+        json_argument_and_tail::<Vec<String>>(input.trim_start()).ok_or(invalid)?;
+    if !(1..=MAX_DURATION_UNIT_TARGETS).contains(&units.len()) {
+        return Err(invalid);
+    }
+    let nanos = bounded_duration_value(value.trim())?;
+    let mut rows = vec![["单位".to_owned(), "数值".to_owned()]];
+    for unit in units {
+        let (symbol, divisor, _) = numeric_duration_unit(&unit).ok_or(invalid)?;
+        rows.push([
+            symbol.to_owned(),
+            exact_duration_number(nanos, divisor).to_string(),
+        ]);
+    }
+    Ok(write_rows(&rows, ','))
 }
 
 pub(super) fn convert_exact_duration(query: &str) -> Result<String, DurationError> {
@@ -1013,6 +1042,37 @@ mod tests {
             convert_duration("range -18446744073709551615s,18446744073709551615s"),
             Err(DurationError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn converts_one_duration_to_multiple_exact_units() {
+        for (query, expected) in [
+            (
+                r#"单位表 ["ms","s","min"] 1秒"#,
+                "单位,数值\r\nms,1000\r\ns,1\r\nmin,1/60",
+            ),
+            (
+                r#"units-csv ["秒","纳秒"] -1ns"#,
+                "单位,数值\r\ns,-1/1000000000\r\nns,-1",
+            ),
+            (
+                r#"单位表 ["S","h"] 23:59:50 到 00:00:10"#,
+                "单位,数值\r\ns,20\r\nh,1/180",
+            ),
+        ] {
+            assert!(is_duration_report(query));
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            r#"单位表 [] 1秒"#,
+            r#"单位表 ["iso"] 1秒"#,
+            r#"单位表 [1] 1秒"#,
+        ] {
+            assert_eq!(
+                convert_duration(query),
+                Err(DurationError::InvalidUnitTableArguments)
+            );
+        }
     }
 
     #[test]

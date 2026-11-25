@@ -370,6 +370,7 @@ fn convert_timestamp_with_local(
             | DurationError::InvalidFrequency
             | DurationError::InvalidQuantileArguments
             | DurationError::InvalidQuantileTableArguments
+            | DurationError::InvalidUnitTableArguments
             | DurationError::InvalidScaleFactor
             | DurationError::InvalidRoundingArguments
             | DurationError::InvalidAllocation
