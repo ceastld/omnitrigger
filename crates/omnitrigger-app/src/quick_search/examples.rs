@@ -5396,6 +5396,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按指定的 CSV 列保留每组最后一条记录",
+        query: "CSV: 按列去重留末 [\"编号\",2] 编号,地区,备注\n001,北,早期\n002,南,保留\n001,北,更新",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "找出 CSV 中有相同列值组合的记录",
         query: "CSV: 查重复 [\"编号\",2] 编号,地区,备注\n001,北,首条\n001,南,独有\n001,北,再次",
     },
@@ -5403,6 +5408,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按精确数值对 CSV 数据行去重",
         query: "CSV: 数值去重 [\"金额\"] 编号,金额\n001,1.50\n002,3/2\n003,1.5e0\n004,5/4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按精确数值保留 CSV 每组最后一条记录",
+        query: "CSV: 数值去重留末 [\"金额\"] 编号,金额\n001,1.50\n002,2\n003,3/2\n004,1.5e0",
     },
     Example {
         icon: Icon::Terminal,

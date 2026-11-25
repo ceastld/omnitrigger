@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
     hash::Hash,
 };
@@ -991,10 +991,13 @@ enum Operation {
         measurement: ContiguousMeasurement,
     },
     DeduplicateRows,
-    DeduplicateByColumns(Vec<ColumnReference>),
+    DeduplicateByColumns {
+        columns: Vec<ColumnReference>,
+        numeric: bool,
+        keep_last: bool,
+    },
     DuplicatesByColumns(Vec<ColumnReference>),
     DuplicatesByNumbers(Vec<ColumnReference>),
-    DeduplicateByNumbers(Vec<ColumnReference>),
     CountByColumns(Vec<ColumnReference>),
     FrequencyByColumns(Vec<ColumnReference>),
     AggregateByColumns {
@@ -2442,14 +2445,27 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 expression,
             }
         }
-        "按列去重" | "deduplicate-columns" | "数值去重" | "deduplicate-numeric" => {
+        "按列去重"
+        | "deduplicate-columns"
+        | "数值去重"
+        | "deduplicate-numeric"
+        | "按列去重留末"
+        | "deduplicate-columns-last"
+        | "数值去重留末"
+        | "deduplicate-numeric-last" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            if matches!(operation.as_str(), "数值去重" | "deduplicate-numeric") {
-                Operation::DeduplicateByNumbers(columns)
-            } else {
-                Operation::DeduplicateByColumns(columns)
+            let (numeric, keep_last) = match operation.as_str() {
+                "数值去重留末" | "deduplicate-numeric-last" => (true, true),
+                "按列去重留末" | "deduplicate-columns-last" => (false, true),
+                "数值去重" | "deduplicate-numeric" => (true, false),
+                _ => (false, false),
+            };
+            Operation::DeduplicateByColumns {
+                columns,
+                numeric,
+                keep_last,
             }
         }
         "查重复" | "duplicates-by-columns" | "数值查重复" | "duplicates-numeric" => {
@@ -3057,17 +3073,24 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
         }
-        Operation::DeduplicateByColumns(columns) => {
-            deduplicate_by_columns(&rows, &columns, |row, columns| Ok(column_key(row, columns)))
+        Operation::DeduplicateByColumns {
+            columns,
+            numeric,
+            keep_last,
+        } => {
+            if numeric {
+                deduplicate_by_columns(&rows, &columns, keep_last, numeric_column_key)
+            } else {
+                deduplicate_by_columns(&rows, &columns, keep_last, |row, columns| {
+                    Ok(column_key(row, columns))
+                })
+            }
         }
         Operation::DuplicatesByColumns(columns) => {
             find_duplicate_columns(&rows, &columns, |row, columns| Ok(column_key(row, columns)))
         }
         Operation::DuplicatesByNumbers(columns) => {
             find_duplicate_columns(&rows, &columns, numeric_column_key)
-        }
-        Operation::DeduplicateByNumbers(columns) => {
-            deduplicate_by_columns(&rows, &columns, numeric_column_key)
         }
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
         Operation::FrequencyByColumns(columns) => group_frequencies(&rows, &columns)?.csv(),
@@ -5794,18 +5817,32 @@ fn compute_column(
 fn deduplicate_by_columns<'a, Key: Eq + Hash>(
     rows: &'a [Vec<String>],
     columns: &[ColumnReference],
+    keep_last: bool,
     key: impl Fn(&'a [String], &[usize]) -> Result<Key, CsvError>,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
-    let mut seen = HashSet::new();
-    let mut unique_records = vec![header];
-    for row in records {
-        if seen.insert(key(row, &columns)?) {
-            unique_records.push(row);
+    let mut selected = HashMap::new();
+    let mut keep = vec![true; records.len()];
+    for (position, row) in records.iter().enumerate() {
+        match selected.entry(key(row, &columns)?) {
+            Entry::Occupied(mut previous) if keep_last => {
+                keep[previous.insert(position)] = false;
+            }
+            Entry::Occupied(_) => keep[position] = false,
+            Entry::Vacant(entry) => {
+                entry.insert(position);
+            }
         }
     }
-    Ok(write_rows(unique_records, ','))
+    let unique_records = records
+        .iter()
+        .zip(keep)
+        .filter_map(|(row, keep)| keep.then_some(row));
+    Ok(write_rows(
+        std::iter::once(header).chain(unique_records),
+        ',',
+    ))
 }
 
 fn find_duplicate_columns<'a, Key: Eq + Hash>(
@@ -7885,6 +7922,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "regex-expand-rows"
             | "工程计数列"
             | "engineering-columns"
+            | "按列去重留末"
+            | "deduplicate-columns-last"
+            | "数值去重留末"
+            | "deduplicate-numeric-last"
             | "对比全部列"
             | "compare-all-columns"
             | "分组时长合计"
@@ -12334,6 +12375,40 @@ B,乙
         assert_eq!(
             transform_csv("按列去重 1,1 编号"),
             Err(CsvError::InvalidColumns)
+        );
+    }
+
+    #[test]
+    fn deduplicates_csv_by_last_record_in_original_order() {
+        let text =
+            "编号,地区,备注\n001,北,首条\n002,南,独有\n001,北,中间\n1,北,前导零不同\n001,北,末条";
+        let preview = csv_table_preview(&format!("按列去重留末 [\"编号\",2] {text}"))
+            .expect("按列去重留末应可预览")
+            .unwrap();
+        assert_eq!(
+            preview.0,
+            "编号,地区,备注\r\n002,南,独有\r\n1,北,前导零不同\r\n001,北,末条"
+        );
+        assert_eq!(
+            transform_csv("deduplicate-columns-last 1 编号,备注").as_deref(),
+            Ok("编号,备注")
+        );
+
+        let numeric = "编号,金额,税率\n001,1.50,1/4\n002,2,1/4\n003,3/2,0.25\n004,1.5e0,1/3";
+        let preview = csv_table_preview(&format!("数值去重留末 [\"金额\",3] {numeric}"))
+            .expect("数值去重留末应可预览")
+            .unwrap();
+        assert_eq!(
+            preview.0,
+            "编号,金额,税率\r\n002,2,1/4\r\n003,3/2,0.25\r\n004,1.5e0,1/3"
+        );
+        assert_eq!(
+            transform_csv(&format!("deduplicate-numeric-last 2 {numeric}")).as_deref(),
+            Ok("编号,金额,税率\r\n002,2,1/4\r\n004,1.5e0,1/3")
+        );
+        assert_eq!(
+            transform_csv("数值去重留末 2 编号,金额\n001,\n002,1"),
+            Err(CsvError::InvalidNumber)
         );
     }
 
