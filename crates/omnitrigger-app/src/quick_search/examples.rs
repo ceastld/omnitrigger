@@ -4619,6 +4619,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从 CSV 表格末尾倒数取单元格",
+        query: "CSV: 取单元格 [-1,\"编号\"] 编号,备注\n001,茶\n002,\"梨\n苹果\"\n003,咖啡",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "取 CSV 中各组最后一条完整记录",
+        query: "CSV: 分组取行 [[\"组\"],-1] 组,编号,备注\nA,001,甲\nB,002,乙\nA,003,\"跨\n行\"\nA,004,丁",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按行号删除指定 CSV 数据行",
         query: "CSV: 删行 2,4 编号,备注\n001,茶\n002,梨\n003,苹果\n004,柿子",
     },

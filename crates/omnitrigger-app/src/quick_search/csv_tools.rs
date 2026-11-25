@@ -112,6 +112,8 @@ pub(super) enum CsvError {
     InvalidRowRange,
     MissingDataRow,
     CellArguments,
+    GroupRowArguments,
+    GroupRowsTooLarge,
     MissingColumnName,
     AmbiguousColumnName,
     RenameArguments,
@@ -328,7 +330,13 @@ impl CsvError {
             Self::NoColumnsRemain => "需要至少保留一列",
             Self::InvalidRowRange => "填写从 1 开始的数据行号或区间，例如 2,4-6",
             Self::MissingDataRow => "指定行号超出了表头之后的数据行数",
-            Self::CellArguments => "填写从 1 开始的数据行号和列名或列号，例如 [2,\"备注\"]",
+            Self::CellArguments => {
+                "填写数据行号和列名或列号，例如 [2,\"备注\"]。首条数据行是 1，末条是 -1"
+            }
+            Self::GroupRowArguments => {
+                "填写分组列和组内非零行号，例如 [[\"部门\"],-1]。组内首条是 1，末条是 -1"
+            }
+            Self::GroupRowsTooLarge => "分组取行结果超过 1 MiB，请缩小表格范围",
             Self::MissingColumnName => "表头中找不到所选列名",
             Self::AmbiguousColumnName => "表头中存在多个同名列",
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
@@ -1342,6 +1350,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             }
         }
         "取单元格" | "pick-cell" => return pick_csv_cell(input),
+        "分组取行" | "pick-group-row" => return select_group_rows(input),
         "去空白" | "trim-columns" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
@@ -3571,7 +3580,7 @@ fn column_number(input: &str) -> Result<usize, CsvError> {
 
 fn pick_csv_cell(input: &str) -> Result<String, CsvError> {
     let invalid = CsvError::CellArguments;
-    let ((row, column), data) = json_argument_and_data::<(usize, ColumnReference)>(input, invalid)?;
+    let ((row, column), data) = json_argument_and_data::<(i128, ColumnReference)>(input, invalid)?;
     if row == 0 {
         return Err(invalid);
     }
@@ -3579,8 +3588,45 @@ fn pick_csv_cell(input: &str) -> Result<String, CsvError> {
     let header = rows.first().ok_or(CsvError::MissingInput)?;
     let column = column.resolve(header)?;
     validate_column_width(&[column], header.len())?;
-    let record = rows.get_mut(row).ok_or(CsvError::MissingDataRow)?;
+    let index = relative_data_row_index(row, rows.len() - 1).ok_or(CsvError::MissingDataRow)?;
+    let record = &mut rows[index + 1];
     Ok(std::mem::take(&mut record[column]))
+}
+
+fn relative_data_row_index(row: i128, count: usize) -> Option<usize> {
+    let index = if row < 0 {
+        count as i128 + row
+    } else {
+        row - 1
+    };
+    usize::try_from(index).ok().filter(|&index| index < count)
+}
+
+fn select_group_rows(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::GroupRowArguments;
+    let ((groups, row), data) =
+        json_argument_and_data::<(Vec<ColumnReference>, i128)>(input, invalid)?;
+    if row == 0 {
+        return Err(invalid);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let selected = grouped_row_positions(records, &groups)
+        .into_iter()
+        .filter_map(|positions| {
+            let index = relative_data_row_index(row, positions.len())?;
+            Some(&records[positions[index]])
+        });
+    let mut output = String::new();
+    for record in std::iter::once(header).chain(selected) {
+        append_bounded_csv_row(
+            &mut output,
+            record.iter().map(String::as_str),
+            CsvError::GroupRowsTooLarge,
+        )?;
+    }
+    Ok(output)
 }
 
 fn select_data_rows(
@@ -7479,6 +7525,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-all-columns"
             | "分组时长合计"
             | "group-duration-sum"
+            | "分组取行"
+            | "pick-group-row"
             | "时长数值列"
             | "duration-number-column"
             | "表格时刻序号列"
@@ -11474,6 +11522,54 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("取单元格 [4,1] {data}")),
             Err(CsvError::MissingDataRow)
+        );
+        assert_eq!(
+            transform_csv(&format!("取单元格 [-1,1] {data}")).as_deref(),
+            Ok("003")
+        );
+        assert_eq!(
+            transform_csv(&format!("取单元格 [-2,\"备注\"] {data}")).as_deref(),
+            Ok(" 梨,\r\n\"苹果\" ")
+        );
+        assert_eq!(
+            transform_csv(&format!("取单元格 [-3,1] {data}")).as_deref(),
+            Ok("001")
+        );
+        for query in [
+            format!("取单元格 [-4,1] {data}"),
+            "取单元格 [-1,1] 编号,备注".to_owned(),
+            format!("取单元格 [18446744073709551615,1] {data}"),
+            format!("取单元格 [-170141183460469231731687303715884105728,1] {data}"),
+        ] {
+            assert_eq!(
+                transform_csv(&query),
+                Err(CsvError::MissingDataRow),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn takes_each_groups_relative_row_without_counting_the_header() {
+        let data = "组,编号,备注\nA,001,甲\nB,002,乙\nA,003,\"跨\n行\"\nA,004,丁";
+        let query = format!("分组取行 [[\"组\"],-1] {data}");
+        let expected = "组,编号,备注\r\nA,004,丁\r\nB,002,乙";
+        assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(&query)
+            .expect("分组取行应可预览")
+            .unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv(&format!("PICK-GROUP-ROW [[1],2] {data}")).as_deref(),
+            Ok("组,编号,备注\r\nA,003,\"跨\n行\"")
+        );
+        assert_eq!(
+            transform_csv(&format!("分组取行 [[],-5] {data}")).as_deref(),
+            Ok("组,编号,备注")
+        );
+        assert_eq!(
+            transform_csv(&format!("分组取行 [[1],0] {data}")),
+            Err(CsvError::GroupRowArguments)
         );
     }
 
