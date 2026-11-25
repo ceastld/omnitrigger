@@ -9,7 +9,7 @@ use super::{
     calendar::{calculate_date, is_date_report},
     cidr::{calculate_cidr, cidr_csv_report},
     complex::calculate_complex,
-    conversion::{calculate_circuit, convert_wave},
+    conversion::{calculate_circuit, convert_exact_data, convert_wave, exact_data_csv_report},
     correlation_plot::CorrelationPlot,
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, build_column_box_plot,
@@ -51,7 +51,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、网段、时长、进制、音高、节拍、分贝、立体、波长、电路、方程、联立、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、网段、时长、数据换算、进制、音高、节拍、分贝、立体、波长、电路、方程、联立、分数或统计命令";
 const STEP_RESULT_SLOT: &str = "{结果}";
 const STEP_TEMPLATE_SYNTAX: &str = "模板的工具前缀之后须正好有一个 {结果}";
 
@@ -475,6 +475,7 @@ fn run_pipeline_steps(
                     | Scope::Timestamp
                     | Scope::Cidr
                     | Scope::Duration
+                    | Scope::ExactData
                     | Scope::Radix
                     | Scope::Pitch
                     | Scope::Wave
@@ -523,6 +524,9 @@ fn run_pipeline_steps(
                 }
                 Scope::Cidr => calculate_cidr(&query).map_err(|cause| cause.message()),
                 Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
+                Scope::ExactData => exact_data_csv_report(&query)
+                    .unwrap_or_else(|| convert_exact_data(&query))
+                    .map_err(|cause| cause.message()),
                 Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
                 Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
                 Scope::Tempo => calculate_tempo(&query).map_err(|cause| cause.message()),
@@ -596,6 +600,9 @@ fn prepare_pipeline_preview(
             let report = convert_duration(query).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))
         }
+        Scope::ExactData => exact_data_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
         Scope::Cidr => cidr_csv_report(query).map(|report| {
             report_preview(report.map_err(|cause| cause.message()), error, csv_error)
         }),

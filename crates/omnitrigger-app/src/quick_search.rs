@@ -102,7 +102,7 @@ use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
     calculate_unit_price, conversion_target_input, convert, convert_batch, convert_batch_csv,
     convert_exact_data, convert_map_scale, convert_period, convert_wave, estimate_transfer,
-    suggested_targets, ConversionError,
+    exact_data_csv_report, suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
 use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelinePreview};
@@ -1042,7 +1042,10 @@ impl Results {
                     Self::text_value(convert_timecode(term).map_err(ValueError::Timecode))
                 }
                 Scope::TransferTime => Self::conversion_value(estimate_transfer(term), None),
-                Scope::ExactData => Self::conversion_value(convert_exact_data(term), None),
+                Scope::ExactData => exact_data_csv_report(term).map_or_else(
+                    || Self::conversion_value(convert_exact_data(term), None),
+                    |report| Self::table_value(report.map_err(ValueError::Conversion)),
+                ),
                 Scope::Pace => {
                     Self::text_value(calculate_pace(term).map_err(ValueError::Conversion))
                 }
@@ -5265,6 +5268,51 @@ mod tests {
             assert!(result.table_preview().is_some(), "{query}");
             assert_eq!(result.refillable_text(), Some(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn previews_exact_data_units_directly_and_in_pipelines() {
+        assert!(matches!(
+            for_query("数据换算: 单位", &[]),
+            Results::Help(items) if items.iter().any(|&index| EXAMPLES[index].query.starts_with("数据换算: 单位表 "))
+        ));
+        for (query, expected) in [
+            (
+                "数据换算: 单位表 [B,b,MiB] 1/3 KiB",
+                "单位,数值\r\nB,1024/3\r\nb,8192/3\r\nMiB,1/3072",
+            ),
+            (
+                r#"处理: ["数据换算: UNITS-CSV [MB/s,KiB/s]"] 1/3 MiB/s"#,
+                "单位,数值\r\nMB/s,16384/46875\r\nKiB/s,1024/3",
+            ),
+            (
+                r#"处理: ["数据换算: 单位表 [B,KiB]","CSV: 选列 2"] 9007199254740993 B"#,
+                "数值\r\n9007199254740993\r\n9007199254740993/1024",
+            ),
+        ] {
+            let results = for_query(query, &[]);
+            assert!(
+                matches!(
+                    &results,
+                    Results::Value(Ok(ResultValue {
+                        kind: ValueKind::Table(_),
+                        ..
+                    }))
+                ),
+                "{query}"
+            );
+            assert_eq!(results.refillable_text(), Some(expected), "{query}");
+        }
+        assert!(matches!(
+            for_query("数据换算: 单位表 [B,] 1 KiB", &[]),
+            Results::Value(Err(ValueError::Conversion(ConversionError::InvalidTargets)))
+        ));
+        assert!(matches!(
+            for_query("数据换算: 单位表 [B/s] 1 KiB", &[]),
+            Results::Value(Err(ValueError::Conversion(
+                ConversionError::DifferentDimensions
+            )))
+        ));
     }
 
     #[test]

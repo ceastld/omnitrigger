@@ -4,9 +4,9 @@ use num_bigint::BigInt;
 use num_rational::BigRational;
 
 use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
-use super::batch::{map_batch_csv, map_batch_lines, BatchError};
+use super::batch::{batch_arguments, map_batch_csv, map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
-use super::csv_tools::csv_cell;
+use super::csv_tools::{csv_cell, write_rows};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
 use super::fraction::{
     calculate_fraction, ensure_exact_size, format_significant_digits, parse_fraction_literal,
@@ -1655,6 +1655,28 @@ pub(super) fn convert_exact_data(query: &str) -> Result<String, ConversionError>
     })
 }
 
+pub(super) fn exact_data_csv_report(query: &str) -> Option<Result<String, ConversionError>> {
+    batch_arguments(query.trim_start(), "单位表", "units-csv").map(exact_data_units_csv)
+}
+
+fn exact_data_units_csv(input: &str) -> Result<String, ConversionError> {
+    let input = normalize(input).replace(char::is_whitespace, " ");
+    let (units, source) = input
+        .trim_start()
+        .strip_prefix('[')
+        .and_then(|input| input.split_once(']'))
+        .ok_or(ConversionError::InvalidTargets)?;
+    let units = parse_conversion_target_list(units)?;
+    let (bits, dimension) = exact_data_source(source.trim())?;
+    let mut rows = vec![["单位".to_owned(), "数值".to_owned()]];
+    for unit in units {
+        let target = exact_data_unit(unit)?;
+        let amount = exact_data_target_amount(&bits, &dimension, &target)?;
+        rows.push([unit.to_owned(), amount.to_string()]);
+    }
+    Ok(write_rows(&rows, ','))
+}
+
 pub(super) fn exact_data_converter(
     target: &str,
 ) -> Result<impl Fn(&str) -> Result<BigRational, ConversionError>, ConversionError> {
@@ -1898,17 +1920,25 @@ fn format_targets(
         let list = list
             .strip_suffix(']')
             .ok_or(ConversionError::InvalidTargets)?;
-        let targets: Vec<_> = list.split(',').map(str::trim).collect();
-        if targets.len() > MAX_CONVERSION_TARGETS || targets.contains(&"") {
-            return Err(ConversionError::InvalidTargets);
-        }
-        return targets
+        return parse_conversion_target_list(list)?
             .into_iter()
             .map(format)
             .collect::<Result<Vec<_>, _>>()
             .map(|values| values.join("\n"));
     }
     format(target)
+}
+
+fn parse_conversion_target_list(list: &str) -> Result<Vec<&str>, ConversionError> {
+    let targets: Vec<_> = list
+        .split(',')
+        .map(str::trim)
+        .take(MAX_CONVERSION_TARGETS + 1)
+        .collect();
+    if targets.len() > MAX_CONVERSION_TARGETS || targets.contains(&"") {
+        return Err(ConversionError::InvalidTargets);
+    }
+    Ok(targets)
 }
 
 fn format_quantity_target(

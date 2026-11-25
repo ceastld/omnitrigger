@@ -1480,6 +1480,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "在表格中对照多个精确数据单位",
+        query: "数据换算: 单位表 [B,b,MiB] 1/3 KiB",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算括号算式计算出的数据量",
         query: "(2**10)B to KiB",
     },
@@ -6918,6 +6923,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "罗马数字",
             "小数",
         ],
+        Scope::ExactData => &["单位表"],
         Scope::Duration => &[
             "精确换算",
             "合计",
@@ -7009,6 +7015,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Date
         | Scope::Radix
         | Scope::Duration
+        | Scope::ExactData
         | Scope::Pitch
         | Scope::Decibel
         | Scope::Tempo
