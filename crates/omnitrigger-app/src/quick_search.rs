@@ -3013,16 +3013,17 @@ impl QuickSearch {
             }
             return;
         }
+        let selected_example = match &self.results {
+            Results::Help(_) => self.results.suggested_input(self.selected),
+            _ => None,
+        };
         let help = match scoped_query(query.trim()) {
             Some((Scope::LocalFiles, term)) => local_files::option_help_query(term),
-            Some((Scope::ToolIndex, _)) => match &self.results {
-                Results::Help(items) => items
-                    .get(self.selected)
-                    .and_then(|&index| EXAMPLES[index].query.split_once([':', '：']))
-                    .and_then(|(prefix, _)| tool_example_keyword(prefix))
-                    .map(|keyword| format!("? {keyword}")),
-                _ => None,
-            },
+            Some((Scope::ToolIndex, _)) => selected_example
+                .and_then(|query| query.split_once([':', '：']))
+                .and_then(|(prefix, _)| tool_example_keyword(prefix))
+                .map(|keyword| format!("? {keyword}")),
+            Some((Scope::ExampleHistory, _)) => selected_example.and_then(example_help_query),
             _ => None,
         }
         .or_else(|| example_help_query(query));
@@ -7198,6 +7199,24 @@ mod tests {
                     reopened.update(cx, verify_table_paging).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            let index = EXAMPLES.iter()
+                                .position(|example| example.query.starts_with("JSON: 取值 "))
+                                .expect("应提供 JSON 取值示例");
+                            search.index.recent.examples.record(index);
+                            let history = "用法历史: 取值";
+                            search.fill_query(history, window, cx);
+                            search.refresh_results(history, window, cx);
+                            assert!(matches!(&search.results, Results::Help(items) if items.first() == Some(&index)));
+                            search.toggle_help(window, cx);
+                            let help = search.input.read(cx).text();
+                            assert_eq!(help, "? JSON: 取值");
+                            search.refresh_results(&help, window, cx);
+                            search.toggle_help(window, cx);
+                            assert_eq!(search.input.read(cx).text(), history);
+                        })
+                        .unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             let prefix = "处理:";
