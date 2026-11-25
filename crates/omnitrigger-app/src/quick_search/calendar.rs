@@ -36,6 +36,7 @@ pub(super) enum DateError {
     InvalidWeekdayOccurrence,
     MissingWeekdayOccurrence,
     InvalidWeekdaySeries,
+    AdjacentWeekdayArguments,
     InvalidWorkdayOrdinal,
     InvalidWorkdayPosition,
     MissingWorkdayOrdinal,
@@ -84,6 +85,7 @@ impl DateError {
             Self::InvalidWeekdaySeries => {
                 "填写起始月份和 1 至 366 个月，例如 2026-10,4 @ 最后一个周五"
             }
+            Self::AdjacentWeekdayArguments => "填写基准日期和星期，例如 2026-11-21 @ 周一",
             Self::InvalidWorkdayOrdinal => {
                 "填写月份和工作日序号，例如 2026-11 @ 3。用 -1 表示最后一个工作日"
             }
@@ -218,6 +220,9 @@ fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), Date
         let days = days_to_week_start(today, week) + i64::from(weekday.num_days_from_monday());
         let date = today.checked_add_signed(TimeDelta::days(days));
         return Ok((in_range(date)?, rest));
+    }
+    if let Some((previous, weekday, rest)) = adjacent_weekday(input) {
+        return Ok((shift_to_weekday(today, weekday, previous)?, rest));
     }
     if let Some((offset, months, last_day, rest)) = relative_period_edge(input) {
         let start = relative_period_start(today, offset, months)?;
@@ -372,11 +377,40 @@ fn relative_weekday(input: &str) -> Option<(i8, Weekday, &str)> {
         "下" => 1,
         _ => return None,
     };
-    let rest = rest
+    let (weekday, tail) = weekday_operand(rest)?;
+    Some((week, weekday, tail))
+}
+
+fn adjacent_weekday(input: &str) -> Option<(bool, Weekday, &str)> {
+    let (direction, rest) = input.split_at_checked(3)?;
+    let rest = rest.strip_prefix("一个")?;
+    let previous = match direction {
+        "上" => true,
+        "下" => false,
+        _ => return None,
+    };
+    let (weekday, tail) = weekday_operand(rest.trim_start())?;
+    Some((previous, weekday, tail))
+}
+
+fn weekday_operand(input: &str) -> Option<(Weekday, &str)> {
+    let rest = input
         .strip_prefix('周')
-        .or_else(|| rest.strip_prefix("星期"))?;
+        .or_else(|| input.strip_prefix("星期"))?;
     let (day, tail) = rest.trim_start().split_at_checked(3)?;
-    Some((week, chinese_weekday(day)?, tail.trim()))
+    Some((chinese_weekday(day)?, tail.trim()))
+}
+
+fn shift_to_weekday(
+    date: NaiveDate,
+    weekday: Weekday,
+    previous: bool,
+) -> Result<NaiveDate, DateError> {
+    let current = i64::from(date.weekday().num_days_from_monday());
+    let target = i64::from(weekday.num_days_from_monday());
+    let direction = if previous { -1 } else { 1 };
+    let days = (direction * (target - current) - 1).rem_euclid(7) + 1;
+    in_range(date.checked_add_signed(TimeDelta::days(direction * days)))
 }
 
 fn days_to_week_start(today: NaiveDate, week: i8) -> i64 {
@@ -453,6 +487,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
         return date.is_empty()
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
             || relative_weekday(date).is_some_and(|(_, _, rest)| date_tail(rest))
+            || adjacent_weekday(date).is_some_and(|(_, _, rest)| date_tail(rest))
             || relative_period_edge(date).is_some_and(|(_, _, _, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_week_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
@@ -465,6 +500,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
             .is_some()
         || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
         || relative_weekday(input).is_some_and(|(_, _, rest)| date_tail(rest))
+        || adjacent_weekday(input).is_some_and(|(_, _, rest)| date_tail(rest))
         || relative_period_edge(input).is_some_and(|(_, _, _, rest)| date_tail(rest))
         || (input.get(4..).is_some_and(|rest| rest.starts_with('年'))
             && written_date_prefix(input).is_some_and(|(_, _, _, rest)| date_tail(rest)))
@@ -1634,6 +1670,19 @@ pub(super) fn shift_calendar_workdays(
     ))
 }
 
+fn weekday_from_anchor(input: &str, today: NaiveDate, previous: bool) -> Result<String, DateError> {
+    let (anchor, day) = input
+        .split_once('@')
+        .ok_or(DateError::AdjacentWeekdayArguments)?;
+    let (date, tail) = date_operand(anchor.trim(), today)?;
+    let weekday = weekday_operand(day.trim())
+        .filter(|(_, rest)| rest.is_empty())
+        .map(|(weekday, _)| weekday)
+        .filter(|_| tail.is_empty())
+        .ok_or(DateError::AdjacentWeekdayArguments)?;
+    Ok(shift_to_weekday(date, weekday, previous)?.to_string())
+}
+
 fn convert_date_pattern(input: &str, today: NaiveDate, parse: bool) -> Result<String, DateError> {
     let [value, pattern] =
         serde_json::from_str::<[String; 2]>(input).map_err(|_| DateError::PatternArguments)?;
@@ -1691,6 +1740,8 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "工作日位置" | "workday-position" => return workday_position(rest, today),
         "工作日序列" | "workday-series" => return workday_series(rest, today),
         "星期序列" | "weekday-series" => return weekday_series(rest, today),
+        "下一个星期" | "next-weekday" => return weekday_from_anchor(rest, today, false),
+        "上一个星期" | "previous-weekday" => return weekday_from_anchor(rest, today, true),
         "合并区间" | "merge-ranges" => {
             return combine_date_ranges(rest, today, DateRangeOperation::Merge);
         }
@@ -2836,6 +2887,61 @@ mod tests {
         assert_eq!(
             calculate_date("2026/11/32", today),
             Err(DateError::InvalidDate)
+        );
+    }
+
+    #[test]
+    fn finds_weekdays_strictly_before_or_after_a_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("下一个周日", "2026-11-22"),
+            ("下一个星期六", "2026-11-28"),
+            ("上一个周六", "2026-11-14"),
+            ("上一个星期日", "2026-11-15"),
+            ("下一个周日 + 2天", "2026-11-24"),
+            ("下一个周日 周日期", "2026-W47-7"),
+        ] {
+            assert!(looks_like_date_query(query), "{query}");
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert!(!looks_like_date_query("下一个周排班表"));
+        assert!(!looks_like_date_query("下一个周日报"));
+        for (query, expected) in [
+            ("下一个星期 2026-11-21 @ 周一", "2026-11-23"),
+            ("上一个星期 今天 @ 星期一", "2026-11-16"),
+            ("上一个星期 2024-03-01 ＠ 星期四", "2024-02-29"),
+            ("NEXT-WEEKDAY 2026-12-31 @ 周五", "2027-01-01"),
+            ("previous-weekday 下一个周一 @ 周日", "2026-11-22"),
+            ("列出 下一个周日 至 下一个周日 每天", "2026-11-22"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "上一个星期 今天",
+            "下一个星期 今天 @ 周末",
+            "下一个星期 今天 + 1天 @ 周一",
+        ] {
+            assert_eq!(
+                calculate_date(query, today),
+                Err(DateError::AdjacentWeekdayArguments),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("下一个星期 9999-12-31 @ 周一", today),
+            Err(DateError::OutOfRange)
+        );
+        assert_eq!(
+            calculate_date("上一个星期 0000-01-01 @ 周五", today),
+            Err(DateError::OutOfRange)
         );
     }
 
