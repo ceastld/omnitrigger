@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use chrono::{
-    DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveTime, SecondsFormat, TimeDelta,
-    Timelike, Utc,
+    DateTime, Datelike, Days, FixedOffset, Local, Months, NaiveDate, NaiveTime, SecondsFormat,
+    TimeDelta, Timelike, Utc,
 };
 use jiff::{
     civil::DateTime as CivilDateTime,
@@ -32,6 +32,7 @@ pub(super) enum TimestampError {
     ZoneTableArguments,
     ZoneCandidateArguments,
     CivilDayArguments,
+    CivilPeriodArguments,
     DailyDurationArguments,
     TooManyDurationDays,
     OffsetChangesArguments,
@@ -64,6 +65,9 @@ impl TimestampError {
                 "填写当地日期、时间和地区时区，例如 2026-11-01 01:30 America/New_York"
             }
             Self::CivilDayArguments => "填写完整日期或顺序正确的日期范围，以及明确时区",
+            Self::CivilPeriodArguments => {
+                "填写 ISO 周或年月及明确时区，例如 2026-W10 America/New_York 或 2026-03 UTC"
+            }
             Self::DailyDurationArguments => "用“到”分隔起止时刻，起点须在终点之前或相同，再用 to 指定时区",
             Self::TooManyDurationDays => "逐日时长最多输出 128 个当地日期",
             Self::OffsetChangesArguments => "填写四位年份和明确时区，例如 2026 America/New_York",
@@ -186,10 +190,16 @@ pub(super) fn is_offset_timestamp(text: &str) -> bool {
 enum TimestampReport {
     Zones,
     CivilDays,
+    CivilPeriod(CivilPeriod),
     DailyDurations,
     OffsetChanges,
     DailyClock,
     AbsoluteIntervals(IntervalOperation),
+}
+
+enum CivilPeriod {
+    Week,
+    Month,
 }
 
 enum IntervalOperation {
@@ -205,6 +215,8 @@ impl TimestampReport {
         match operation.to_ascii_lowercase().as_str() {
             "时区csv" | "zone-csv" => Some(Self::Zones),
             "日区间" | "day-intervals" => Some(Self::CivilDays),
+            "周区间" | "week-intervals" => Some(Self::CivilPeriod(CivilPeriod::Week)),
+            "月区间" | "month-intervals" => Some(Self::CivilPeriod(CivilPeriod::Month)),
             "逐日时长" | "daily-durations" => Some(Self::DailyDurations),
             "偏移变更" | "offset-changes" => Some(Self::OffsetChanges),
             "每日同刻" | "daily-clock" => Some(Self::DailyClock),
@@ -248,6 +260,9 @@ fn convert_timestamp_with_local(
     }
     let table = match TimestampReport::from_operation(operation) {
         Some(TimestampReport::CivilDays) => return civil_day_intervals(argument),
+        Some(TimestampReport::CivilPeriod(period)) => {
+            return civil_period_intervals(argument, period)
+        }
         Some(TimestampReport::DailyDurations) => return daily_durations(argument, now),
         Some(TimestampReport::OffsetChanges) => return timezone_offset_changes(argument),
         Some(TimestampReport::DailyClock) => return daily_clock_series(argument),
@@ -447,9 +462,38 @@ fn civil_day_intervals(input: &str) -> Result<String, TimestampError> {
     }
     let zone = explicit_timezone(zone, invalid)?;
     let next_day = end.succ_opt().ok_or(TimestampError::OutOfRange)?;
+    civil_intervals(start, next_day, zone)
+}
+
+fn civil_period_intervals(input: &str, period: CivilPeriod) -> Result<String, TimestampError> {
+    let invalid = TimestampError::CivilPeriodArguments;
+    let (value, zone) = input
+        .trim()
+        .rsplit_once(char::is_whitespace)
+        .ok_or(invalid)?;
+    let value = value.trim_end();
+    let first_date = match period {
+        CivilPeriod::Week if value.len() == 8 => format!("{value}-1"),
+        CivilPeriod::Month if value.len() == 7 => format!("{value}-01"),
+        _ => return Err(invalid),
+    };
+    let start = parse_complete_date(&first_date).map_err(|_| invalid)?;
+    let end = match period {
+        CivilPeriod::Week => start.checked_add_days(Days::new(7)),
+        CivilPeriod::Month => start.checked_add_months(Months::new(1)),
+    }
+    .ok_or(TimestampError::OutOfRange)?;
+    civil_intervals(start, end, explicit_timezone(zone, invalid)?)
+}
+
+fn civil_intervals(
+    start: NaiveDate,
+    end_exclusive: NaiveDate,
+    zone: TimeZone,
+) -> Result<String, TimestampError> {
     let seconds = |date: NaiveDate| date.and_time(NaiveTime::MIN).and_utc().timestamp();
     let day_start = seconds(start);
-    let day_end = seconds(next_day);
+    let day_end = seconds(end_exclusive);
     let first = Timestamp::new(day_start - i64::from(Offset::MAX.seconds()), 0)
         .map_err(|_| TimestampError::OutOfRange)?;
     let last = Timestamp::new(day_end - i64::from(Offset::MIN.seconds()), 0)
@@ -1406,6 +1450,44 @@ mod tests {
         assert_eq!(
             convert_timestamp("日区间 2026-03-09 至 2026-03-07 UTC", DateTime::UNIX_EPOCH),
             Err(TimestampError::CivilDayArguments),
+        );
+    }
+
+    #[test]
+    fn previews_full_local_weeks_and_months_on_the_utc_timeline() {
+        let now = DateTime::UNIX_EPOCH;
+        for (query, expected) in [
+            (
+                "周区间 2026-W10 America/New_York",
+                "2026-03-02T05:00:00Z,2026-03-09T04:00:00Z,167:00:00",
+            ),
+            (
+                "week-intervals 2020-w53 UTC",
+                "2020-12-28T00:00:00Z,2021-01-04T00:00:00Z,168:00:00",
+            ),
+            (
+                "月区间 2026-03 America/New_York",
+                "2026-03-01T05:00:00Z,2026-04-01T04:00:00Z,743:00:00",
+            ),
+            (
+                "month-intervals 2024-02 UTC",
+                "2024-02-01T00:00:00Z,2024-03-01T00:00:00Z,696:00:00",
+            ),
+        ] {
+            assert!(is_timestamp_report(query));
+            assert_eq!(
+                convert_timestamp(query, now),
+                Ok(format!("开始UTC,结束UTC,时长\r\n{expected}")),
+                "{query}",
+            );
+        }
+        assert_eq!(
+            convert_timestamp("周区间 2021-W53 UTC", now),
+            Err(TimestampError::CivilPeriodArguments),
+        );
+        assert_eq!(
+            convert_timestamp("月区间 2026-13 UTC", now),
+            Err(TimestampError::CivilPeriodArguments),
         );
     }
 
