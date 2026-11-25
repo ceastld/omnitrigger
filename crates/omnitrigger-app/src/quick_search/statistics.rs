@@ -46,6 +46,7 @@ pub(super) enum StatisticsError {
     BinomialDistributionArguments,
     BinomialQuantileArguments,
     NegativeBinomialArguments,
+    NegativeBinomialTableArguments,
     NegativeBinomialSummaryArguments,
     NegativeBinomialQuantileArguments,
     WaitingQuantileUnbounded,
@@ -109,6 +110,9 @@ impl StatisticsError {
             }
             Self::NegativeBinomialArguments => {
                 "依次填写目标成功次数、试验总次数和单次成功概率，例如 3,5,50%。次数为 1 至 128，概率须大于零"
+            }
+            Self::NegativeBinomialTableArguments => {
+                "填写目标成功次数、表格最大试验次数和单次成功概率，例如 2,4,50%。最大试验次数为 128"
             }
             Self::NegativeBinomialSummaryArguments => {
                 "依次填写 1 至 128 次目标成功次数和单次成功概率，例如 3,50%"
@@ -358,6 +362,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "负二项至少" | "negative-binomial-at-least" => {
             return negative_binomial_probability(values, DiscreteEvent::AtLeast)
         }
+        "负二项概率表" | "negative-binomial-table" => return negative_binomial_csv(values),
         "负二项摘要" | "negative-binomial-summary" => {
             return negative_binomial_summary(values)
         }
@@ -952,6 +957,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
                 | "weighted-quantiles-csv"
                 | "二项概率表"
                 | "binomial-table"
+                | "负二项概率表"
+                | "negative-binomial-table"
                 | "泊松概率表"
                 | "poisson-table"
                 | "超几何概率表"
@@ -1630,15 +1637,7 @@ fn negative_binomial_probability(
     event: DiscreteEvent,
 ) -> Result<String, StatisticsError> {
     let invalid = StatisticsError::NegativeBinomialArguments;
-    let mut terms = split_top_level_commas(input).map(str::trim);
-    let (Some(target), Some(trials), Some(probability), None) =
-        (terms.next(), terms.next(), terms.next(), terms.next())
-    else {
-        return Err(invalid);
-    };
-    let target = positive_binomial_trial_count(target, invalid)?;
-    let trials = positive_binomial_trial_count(trials, invalid)?;
-    let probability = positive_trial_probability(probability, invalid)?;
+    let (target, trials, probability) = negative_binomial_parameters(input, invalid)?;
     if trials < target {
         return Ok(u8::from(matches!(event, DiscreteEvent::AtLeast)).to_string());
     }
@@ -1656,6 +1655,47 @@ fn negative_binomial_probability(
         }
     };
     Ok(bounded(result)?.to_string())
+}
+
+fn negative_binomial_parameters(
+    input: &str,
+    invalid: StatisticsError,
+) -> Result<(u32, u32, BigRational), StatisticsError> {
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(target), Some(trials), Some(probability), None) =
+        (terms.next(), terms.next(), terms.next(), terms.next())
+    else {
+        return Err(invalid);
+    };
+    let target = positive_binomial_trial_count(target, invalid)?;
+    let trials = positive_binomial_trial_count(trials, invalid)?;
+    let probability = positive_trial_probability(probability, invalid)?;
+    Ok((target, trials, probability))
+}
+
+fn negative_binomial_csv(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::NegativeBinomialTableArguments;
+    let (target, last, probability) = negative_binomial_parameters(input, invalid)?;
+    if last < target {
+        return Err(invalid);
+    }
+    let denominator = rational_power(probability.clone(), BigRational::from_integer(last.into()))
+        .map_err(StatisticsError::Evaluation)?
+        .denom()
+        .clone();
+    let failures = probability.denom() - probability.numer();
+    // 所有项使用同一分母，其指数等于表格的最大试验次数。
+    let mut mass = probability.numer().pow(target) * probability.denom().pow(last - target);
+    let masses = (target..=last).map(|trials| {
+        let current = mass.clone();
+        if trials < last {
+            let numerator = &mass * &failures * BigInt::from(trials);
+            let divisor = probability.denom() * BigInt::from(trials - target + 1);
+            mass = numerator / divisor;
+        }
+        (trials, current)
+    });
+    probability_csv("试验次数", denominator, masses)
 }
 
 fn negative_binomial_summary(input: &str) -> Result<String, StatisticsError> {
@@ -2875,6 +2915,32 @@ mod tests {
         ] {
             assert_eq!(calculate_statistics(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn reports_an_exact_negative_binomial_table_through_the_requested_trial() {
+        let query = "负二项概率表 2,4,50%";
+        let expected = concat!(
+            "试验次数,恰好概率,至多概率,至少概率\r\n",
+            "2,1/4,1/4,1\r\n3,1/4,1/2,3/4\r\n4,3/16,11/16,1/2",
+        );
+        assert_eq!(calculate_statistics(query).as_deref(), Ok(expected));
+        assert_eq!(
+            statistics_csv_report(query).unwrap().as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            calculate_statistics("negative-binomial-table 2,3,100%").as_deref(),
+            Ok("试验次数,恰好概率,至多概率,至少概率\r\n2,1,1,1\r\n3,0,1,0")
+        );
+        assert_eq!(
+            calculate_statistics("负二项概率表 3,2,50%"),
+            Err(StatisticsError::NegativeBinomialTableArguments)
+        );
+        assert_eq!(
+            calculate_statistics("负二项概率表 2,3,0"),
+            Err(StatisticsError::NegativeBinomialTableArguments)
+        );
     }
 
     #[test]
