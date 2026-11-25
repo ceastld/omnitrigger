@@ -884,6 +884,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 负二项至少 3,5,50%",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算在给定试验次数区间内达到成功目标的概率",
+        query: "统计: 负二项区间概率 2,3..4,50%",
+    },
+    Example {
         icon: Icon::Layers,
         title: "查看达到成功目标所需试验次数的概率表",
         query: "统计: 负二项概率表 2,4,50%",
@@ -6900,6 +6905,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "负二项概率",
                     "负二项累计",
                     "负二项至少",
+                    "负二项区间概率",
                     "负二项概率表",
                     "负二项摘要",
                     "负二项分位点",

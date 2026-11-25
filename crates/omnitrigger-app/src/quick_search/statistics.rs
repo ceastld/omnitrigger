@@ -46,6 +46,7 @@ pub(super) enum StatisticsError {
     BinomialDistributionArguments,
     BinomialQuantileArguments,
     NegativeBinomialArguments,
+    NegativeBinomialRangeArguments,
     NegativeBinomialTableArguments,
     NegativeBinomialSummaryArguments,
     NegativeBinomialQuantileArguments,
@@ -110,6 +111,9 @@ impl StatisticsError {
             }
             Self::NegativeBinomialArguments => {
                 "依次填写目标成功次数、试验总次数和单次成功概率，例如 3,5,50%。次数为 1 至 128，概率须大于零"
+            }
+            Self::NegativeBinomialRangeArguments => {
+                "填写目标成功次数、试验次数区间和单次成功概率，例如 2,3..4,50%。次数为 1 至 128，概率须大于零"
             }
             Self::NegativeBinomialTableArguments => {
                 "填写目标成功次数、表格最大试验次数和单次成功概率，例如 2,4,50%。最大试验次数为 128"
@@ -361,6 +365,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "负二项至少" | "negative-binomial-at-least" => {
             return negative_binomial_probability(values, DiscreteEvent::AtLeast)
+        }
+        "负二项区间概率" | "negative-binomial-range" => {
+            return negative_binomial_range_probability(values)
         }
         "负二项概率表" | "negative-binomial-table" => return negative_binomial_csv(values),
         "负二项摘要" | "negative-binomial-summary" => {
@@ -1661,6 +1668,16 @@ fn negative_binomial_parameters(
     input: &str,
     invalid: StatisticsError,
 ) -> Result<(u32, u32, BigRational), StatisticsError> {
+    let (target, trials, probability) = negative_binomial_terms(input, invalid)?;
+    let trials = positive_binomial_trial_count(trials, invalid)?;
+    let probability = positive_trial_probability(probability, invalid)?;
+    Ok((target, trials, probability))
+}
+
+fn negative_binomial_terms(
+    input: &str,
+    invalid: StatisticsError,
+) -> Result<(u32, &str, &str), StatisticsError> {
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(target), Some(trials), Some(probability), None) =
         (terms.next(), terms.next(), terms.next(), terms.next())
@@ -1668,9 +1685,31 @@ fn negative_binomial_parameters(
         return Err(invalid);
     };
     let target = positive_binomial_trial_count(target, invalid)?;
-    let trials = positive_binomial_trial_count(trials, invalid)?;
-    let probability = positive_trial_probability(probability, invalid)?;
     Ok((target, trials, probability))
+}
+
+fn negative_binomial_range_probability(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::NegativeBinomialRangeArguments;
+    let (target, range, probability) = negative_binomial_terms(input, invalid)?;
+    let (first, last) = range.split_once("..").ok_or(invalid)?;
+    let first = positive_binomial_trial_count(first, invalid)?;
+    let last = positive_binomial_trial_count(last, invalid)?;
+    if first > last {
+        return Err(invalid);
+    }
+    let probability = positive_trial_probability(probability, invalid)?;
+    if last < target {
+        return Ok("0".to_owned());
+    }
+    // 试验次数不超过 n，等价于前 n 次试验中至少成功 target 次。
+    let upper =
+        binomial_event_probability(last, target, probability.clone(), DiscreteEvent::AtLeast)?;
+    let lower = if first > target {
+        binomial_event_probability(first - 1, target, probability, DiscreteEvent::AtLeast)?
+    } else {
+        BigRational::default()
+    };
+    Ok(bounded(upper - lower)?.to_string())
 }
 
 fn negative_binomial_csv(input: &str) -> Result<String, StatisticsError> {
@@ -2941,6 +2980,35 @@ mod tests {
             calculate_statistics("负二项概率表 2,3,0"),
             Err(StatisticsError::NegativeBinomialTableArguments)
         );
+    }
+
+    #[test]
+    fn sums_exact_waiting_probabilities_over_an_inclusive_trial_count_range() {
+        for (query, expected) in [
+            ("负二项区间概率 2,3..4,50%", "7/16"),
+            ("negative-binomial-range 2,1..4,1/2", "11/16"),
+            ("负二项区间概率 2,3..4,1/3", "8/27"),
+            ("负二项区间概率 4,1..3,50%", "0"),
+            ("负二项区间概率 2,2..3,100%", "1"),
+            ("负二项区间概率 2,3..4,100%", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "负二项区间概率 2,4..3,50%",
+            "负二项区间概率 2,1..129,50%",
+            "负二项区间概率 2,1..3,0",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::NegativeBinomialRangeArguments),
+                "{query}",
+            );
+        }
     }
 
     #[test]
