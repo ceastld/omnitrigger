@@ -36,7 +36,7 @@ impl RecentValues {
 
     pub(super) fn exact_number_at(&self, index: usize) -> Option<BigRational> {
         self.numeric_value_at(index, |result| {
-            super::fraction::parse_fraction_literal(result).ok()
+            super::fraction::parse_confirmed_fraction(result).ok()
         })
     }
 

@@ -115,7 +115,7 @@ use examples::{
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
-use fraction::{calculate_fraction, parse_fraction_literal, FractionError};
+use fraction::{calculate_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use intervals::{calculate_intervals, IntervalError};
 use json_tools::{transform_json, JsonError};
@@ -1227,9 +1227,7 @@ impl Results {
                             })
                             .map(|text| ResultValue {
                                 kind: ValueKind::ExactCalculation {
-                                    // 为括号、运算符和至少一位操作数预留空间。
-                                    can_continue: text.len() <= calculator::QUERY_LIMIT - 4
-                                        && parse_fraction_literal(&text).is_ok(),
+                                    can_continue: fraction::parse_confirmed_fraction(&text).is_ok(),
                                 },
                                 text,
                             })
@@ -1605,6 +1603,12 @@ impl Results {
         match kind {
             ValueKind::Calculation if text.starts_with('-') => Some(format!("({text})")),
             ValueKind::Calculation => Some(text.clone()),
+            // 为括号、运算符和至少一位操作数留出空间。
+            ValueKind::ExactCalculation { can_continue: true }
+                if text.len() > calculator::QUERY_LIMIT - 4 =>
+            {
+                Some("分数: 计算 (ans)".to_owned())
+            }
             ValueKind::ExactCalculation { can_continue: true } => {
                 Some(format!("分数: 计算 ({text})"))
             }
@@ -8239,6 +8243,34 @@ mod tests {
     }
 
     #[test]
+    fn continues_long_exact_results_using_the_confirmed_answer() {
+        let index = SearchIndex::default();
+        for (query, continuation, expected) in [
+            ("分数: 计算 2**1024", "分数: 计算 ans/2**1023", "2"),
+            (
+                "分数: 计算 shl(1,8191)/(shl(1,8190)+1)",
+                "分数: 计算 ans*(shl(1,8190)+1)/shl(1,8190)",
+                "2",
+            ),
+        ] {
+            let result = index.results(query);
+            assert_eq!(
+                result.continuation_query().as_deref(),
+                Some("分数: 计算 (ans)")
+            );
+            let Results::Value(Ok(result)) = result else {
+                panic!("应返回精确算式结果");
+            };
+            assert!(result.text.len() > calculator::QUERY_LIMIT);
+            index.recent.calculations.record(query, &result.text);
+            assert_eq!(
+                index.results(continuation).refillable_text(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn reuses_confirmed_answers_as_exact_fractions_without_float_rounding() {
         let index = SearchIndex::default();
         assert!(matches!(
@@ -8305,9 +8337,12 @@ mod tests {
             &large,
             Results::Value(Ok(value))
                 if value.text.len() > calculator::QUERY_LIMIT
-                    && value.continuation_hint().is_none()
+                    && value.continuation_hint().is_some()
         ));
-        assert_eq!(large.continuation_query(), None);
+        assert_eq!(
+            large.continuation_query().as_deref(),
+            Some("分数: 计算 (ans)")
+        );
     }
 
     #[test]

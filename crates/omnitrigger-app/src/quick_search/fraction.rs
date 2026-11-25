@@ -996,8 +996,22 @@ fn from_continued_fraction(input: &str) -> Result<BigRational, FractionError> {
 }
 
 pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, FractionError> {
+    parse_fraction_literal_with_limit(input, QUERY_LIMIT)
+}
+
+pub(super) fn parse_confirmed_fraction(input: &str) -> Result<BigRational, FractionError> {
+    // 分子和分母各最多 8192 位，十进制写法连符号和斜杠不足 5000 字符。
+    let value = parse_fraction_literal_with_limit(input, 5_000)?;
+    ensure_exact_size(&value)?;
+    Ok(value)
+}
+
+fn parse_fraction_literal_with_limit(
+    input: &str,
+    limit: usize,
+) -> Result<BigRational, FractionError> {
     let input = input.trim();
-    if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+    if input.chars().take(limit + 1).count() > limit {
         return Err(FractionError::TooLong);
     }
     let mut parser = FractionParser {
