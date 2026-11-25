@@ -1900,6 +1900,16 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.interpolation_function(&name);
         }
+        let alignment = match name.as_str() {
+            "roundstep" => Some(FractionAlignment::Nearest),
+            "floorstep" => Some(FractionAlignment::Down),
+            "ceilstep" => Some(FractionAlignment::Up),
+            _ => None,
+        };
+        if let Some(alignment) = alignment {
+            self.remaining = rest;
+            return self.alignment_function(alignment);
+        }
         if name == "fma" {
             self.remaining = rest;
             let [left, right, addend]: [BigRational; 3] = self
@@ -2385,6 +2395,36 @@ impl FractionParser<'_> {
             }
             _ => unreachable!("插值函数参数数量已确定"),
         }
+    }
+
+    fn alignment_function(
+        &mut self,
+        alignment: FractionAlignment,
+    ) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let value = self.sum()?;
+        if !self.consume(',') {
+            return Err(self.expected_token());
+        }
+        let step = self.sum()?;
+        let origin = if self.consume(',') {
+            self.sum()?
+        } else {
+            BigRational::default()
+        };
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        if step.numer().sign() != Sign::Plus {
+            return Err(FractionError::AlignmentArguments);
+        }
+        let shifted = value - &origin;
+        ensure_exact_size(&shifted)?;
+        let result = align_fraction_to_step(shifted, &step, alignment)? + origin;
+        ensure_exact_size(&result)?;
+        Ok(result)
     }
 
     fn round_function(&mut self) -> Result<BigRational, FractionError> {
@@ -3466,6 +3506,30 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn aligns_exact_expressions_on_grids_with_optional_origins() {
+        for (query, expected) in [
+            ("计算 roundstep(2.675,0.05)", "27/10"),
+            ("计算 2*floorstep(3/8,1/4,1/10)", "7/10"),
+            ("计算 ceilstep(-3/8,1/4,1/10)", "-3/20"),
+            ("计算 roundstep(3/8,1/4,1/4)", "1/4"),
+            ("计算 roundstep(-1/8,1/4,-1/4)", "-1/4"),
+            ("计算 ceilstep(1/6,1/3,-1/6)", "1/6"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_fraction("roundstep(1,0)"),
+            Err(FractionError::AlignmentArguments)
+        );
+        assert_eq!(
+            calculate_fraction("floorstep(1,-1/8,-2)"),
+            Err(FractionError::AlignmentArguments)
+        );
+        assert!(calculate_fraction("ceilstep(1)").is_err());
+        assert!(calculate_fraction("ceilstep(1,2,3,4)").is_err());
     }
 
     #[test]

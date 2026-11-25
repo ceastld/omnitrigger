@@ -6804,6 +6804,21 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "在精确算式中按带起点的步长向下对齐",
+        query: "分数: 计算 floorstep(3/8,1/4,1/10)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在精确算式中对齐到最近的步长",
+        query: "分数: 计算 roundstep(2.675,0.05)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在精确算式中按带起点的步长向上对齐",
+        query: "分数: 计算 ceilstep(-3/8,1/4,1/10)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "向下对齐到指定步长的倍数",
         query: "分数: 向下对齐 -2.675 to 0.05",
     },
