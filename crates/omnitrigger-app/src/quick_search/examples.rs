@@ -4804,6 +4804,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把每个单元格首次正则匹配的多个捕获组追加为新列",
+        query: "CSV: 正则提取多列 [\"原文\",\"(?<key>[A-Z])(?:=([0-9]+))?\",[[\"标记\",\"key\"],[\"编号\",\"2\"]]]\n原文,备注\nA=007 B=99,第一条\nB,第二条\n略过,空结果",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按分隔符把一列拆到多个新列",
         query: "CSV: 拆分列 [\"地址\",[\"省\",\"市和区\"],\"/\"] 编号,地址\n001,福建/福州/鼓楼\n002,浙江",
     },

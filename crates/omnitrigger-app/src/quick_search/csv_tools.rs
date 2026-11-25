@@ -87,6 +87,7 @@ const MAX_FUNCTION_RECORDS: usize = 128;
 const MAX_ADDED_CELLS: usize = 16_384;
 const MAX_CELL_PADDING_WIDTH: usize = 4096;
 const MAX_REGEX_COLUMN_INPUT_BYTES: usize = 16 * 1024;
+const MAX_REGEX_CAPTURE_COLUMNS: usize = 16;
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
 
@@ -138,6 +139,8 @@ pub(super) enum CsvError {
     ConcatenatedColumnArguments,
     FirstNonemptyColumnArguments,
     RegexCaptureColumnArguments,
+    RegexCaptureColumnsArguments,
+    RegexCaptureColumnsInputTooLarge,
     SplitColumnArguments,
     DataConversionColumnArguments,
     RadixColumnArguments,
@@ -367,6 +370,10 @@ impl CsvError {
             Self::RegexCaptureColumnArguments => {
                 "填写新列名、来源列、正则表达式和捕获组，捕获组用双引号写名称或编号"
             }
+            Self::RegexCaptureColumnsArguments => {
+                "填写来源列、正则表达式和 1 至 16 组 [新列名,捕获组]，新列名须非空且互不重复"
+            }
+            Self::RegexCaptureColumnsInputTooLarge => "来源列文本合计超过 16 KiB",
             Self::SplitColumnArguments => {
                 "填写来源列、至少两个不同的新列名和非空分隔符，例如 [\"地址\",[\"省\",\"市\"],\"/\"]"
             }
@@ -856,6 +863,11 @@ enum Operation {
         source: ColumnReference,
         pattern: String,
         group: String,
+    },
+    RegexCaptureColumns {
+        source: ColumnReference,
+        pattern: String,
+        columns: Vec<[String; 2]>,
     },
     SplitColumn {
         source: ColumnReference,
@@ -1684,6 +1696,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 source,
                 pattern,
                 group,
+            }
+        }
+        "正则提取多列" | "regex-capture-columns" => {
+            let ((source, pattern, columns), data) =
+                json_argument_and_data::<(ColumnReference, String, Vec<[String; 2]>)>(
+                    input,
+                    CsvError::RegexCaptureColumnsArguments,
+                )?;
+            input = data;
+            Operation::RegexCaptureColumns {
+                source,
+                pattern,
+                columns,
             }
         }
         "拆分列" | "split-column" => {
@@ -2613,6 +2638,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             pattern,
             group,
         } => regex_capture_column(&rows, &name, source, &pattern, &group),
+        Operation::RegexCaptureColumns {
+            source,
+            pattern,
+            columns,
+        } => regex_capture_columns(&rows, source, &pattern, &columns),
         Operation::SplitColumn {
             source,
             names,
@@ -4218,6 +4248,58 @@ fn regex_capture_column(
             .and_then(|captures| captures.get(group))
             .map_or("", |matched| matched.as_str()))
     })
+}
+
+fn regex_capture_columns(
+    rows: &[Vec<String>],
+    source: ColumnReference,
+    pattern: &str,
+    columns: &[[String; 2]],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let names = || columns.iter().map(|[name, _]| name);
+    let mut seen = HashSet::new();
+    if !(1..=MAX_REGEX_CAPTURE_COLUMNS).contains(&columns.len())
+        || names().any(|name| name.trim().is_empty() || name.contains('\0') || !seen.insert(name))
+    {
+        return Err(CsvError::RegexCaptureColumnsArguments);
+    }
+    if names().any(|name| header.contains(name)) {
+        return Err(CsvError::HeaderNameConflict);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    if records.iter().map(|row| row[source].len()).sum::<usize>() > MAX_REGEX_COLUMN_INPUT_BYTES {
+        return Err(CsvError::RegexCaptureColumnsInputTooLarge);
+    }
+    let pattern = compile_regex(pattern).map_err(CsvError::Regex)?;
+    let groups = columns
+        .iter()
+        .map(|[_, group]| regex_group_index(&pattern, group))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CsvError::Regex)?;
+
+    let mut output = String::new();
+    append_bounded_csv_row(
+        &mut output,
+        header.iter().chain(names()).map(String::as_str),
+        CsvError::AddedColumnTooLarge,
+    )?;
+    for row in records {
+        let captures = pattern.captures(&row[source]);
+        let fields = groups.iter().map(|&group| {
+            captures
+                .as_ref()
+                .and_then(|captures| captures.get(group))
+                .map_or("", |matched| matched.as_str())
+        });
+        append_bounded_csv_row(
+            &mut output,
+            row.iter().map(String::as_str).chain(fields),
+            CsvError::AddedColumnTooLarge,
+        )?;
+    }
+    Ok(output)
 }
 
 fn first_nonempty_csv_column(
@@ -7391,6 +7473,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-column"
             | "数值对比列"
             | "compare-numeric-column"
+            | "正则提取多列"
+            | "regex-capture-columns"
             | "对比全部列"
             | "compare-all-columns"
             | "分组时长合计"
@@ -11156,6 +11240,46 @@ mod tests {
         assert_eq!(
             transform_csv("正则提取列 [\"结果\",1,\"(A)\",\"2\"]\n原文"),
             Err(CsvError::Regex(TextError::UnknownRegexGroup))
+        );
+    }
+
+    #[test]
+    fn appends_multiple_groups_from_each_first_csv_cell_match() {
+        let query = concat!(
+            r#"正则提取多列 ["原文","(?<key>[A-Z])(?:=([0-9]+))?",[["编号","2"],["标记","key"],["匹配","0"]]]"#,
+            "\n原文,备注\nA=007 B=99,第一条\nB,第二条\n略过,空结果",
+        );
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok(concat!(
+                "原文,备注,编号,标记,匹配\r\n",
+                "A=007 B=99,第一条,007,A,A=007\r\n",
+                "B,第二条,\"\",B,B\r\n",
+                "略过,空结果,\"\",\"\",\"\"",
+            ))
+        );
+        let (csv, _) = csv_table_preview(query)
+            .expect("正则提取多列应可预览")
+            .unwrap();
+        assert_eq!(csv, transform_csv(query).unwrap());
+        assert_eq!(
+            transform_csv(r#"regex-capture-columns [1,"(A)",[["结果","2"]]] 来源"#),
+            Err(CsvError::Regex(TextError::UnknownRegexGroup))
+        );
+        assert_eq!(
+            transform_csv(r#"正则提取多列 [1,"(A)",[["重复","1"],["重复","0"]]] 来源"#),
+            Err(CsvError::RegexCaptureColumnsArguments)
+        );
+        assert_eq!(
+            transform_csv(r#"正则提取多列 [1,"(A)",[["来源","1"]]] 来源"#),
+            Err(CsvError::HeaderNameConflict)
+        );
+        assert_eq!(
+            transform_csv(&format!(
+                "正则提取多列 [1,\"x\",[[\"结果\",\"0\"]]] 来源\n{}",
+                "x".repeat(MAX_REGEX_COLUMN_INPUT_BYTES + 1),
+            )),
+            Err(CsvError::RegexCaptureColumnsInputTooLarge)
         );
     }
 
