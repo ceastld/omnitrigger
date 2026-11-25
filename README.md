@@ -419,6 +419,7 @@
 - 用 `ulp(1)` 查看双精度浮点数在 `1` 处的最小进位间隔，得到约 `2.22044604925031e-16`。计算取输入的绝对值并向较大的相邻数取间隔。零返回最小正浮点值，最大有限值取与较小相邻数的间隔。 [Python 的 ULP 定义](https://docs.python.org/3/library/math.html#math.ulp)
 - 用 `remainder(6,4)` 按最近整数商求余数，得到 `-2`。商恰好在两个整数中间时取偶数，因此 `remainder(10,4)` 得到 `2`。用 `分数: 计算 remainder(3/2,1)` 得到精确余数 `-1/2`。 [Python 的 IEEE 余数定义](https://docs.python.org/3/library/math.html#math.remainder)
 - 用 `nextafter(x,y)` 从 `x` 向 `y` 移动一个双精度浮点位置。第三项可指定 0 至 `9007199254740991` 步，到达目标就停止。`(nextafter(1,2,3)-1)/ulp(1)` 得到 `3`。用 `进制: 算式浮点位 nextafter(1,2)` 可查看完整数值和位模式。 [Python 的相邻浮点数定义](https://docs.python.org/3/library/math.html#math.nextafter)
+- 用 `copysign(3,-0)` 把第二项的符号复制给第一项，得到 `-3`。用 `signbit(-0)` 可查看负零的符号位，结果为 `1`，正数和正零返回 `0`。 [Rust 浮点符号复制](https://doc.rust-lang.org/1.90.0/std/primitive.f64.html#method.copysign) [Python 浮点符号位](https://docs.python.org/3/library/math.html#math.signbit)
 - 输入 `分数: 计算 wavg(1/3,2,1/6,1)` 得到精确加权平均值 `5/18`。数值和权重成对填写，权重可用非负分数或小数，至少一个权重须为正。
 - 输入 `wpvariance(0,1,4,3)` 得到加权总体方差 `3`，`wpstdev` 求它的平方根。数值与非负权重成对填写，零权重跳过。`分数: 计算 wpvariance(1/3,2,7/3,1)` 得到精确结果 `8/9`。
 - 输入 `分数: 计算 wquantile(1/2,4,2,1,1,2,1)` 得到加权中位数 `2`。也可写 `wpercentile(50,4,2,1,1,2,1)`。计算时跳过零权重，再从小到大找出累计权重首次达到指定比例的值。

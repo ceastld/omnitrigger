@@ -923,6 +923,31 @@ mod tests {
     }
 
     #[test]
+    fn copies_and_inspects_binary64_signs_including_negative_zero() {
+        for (query, expected) in [
+            ("copysign(3,-0)", -3.0_f64),
+            ("copysign(-3,0)", 3.0),
+            ("copysign(0,-1)", -0.0),
+            ("copysign(-0,1)", 0.0),
+            ("signbit(-0)", 1.0),
+            ("signbit(0)", 0.0),
+            ("signbit(-5e-324)", 1.0),
+            ("signbit(copysign(0,-1))", 1.0),
+            ("signbit(abs(-0))", 0.0),
+        ] {
+            assert_eq!(
+                evaluate(query).unwrap().to_bits(),
+                expected.to_bits(),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            evaluate("copysign(3)"),
+            Err(CalculationError::FunctionDomain)
+        );
+    }
+
+    #[test]
     fn steps_toward_a_target_across_binary64_spacing_boundaries_and_zero() {
         for (query, expected) in [
             ("nextafter(1,2)", 1.0_f64.next_up()),

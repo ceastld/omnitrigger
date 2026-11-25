@@ -25,6 +25,12 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "isclose" => return Some(NamedValue::Aggregate(is_close)),
         "remainder" => return Some(NamedValue::Aggregate(nearest_remainder)),
         "nextafter" => return Some(NamedValue::Aggregate(next_after)),
+        "copysign" => {
+            return Some(NamedValue::Aggregate(|values| match *values {
+                [value, sign] => value.copysign(sign),
+                _ => f64::NAN,
+            }));
+        }
         "fsum" => return Some(NamedValue::Aggregate(exact_float_sum)),
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
@@ -157,6 +163,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
                 magnitude.next_up() - magnitude
             }
         },
+        "signbit" => |value| f64::from(u8::from(value.is_sign_negative())),
         "sqrt" => f64::sqrt,
         "cbrt" => f64::cbrt,
         "floor" => f64::floor,

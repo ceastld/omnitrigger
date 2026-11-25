@@ -3553,6 +3553,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留绝对值并取用另一个数的符号",
+        query: "copysign(3,-0)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看负零的符号位",
+        query: "signbit(-0)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按最近整数商求余数，中点取偶数商",
         query: "remainder(6,4)",
     },
