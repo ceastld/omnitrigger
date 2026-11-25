@@ -1414,6 +1414,16 @@ pub(super) fn format_exact_multiple(value: &BigRational, symbol: &str) -> String
     }
 }
 
+fn exact_sample_quantile(
+    ordered: &[BigRational],
+    probability: &BigRational,
+) -> Result<BigRational, FractionError> {
+    interpolate_ordered_quantile(ordered.len() as u64, probability, |rank| {
+        &ordered[rank as usize]
+    })
+    .map_err(|_| FractionError::ExactRange)
+}
+
 pub(super) fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
     if value.numer().bits().max(value.denom().bits()) > MAX_EXACT_BITS {
         return Err(FractionError::ExactRange);
@@ -1731,6 +1741,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.quantile_function(name == "percentile");
         }
+        if name == "iqr" {
+            self.remaining = rest;
+            return self.interquartile_range_function();
+        }
         if name == "wavg" {
             self.remaining = rest;
             return self.weighted_average_function();
@@ -2026,10 +2040,18 @@ impl FractionParser<'_> {
             return Err(FractionError::QuantileArguments);
         }
         values.sort_unstable();
-        interpolate_ordered_quantile(values.len() as u64, &probability, |rank| {
-            &values[rank as usize]
-        })
-        .map_err(|_| FractionError::ExactRange)
+        exact_sample_quantile(&values, &probability)
+    }
+
+    fn interquartile_range_function(&mut self) -> Result<BigRational, FractionError> {
+        let mut values = self.list_function_arguments()?;
+        values.sort_unstable();
+        let quartile = |numerator: u8| {
+            exact_sample_quantile(&values, &BigRational::new(numerator.into(), 4.into()))
+        };
+        let spread = quartile(3)? - quartile(1)?;
+        ensure_exact_size(&spread)?;
+        Ok(spread)
     }
 
     fn weighted_average_function(&mut self) -> Result<BigRational, FractionError> {
@@ -2787,6 +2809,24 @@ mod tests {
             calculate_fraction("prod(1e2000,1e2000)"),
             Err(FractionError::ExactRange),
         );
+    }
+
+    #[test]
+    fn combines_exact_interquartile_ranges_inside_calculator_expressions() {
+        for (query, expected) in [
+            ("iqr(7/3,2/3,5/3,1/3)", "5/4"),
+            ("2*iqr(4,1,3,2)", "3"),
+            ("iqr(9007199254740993,9007199254740992)", "1/2"),
+            ("IQR(1/3)", "0"),
+            ("iqr(-2,-2,-2)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        assert!(calculate_fraction("iqr()").is_err());
     }
 
     #[test]

@@ -6480,6 +6480,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在精确算式中求四分位距",
+        query: "分数: 计算 iqr(7/3,2/3,5/3,1/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在精确算式中计算加权平均值",
         query: "分数: 计算 wavg(1/3,2,1/6,1)",
     },
