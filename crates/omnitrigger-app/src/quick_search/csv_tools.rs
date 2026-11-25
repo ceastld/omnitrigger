@@ -7720,6 +7720,14 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "group-timestamp-offset-column"
             | "会话编号列"
             | "timestamp-session-column"
+            | "百分位排名列"
+            | "percent-rank-column"
+            | "降序百分位排名列"
+            | "descending-percent-rank-column"
+            | "累积分布列"
+            | "cume-dist-column"
+            | "降序累积分布列"
+            | "descending-cume-dist-column"
             | "段内计数列"
             | "run-length-column"
             | "网段归属列"
@@ -13908,6 +13916,9 @@ null"#
         ] {
             let query = format!("{command} [\"位置\",2,[\"部门\"]]\n{data}");
             assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+            let (text, table) = csv_table_preview(&query).unwrap().unwrap();
+            assert_eq!(text, expected);
+            assert_eq!(table.page_csv(0, 0), expected);
         }
         assert_eq!(
             transform_csv("cume-dist-column [\"位置\",1,[]]\n金额").as_deref(),
