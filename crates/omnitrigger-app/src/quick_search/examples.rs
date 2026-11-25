@@ -104,26 +104,16 @@ impl Example {
 
     fn calculator_argument_range(&self) -> Option<Range<usize>> {
         let query = self.query.trim_end();
-        let expression = match scoped_query(query) {
-            Some((Scope::Fraction, term)) => fraction_command_expression(term)?,
+        let (expression, exact) = match scoped_query(query) {
+            Some((Scope::Fraction, term)) => (fraction_command_expression(term)?, true),
             Some(_) => return None,
-            None => query.trim_start(),
+            None => (query.trim_start(), false),
         };
-        let (name, rest) = split_name(expression);
-        if !name.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
-            return None;
+        let end = query.len();
+        if let Some(arguments) = standalone_function_arguments(expression) {
+            return Some(end - 1 - arguments.len()..end - 1);
         }
-        let arguments = rest.trim_start().strip_prefix('(')?.strip_suffix(')')?;
-        let mut depth = 0usize;
-        for byte in arguments.bytes() {
-            match byte {
-                b'(' => depth += 1,
-                b')' => depth = depth.checked_sub(1)?,
-                _ => {}
-            }
-        }
-        let end = query.len() - 1;
-        (depth == 0 && !arguments.trim().is_empty()).then_some(end - arguments.len()..end)
+        (exact && !expression.is_empty()).then_some(end - expression.len()..end)
     }
 
     pub(super) fn argument_start(&self) -> Option<usize> {
@@ -7354,6 +7344,23 @@ pub(super) fn fraction_function_examples(query: &str) -> Option<Vec<usize>> {
     })
 }
 
+fn standalone_function_arguments(expression: &str) -> Option<&str> {
+    let (name, rest) = split_name(expression);
+    if !name.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+    let arguments = rest.trim_start().strip_prefix('(')?.strip_suffix(')')?;
+    let mut depth = 0usize;
+    for byte in arguments.bytes() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+    }
+    (depth == 0 && !arguments.trim().is_empty()).then_some(arguments)
+}
+
 fn fraction_command_expression(input: &str) -> Option<&str> {
     let (verb, expression) = input.split_once(char::is_whitespace)?;
     (verb == "计算" || verb.eq_ignore_ascii_case("calc")).then(|| expression.trim())
@@ -7498,12 +7505,16 @@ mod tests {
     }
 
     #[test]
-    fn selects_the_arguments_inside_a_complete_calculator_function() {
+    fn selects_function_parameters_or_the_whole_exact_expression() {
         for (query, expected) in [
-            ("root(-125/343,3)", Some("-125/343,3")),
-            ("分数: 计算 root(-125/343,3)", Some("-125/343,3")),
-            ("sin(radians(90))", Some("radians(90)")),
-            ("分数: 计算 sqrt(4)+root(1/8,3)", None),
+            ("root(-125/343,3)", Some(("-125/343,3", ")"))),
+            ("分数: 计算 root(-125/343,3)", Some(("-125/343,3", ")"))),
+            ("sin(radians(90))", Some(("radians(90)", ")"))),
+            (
+                "分数: 计算 sqrt(4)+root(1/8,3)",
+                Some(("sqrt(4)+root(1/8,3)", "")),
+            ),
+            ("分数: 计算 2**80", Some(("2**80", ""))),
             ("2**10", None),
             ("gcd()", None),
         ] {
@@ -7512,11 +7523,11 @@ mod tests {
                 title: "函数参数",
                 query,
             };
-            let range = example.argument_range();
-            assert_eq!(range.clone().map(|range| &query[range]), expected);
-            if let Some(range) = range {
-                assert_eq!(&query[range.end..], ")");
-            }
+            let selected = example.argument_range().map(|range| {
+                let tail = &query[range.end..];
+                (&query[range], tail)
+            });
+            assert_eq!(selected, expected, "{query}");
         }
     }
 

@@ -6659,28 +6659,45 @@ mod tests {
             search.refresh_results(&query, window, cx);
             assert_eq!(search.results.refillable_text(), Some(expected));
         }
-        let prefix = "分数: 计算 root(";
-        search.fill_query(prefix, window, cx);
-        search.refresh_results(prefix, window, cx);
-        search.key_down(
-            &KeyDownEvent {
-                keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
-                is_held: false,
-            },
-            window,
-            cx,
-        );
-        let input = search.input.read(cx);
-        let example = input.text();
-        assert_eq!(example, "分数: 计算 root(-125/343,3)");
-        assert_eq!(input.selection(), prefix.len()..example.len() - 1);
-        search.input.update(cx, |input, cx| {
-            input.replace_text_in_range(None, "1/8,3", window, cx);
-        });
-        let query = search.input.read(cx).text();
-        assert_eq!(query, "分数: 计算 root(1/8,3)");
-        search.refresh_results(&query, window, cx);
-        assert_eq!(search.results.refillable_text(), Some("1/2"));
+        for (command, prefix, sample, suffix, replacement, expected) in [
+            (
+                "分数: 计算 root(",
+                "分数: 计算 root(",
+                "-125/343,3",
+                ")",
+                "1/8,3",
+                "1/2",
+            ),
+            (
+                "? 分数: 计算 2**80",
+                "分数: 计算 ",
+                "2**80",
+                "",
+                "2**64+1",
+                "18446744073709551617",
+            ),
+        ] {
+            search.fill_query(command, window, cx);
+            search.refresh_results(command, window, cx);
+            search.key_down(
+                &KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
+                    is_held: false,
+                },
+                window,
+                cx,
+            );
+            let input = search.input.read(cx);
+            assert_eq!(input.text(), format!("{prefix}{sample}{suffix}"));
+            assert_eq!(input.selection(), prefix.len()..prefix.len() + sample.len());
+            search.input.update(cx, |input, cx| {
+                input.replace_text_in_range(None, replacement, window, cx);
+            });
+            let query = search.input.read(cx).text();
+            assert_eq!(query, format!("{prefix}{replacement}{suffix}"));
+            search.refresh_results(&query, window, cx);
+            assert_eq!(search.results.refillable_text(), Some(expected));
+        }
     }
 
     #[cfg(target_os = "windows")]
