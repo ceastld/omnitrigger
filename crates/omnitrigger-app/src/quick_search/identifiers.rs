@@ -1,7 +1,7 @@
 use std::{borrow::Cow, cmp::Ordering};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use semver::Version;
+use semver::{Version, VersionReq};
 use uuid::{Uuid, Variant};
 
 use super::calculator::normalize;
@@ -9,7 +9,7 @@ use super::calculator::normalize;
 const GREGORIAN_TO_UNIX_TICKS: i64 = 122_192_928_000_000_000;
 const TICKS_PER_SECOND: i64 = 10_000_000;
 const ULID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-const MAX_SORTED_VERSIONS: usize = 128;
+const MAX_VERSIONS_PER_QUERY: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IdentifierError {
@@ -27,7 +27,9 @@ pub(super) enum IdentifierError {
     GtinChecksum,
     InvalidSemver,
     SemverCompareArguments,
-    SemverSortArguments,
+    SemverListArguments,
+    SemverRequirementArguments,
+    InvalidSemverRequirement,
     SemverOperation,
     InvalidOperation,
     MissingUuidTime,
@@ -51,8 +53,12 @@ impl IdentifierError {
             Self::GtinChecksum => "商品条码校验位错误",
             Self::InvalidSemver => "输入有效的语义版本，例如 1.2.3 或 v1.2.3-rc.1",
             Self::SemverCompareArguments => "填写两个版本，例如 比较 v1.9.0, v1.10.0",
-            Self::SemverSortArguments => "填写 1 至 128 个版本，用逗号或空白分隔",
-            Self::SemverOperation => "可用 格式、比较 或 排序",
+            Self::SemverListArguments => "填写 1 至 128 个版本，用逗号或空白分隔",
+            Self::SemverRequirementArguments => {
+                "用 @ 分隔 Cargo 版本要求与待查版本，例如 ^1.2 @ v1.5.0"
+            }
+            Self::InvalidSemverRequirement => "请输入 Cargo 版本要求，例如 ^1.2 或 >=1.2, <2",
+            Self::SemverOperation => "可用 格式、比较、排序、匹配Cargo 或 筛选Cargo",
             Self::InvalidOperation => "可用 格式 或 时间，UUID 还支持 紧凑、URN 和 v5",
             Self::MissingUuidTime => "请输入带时间字段的 UUIDv1、UUIDv6 或 UUIDv7",
             Self::TimeRange => "标识符的时间超出可显示范围",
@@ -293,13 +299,10 @@ fn identifier_symbols(source: &str) -> impl Iterator<Item = char> + '_ {
 
 pub(super) fn transform_semver(query: &str) -> Result<String, IdentifierError> {
     let (operation, input) = identifier_input(query)?;
-    let tokens = input
-        .split(|character: char| character.is_whitespace() || matches!(character, ',' | '，'))
-        .filter(|token| !token.is_empty());
     match operation.to_ascii_lowercase().as_str() {
         "" | "格式" | "normalize" => parse_semver(input).map(|version| version.to_string()),
         "比较" | "compare" => {
-            let mut tokens = tokens;
+            let mut tokens = semver_tokens(input);
             let (Some(left), Some(right), None) = (tokens.next(), tokens.next(), tokens.next())
             else {
                 return Err(IdentifierError::SemverCompareArguments);
@@ -312,13 +315,7 @@ pub(super) fn transform_semver(query: &str) -> Result<String, IdentifierError> {
             Ok(format!("{left} {relation} {right}"))
         }
         "排序" | "sort" => {
-            let mut versions = tokens
-                .take(MAX_SORTED_VERSIONS + 1)
-                .map(|token| parse_semver(token).map(|version| (token, version)))
-                .collect::<Result<Vec<_>, _>>()?;
-            if !(1..=MAX_SORTED_VERSIONS).contains(&versions.len()) {
-                return Err(IdentifierError::SemverSortArguments);
-            }
+            let mut versions = parse_semver_list(input)?;
             versions.sort_by(|(_, left), (_, right)| left.cmp_precedence(right));
             Ok(versions
                 .into_iter()
@@ -326,8 +323,51 @@ pub(super) fn transform_semver(query: &str) -> Result<String, IdentifierError> {
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
+        "匹配cargo" | "cargo-matches" => {
+            let (requirement, input) = cargo_requirement(input)?;
+            let version = parse_semver(input)?;
+            Ok(if requirement.matches(&version) {
+                "符合".to_owned()
+            } else {
+                "不符合".to_owned()
+            })
+        }
+        "筛选cargo" | "cargo-filter" => {
+            let (requirement, input) = cargo_requirement(input)?;
+            Ok(parse_semver_list(input)?
+                .into_iter()
+                .filter_map(|(token, version)| requirement.matches(&version).then_some(token))
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
         _ => Err(IdentifierError::SemverOperation),
     }
+}
+
+fn semver_tokens(input: &str) -> impl Iterator<Item = &str> {
+    input
+        .split(|character: char| character.is_whitespace() || matches!(character, ',' | '，'))
+        .filter(|token| !token.is_empty())
+}
+
+fn parse_semver_list(input: &str) -> Result<Vec<(&str, Version)>, IdentifierError> {
+    let versions = semver_tokens(input)
+        .take(MAX_VERSIONS_PER_QUERY + 1)
+        .map(|token| parse_semver(token).map(|version| (token, version)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !(1..=MAX_VERSIONS_PER_QUERY).contains(&versions.len()) {
+        return Err(IdentifierError::SemverListArguments);
+    }
+    Ok(versions)
+}
+
+fn cargo_requirement(input: &str) -> Result<(VersionReq, &str), IdentifierError> {
+    let (requirement, versions) = input
+        .split_once(['@', '＠'])
+        .ok_or(IdentifierError::SemverRequirementArguments)?;
+    let requirement = VersionReq::parse(&normalize(requirement.trim()))
+        .map_err(|_| IdentifierError::InvalidSemverRequirement)?;
+    Ok((requirement, versions.trim()))
 }
 
 fn parse_semver(input: &str) -> Result<Version, IdentifierError> {
@@ -380,7 +420,30 @@ mod tests {
         );
         assert_eq!(
             transform_semver(&format!("排序 {}", "1.0.0\n".repeat(129))),
-            Err(IdentifierError::SemverSortArguments)
+            Err(IdentifierError::SemverListArguments)
+        );
+    }
+
+    #[test]
+    fn matches_cargo_version_requirements_for_releases_and_explicit_prereleases() {
+        for (query, expected) in [
+            ("匹配Cargo ^1.2 @ v1.5.0", "符合"),
+            ("匹配Cargo ^0.2.3 ＠ 0.3.0", "不符合"),
+            ("cargo-matches ~1.2 @ 1.3.0", "不符合"),
+            ("匹配Cargo * @ 1.2.3-rc.1", "不符合"),
+            ("匹配Cargo >=1.2.3-rc.1, <1.2.3 @ 1.2.3-rc.2", "符合"),
+            ("匹配Cargo =1.2.3+linux @ v1.2.3+windows", "符合"),
+            (
+                "筛选Cargo >=1.2, <2 @ v1.9.0，1.1.9\n1.2.0+ci.7\n2.0.0",
+                "v1.9.0\n1.2.0+ci.7",
+            ),
+            ("筛选Cargo ^2.0 @ 1.0.0", ""),
+        ] {
+            assert_eq!(transform_semver(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_semver("匹配Cargo 1.2 || 2.0 @ 1.2.3"),
+            Err(IdentifierError::InvalidSemverRequirement)
         );
     }
 
