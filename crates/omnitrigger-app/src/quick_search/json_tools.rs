@@ -206,6 +206,7 @@ enum JsonCsvOperation {
     LineGroupMedians,
     ValidateLines,
     Differences,
+    DuplicateKeys,
     Leaves,
     Keys,
     Values,
@@ -225,6 +226,7 @@ impl JsonCsvOperation {
             "行分组中位数csv" | "jsonl-group-median-csv" => Some(Self::LineGroupMedians),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "对比csv" | "diff-csv" => Some(Self::Differences),
+            "重复键csv" | "duplicate-keys-csv" => Some(Self::DuplicateKeys),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
             "找键csv" | "find-key-csv" => Some(Self::Keys),
             "找值csv" | "find-value-csv" => Some(Self::Values),
@@ -247,6 +249,7 @@ impl JsonCsvOperation {
             | Self::LineGroupMedians
             | Self::ValidateLines
             | Self::Differences
+            | Self::DuplicateKeys
             | Self::Leaves
             | Self::Keys
             | Self::Values => true,
@@ -270,6 +273,7 @@ impl JsonCsvOperation {
             Self::LineGroupMedians => median_json_line_groups_csv(source),
             Self::ValidateLines => validate_json_lines_csv(source).map(|report| report.csv),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
+            Self::DuplicateKeys => report_duplicate_json_keys(source, true),
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
             }
@@ -505,7 +509,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         }
         "找键" | "find-key" => return find_json_keys(source, PointerOutput::Paths),
         "找值" | "find-value" => return find_json_values(source, PointerOutput::Paths),
-        "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source),
+        "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source, false),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
         "展平" | "flatten" => {
             return write_json_pointer_results(
@@ -2843,11 +2847,15 @@ fn write_json_pointer_results(
     Ok(result)
 }
 
-fn report_duplicate_json_keys(source: &str) -> Result<String, JsonError> {
+fn report_duplicate_json_keys(source: &str, csv: bool) -> Result<String, JsonError> {
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let mut pending = vec![(root, None::<(usize, String)>)];
     let mut path = String::new();
-    let mut result = String::from("[");
+    let mut result = String::from(if csv {
+        "对象路径,对象起始字节,键,次数"
+    } else {
+        "["
+    });
     while let Some((value, key)) = pending.pop() {
         if let Some((parent_length, key)) = key {
             path.truncate(parent_length);
@@ -2857,7 +2865,7 @@ fn report_duplicate_json_keys(source: &str) -> Result<String, JsonError> {
         match raw.as_bytes()[0] {
             b'{' => {
                 let entries = read_object_entries(raw)?;
-                append_duplicate_json_keys(&mut result, source, raw, &path, &entries)?;
+                append_duplicate_json_keys(&mut result, source, raw, &path, &entries, csv)?;
                 for (key, child) in entries.into_iter().rev() {
                     pending.push((child, Some((path.len(), key))));
                 }
@@ -2870,10 +2878,12 @@ fn report_duplicate_json_keys(source: &str) -> Result<String, JsonError> {
             _ => {}
         }
     }
-    if result.len() > 1 {
-        result.push('\n');
+    if !csv {
+        if result.len() > 1 {
+            result.push('\n');
+        }
+        result.push(']');
     }
-    result.push(']');
     Ok(result)
 }
 
@@ -2883,6 +2893,7 @@ fn append_duplicate_json_keys(
     raw: &str,
     path: &str,
     entries: &[(String, &RawValue)],
+    csv: bool,
 ) -> Result<(), JsonError> {
     let mut counts = HashMap::with_capacity(entries.len());
     for (name, _) in entries {
@@ -2896,6 +2907,23 @@ fn append_duplicate_json_keys(
         let Some(count) = counts.remove(name.as_str()).filter(|&count| count > 1) else {
             continue;
         };
+        if csv {
+            if path.contains('\0') || name.contains('\0') {
+                return Err(JsonError::CsvNullCharacter);
+            }
+            append_bounded_csv_row(
+                result,
+                [
+                    path,
+                    object_start.to_string().as_str(),
+                    name,
+                    count.to_string().as_str(),
+                ]
+                .into_iter(),
+                JsonError::DuplicateKeyReportTooLarge,
+            )?;
+            continue;
+        }
         let row = serde_json::json!({
             "对象路径": path,
             "对象起始字节": object_start,
@@ -3752,8 +3780,34 @@ mod tests {
         let rows = [r#"{"x":0,"x":1}"#; 256].join(",");
         let source = format!(r#"{{"{}":[{rows}]}}"#, "x".repeat(4096));
         assert_eq!(
-            report_duplicate_json_keys(&source),
+            report_duplicate_json_keys(&source, false),
             Err(JsonError::DuplicateKeyReportTooLarge)
+        );
+    }
+
+    #[test]
+    fn reports_duplicate_keys_in_distinct_objects_with_the_same_csv_path() {
+        let first = r#"{"列,名":1,"列,名":2}"#;
+        let second = r#"{"":3,"":4}"#;
+        let source = format!(r#"{{"茶/杯":{first},"茶/杯":{second}}}"#);
+        let query = format!("重复键CSV {source}");
+        let expected = format!(
+            "对象路径,对象起始字节,键,次数\r\n\"\",1,茶/杯,2\r\n/茶~1杯,{},\"列,名\",2\r\n/茶~1杯,{},\"\",2",
+            source.find(first).unwrap() + 1,
+            source.find(second).unwrap() + 1,
+        );
+        assert_eq!(transform_json(&query).as_deref(), Ok(expected.as_str()));
+        assert_eq!(
+            json_csv_report(&query).unwrap().as_deref(),
+            Ok(expected.as_str())
+        );
+        assert_eq!(
+            transform_json(r#"duplicate-keys-csv [{"相同":1},{"相同":2}]"#).as_deref(),
+            Ok("对象路径,对象起始字节,键,次数"),
+        );
+        assert_eq!(
+            transform_json(r#"重复键CSV {"\u0000":1,"\u0000":2}"#),
+            Err(JsonError::CsvNullCharacter),
         );
     }
 

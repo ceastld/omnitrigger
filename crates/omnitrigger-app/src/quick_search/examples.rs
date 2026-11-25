@@ -5105,6 +5105,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在表格中定位 JSON 的重复键",
+        query: r#"JSON: 重复键CSV {"订单":[{"价格":1,"价格":2},{"价格":3}]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留 JSON 中每个重复键的首次出现",
         query: r#"JSON: 去重复键 留首 {"状态":"草稿","编号":1,"状态":"完成"}"#,
     },
