@@ -1016,6 +1016,9 @@ mod tests {
             ("rms(0,0)", "0"),
             ("meansquare(0,6,0,-8)", "25"),
             ("meansquare(3,4)", "12.5"),
+            ("sumsq(-3,2+2)", "25"),
+            ("SUMSQ(0,0)", "0"),
+            ("sumsq(3e150,4e150)", "2.5e301"),
             ("rms(1e308,-1e308)", "1e308"),
             ("rms(1e-200,-1e-200)", "1e-200"),
             ("corr(1,2,2,4,3,6)", "1"),
@@ -1074,6 +1077,7 @@ mod tests {
             calculate("sum(1e308,1e308)"),
             Err(CalculationError::OutOfRange)
         );
+        assert_eq!(calculate("sumsq(1e308)"), Err(CalculationError::OutOfRange));
         assert_eq!(
             calculate("lcm(9007199254740991,2)"),
             Err(CalculationError::OutOfRange)

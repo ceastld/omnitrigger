@@ -3436,6 +3436,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算一组数的平方和",
+        query: "sumsq(-3,4)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算皮尔逊相关系数",
         query: "corr(1,2,2,4,3,6)",
     },
@@ -6567,6 +6572,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "用精确算式计算均方值",
         query: "分数: 计算 meansquare(1/3,2/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算多个分数的精确平方和",
+        query: "分数: 计算 sumsq(-1/3,2/3)",
     },
     Example {
         icon: Icon::Terminal,

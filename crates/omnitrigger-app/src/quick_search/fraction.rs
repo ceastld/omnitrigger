@@ -11,8 +11,8 @@ use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
 use super::statistics::{
     absolute_deviation_unweighted, interpolate_ordered_quantile, mean_square_unweighted,
-    median_sorted_values, variance_unweighted, weighted_quantile_value, StatisticsError,
-    WeightedDistribution, WeightedMean,
+    median_sorted_values, sum_squares_unweighted, variance_unweighted, weighted_quantile_value,
+    StatisticsError, WeightedDistribution, WeightedMean,
 };
 
 const MAX_POWER_EXPONENT: u32 = 1024;
@@ -1788,9 +1788,12 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.variance_function(&name);
         }
-        if matches!(name.as_str(), "rms" | "meansquare") {
+        if matches!(name.as_str(), "rms" | "meansquare" | "sumsq") {
             self.remaining = rest;
             let values = self.list_function_arguments()?;
+            if name == "sumsq" {
+                return sum_squares_unweighted(values).map_err(|_| FractionError::ExactRange);
+            }
             let square = mean_square_unweighted(values).map_err(|_| FractionError::ExactRange)?;
             if name == "rms" {
                 return exact_rational_root(&square, 2)
@@ -2947,8 +2950,11 @@ mod tests {
     }
 
     #[test]
-    fn computes_exact_mean_square_and_rational_root_mean_square() {
+    fn computes_exact_squares_and_rational_root_mean_square() {
         for (query, expected) in [
+            ("sumsq(-1/3,2/3)", "5/9"),
+            ("SUMSQ(-3,2+2)*2", "50"),
+            ("sumsq(0)", "0"),
             ("meansquare(1/3,2/3)", "5/18"),
             ("meansquare(3,4)", "25/2"),
             ("rms(-1/3,7/3)", "5/3"),
@@ -2964,6 +2970,11 @@ mod tests {
         assert_eq!(
             calculate_fraction("rms(3,4)"),
             Err(FractionError::RationalRootMeanSquare)
+        );
+        assert!(calculate_fraction("sumsq()").is_err());
+        assert_eq!(
+            calculate_fraction("sumsq(1e2000)"),
+            Err(FractionError::ExactRange)
         );
     }
 

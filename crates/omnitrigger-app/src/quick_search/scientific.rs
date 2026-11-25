@@ -25,6 +25,12 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
         "gmean" => return Some(NamedValue::Aggregate(geometric_mean)),
         "hmean" => return Some(NamedValue::Aggregate(harmonic_mean)),
+        "sumsq" => {
+            return Some(NamedValue::Aggregate(|values| {
+                let (scale, squares) = scaled_sum_of_squares(values);
+                scale * (scale * squares)
+            }))
+        }
         "rms" => return Some(NamedValue::Aggregate(root_mean_square)),
         "meansquare" => {
             return Some(NamedValue::Aggregate(|values| {
@@ -546,12 +552,17 @@ fn interpolated_quantile(sorted: &[f64], probability: f64) -> f64 {
 }
 
 fn root_mean_square(values: &[f64]) -> f64 {
+    let (scale, squares) = scaled_sum_of_squares(values);
+    scale * (squares / values.len().max(1) as f64).sqrt()
+}
+
+fn scaled_sum_of_squares(values: &[f64]) -> (f64, f64) {
     let scale = values.iter().map(|value| value.abs()).fold(0., f64::max);
     if scale == 0. {
-        return 0.;
+        return (0., 0.);
     }
-    let squares: f64 = values.iter().map(|value| (value / scale).powi(2)).sum();
-    scale * (squares / values.len() as f64).sqrt()
+    let squares = values.iter().map(|value| (value / scale).powi(2)).sum();
+    (scale, squares)
 }
 
 fn centered_scale(values: impl Iterator<Item = f64>) -> (f64, f64) {

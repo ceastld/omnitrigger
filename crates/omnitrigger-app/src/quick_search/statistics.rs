@@ -1363,8 +1363,15 @@ pub(super) fn variance_unweighted(
 pub(super) fn mean_square_unweighted(
     values: Vec<BigRational>,
 ) -> Result<BigRational, StatisticsError> {
+    let count = values.len();
+    bounded(sum_squares_unweighted(values)? / BigInt::from(count))
+}
+
+pub(super) fn sum_squares_unweighted(
+    values: Vec<BigRational>,
+) -> Result<BigRational, StatisticsError> {
     let values = unweighted_observations(values)?;
-    variance_about(&values, &BigRational::default(), values.len() as u64)
+    squared_deviation_sum(&values, &BigRational::default())
 }
 
 fn observation_sum(values: &[(BigRational, u64)]) -> Result<BigRational, StatisticsError> {
