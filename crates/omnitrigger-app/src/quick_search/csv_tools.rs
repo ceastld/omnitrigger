@@ -8819,11 +8819,15 @@ fn transpose(rows: &[Vec<String>]) -> Vec<Vec<String>> {
         .collect()
 }
 
-fn write_rows<'a>(rows: impl IntoIterator<Item = &'a Vec<String>>, delimiter: char) -> String {
+pub(super) fn write_rows<'a, Row: AsRef<[String]> + ?Sized + 'a>(
+    rows: impl IntoIterator<Item = &'a Row>,
+    delimiter: char,
+) -> String {
     let separator = delimiter.to_string();
     rows.into_iter()
         .map(|row| {
-            row.iter()
+            row.as_ref()
+                .iter()
                 .map(|cell| separated_cell(cell, delimiter))
                 .collect::<Vec<_>>()
                 .join(&separator)

@@ -2,6 +2,8 @@ use gpui::{div, prelude::*, px, relative, Div, FontWeight};
 
 use crate::theme::{self, rgb};
 
+use super::csv_tools::write_rows;
+
 const MAX_DATA_ROWS: usize = 6;
 pub(super) const MAX_VISIBLE_COLUMNS: usize = 6;
 const MAX_VISIBLE_CELL_CHARACTERS: usize = 128;
@@ -69,6 +71,14 @@ impl TablePreview {
 
     pub(super) fn column_pages(&self) -> usize {
         self.columns.div_ceil(self.columns_per_page)
+    }
+
+    pub(super) fn spans_pages(&self) -> bool {
+        self.row_pages() > 1 || self.column_pages() > 1
+    }
+
+    pub(super) fn page_csv(&self, row_page: usize, column_page: usize) -> String {
+        write_rows(self.visible_rows(row_page, column_page), ',')
     }
 
     pub(super) fn legend(&self) -> Div {
@@ -209,6 +219,26 @@ mod tests {
         assert!((widths.iter().sum::<f32>() - 1.).abs() < 1e-6);
         assert_eq!(table.column_width_fractions(1), vec![1.]);
         assert_eq!(cell_width_units(&"长".repeat(1000)), MAX_COLUMN_WIDTH_UNITS);
+    }
+
+    #[test]
+    fn exports_visible_rows_and_columns_with_the_header_and_full_cell_values() {
+        let mut rows = vec![["id", "label", "name", "note"]];
+        rows.extend([["1", "初页", "甲", "原始"]].repeat(6));
+        rows.push(["7", "末页", "绿茶,冰", " 原样\n\"备注\" "]);
+        rows.push(["8", "末页", "", "  "]);
+        let preview = TablePreview::from_rows(
+            rows.into_iter()
+                .map(|row| row.into_iter().map(str::to_owned).collect())
+                .collect(),
+        )
+        .with_columns_per_page(2);
+
+        assert_eq!(
+            preview.page_csv(1, 1),
+            "name,note\r\n\"绿茶,冰\",\" 原样\n\"\"备注\"\" \"\r\n\"\",  "
+        );
+        assert_eq!(preview.page_csv(1, 0), "id,label\r\n7,末页\r\n8,末页");
     }
 
     #[test]

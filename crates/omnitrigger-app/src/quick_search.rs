@@ -2407,6 +2407,25 @@ impl QuickSearch {
         }
     }
 
+    fn copy_table_page(&self, is_held: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Results::Value(Ok(ResultValue {
+            kind: ValueKind::Table(table),
+            ..
+        })) = &self.results
+        else {
+            return false;
+        };
+        if self.expanded_value_pages.is_some() || !table.spans_pages() {
+            return false;
+        }
+        if !is_held {
+            let text = table.page_csv(self.table_pages.rows, self.table_pages.columns);
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            window.remove_window();
+        }
+        true
+    }
+
     fn file_operation_in_progress(&self) -> bool {
         matches!(self.result_save, ResultSaveState::InProgress)
             || matches!(self.input_file_load, InputFileLoadState::InProgress)
@@ -2951,6 +2970,13 @@ impl QuickSearch {
                 if !event.is_held && !self.previous_input.is_empty() {
                     self.fill_query(self.previous_input.clone(), window, cx);
                 }
+                cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "c"
+                && self.copy_table_page(event.is_held, window, cx)
+            {
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "enter" {
                 if !event.is_held {
@@ -3619,6 +3645,17 @@ impl QuickSearch {
                             )
                         },
                     )
+                    .when(table.spans_pages(), |footer| {
+                        footer.child(
+                            button("copy-table-page", "复制本页", Tone::Ghost, true)
+                                .h(px(20.))
+                                .px(px(8.))
+                                .tooltip(theme::text_tooltip("Ctrl+Shift+C 复制本页 CSV".into()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.copy_table_page(false, window, cx);
+                                })),
+                        )
+                    })
                     .child(div().flex_1())
                     .when(table.row_pages() > 1, |footer| {
                         footer.child(self.table_page_controls(
