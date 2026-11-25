@@ -3990,6 +3990,14 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"文本: 正则替换 "([0-9]{4})/([0-9]{2})/([0-9]{2})" "$1-$2-$3" 2026/11/21"#,
     },
     Example {
+        icon: Icon::Layers,
+        title: "预览正则每处匹配与展开后的替换值",
+        query: concat!(
+            r#"文本: 正则替换明细CSV "ID=(?<id>[0-9]+)" "编号:${id}" 北京 ID=007"#,
+            "\n🫖 ID=9",
+        ),
+    },
+    Example {
         icon: Icon::Terminal,
         title: "把文本转义为正则字面量",
         query: "文本: 正则转义 a+b[0]",

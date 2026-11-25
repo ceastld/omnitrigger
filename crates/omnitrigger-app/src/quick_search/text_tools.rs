@@ -230,6 +230,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "markdown标题csv" | "markdown-headings-csv" => Some(markdown_headings_csv(text)),
         "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
         "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
+        "正则替换明细csv" | "regex-replacement-csv" => Some(regex_replacement_csv(text)),
         _ => None,
     }
 }
@@ -1573,6 +1574,33 @@ pub(super) fn regex_group_index(pattern: &Regex, group: &str) -> Result<usize, T
         .ok_or(TextError::UnknownRegexGroup)
 }
 
+struct MatchPosition {
+    last_start: usize,
+    line: usize,
+    column: usize,
+}
+
+impl MatchPosition {
+    fn new() -> Self {
+        Self {
+            last_start: 0,
+            line: 1,
+            column: 1,
+        }
+    }
+
+    fn advance(&mut self, text: &str, start: usize) {
+        let between = &text[self.last_start..start];
+        if let Some((before, after)) = between.rsplit_once('\n') {
+            self.line += before.bytes().filter(|&byte| byte == b'\n').count() + 1;
+            self.column = after.chars().count() + 1;
+        } else {
+            self.column += between.chars().count();
+        }
+        self.last_start = start;
+    }
+}
+
 fn regex_captures_to_csv(input: &str, include_position: bool) -> Result<String, TextError> {
     let (pattern, text) = regex_text_argument(input)?;
     if pattern.captures_len() <= 1 {
@@ -1597,20 +1625,13 @@ fn regex_captures_to_csv(input: &str, include_position: bool) -> Result<String, 
         String::new()
     };
     result.push_str(&capture_headers);
-    let (mut last_start, mut line, mut column) = (0, 1, 1);
+    let mut position = MatchPosition::new();
     for captures in pattern.captures_iter(text) {
         result.push_str("\r\n");
         if include_position {
             let start = captures.get(0).expect("组 0 包含整项匹配").start();
-            let between = &text[last_start..start];
-            if let Some((before, after)) = between.rsplit_once('\n') {
-                line += before.bytes().filter(|&byte| byte == b'\n').count() + 1;
-                column = after.chars().count() + 1;
-            } else {
-                column += between.chars().count();
-            }
-            last_start = start;
-            result.push_str(&format!("{line},{column},"));
+            position.advance(text, start);
+            write!(result, "{},{},", position.line, position.column).expect("写入 String 不会出错");
         }
         for (column, matched) in captures.iter().skip(1).enumerate() {
             if column > 0 {
@@ -2056,6 +2077,37 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
     let (pattern, replacement, text) = replacement_parts(input)?;
     let pattern = compile_regex(&pattern)?;
     replace_regex_matches(text, &pattern, &replacement)
+}
+
+fn regex_replacement_csv(input: &str) -> Result<String, TextError> {
+    let (pattern, replacement, text) = replacement_parts(input)?;
+    let pattern = compile_regex(&pattern)?;
+    let mut position = MatchPosition::new();
+    let mut result = String::from("原文行号,原文列号,匹配,替换");
+    let mut expanded = String::new();
+    for captures in pattern.captures_iter(text) {
+        let matched = captures.get_match();
+        position.advance(text, matched.start());
+        expanded.clear();
+        captures.expand(&replacement, &mut expanded);
+        if matched.as_str().contains('\0') || expanded.contains('\0') {
+            return Err(TextError::NullCharacter);
+        }
+        let row = position.line.to_string();
+        let column = position.column.to_string();
+        append_bounded_csv_row(
+            &mut result,
+            [
+                row.as_str(),
+                column.as_str(),
+                matched.as_str(),
+                expanded.as_str(),
+            ]
+            .into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(result)
 }
 
 pub(super) fn replace_regex_matches(
@@ -2668,6 +2720,25 @@ mod tests {
         ] {
             assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn shows_regex_replacements_at_original_unicode_line_and_column_positions() {
+        let query = concat!(
+            r#"正则替换明细CSV "ID=(?<id>[0-9]+)" "编号:${id}" 北京 ID=007"#,
+            "\r\n🫖 ID=9",
+        );
+        let expected = "原文行号,原文列号,匹配,替换\r\n1,4,ID=007,编号:007\r\n2,3,ID=9,编号:9";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query), Some(Ok(expected.to_owned())));
+        assert_eq!(
+            transform_text(concat!(r##"REGEX-REPLACEMENT-CSV "(?m)^" "#" 甲"##, "\n乙")).as_deref(),
+            Ok("原文行号,原文列号,匹配,替换\r\n1,1,\"\",#\r\n2,1,\"\",#"),
+        );
+        assert_eq!(
+            transform_text(r#"正则替换明细CSV "不存在" "改" 原文"#).as_deref(),
+            Ok("原文行号,原文列号,匹配,替换"),
+        );
     }
 
     #[test]
