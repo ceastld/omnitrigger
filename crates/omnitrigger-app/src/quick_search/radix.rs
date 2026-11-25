@@ -60,6 +60,7 @@ pub(super) enum RadixError {
     FloatBitsArguments,
     ReadFloatBitsArguments,
     FloatBitsWidthExceeded,
+    FloatFractionNonfinite,
     SheetColumnArguments,
     RomanArguments,
     RomanRange,
@@ -100,6 +101,7 @@ impl RadixError {
             Self::BitComparisonArguments => "用逗号分隔两个非负整数，例如 0xA5,0xAD",
             Self::FloatBitsArguments => "填写 32 或 64 位宽和浮点数，例如 32 @ 0.1",
             Self::ReadFloatBitsArguments => "填写 32 或 64 位宽和非负位模式，例如 32 @ 0x3DCCCCCD",
+            Self::FloatFractionNonfinite => "无穷和 NaN 没有对应的有限分数",
             Self::WriteBitsArguments => {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
             }
@@ -242,6 +244,12 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     }
     if let Some(transform) = radix_report_operation(operation) {
         return transform(arguments);
+    }
+    if operation == "浮点分数" || operation.eq_ignore_ascii_case("float-fraction") {
+        return float_fraction(arguments, false);
+    }
+    if operation == "读浮点分数" || operation.eq_ignore_ascii_case("read-float-fraction") {
+        return float_fraction(arguments, true);
     }
     if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
         return convert_sheet_column(arguments);
@@ -541,7 +549,12 @@ pub(super) fn radix_csv_report(query: &str) -> Option<Result<String, RadixError>
     Some(transform(&normalize(arguments)))
 }
 
-fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
+enum ParsedFloat {
+    Single(f32, u32),
+    Double(f64, u64),
+}
+
+fn parse_float(input: &str, decode: bool) -> Result<ParsedFloat, RadixError> {
     let invalid = if decode {
         RadixError::ReadFloatBitsArguments
     } else {
@@ -559,13 +572,7 @@ fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
                 let value = input.parse::<f32>().map_err(|_| invalid)?;
                 (value, value.to_bits())
             };
-            Ok(format_float_bits(
-                u64::from(bits),
-                &value.to_string(),
-                value.classify(),
-                8,
-                23,
-            ))
+            Ok(ParsedFloat::Single(value, bits))
         }
         "64" => {
             let (value, bits) = if decode {
@@ -576,16 +583,31 @@ fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
                 let value = input.parse::<f64>().map_err(|_| invalid)?;
                 (value, value.to_bits())
             };
-            Ok(format_float_bits(
-                bits,
-                &value.to_string(),
-                value.classify(),
-                11,
-                52,
-            ))
+            Ok(ParsedFloat::Double(value, bits))
         }
         _ => Err(invalid),
     }
+}
+
+fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
+    Ok(match parse_float(input, decode)? {
+        ParsedFloat::Single(value, bits) => {
+            format_float_bits(u64::from(bits), &value.to_string(), value.classify(), 8, 23)
+        }
+        ParsedFloat::Double(value, bits) => {
+            format_float_bits(bits, &value.to_string(), value.classify(), 11, 52)
+        }
+    })
+}
+
+fn float_fraction(input: &str, decode: bool) -> Result<String, RadixError> {
+    let value = match parse_float(input, decode)? {
+        ParsedFloat::Single(value, _) => f64::from(value),
+        ParsedFloat::Double(value, _) => value,
+    };
+    BigRational::from_float(value)
+        .map(|fraction| fraction.to_string())
+        .ok_or(RadixError::FloatFractionNonfinite)
 }
 
 fn format_float_bits(
@@ -912,6 +934,38 @@ mod tests {
         assert_eq!(encoded, format!("0b1{}", "0".repeat(8191)));
         let decoded = convert_arbitrary_radix(&format!("读格雷码 {encoded}")).unwrap();
         assert_eq!(decoded, bit_mask(8192).to_string());
+    }
+
+    #[test]
+    fn returns_exact_fractions_for_rounded_floats_and_raw_bit_patterns() {
+        for (query, expected) in [
+            ("浮点分数 32 @ 0.1", "13421773/134217728"),
+            (
+                "float-fraction 64 @ 0.1",
+                "3602879701896397/36028797018963968",
+            ),
+            ("读浮点分数 32 @ 0xBDCCCCCD", "-13421773/134217728"),
+            ("读浮点分数 64 @ 0x8000000000000000", "0"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        let denominator = BigInt::from(1u8) << 1074usize;
+        assert_eq!(
+            convert_arbitrary_radix("read-float-fraction 64 @ 0b1"),
+            Ok(format!("1/{denominator}"))
+        );
+        assert_eq!(
+            convert_arbitrary_radix("读浮点分数 32 @ 0x7F800000"),
+            Err(RadixError::FloatFractionNonfinite)
+        );
+        assert_eq!(
+            convert_arbitrary_radix("浮点分数 64 @ NaN"),
+            Err(RadixError::FloatFractionNonfinite)
+        );
     }
 
     #[test]
