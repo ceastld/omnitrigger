@@ -2831,6 +2831,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "从一段时间中扣除多个占用时段",
+        query: r#"时间戳: 区间差集 [["0s","20s"],["2s","5s"],["8s","25s"]]"#,
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按当地日期查看两个时刻之间的实际时长",
         query: "时间戳: 逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York",
     },
@@ -6847,6 +6852,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "日区间",
                     "区间合并",
                     "区间交集",
+                    "区间差集",
                     "逐日时长",
                     "偏移变更",
                     "每日同刻",

@@ -195,6 +195,7 @@ enum TimestampReport {
 enum IntervalOperation {
     Merge,
     Intersection,
+    Difference,
 }
 
 impl TimestampReport {
@@ -210,6 +211,9 @@ impl TimestampReport {
             }
             "区间交集" | "intersect-intervals" => {
                 Some(Self::AbsoluteIntervals(IntervalOperation::Intersection))
+            }
+            "区间差集" | "subtract-intervals" => {
+                Some(Self::AbsoluteIntervals(IntervalOperation::Difference))
             }
             _ => None,
         }
@@ -764,6 +768,7 @@ fn absolute_intervals_csv(
             .filter(|(start, end)| start < end)
             .into_iter()
             .collect(),
+        IntervalOperation::Difference => subtract_absolute_intervals(intervals),
     };
     let mut result = String::from("开始UTC,结束UTC,时长");
     for (start, end) in intervals {
@@ -793,6 +798,31 @@ fn merge_absolute_intervals(
         }
     }
     merged
+}
+
+fn subtract_absolute_intervals(
+    mut intervals: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    let (source, cuts) = intervals.split_first_mut().expect("已验证至少有一段时间");
+    let (mut start, end) = *source;
+    cuts.sort_unstable();
+    let mut remaining = Vec::new();
+    for &(cut_start, cut_end) in cuts.iter() {
+        if cut_start >= end {
+            break;
+        }
+        if start < cut_start {
+            remaining.push((start, cut_start));
+        }
+        start = start.max(cut_end);
+        if start >= end {
+            break;
+        }
+    }
+    if start < end {
+        remaining.push((start, end));
+    }
+    remaining
 }
 
 fn interval_nanos(
@@ -1281,6 +1311,33 @@ mod tests {
         assert_eq!(
             convert_timestamp(r#"区间合并 [["1ns","0s"]]"#, now),
             Err(TimestampError::AbsoluteIntervalOrder)
+        );
+    }
+
+    #[test]
+    fn subtracts_overlapping_and_touching_cuts_from_one_absolute_interval() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = concat!(
+            r#"区间差集 [["现在","20s"],["10s","25s"],["2s","4s"],"#,
+            r#"["3s","5s"],["-10s","0s"]]"#,
+        );
+        assert!(is_timestamp_report(query));
+        assert_eq!(
+            convert_timestamp(query, now).as_deref(),
+            Ok(concat!(
+                "开始UTC,结束UTC,时长\r\n",
+                "1970-01-01T00:00:00Z,1970-01-01T00:00:02Z,00:00:02\r\n",
+                "1970-01-01T00:00:05Z,1970-01-01T00:00:10Z,00:00:05",
+            )),
+        );
+        assert_eq!(
+            convert_timestamp(r#"subtract-intervals [["0s","1ns"],["-1ns","1ns"]]"#, now)
+                .as_deref(),
+            Ok("开始UTC,结束UTC,时长")
+        );
+        assert_eq!(
+            convert_timestamp(r#"区间差集 [["0s","1ns"],["1ns","2ns"]]"#, now).as_deref(),
+            Ok("开始UTC,结束UTC,时长\r\n1970-01-01T00:00:00Z,1970-01-01T00:00:00.000000001Z,00:00:00.000000001")
         );
     }
 
