@@ -87,7 +87,7 @@ use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use batch::{
     batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError, BatchToolOutput,
 };
-use calculator::{calculate, calculate_with_answer, looks_like_calculation, CalculationError};
+use calculator::{calculate, calculate_with_answers, looks_like_calculation, CalculationError};
 use calendar::{
     calculate_date, is_date_report, looks_like_date_query, parse_complete_date, DateError,
 };
@@ -1342,7 +1342,8 @@ impl Results {
         }
         let is_date = looks_like_date_query(query);
         if !is_date && looks_like_calculation(query) {
-            let result = calculate_with_answer(query, recent.calculations.latest_number());
+            let result =
+                calculate_with_answers(query, &|index| recent.calculations.number_at(index));
             let examples = match result {
                 Err(CalculationError::Incomplete | CalculationError::Invalid) => {
                     function_examples(query)
@@ -7852,7 +7853,7 @@ mod tests {
     }
 
     #[test]
-    fn substitutes_the_latest_confirmed_numeric_answer_in_calculator_queries() {
+    fn substitutes_confirmed_numeric_answers_in_calculator_queries_by_recency() {
         let index = SearchIndex::default();
         assert!(matches!(
             index.results("ans+1"),
@@ -7870,6 +7871,17 @@ mod tests {
             .calculations
             .record("精确结果", "多行输出\n根一");
         assert_eq!(index.results("max(0, ans*3)").refillable_text(), Some("1"));
+        assert_eq!(index.results("ans2+ans1*3").refillable_text(), Some("1025"));
+        assert_eq!(
+            index.results("ＡＮＳ２ - 24").refillable_text(),
+            Some("1000")
+        );
+        assert!(matches!(
+            index.results("ans3 + 1"),
+            Results::Value(Err(ValueError::Calculation(
+                CalculationError::MissingAnswer
+            )))
+        ));
         assert_eq!(for_query("12+3", &[]).refillable_text(), Some("15"));
     }
 

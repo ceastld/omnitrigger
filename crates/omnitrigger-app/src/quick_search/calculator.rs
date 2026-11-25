@@ -23,7 +23,9 @@ impl CalculationError {
         match self {
             Self::Incomplete => "算式未完成",
             Self::Invalid => "无法识别算式",
-            Self::MissingAnswer => "先复制一个计算结果，或按 Tab 确认结果后使用 ans",
+            Self::MissingAnswer => {
+                "没有对应的已确认数值。用 Ctrl+R 查看算式历史，复制结果或按 Tab 确认后可引用"
+            }
             Self::DivisionByZero => "不能除以零",
             Self::FunctionDomain => "参数超出函数定义域",
             Self::OutOfRange => "结果超出计算范围",
@@ -48,7 +50,7 @@ fn looks_like_expression(query: &str) -> bool {
     }
     let (name, tail) = split_name(query);
     let tail = tail.trim_start();
-    if name.eq_ignore_ascii_case("ans") {
+    if answer_index(name).is_some() {
         return tail.is_empty()
             || Operator::prefix(tail).is_some()
             || tail.starts_with(is_superscript);
@@ -68,14 +70,27 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
     format_result(evaluate(query)?)
 }
 
-pub(super) fn calculate_with_answer(
+fn answer_index(name: &str) -> Option<usize> {
+    let prefix = name.get(..3)?;
+    if !prefix.eq_ignore_ascii_case("ans") {
+        return None;
+    }
+    let number = &name[3..];
+    if number.is_empty() {
+        Some(0)
+    } else {
+        number.parse::<usize>().ok()?.checked_sub(1)
+    }
+}
+
+pub(super) fn calculate_with_answers(
     query: &str,
-    answer: Option<f64>,
+    answer_at: &dyn Fn(usize) -> Option<f64>,
 ) -> Result<String, CalculationError> {
     format_result(evaluate_with_variables(
         query,
         Variables {
-            answer,
+            answer_at: Some(answer_at),
             ..Variables::default()
         },
     )?)
@@ -141,14 +156,14 @@ fn optional_sample(value: Result<f64, CalculationError>) -> Result<Option<f64>, 
 }
 
 #[derive(Clone, Copy, Default)]
-struct Variables {
+struct Variables<'a> {
     x: Option<f64>,
     y: Option<f64>,
     t: Option<f64>,
-    answer: Option<f64>,
+    answer_at: Option<&'a dyn Fn(usize) -> Option<f64>>,
 }
 
-fn evaluate_with_variables(query: &str, variables: Variables) -> Result<f64, CalculationError> {
+fn evaluate_with_variables(query: &str, variables: Variables<'_>) -> Result<f64, CalculationError> {
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(CalculationError::TooLong);
     }
@@ -158,7 +173,7 @@ fn evaluate_with_variables(query: &str, variables: Variables) -> Result<f64, Cal
     evaluate_expression(input.strip_prefix('=').unwrap_or(input).trim(), variables)
 }
 
-fn evaluate_expression(input: &str, variables: Variables) -> Result<f64, CalculationError> {
+fn evaluate_expression(input: &str, variables: Variables<'_>) -> Result<f64, CalculationError> {
     if let Some((mode, base, rate)) = percentage_operands(input) {
         let rate = evaluate_expression(rate, variables)?;
         return finite(mode.apply(evaluate_expression(base, variables)?, rate));
@@ -252,7 +267,7 @@ pub(super) fn format_round_trip(value: f64) -> String {
 
 struct Parser<'a> {
     rest: &'a str,
-    variables: Variables,
+    variables: Variables<'a>,
 }
 
 fn superscript_digit(character: char) -> Option<usize> {
@@ -378,10 +393,11 @@ impl Parser<'_> {
     fn named(&mut self) -> Result<f64, CalculationError> {
         let (name, rest) = split_name(self.rest);
         self.rest = rest;
-        if name.eq_ignore_ascii_case("ans") {
+        if let Some(index) = answer_index(name) {
             return finite(
                 self.variables
-                    .answer
+                    .answer_at
+                    .and_then(|answer_at| answer_at(index))
                     .ok_or(CalculationError::MissingAnswer)?,
             );
         }

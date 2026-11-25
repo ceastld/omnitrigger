@@ -28,11 +28,12 @@ impl RecentValues {
         items.truncate(HISTORY_LIMIT);
     }
 
-    pub(super) fn latest_number(&self) -> Option<f64> {
+    pub(super) fn number_at(&self, index: usize) -> Option<f64> {
         self.0
             .borrow()
             .iter()
-            .find_map(|item| super::calculator::evaluate(&item.result).ok())
+            .filter_map(|item| super::calculator::evaluate(&item.result).ok())
+            .nth(index)
     }
 
     pub(super) fn matching(&self, query: &str) -> Vec<InputSuggestion> {
