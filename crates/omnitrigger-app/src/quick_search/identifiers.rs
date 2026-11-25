@@ -1,6 +1,7 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, cmp::Ordering};
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use semver::Version;
 use uuid::{Uuid, Variant};
 
 use super::calculator::normalize;
@@ -8,6 +9,7 @@ use super::calculator::normalize;
 const GREGORIAN_TO_UNIX_TICKS: i64 = 122_192_928_000_000_000;
 const TICKS_PER_SECOND: i64 = 10_000_000;
 const ULID_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const MAX_SORTED_VERSIONS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IdentifierError {
@@ -23,6 +25,10 @@ pub(super) enum IdentifierError {
     InvalidGtin,
     GtinBodyArguments,
     GtinChecksum,
+    InvalidSemver,
+    SemverCompareArguments,
+    SemverSortArguments,
+    SemverOperation,
     InvalidOperation,
     MissingUuidTime,
     TimeRange,
@@ -43,6 +49,10 @@ impl IdentifierError {
             Self::InvalidGtin => "填写 8、12、13 或 14 位商品条码数字",
             Self::GtinBodyArguments => "填写待补校验位的 7、11、12 或 13 位商品条码数字",
             Self::GtinChecksum => "商品条码校验位错误",
+            Self::InvalidSemver => "输入有效的语义版本，例如 1.2.3 或 v1.2.3-rc.1",
+            Self::SemverCompareArguments => "填写两个版本，例如 比较 v1.9.0, v1.10.0",
+            Self::SemverSortArguments => "填写 1 至 128 个版本，用逗号或空白分隔",
+            Self::SemverOperation => "可用 格式、比较 或 排序",
             Self::InvalidOperation => "可用 格式 或 时间，UUID 还支持 紧凑、URN 和 v5",
             Self::MissingUuidTime => "请输入带时间字段的 UUIDv1、UUIDv6 或 UUIDv7",
             Self::TimeRange => "标识符的时间超出可显示范围",
@@ -281,6 +291,50 @@ fn identifier_symbols(source: &str) -> impl Iterator<Item = char> + '_ {
         .filter(|&ch| !ch.is_whitespace() && !matches!(ch, '-' | '\u{2010}' | '\u{2011}'))
 }
 
+pub(super) fn transform_semver(query: &str) -> Result<String, IdentifierError> {
+    let (operation, input) = identifier_input(query)?;
+    let tokens = input
+        .split(|character: char| character.is_whitespace() || matches!(character, ',' | '，'))
+        .filter(|token| !token.is_empty());
+    match operation.to_ascii_lowercase().as_str() {
+        "" | "格式" | "normalize" => parse_semver(input).map(|version| version.to_string()),
+        "比较" | "compare" => {
+            let mut tokens = tokens;
+            let (Some(left), Some(right), None) = (tokens.next(), tokens.next(), tokens.next())
+            else {
+                return Err(IdentifierError::SemverCompareArguments);
+            };
+            let relation = match parse_semver(left)?.cmp_precedence(&parse_semver(right)?) {
+                Ordering::Less => "<",
+                Ordering::Equal => "=",
+                Ordering::Greater => ">",
+            };
+            Ok(format!("{left} {relation} {right}"))
+        }
+        "排序" | "sort" => {
+            let mut versions = tokens
+                .take(MAX_SORTED_VERSIONS + 1)
+                .map(|token| parse_semver(token).map(|version| (token, version)))
+                .collect::<Result<Vec<_>, _>>()?;
+            if !(1..=MAX_SORTED_VERSIONS).contains(&versions.len()) {
+                return Err(IdentifierError::SemverSortArguments);
+            }
+            versions.sort_by(|(_, left), (_, right)| left.cmp_precedence(right));
+            Ok(versions
+                .into_iter()
+                .map(|(token, _)| token)
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        _ => Err(IdentifierError::SemverOperation),
+    }
+}
+
+fn parse_semver(input: &str) -> Result<Version, IdentifierError> {
+    Version::parse(input.strip_prefix(['v', 'V']).unwrap_or(input))
+        .map_err(|_| IdentifierError::InvalidSemver)
+}
+
 fn identifier_input(query: &str) -> Result<(&str, &str), IdentifierError> {
     let query = query.trim();
     if query.is_empty() {
@@ -298,6 +352,37 @@ fn format_time(time: Option<DateTime<Utc>>) -> Result<String, IdentifierError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compares_and_stably_sorts_semver_precedence_ignoring_build_metadata() {
+        for (query, expected) in [
+            ("V1.2.3-rc.1+001", "1.2.3-rc.1+001"),
+            ("比较 v1.9.0，v1.10.0", "v1.9.0 < v1.10.0"),
+            (
+                "compare 1.0.0-beta.11 1.0.0-beta.2",
+                "1.0.0-beta.11 > 1.0.0-beta.2",
+            ),
+            ("比较 1.0.0+ci.9 1.0.0+ci.1", "1.0.0+ci.9 = 1.0.0+ci.1"),
+            (
+                "排序 v1.0.0+ci.9,1.0.0-beta.11\r\n1.0.0-beta.2\u{2028}1.0.0+ci.1",
+                "1.0.0-beta.2\n1.0.0-beta.11\nv1.0.0+ci.9\n1.0.0+ci.1",
+            ),
+        ] {
+            assert_eq!(transform_semver(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_semver("比较 1.0.0,2.0.0,3.0.0"),
+            Err(IdentifierError::SemverCompareArguments)
+        );
+        assert_eq!(
+            transform_semver("排序 1.0.0,1.01.0"),
+            Err(IdentifierError::InvalidSemver)
+        );
+        assert_eq!(
+            transform_semver(&format!("排序 {}", "1.0.0\n".repeat(129))),
+            Err(IdentifierError::SemverSortArguments)
+        );
+    }
 
     #[test]
     fn checks_and_converts_book_numbers_with_fullwidth_and_hyphenated_input() {

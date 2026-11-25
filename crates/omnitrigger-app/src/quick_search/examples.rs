@@ -156,6 +156,7 @@ fn query_argument_start(query: &str) -> Option<usize> {
             | Scope::Ulid
             | Scope::Isbn
             | Scope::Gtin
+            | Scope::Semver
             | Scope::Circuit
             | Scope::Complex
             | Scope::Circle
@@ -2883,6 +2884,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把商品条码补成 14 位存储格式",
         query: "条码: 补齐14位 6291041500213",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按语义版本规则比较两个版本",
+        query: "版本: 比较 v1.9.0,v1.10.0",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按语义版本规则排序预发行号和构建标签",
+        query: "版本: 排序 v1.0.0+ci.9,1.0.0-beta.11,1.0.0-beta.2,1.0.0+ci.1",
     },
     Example {
         icon: Icon::Terminal,
@@ -7819,6 +7830,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Ulid
         | Scope::Isbn
         | Scope::Gtin
+        | Scope::Semver
         | Scope::Vector
         | Scope::Matrix
         | Scope::Complex

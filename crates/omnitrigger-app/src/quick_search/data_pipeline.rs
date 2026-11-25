@@ -21,6 +21,7 @@ use super::{
     duration::{convert_duration, is_duration_report},
     equation::{equation_chart, solve_equation, solve_linear_system},
     fraction::{fraction_csv_report, simplify_fraction},
+    identifiers::transform_semver,
     json_tools::{
         json_csv_report, json_lines, parse_json_line, read_json_array, read_unique_object_entries,
         transform_json, JsonError,
@@ -477,6 +478,7 @@ fn run_pipeline_steps(
                     | Scope::Duration
                     | Scope::ExactData
                     | Scope::Radix
+                    | Scope::Semver
                     | Scope::Pitch
                     | Scope::Wave
                     | Scope::Circuit
@@ -528,6 +530,7 @@ fn run_pipeline_steps(
                     .unwrap_or_else(|| convert_exact_data(&query))
                     .map_err(|cause| cause.message()),
                 Scope::Radix => convert_arbitrary_radix(&query).map_err(|cause| cause.message()),
+                Scope::Semver => transform_semver(&query).map_err(|cause| cause.message()),
                 Scope::Pitch => convert_pitch(&query).map_err(|cause| cause.message()),
                 Scope::Tempo => calculate_tempo(&query).map_err(|cause| cause.message()),
                 Scope::Decibel => convert_decibels(&query).map_err(|cause| cause.message()),
@@ -1040,6 +1043,7 @@ mod tests {
             (r#"["JSON: 取值 /值","分数:"] {"值":0.250}"#, "1/4"),
             (r#"["音高："] A4"#, "A4 · MIDI 69 · 440 Hz"),
             (r#"["进制:"] ff 从 16 到 10"#, "255"),
+            (r#"["版本:"] v1.2.3-rc.1"#, "1.2.3-rc.1"),
         ] {
             assert_eq!(run_pipeline(input).as_deref(), Ok(expected), "{input}");
         }

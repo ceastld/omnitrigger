@@ -122,7 +122,8 @@ use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
 use fraction::{calculate_fraction, FractionError};
 use identifiers::{
-    transform_gtin, transform_isbn, transform_ulid, transform_uuid, IdentifierError,
+    transform_gtin, transform_isbn, transform_semver, transform_ulid, transform_uuid,
+    IdentifierError,
 };
 use intervals::{calculate_intervals, IntervalError};
 use json_tools::{transform_json, JsonError};
@@ -1223,6 +1224,9 @@ impl Results {
                 }
                 Scope::Gtin => {
                     Self::text_value(transform_gtin(term).map_err(ValueError::Identifier))
+                }
+                Scope::Semver => {
+                    Self::text_value(transform_semver(term).map_err(ValueError::Identifier))
                 }
                 Scope::Color => {
                     let palette = batch_arguments(term, "色阶", "palette")

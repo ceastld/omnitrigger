@@ -25,7 +25,7 @@
 | embed-resource | 构建时嵌入 Windows 图标资源 | MIT |
 | omnitrigger-browser | 固定 Git 修订的浏览器 RPC 客户端 | MIT |
 | tokio | 浏览器连接的后台异步运行时 | MIT |
-| semver | 应用更新版本排序，复用锁定的 1.0.28 | MIT OR Apache-2.0 |
+| semver | 应用更新与快速搜索的语义版本比较和排序，复用锁定的 1.0.28 | MIT OR Apache-2.0 |
 | sha2 | 脚本开发包及托管宿主映像完整性检查，复用锁定的 0.10.9 | MIT OR Apache-2.0 |
 | zip | 写入配置备份并逐项读回 ZIP | MIT |
 | chrono | 保留备份文件的本地修改时间 | MIT OR Apache-2.0 |
