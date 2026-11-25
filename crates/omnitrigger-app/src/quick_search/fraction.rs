@@ -228,7 +228,9 @@ fn simplify_fraction_using(
     let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     let calculate = |source: &str| evaluate_fraction(source, None, None, answer_at);
     if verb == "计算" || verb.eq_ignore_ascii_case("calc") {
-        return calculate(expression.trim()).map(|value| value.to_string());
+        let expression = expression.trim();
+        return calculate(expression.strip_prefix('=').unwrap_or(expression))
+            .map(|value| value.to_string());
     }
     if verb == "循环小数" || verb.eq_ignore_ascii_case("repeating-decimal") {
         return repeating_decimal(&calculate(expression.trim())?);

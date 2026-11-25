@@ -186,6 +186,33 @@ impl MessageInput {
         self
     }
 
+    pub(super) fn replace_leading_text(
+        &mut self,
+        prefix: &str,
+        replacement: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.content.starts_with(prefix) || self.is_composing() {
+            return;
+        }
+        let selection = self.selection_position();
+        self.replace_text_in_range(
+            Some(0..prefix.encode_utf16().count()),
+            replacement,
+            window,
+            cx,
+        );
+        let relocate = |offset: usize| offset.saturating_sub(prefix.len()) + replacement.len();
+        self.restore_selection(
+            MessageSelection {
+                anchor: relocate(selection.anchor),
+                head: relocate(selection.head),
+            },
+            cx,
+        );
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
         let text = if self.mode == TextMode::Json {

@@ -159,6 +159,7 @@ use wheels::{matching_wheels, SearchWheel};
 
 const WIDTH: f32 = 500.;
 const INPUT_CHARACTER_LIMIT: usize = 4096;
+const EXACT_MODE_PREFIX: &str = "分数: 计算 ";
 const PAGE_ROW_HEIGHT: f32 = 38.;
 const DESTINATION_PAGE_SIZE: usize = 4;
 const CONVERSION_PAGE_SIZE: usize = 4;
@@ -297,6 +298,12 @@ impl ResultValue {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum CalculationMode {
+    Decimal,
+    Exact,
 }
 
 #[derive(PartialEq, Eq)]
@@ -2851,6 +2858,40 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
+    fn next_calculation_mode(&self, cx: &App) -> Option<CalculationMode> {
+        if self.input.read(cx).text().starts_with(EXACT_MODE_PREFIX) {
+            Some(CalculationMode::Decimal)
+        } else if matches!(
+            &self.results,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Calculation,
+                ..
+            })) | Results::Value(Err(ValueError::Calculation(
+                CalculationError::OutOfRange | CalculationError::FunctionDomain
+            )))
+        ) {
+            Some(CalculationMode::Exact)
+        } else {
+            None
+        }
+    }
+
+    fn switch_calculation_mode(
+        &self,
+        mode: CalculationMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (prefix, replacement) = match mode {
+            CalculationMode::Decimal => (EXACT_MODE_PREFIX, ""),
+            CalculationMode::Exact => ("", EXACT_MODE_PREFIX),
+        };
+        self.input.update(cx, |input, cx| {
+            input.replace_leading_text(prefix, replacement, window, cx);
+        });
+        window.focus(&self.input.focus_handle(cx));
+    }
+
     fn refill_decimal_preview(
         &mut self,
         is_held: bool,
@@ -3302,6 +3343,13 @@ impl QuickSearch {
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "tab" {
                 if self.select_example_range(Example::argument_range, event.is_held, window, cx) {
+                    cx.stop_propagation();
+                }
+            } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "f2" {
+                if let Some(mode) = self.next_calculation_mode(cx) {
+                    if !event.is_held {
+                        self.switch_calculation_mode(mode, window, cx);
+                    }
                     cx.stop_propagation();
                 }
             } else if modifiers == 1
@@ -4176,13 +4224,33 @@ impl QuickSearch {
                     })
                     .when_some(output.continuation_hint(), |result, hint| {
                         result.child(
-                            Self::selection_hint(hint)
-                                .id("continue-value")
-                                .cursor_pointer()
-                                .hover(|style| style.text_color(rgb(theme::ACCENT)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.continue_value(window, cx);
-                                })),
+                            Self::result_footer()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(
+                                    div()
+                                        .id("continue-value")
+                                        .child(hint)
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(rgb(theme::ACCENT)))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.continue_value(window, cx);
+                                        })),
+                                )
+                                .when_some(self.next_calculation_mode(cx), |row, mode| {
+                                    let label = match mode {
+                                        CalculationMode::Decimal => "普通计算 Alt+F2",
+                                        CalculationMode::Exact => "精确计算 Alt+F2",
+                                    };
+                                    row.child(
+                                        button("switch-calculation-mode", label, Tone::Ghost, true)
+                                            .h(px(18.))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.switch_calculation_mode(mode, window, cx);
+                                            })),
+                                    )
+                                }),
                         )
                     })
                     .when(self.results.value_preview_expandable(), |result| {
@@ -7801,6 +7869,37 @@ mod tests {
                                 let input = search.input.read(cx);
                                 assert_eq!(input.text(), text, "{key}");
                                 assert_eq!(input.selection(), selection, "{key}");
+                            })
+                            .unwrap();
+                    }
+                    let query = "  =1/3 ";
+                    let selection = 3..6;
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query(query, window, cx);
+                            search.input.update(cx, |input, cx| input.select_range(selection.clone(), cx));
+                        })
+                        .unwrap();
+                    let decimal = calculate(query).unwrap();
+                    let exact_query = format!("{EXACT_MODE_PREFIX}{query}");
+                    let exact_selection = (EXACT_MODE_PREFIX.len() + selection.start)
+                        ..(EXACT_MODE_PREFIX.len() + selection.end);
+                    for (key, text, range, result) in [
+                        ("alt-f2", exact_query.as_str(), exact_selection.clone(), "1/3"),
+                        ("alt-f2", query, selection, decimal.as_str()),
+                        ("ctrl-z", exact_query.as_str(), exact_selection, "1/3"),
+                    ] {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(input.text(), text, "{key}");
+                                assert_eq!(input.selection(), range, "{key}");
+                                assert_eq!(search.results.refillable_text(), Some(result), "{key}");
                             })
                             .unwrap();
                     }
