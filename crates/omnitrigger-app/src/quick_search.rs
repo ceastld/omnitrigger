@@ -2798,8 +2798,8 @@ impl QuickSearch {
     }
 
     fn bookmark_target<'a>(&'a self, query: &'a str) -> Option<&'a str> {
-        if let Results::Bookmarks(items) = &self.results {
-            return Some(&items.get(self.selected)?.expression);
+        if matches!(self.results, Results::Bookmarks(_) | Results::Queries(_)) {
+            return self.results.suggested_input(self.selected);
         }
         let trimmed = query.trim();
         (!trimmed.is_empty()
@@ -4269,6 +4269,8 @@ impl Render for QuickSearch {
                     ("已收藏", "Ctrl+D 取消收藏")
                 } else if self.bookmark_limit_reached {
                     ("最多收藏 12 项", "在收藏列表移除一项后再添加")
+                } else if matches!(self.results, Results::Queries(_)) {
+                    ("收藏所选", "Ctrl+D 收藏所选查询")
                 } else {
                     ("收藏", "Ctrl+D 收藏当前查询")
                 };
@@ -6970,6 +6972,15 @@ mod tests {
                             search.refresh_results("收藏: 3**4", window, cx);
                             search.key_down(&bookmark, window, cx);
                             let removed = matches!(&search.results, Results::Bookmarks(items) if items.is_empty());
+                            let historical = "文本: 原文   甲\r\n乙 ";
+                            search.index.recent.queries.record_exact(historical, "");
+                            search.fill_query("查询历史:", window, cx);
+                            search.refresh_results("查询历史:", window, cx);
+                            search.key_down(&bookmark, window, cx);
+                            assert!(search.index.recent.bookmarks.contains(historical));
+                            assert!(!search.index.recent.bookmarks.contains("查询历史:"));
+                            search.key_down(&bookmark, window, cx);
+                            assert!(!search.index.recent.bookmarks.contains(historical));
                             for query in ["11 + 11", "2**3", "11 + 22"] {
                                 search.index.recent.bookmarks.toggle(query).unwrap();
                             }
