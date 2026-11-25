@@ -7,7 +7,9 @@ use super::calculator::{answer_index, normalize, CalculationError, QUERY_LIMIT};
 use super::conversion::split_conversion;
 use super::csv_tools::append_bounded_csv_row;
 use super::linear_fit::format_power_expression;
-use super::operators::{split_top_level_commas, NumberComparison, Operator};
+use super::operators::{
+    decimal_magnitude_suffix, split_top_level_commas, NumberComparison, Operator,
+};
 use super::radix::{ungroup_digits, Base};
 use super::statistics::{
     absolute_deviation_unweighted, interpolate_ordered_quantile, mean_square_unweighted,
@@ -2423,6 +2425,13 @@ impl FractionParser<'_> {
         } else {
             None
         };
+        let magnitude_power = if let Some((power, rest)) = decimal_magnitude_suffix(self.remaining)
+        {
+            self.remaining = rest;
+            power
+        } else {
+            0
+        };
         let digits = format!("{}{fraction}", &input[..whole]);
         let numerator = BigInt::parse_bytes(digits.as_bytes(), 10).ok_or(FractionError::Invalid)?;
         if numerator.sign() == Sign::NoSign {
@@ -2433,7 +2442,7 @@ impl FractionParser<'_> {
             .ok()
             .filter(|power| u64::from(power.unsigned_abs()) <= MAX_EXACT_BITS)
             .ok_or(FractionError::ExactRange)?;
-        let shift = exponent - fraction.len() as i32;
+        let shift = exponent + magnitude_power - fraction.len() as i32;
         let scale = BigInt::from(10u8).pow(shift.unsigned_abs());
         let value = if shift < 0 {
             BigRational::new(numerator, scale)
@@ -2934,6 +2943,9 @@ mod tests {
             ("计算 9.007199254740993e15 - 9007199254740992", "1"),
             ("计算 .125E+1", "5/4"),
             ("计算 2e2^2", "40000"),
+            ("计算 1.2万/7", "12000/7"),
+            ("计算 0.000000000001万亿", "1"),
+            ("计算 2千^2", "4000000"),
             ("计算 -0.000e-99999999999999999999", "0"),
             ("小数 125e-4 to 4", "0.0125"),
         ] {

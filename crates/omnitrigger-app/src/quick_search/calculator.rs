@@ -1,5 +1,5 @@
 use super::conversion::ConversionError;
-use super::operators::Operator;
+use super::operators::{decimal_magnitude_suffix, Operator};
 use super::percentage::percentage_operands;
 use super::radix::Base;
 use super::scientific::{named_value, split_name, NamedValue};
@@ -476,6 +476,10 @@ impl Parser<'_> {
             literal.parse::<f64>()
         }
         .map_err(|_| CalculationError::Invalid)?;
+        if let Some((power, rest)) = decimal_magnitude_suffix(self.rest) {
+            self.rest = rest;
+            return finite(value * 10.0_f64.powi(power));
+        }
         finite(value)
     }
 
@@ -583,6 +587,21 @@ mod tests {
         ] {
             assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn treats_chinese_decimal_magnitudes_as_part_of_the_number() {
+        for (query, expected) in [
+            ("2万+3千", "23000"),
+            ("1.2亿/2万", "6000"),
+            ("0.25万亿", "250000000000"),
+            ("2千^2", "4000000"),
+            ("1e2万", "1000000"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(calculate("2 万"), Err(CalculationError::Invalid));
+        assert_eq!(calculate("2万3千"), Err(CalculationError::Invalid));
     }
 
     #[test]

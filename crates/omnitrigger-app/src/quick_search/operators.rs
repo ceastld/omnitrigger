@@ -4,6 +4,12 @@ use super::calculator::CalculationError;
 
 pub(super) const MAX_SORT_FIELDS: usize = 8;
 
+pub(super) fn decimal_magnitude_suffix(input: &str) -> Option<(i32, &str)> {
+    [("万亿", 12), ("亿", 8), ("万", 4), ("千", 3)]
+        .into_iter()
+        .find_map(|(suffix, power)| input.strip_prefix(suffix).map(|rest| (power, rest)))
+}
+
 pub(super) fn json_argument_and_tail<T: serde::de::DeserializeOwned>(
     input: &str,
 ) -> Option<(T, &str)> {
