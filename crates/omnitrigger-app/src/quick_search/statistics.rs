@@ -825,7 +825,7 @@ fn weighted_quantile(input: &str) -> Result<String, StatisticsError> {
     weighted_quantile_value(&distribution, probability).map(ToString::to_string)
 }
 
-fn weighted_quantile_value(
+pub(super) fn weighted_quantile_value(
     distribution: &WeightedDistribution,
     probability: BigRational,
 ) -> Result<&BigRational, StatisticsError> {

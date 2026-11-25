@@ -6505,6 +6505,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在精确算式中计算加权分位数",
+        query: "分数: 计算 wquantile(1/2,4,2,1,1,2,1)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求大整数的最大公约数",
         query: "分数: 计算 gcd(-3 * 2**80, 5 * 2**80)",
     },

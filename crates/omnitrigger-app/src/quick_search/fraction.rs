@@ -10,7 +10,8 @@ use super::linear_fit::format_power_expression;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
 use super::statistics::{
-    interpolate_ordered_quantile, median_sorted_values, StatisticsError, WeightedMean,
+    interpolate_ordered_quantile, median_sorted_values, weighted_quantile_value, StatisticsError,
+    WeightedDistribution, WeightedMean,
 };
 
 const MAX_POWER_EXPONENT: u32 = 1024;
@@ -53,6 +54,7 @@ pub(super) enum FractionError {
     ClampBounds,
     QuantileArguments,
     WeightedAverageArguments,
+    WeightedQuantileArguments,
     PositiveMeanArguments,
     RationalGeometricMean,
     AlignmentArguments,
@@ -112,6 +114,9 @@ impl FractionError {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
             }
             Self::WeightedAverageArguments => "wavg 须成对填写数值和非负权重，且至少一个权重大于零",
+            Self::WeightedQuantileArguments => {
+                "wquantile 须先填 0 至 1 的概率，wpercentile 须先填 0 至 100 的百分位。随后成对填写数值和非负权重，至少一个权重大于零"
+            }
             Self::PositiveMeanArguments => "gmean 和 hmean 的每个参数须为正数",
             Self::RationalGeometricMean => "这些参数的几何平均值无法表示为分数",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
@@ -1770,6 +1775,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.weighted_average_function();
         }
+        if matches!(name.as_str(), "wquantile" | "wpercentile") {
+            self.remaining = rest;
+            return self.weighted_quantile_function(name == "wpercentile");
+        }
         if name == "clamp" {
             self.remaining = rest;
             return self.clamp_function();
@@ -2097,6 +2106,38 @@ impl FractionParser<'_> {
             StatisticsError::ZeroTotalWeight => FractionError::WeightedAverageArguments,
             _ => FractionError::ExactRange,
         })
+    }
+
+    fn weighted_quantile_function(
+        &mut self,
+        percentage: bool,
+    ) -> Result<BigRational, FractionError> {
+        let mut values = self.list_function_arguments()?.into_iter();
+        let mut probability = values.next().expect("函数参数列表至少有一项");
+        if percentage {
+            probability /= BigInt::from(100);
+        }
+        if probability.numer().sign() == Sign::Minus
+            || probability.numer() > probability.denom()
+            || values.len() < 2
+            || !values.len().is_multiple_of(2)
+        {
+            return Err(FractionError::WeightedQuantileArguments);
+        }
+        let map_error = |error| match error {
+            StatisticsError::InvalidWeight | StatisticsError::ZeroTotalWeight => {
+                FractionError::WeightedQuantileArguments
+            }
+            _ => FractionError::ExactRange,
+        };
+        let mut distribution = WeightedDistribution::default();
+        while let Some(value) = values.next() {
+            let weight = values.next().expect("每个数值都有对应权重");
+            distribution.record((value, weight)).map_err(map_error)?;
+        }
+        weighted_quantile_value(&distribution, probability)
+            .cloned()
+            .map_err(map_error)
     }
 
     fn clamp_function(&mut self) -> Result<BigRational, FractionError> {
@@ -2743,6 +2784,39 @@ mod tests {
             assert_eq!(
                 calculate_fraction(query),
                 Err(FractionError::WeightedAverageArguments),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn computes_exact_weighted_quantiles_inside_calculator_expressions() {
+        for (query, expected) in [
+            ("wquantile(3/4,1,1,2,1,4,2)", "4"),
+            ("wquantile(1/2,4,2,1,1,2,1)", "2"),
+            ("wquantile(0,-1,0,3/8,1)", "3/8"),
+            ("wquantile(1,6,0,4,1,1,1)", "4"),
+            ("WQUANTILE(2/3,2,1/3,4,1/3,2,1/3)*10", "20"),
+            ("wpercentile(25,1/2,0,5/4,3,7/3,1)", "5/4"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        for query in [
+            "wquantile(0)",
+            "wquantile(1/2,1,1,2)",
+            "wquantile(-1/2,1,1)",
+            "wquantile(3/2,1,1)",
+            "wquantile(1/2,1,-1,2,2)",
+            "wquantile(1/2,1,0,2,0)",
+            "wpercentile(101,1,1)",
+        ] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::WeightedQuantileArguments),
                 "{query}"
             );
         }
