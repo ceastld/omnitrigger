@@ -69,9 +69,9 @@ use super::{
     table_preview::TablePreview,
     text_tools::{
         append_padded_text, compare_natural, compile_regex, grapheme_common_substring,
-        grapheme_edit_distance, newline_pattern, regex_group_index, replace_literal_matches,
-        replace_regex_matches, GraphemeRange, TextError, TextLengthUnit, UnicodeForm,
-        MAX_PADDING_WIDTH, MAX_TEXT_COMPARISON_WORK,
+        grapheme_edit_distance, newline_pattern, parse_template, regex_group_index,
+        replace_literal_matches, replace_regex_matches, GraphemeRange, TemplatePart, TextError,
+        TextLengthUnit, UnicodeForm, MAX_PADDING_WIDTH, MAX_TEXT_COMPARISON_WORK,
     },
     timestamp::{
         absolute_elapsed_nanoseconds, absolute_timestamp, format_absolute_elapsed,
@@ -144,6 +144,7 @@ pub(super) enum CsvError {
     RowNumberArguments,
     RowNumberOverflow,
     ConcatenatedColumnArguments,
+    TemplateColumnArguments,
     FirstNonemptyColumnArguments,
     RegexCaptureColumnArguments,
     RegexCaptureColumnsArguments,
@@ -390,6 +391,9 @@ impl CsvError {
             Self::RowNumberOverflow => "行号超过无符号 64 位整数范围",
             Self::ConcatenatedColumnArguments => {
                 "填写新列名、至少两列和分隔符，例如 [\"地址\",[\"省\",\"市\"],\"-\"]"
+            }
+            Self::TemplateColumnArguments => {
+                "填写新列名和模板，例如 [\"标签\",\"{编号}（{城市}）\"]。用 {{ 和 }} 表示花括号"
             }
             Self::FirstNonemptyColumnArguments => {
                 "填写新列名和至少两个候选列，例如 [\"联系方式\",[\"手机\",\"座机\"]]"
@@ -917,6 +921,7 @@ enum Operation {
         columns: Vec<ColumnReference>,
         separator: String,
     },
+    TemplateColumn([String; 2]),
     FirstNonemptyColumn(String, Vec<ColumnReference>),
     RegexCaptureColumn {
         name: String,
@@ -1816,6 +1821,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 columns,
                 separator,
             }
+        }
+        "模板列" | "template-column" => {
+            let (arguments, data) =
+                json_argument_and_data(input, CsvError::TemplateColumnArguments)?;
+            input = data;
+            Operation::TemplateColumn(arguments)
         }
         "首个非空" | "coalesce-columns" => {
             let ((name, columns), data) = json_argument_and_data::<(String, Vec<ColumnReference>)>(
@@ -2900,6 +2911,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             columns,
             separator,
         } => concatenate_columns(&rows, &name, &columns, &separator),
+        Operation::TemplateColumn([name, template]) => template_column(&rows, &name, &template),
         Operation::FirstNonemptyColumn(name, columns) => {
             first_nonempty_csv_column(&rows, &name, &columns)
         }
@@ -4615,6 +4627,43 @@ fn concatenate_columns(
             return Err(CsvError::AddedColumnTooLarge);
         }
         Ok(parts.join(separator))
+    })
+}
+
+fn template_column(rows: &[Vec<String>], name: &str, template: &str) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::TemplateColumnArguments);
+    }
+    if template.contains('\0') {
+        return Err(CsvError::NullReplacementValue);
+    }
+    let parts = parse_template(template, CsvError::TemplateColumnArguments, |field| {
+        if let Some(number) = field
+            .strip_prefix('#')
+            .filter(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            let number = number.parse().map_err(|_| CsvError::InvalidColumns)?;
+            let index = ColumnReference::Number(number).resolve(header)?;
+            validate_column_width(&[index], header.len())?;
+            Ok(index)
+        } else {
+            header_column(header, field)
+        }
+    })?;
+    write_appended_column(header, records, name, |row| {
+        let mut value = String::new();
+        for part in &parts {
+            let chunk = match *part {
+                TemplatePart::Literal(literal) => literal,
+                TemplatePart::Field(index) => &row[index],
+            };
+            if value.len().saturating_add(chunk.len()) > MAX_EXPANDED_CSV_BYTES {
+                return Err(CsvError::AddedColumnTooLarge);
+            }
+            value.push_str(chunk);
+        }
+        Ok(value)
     })
 }
 
@@ -8148,6 +8197,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "split-to-rows"
             | "工程计数列"
             | "engineering-columns"
+            | "模板列"
+            | "template-column"
             | "按列去重留末"
             | "deduplicate-columns-last"
             | "数值去重留末"
@@ -12099,6 +12150,37 @@ mod tests {
             transform_csv(r#"拼接列 ["省",[1,2],"-"] 省,市"#),
             Err(CsvError::HeaderNameConflict)
         );
+    }
+
+    #[test]
+    fn fills_csv_templates_with_original_cells_and_escapes_only_template_braces() {
+        let query = concat!(
+            r#"模板列 ["标签","{#1} | {{{城市}}} | {编号}, {编号}"]"#,
+            "\n编号,城市\n001,福州\n002,{编号}\n003,"
+        );
+        let expected = concat!(
+            "编号,城市,标签\r\n",
+            "001,福州,\"001 | {福州} | 001, 001\"\r\n",
+            "002,{编号},\"002 | {{编号}} | 002, 002\"\r\n",
+            "003,\"\",\"003 | {} | 003, 003\""
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(csv_table_preview(query).unwrap().unwrap().0, expected);
+        for (template, header, error) in [
+            ("{城市", "城市", CsvError::TemplateColumnArguments),
+            ("{地名}", "城市", CsvError::MissingColumnName),
+            ("{城市}", "城市,城市", CsvError::AmbiguousColumnName),
+            ("{#2}", "城市", CsvError::ColumnOutOfRange),
+        ] {
+            let query = format!(r#"template-column ["标签","{template}"] {header}"#);
+            assert_eq!(transform_csv(&query), Err(error));
+        }
+        let template = "{#1}".repeat(1025);
+        let large = format!(
+            "模板列 [\"标签\",\"{template}\"] 城市\n{}",
+            "x".repeat(1024)
+        );
+        assert_eq!(transform_csv(&large), Err(CsvError::AddedColumnTooLarge));
     }
 
     #[test]

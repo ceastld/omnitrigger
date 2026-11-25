@@ -5330,6 +5330,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按模板把每行的单元格组合成标签",
+        query: "CSV: 模板列 [\"标签\",\"{城市}（{#1}）\"] 编号,城市\n001,福州\n002,杭州",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把每行按顺序找到的第一个非空值写入新列",
         query: "CSV: 首个非空 [\"联系\",[\"手机\",\"座机\"]] 编号,手机,座机\n001,,021-1000\n002,010-2000,021-2000\n003,,",
     },

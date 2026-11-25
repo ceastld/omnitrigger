@@ -1425,43 +1425,67 @@ fn decorate_lines(input: &str, prepend: bool) -> Result<String, TextError> {
 }
 
 #[derive(Clone, Copy)]
-enum LineTemplatePart<'a> {
+pub(super) enum TemplatePart<'a, T> {
     Literal(&'a str),
+    Field(T),
+}
+
+#[derive(Clone, Copy)]
+enum LineTemplateField {
     Line,
     Number,
 }
 
-fn apply_line_template(input: &str) -> Result<String, TextError> {
-    let (template, text) = quoted_text_argument(input)?;
+pub(super) fn parse_template<'a, T, E: Copy>(
+    template: &'a str,
+    invalid: E,
+    mut resolve: impl FnMut(&str) -> Result<T, E>,
+) -> Result<Vec<TemplatePart<'a, T>>, E> {
     let mut parts = Vec::new();
-    let mut rest = template.as_str();
+    let mut rest = template;
     while let Some(index) = rest.find(['{', '}']) {
         let (literal, marker) = rest.split_at(index);
         if !literal.is_empty() {
-            parts.push(LineTemplatePart::Literal(literal));
+            parts.push(TemplatePart::Literal(literal));
         }
-        let (part, tail) = if let Some(tail) = marker.strip_prefix("{行}") {
-            (LineTemplatePart::Line, tail)
-        } else if let Some(tail) = marker.strip_prefix("{序号}") {
-            (LineTemplatePart::Number, tail)
-        } else if let Some(tail) = marker.strip_prefix("{{") {
-            (LineTemplatePart::Literal("{"), tail)
+        let (part, tail) = if let Some(tail) = marker.strip_prefix("{{") {
+            (TemplatePart::Literal("{"), tail)
         } else if let Some(tail) = marker.strip_prefix("}}") {
-            (LineTemplatePart::Literal("}"), tail)
+            (TemplatePart::Literal("}"), tail)
+        } else if let Some(field) = marker.strip_prefix('{') {
+            let (name, tail) = field.split_once('}').ok_or(invalid)?;
+            if name.is_empty() || name.contains('{') {
+                return Err(invalid);
+            }
+            (TemplatePart::Field(resolve(name)?), tail)
         } else {
-            return Err(TextError::InvalidLineTemplate);
+            return Err(invalid);
         };
         parts.push(part);
         rest = tail;
     }
     if !rest.is_empty() {
-        parts.push(LineTemplatePart::Literal(rest));
+        parts.push(TemplatePart::Literal(rest));
     }
+    Ok(parts)
+}
+
+fn apply_line_template(input: &str) -> Result<String, TextError> {
+    let (template, text) = quoted_text_argument(input)?;
+    let parts = parse_template(
+        &template,
+        TextError::InvalidLineTemplate,
+        |name| match name {
+            "行" => Ok(LineTemplateField::Line),
+            "序号" => Ok(LineTemplateField::Number),
+            _ => Err(TextError::InvalidLineTemplate),
+        },
+    )?;
     // 跳过空行中无输出的字段，让每次渲染迭代都消耗输出额度。
     let blank_parts: Vec<_> = parts
         .iter()
         .copied()
-        .filter(|part| !matches!(part, LineTemplatePart::Line))
+        .filter(|part| !matches!(part, TemplatePart::Field(LineTemplateField::Line)))
         .collect();
     let mut result = String::new();
     let mut append = |chunk: &str| {
@@ -1483,9 +1507,9 @@ fn apply_line_template(input: &str) -> Result<String, TextError> {
         let number = (index + 1).to_string();
         for part in active_parts {
             let chunk = match *part {
-                LineTemplatePart::Literal(literal) => literal,
-                LineTemplatePart::Line => line,
-                LineTemplatePart::Number => number.as_str(),
+                TemplatePart::Literal(literal) => literal,
+                TemplatePart::Field(LineTemplateField::Line) => line,
+                TemplatePart::Field(LineTemplateField::Number) => number.as_str(),
             };
             append(chunk)?;
         }
