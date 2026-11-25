@@ -76,7 +76,7 @@ use crate::appearance_ui::SettingsSection;
 use crate::{
     appearance,
     assets::Icon,
-    message_input::{input_preview, MessageInput},
+    message_input::{input_preview, MessageInput, MessageSelection},
     theme::{self, button, icon, rgb, Tone},
     wheel_scenes::WheelSlotKey,
     Page, Workspace,
@@ -1715,6 +1715,17 @@ struct TableSearchOrigin {
     pages: TablePages,
 }
 
+struct QueryDraft {
+    text: String,
+    selection: MessageSelection,
+}
+
+impl QueryDraft {
+    fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ApplicationRefresh {
     NotRequested,
@@ -1872,10 +1883,10 @@ pub(super) struct QuickSearch {
     table_pages: TablePages,
     selected: usize,
     application_refresh: ApplicationRefresh,
-    input_before_help: Option<String>,
-    input_before_calculation_history: Option<String>,
-    input_before_query_history: Option<String>,
-    input_before_bookmarks: Option<String>,
+    input_before_help: Option<QueryDraft>,
+    input_before_calculation_history: Option<QueryDraft>,
+    input_before_query_history: Option<QueryDraft>,
+    input_before_bookmarks: Option<QueryDraft>,
     input_before_table_search: Option<TableSearchOrigin>,
     table_search_return: Option<TableSearchOrigin>,
     result_refill: Option<ResultRefill>,
@@ -2067,27 +2078,33 @@ impl QuickSearch {
             self.input_before_help = None;
         }
         if !matches!(&next, Results::Calculations(_))
-            && !self.input_before_help.as_deref().is_some_and(|input| {
-                matches!(
-                    scoped_query(input.trim()),
-                    Some((Scope::CalculationHistory, _))
-                )
-            })
+            && !self
+                .input_before_help
+                .as_ref()
+                .map(QueryDraft::text)
+                .is_some_and(|input| {
+                    matches!(
+                        scoped_query(input.trim()),
+                        Some((Scope::CalculationHistory, _))
+                    )
+                })
         {
             self.input_before_calculation_history = None;
         }
-        let before_help = self.input_before_help.as_deref();
+        let before_help = self.input_before_help.as_ref().map(QueryDraft::text);
         let history_visible =
             Self::is_query_history(query) || before_help.is_some_and(Self::is_query_history);
         let bookmarks_visible =
             Self::is_bookmark_query(query) || before_help.is_some_and(Self::is_bookmark_query);
         let bookmarks_from_history = self
             .input_before_bookmarks
-            .as_deref()
+            .as_ref()
+            .map(QueryDraft::text)
             .is_some_and(Self::is_query_history);
         let history_from_bookmarks = self
             .input_before_query_history
-            .as_deref()
+            .as_ref()
+            .map(QueryDraft::text)
             .is_some_and(Self::is_bookmark_query);
         if !(history_visible || (bookmarks_visible && bookmarks_from_history)) {
             self.input_before_query_history = None;
@@ -2099,8 +2116,8 @@ impl QuickSearch {
             && !query.starts_with(TABLE_SEARCH_COMMAND)
             && !self
                 .input_before_help
-                .as_deref()
-                .is_some_and(|previous| previous.starts_with(TABLE_SEARCH_COMMAND))
+                .as_ref()
+                .is_some_and(|previous| previous.text.starts_with(TABLE_SEARCH_COMMAND))
         {
             self.input_before_table_search = None;
         }
@@ -2755,21 +2772,41 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
+    fn query_draft(&self, cx: &Context<Self>) -> QueryDraft {
+        let input = self.input.read(cx);
+        QueryDraft {
+            text: input.text(),
+            selection: input.selection_position(),
+        }
+    }
+
+    fn restore_query_draft(&self, draft: QueryDraft, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.set_text(draft.text, cx);
+            input.restore_selection(draft.selection, cx);
+        });
+        window.focus(&self.input.focus_handle(cx));
+    }
+
     fn toggle_calculation_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).text();
+        let draft = self.query_draft(cx);
+        let query = draft.text();
         const PREFIX: &str = "算式历史: ";
         match scoped_query(query.trim()) {
             Some((Scope::CalculationHistory, term)) => {
-                let previous = self.input_before_calculation_history.take();
-                let filter = query.strip_prefix(PREFIX).unwrap_or(term);
-                self.fill_query(previous.unwrap_or_else(|| filter.to_owned()), window, cx);
+                if let Some(previous) = self.input_before_calculation_history.take() {
+                    self.restore_query_draft(previous, window, cx);
+                } else {
+                    let filter = query.strip_prefix(PREFIX).unwrap_or(term);
+                    self.fill_query(filter.to_owned(), window, cx);
+                }
             }
             _ => {
                 let filter: String = query
                     .chars()
                     .take(INPUT_CHARACTER_LIMIT - PREFIX.chars().count())
                     .collect();
-                self.input_before_calculation_history = Some(query);
+                self.input_before_calculation_history = Some(draft);
                 self.fill_query(format!("{PREFIX}{filter}"), window, cx);
             }
         }
@@ -2780,29 +2817,31 @@ impl QuickSearch {
     }
 
     fn toggle_query_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).text();
-        if Self::is_bookmark_query(&query) {
+        let draft = self.query_draft(cx);
+        let query = draft.text();
+        if Self::is_bookmark_query(query) {
             if let Some(previous) = self
                 .input_before_bookmarks
-                .take_if(|input| Self::is_query_history(input))
+                .take_if(|input| Self::is_query_history(input.text()))
             {
-                self.fill_query(previous, window, cx);
+                self.restore_query_draft(previous, window, cx);
                 return;
             }
         }
-        if Self::is_query_history(&query) {
+        if Self::is_query_history(query) {
             if let Some(previous) = self.input_before_query_history.take() {
-                self.fill_query(previous, window, cx);
+                self.restore_query_draft(previous, window, cx);
             }
-        } else if Self::shows_help(&query, &self.results)
+        } else if Self::shows_help(query, &self.results)
             && self
                 .input_before_help
-                .as_deref()
+                .as_ref()
+                .map(QueryDraft::text)
                 .is_some_and(Self::is_query_history)
         {
             self.toggle_help(window, cx);
         } else {
-            self.input_before_query_history = Some(query);
+            self.input_before_query_history = Some(draft);
             self.fill_query("查询历史: ", window, cx);
         }
     }
@@ -2829,29 +2868,31 @@ impl QuickSearch {
     }
 
     fn toggle_bookmark_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).text();
-        if Self::is_query_history(&query) {
+        let draft = self.query_draft(cx);
+        let query = draft.text();
+        if Self::is_query_history(query) {
             if let Some(previous) = self
                 .input_before_query_history
-                .take_if(|input| Self::is_bookmark_query(input))
+                .take_if(|input| Self::is_bookmark_query(input.text()))
             {
-                self.fill_query(previous, window, cx);
+                self.restore_query_draft(previous, window, cx);
                 return;
             }
         }
-        if Self::is_bookmark_query(&query) {
+        if Self::is_bookmark_query(query) {
             if let Some(previous) = self.input_before_bookmarks.take() {
-                self.fill_query(previous, window, cx);
+                self.restore_query_draft(previous, window, cx);
             }
-        } else if Self::shows_help(&query, &self.results)
+        } else if Self::shows_help(query, &self.results)
             && self
                 .input_before_help
-                .as_deref()
+                .as_ref()
+                .map(QueryDraft::text)
                 .is_some_and(Self::is_bookmark_query)
         {
             self.toggle_help(window, cx);
         } else {
-            self.input_before_bookmarks = Some(query);
+            self.input_before_bookmarks = Some(draft);
             self.fill_query("收藏: ", window, cx);
         }
     }
@@ -2964,10 +3005,11 @@ impl QuickSearch {
         if self.input.read(cx).is_composing() {
             return;
         }
-        let query = self.input.read(cx).text();
-        if Self::shows_help(&query, &self.results) {
+        let draft = self.query_draft(cx);
+        let query = draft.text();
+        if Self::shows_help(query, &self.results) {
             if let Some(previous) = self.input_before_help.take() {
-                self.fill_query(previous, window, cx);
+                self.restore_query_draft(previous, window, cx);
             }
             return;
         }
@@ -2983,8 +3025,8 @@ impl QuickSearch {
             },
             _ => None,
         }
-        .or_else(|| example_help_query(&query));
-        self.input_before_help = Some(query);
+        .or_else(|| example_help_query(query));
+        self.input_before_help = Some(draft);
         self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
     }
 
@@ -7024,6 +7066,7 @@ mod tests {
                             };
                             let original = " 2**10 ";
                             search.fill_query(original, window, cx);
+                            search.input.update(cx, |input, cx| input.move_cursor_to(2, cx));
                             search.refresh_results(original, window, cx);
                             search.key_down(&key("f4", true), window, cx);
                             let after_repeat = search.input.read(cx).text();
@@ -7031,12 +7074,16 @@ mod tests {
                             let opened = search.input.read(cx).text();
                             let filter = "收藏: 每周";
                             search.fill_query(filter, window, cx);
+                            search.input.update(cx, |input, cx| {
+                                input.select_suffix("收藏: ".len(), cx);
+                            });
                             search.refresh_results(filter, window, cx);
                             search.key_down(&key("f1", false), window, cx);
                             let help = search.input.read(cx).text();
                             search.refresh_results(&help, window, cx);
                             search.key_down(&key("f1", false), window, cx);
                             let restored_filter = search.input.read(cx).text();
+                            assert_eq!(search.input.read(cx).selection(), "收藏: ".len()..filter.len());
                             search.refresh_results(&restored_filter, window, cx);
                             search.key_down(&key("f1", false), window, cx);
                             let reopened_help = search.input.read(cx).text();
@@ -7044,9 +7091,11 @@ mod tests {
                             search.refresh_results(&reopened_help, window, cx);
                             search.key_down(&key("f4", false), window, cx);
                             assert_eq!(search.input.read(cx).text(), filter);
+                            assert_eq!(search.input.read(cx).selection(), "收藏: ".len()..filter.len());
                             search.refresh_results(filter, window, cx);
                             search.key_down(&key("f4", false), window, cx);
                             let restored_query = search.input.read(cx).text();
+                            assert_eq!(search.input.read(cx).selection(), 2..2);
                             search.fill_query(filter, window, cx);
                             search.refresh_results(filter, window, cx);
                             search.key_down(&key("f4", false), window, cx);
@@ -7068,6 +7117,7 @@ mod tests {
                             };
                             let history = key("ctrl-r");
                             search.fill_query(" 2**10 ", window, cx);
+                            search.input.update(cx, |input, cx| input.select_suffix(2, cx));
                             search.key_down(&history, window, cx);
                             let opened = search.input.read(cx).text();
                             let filter = "算式历史: １０２４";
@@ -7080,6 +7130,7 @@ mod tests {
                             search.refresh_results(filter, window, cx);
                             search.key_down(&history, window, cx);
                             let restored = search.input.read(cx).text();
+                            assert_eq!(search.input.read(cx).selection(), 2..restored.len());
                             search.fill_query("算式历史： 3**4", window, cx);
                             search.key_down(&history, window, cx);
                             let manual = search.input.read(cx).text();
@@ -7110,6 +7161,7 @@ mod tests {
                             ] {
                                 for back in [first, second] {
                                     search.fill_query(draft, window, cx);
+                                    search.input.update(cx, |input, cx| input.move_cursor_to(3, cx));
                                     search.refresh_results(draft, window, cx);
                                     let press = |search: &mut QuickSearch,
                                                  key: &str,
@@ -7127,10 +7179,18 @@ mod tests {
                                     assert_eq!(press(search, first, window, cx), intermediate);
                                     let filter = format!("{intermediate}待测试");
                                     search.fill_query(&filter, window, cx);
+                                    search.input.update(cx, |input, cx| {
+                                        input.select_suffix(intermediate.len(), cx);
+                                    });
                                     search.refresh_results(&filter, window, cx);
                                     assert_eq!(press(search, second, window, cx), innermost);
                                     assert_eq!(press(search, back, window, cx), filter);
+                                    assert_eq!(
+                                        search.input.read(cx).selection(),
+                                        intermediate.len()..filter.len()
+                                    );
                                     assert_eq!(press(search, first, window, cx), draft);
+                                    assert_eq!(search.input.read(cx).selection(), 3..3);
                                 }
                             }
                         })

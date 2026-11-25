@@ -62,6 +62,12 @@ enum TextMode {
     PreserveWhitespace,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct MessageSelection {
+    anchor: usize,
+    head: usize,
+}
+
 pub struct MessageInput {
     character_limit: usize,
     mode: TextMode,
@@ -162,6 +168,26 @@ impl MessageInput {
 
     pub(super) fn selection(&self) -> Range<usize> {
         self.anchor.min(self.head)..self.anchor.max(self.head)
+    }
+
+    pub(super) fn selection_position(&self) -> MessageSelection {
+        MessageSelection {
+            anchor: self.anchor,
+            head: self.head,
+        }
+    }
+
+    pub(super) fn restore_selection(
+        &mut self,
+        selection: MessageSelection,
+        cx: &mut Context<Self>,
+    ) {
+        if self.content.is_char_boundary(selection.anchor)
+            && self.content.is_char_boundary(selection.head)
+        {
+            self.anchor = selection.anchor;
+            self.move_to(selection.head, true, cx);
+        }
     }
 
     fn move_to(&mut self, offset: usize, extend: bool, cx: &mut Context<Self>) {
