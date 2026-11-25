@@ -66,6 +66,7 @@ pub(super) enum RadixError {
     FloatAdjacentNan,
     SheetColumnArguments,
     SheetCellArguments,
+    SheetReferenceArguments,
     SheetRangeArguments,
     RomanArguments,
     RomanRange,
@@ -120,6 +121,9 @@ impl RadixError {
             }
             Self::SheetColumnArguments => "填写 A 至 XFD 的列字母，或 1 至 16384 的整数列号",
             Self::SheetCellArguments => "填写单个单元格，例如 B3 或 R3C2，范围为 A1 至 XFD1048576",
+            Self::SheetReferenceArguments => {
+                "填写引用和基准地址，例如 R[-2]C[1] @ B3 或 C1 @ B3。引用须在工作表范围内"
+            }
             Self::SheetRangeArguments => "用冒号分隔两个同格式地址，例如 B3:D8 或 R3C2:R8C4",
             Self::RomanArguments => "填写常用写法的罗马数字，例如 IV、CDXCIX 或 MMXXVI",
             Self::RomanRange => "填写 1 至 3999 的十进制整数，例如 2026",
@@ -267,6 +271,16 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
         return parse_sheet_cell(arguments)
             .map(SheetCell::converted_address)
             .ok_or(RadixError::SheetCellArguments);
+    }
+    if operation.eq_ignore_ascii_case("引用转A1")
+        || operation.eq_ignore_ascii_case("reference-to-a1")
+    {
+        return convert_sheet_reference(arguments, SheetNotation::A1);
+    }
+    if operation.eq_ignore_ascii_case("引用转R1C1")
+        || operation.eq_ignore_ascii_case("reference-to-r1c1")
+    {
+        return convert_sheet_reference(arguments, SheetNotation::R1C1);
     }
     if operation == "单元格范围" || operation.eq_ignore_ascii_case("cell-range") {
         return convert_sheet_range(arguments, false);
@@ -478,15 +492,97 @@ fn parse_sheet_cell(input: &str) -> Option<SheetCell> {
         });
     }
 
+    let reference = parse_a1_reference(input)?;
+    Some(SheetCell {
+        row: reference.row,
+        column: reference.column,
+        notation: SheetNotation::A1,
+    })
+}
+
+struct SheetA1Reference {
+    row: u32,
+    column: u32,
+    row_absolute: bool,
+    column_absolute: bool,
+}
+
+fn parse_a1_reference(input: &str) -> Option<SheetA1Reference> {
+    let column_absolute = input.starts_with('$');
     let cell = input.strip_prefix('$').unwrap_or(input);
     let (column, row) = cell.split_at(cell.find(|ch: char| !ch.is_ascii_alphabetic())?);
     let column = sheet_column_number(column)?;
+    let row_absolute = row.starts_with('$');
     let row = sheet_coordinate(row.strip_prefix('$').unwrap_or(row), MAX_SHEET_ROW)?;
-    Some(SheetCell {
+    Some(SheetA1Reference {
         row,
         column,
-        notation: SheetNotation::A1,
+        row_absolute,
+        column_absolute,
     })
+}
+
+fn convert_sheet_reference(input: &str, target: SheetNotation) -> Result<String, RadixError> {
+    let (reference, anchor) = input
+        .split_once('@')
+        .ok_or(RadixError::SheetReferenceArguments)?;
+    let anchor = parse_sheet_cell(anchor).ok_or(RadixError::SheetReferenceArguments)?;
+    let reference = reference.trim();
+    match target {
+        SheetNotation::A1 => relative_r1c1_to_a1(reference, &anchor),
+        SheetNotation::R1C1 => a1_to_relative_r1c1(reference, &anchor),
+    }
+    .ok_or(RadixError::SheetReferenceArguments)
+}
+
+fn relative_r1c1_to_a1(reference: &str, anchor: &SheetCell) -> Option<String> {
+    let (row, column) = reference.strip_prefix(['R', 'r'])?.split_once(['C', 'c'])?;
+    let (row, row_absolute) = resolve_r1c1_coordinate(row, anchor.row, MAX_SHEET_ROW)?;
+    let (column, column_absolute) =
+        resolve_r1c1_coordinate(column, anchor.column, MAX_SHEET_COLUMN)?;
+    let row_marker = if row_absolute { "$" } else { "" };
+    let column_marker = if column_absolute { "$" } else { "" };
+    Some(format!(
+        "{column_marker}{}{row_marker}{row}",
+        sheet_column_letters(column)
+    ))
+}
+
+fn resolve_r1c1_coordinate(input: &str, anchor: u32, maximum: u32) -> Option<(u32, bool)> {
+    if input.is_empty() {
+        return Some((anchor, false));
+    }
+    if let Some(offset) = input
+        .strip_prefix('[')
+        .and_then(|part| part.strip_suffix(']'))
+    {
+        let digits = offset.strip_prefix('-').unwrap_or(offset);
+        if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let index = anchor.checked_add_signed(offset.parse().ok()?)?;
+        return (1..=maximum).contains(&index).then_some((index, false));
+    }
+    sheet_coordinate(input, maximum).map(|index| (index, true))
+}
+
+fn a1_to_relative_r1c1(reference: &str, anchor: &SheetCell) -> Option<String> {
+    let reference = parse_a1_reference(reference)?;
+    let row = format_r1c1_coordinate(reference.row, anchor.row, reference.row_absolute);
+    let column = format_r1c1_coordinate(reference.column, anchor.column, reference.column_absolute);
+    Some(format!("R{row}C{column}"))
+}
+
+fn format_r1c1_coordinate(index: u32, anchor: u32, absolute: bool) -> String {
+    if absolute {
+        return index.to_string();
+    }
+    let offset = i64::from(index) - i64::from(anchor);
+    if offset == 0 {
+        String::new()
+    } else {
+        format!("[{offset}]")
+    }
 }
 
 fn convert_sheet_range(input: &str, dimensions: bool) -> Result<String, RadixError> {
@@ -1566,6 +1662,41 @@ mod tests {
             assert_eq!(
                 convert_arbitrary_radix(query),
                 Err(RadixError::SheetRangeArguments)
+            );
+        }
+    }
+
+    #[test]
+    fn converts_relative_and_mixed_spreadsheet_references_using_the_anchor() {
+        for (input, expected) in [
+            ("引用转A1 R[-2]C[1] @ B3", "C1"),
+            ("引用转R1C1 C1 @ B3", "R[-2]C[1]"),
+            ("引用转A1 r1c[-1] @ R3C2", "A$1"),
+            ("reference-to-r1c1 A$1 @ B3", "R1C[-1]"),
+            ("引用转A1 RC1 @ B3", "$A3"),
+            ("引用转R1C1 RC1 @ B3", "R[-2]C[469]"),
+            ("引用转R1C1 $C$1 @ B3", "R1C3"),
+            ("引用转R1C1 B3 @ B3", "RC"),
+            ("引用转A1 R[0]C @ XFD1048576", "XFD1048576"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "引用转A1 R[-1]C @ A1",
+            "引用转A1 RC[1] @ XFD1",
+            "引用转A1 R[+1]C @ A1",
+            "引用转A1 R[99999999999]C @ A1",
+            "引用转R1C1 XFE1 @ A1",
+            "引用转R1C1 A1 @ XFE1",
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(input),
+                Err(RadixError::SheetReferenceArguments),
+                "{input}"
             );
         }
     }

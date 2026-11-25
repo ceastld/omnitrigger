@@ -2031,6 +2031,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按基准格将 R1C1 引用转为 A1",
+        query: "进制: 引用转A1 R[-2]C[1] @ B3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按基准格将 A1 引用转为 R1C1",
+        query: "进制: 引用转R1C1 C1 @ B3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在 A1 与 R1C1 格式间转换单元格范围",
         query: "进制: 单元格范围 $B$3:D8",
     },
@@ -7342,6 +7352,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "位比对CSV",
             "表格列号",
             "单元格地址",
+            "引用转A1",
+            "引用转R1C1",
             "单元格范围",
             "范围大小",
             "罗马数字",
