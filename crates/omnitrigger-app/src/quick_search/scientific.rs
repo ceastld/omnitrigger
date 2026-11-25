@@ -24,6 +24,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "isclose" => return Some(NamedValue::Aggregate(is_close)),
         "remainder" => return Some(NamedValue::Aggregate(nearest_remainder)),
+        "nextafter" => return Some(NamedValue::Aggregate(next_after)),
         "fsum" => return Some(NamedValue::Aggregate(exact_float_sum)),
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
@@ -510,6 +511,43 @@ fn exact_float_sum(values: &[f64]) -> f64 {
         return f64::from_bits(sign | (EXPONENT_MASK << FRACTION_BITS));
     }
     f64::from_bits(sign | (exponent << FRACTION_BITS) | (mantissa & FRACTION_MASK))
+}
+
+fn next_after(values: &[f64]) -> f64 {
+    let (start, target, steps) = match *values {
+        [start, target] => (start, target, 1),
+        [start, target, steps]
+            if (0.0..=MAX_SAFE_INTEGER as f64).contains(&steps) && steps.fract() == 0.0 =>
+        {
+            (start, target, steps as i64)
+        }
+        _ => return f64::NAN,
+    };
+    if steps == 0 {
+        return start;
+    }
+    if start == target {
+        return target;
+    }
+
+    const SIGN_BIT: u64 = 1 << 63;
+    // 位模式的绝对值按大小排序，两个有符号零共用一个位置。
+    let rank = |value: f64| {
+        let magnitude = (value.to_bits() & !SIGN_BIT) as i64;
+        if value.is_sign_negative() {
+            -magnitude
+        } else {
+            magnitude
+        }
+    };
+    let origin = rank(start);
+    let destination = rank(target);
+    if steps as u64 > origin.abs_diff(destination) {
+        return target;
+    }
+    let advanced = origin + if origin < destination { steps } else { -steps };
+    let negative = advanced < 0 || (advanced == 0 && start.is_sign_negative());
+    f64::from_bits(advanced.unsigned_abs() | (u64::from(negative) << 63))
 }
 
 fn nearest_remainder(values: &[f64]) -> f64 {

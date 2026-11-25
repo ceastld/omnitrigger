@@ -898,6 +898,39 @@ mod tests {
     }
 
     #[test]
+    fn steps_toward_a_target_across_binary64_spacing_boundaries_and_zero() {
+        for (query, expected) in [
+            ("nextafter(1,2)", 1.0_f64.next_up()),
+            ("nextafter(1,0,3)", f64::from_bits(1.0_f64.to_bits() - 3)),
+            ("nextafter(1,2,2**52)", 2.0),
+            ("nextafter(1,1+2**-52,100)", 1.0_f64.next_up()),
+            ("nextafter(1.7976931348623157e308,0)", f64::MAX.next_down()),
+            ("nextafter(-5e-324,5e-324)", -0.0),
+            ("nextafter(-5e-324,5e-324,2)", f64::from_bits(1)),
+            ("nextafter(5e-324,-1,2)", -f64::from_bits(1)),
+            ("nextafter(0,-0)", -0.0),
+            ("nextafter(0,-0,0)", 0.0),
+        ] {
+            assert_eq!(
+                evaluate(query).unwrap().to_bits(),
+                expected.to_bits(),
+                "{query}"
+            );
+        }
+        for query in [
+            "nextafter(1,2,-1)",
+            "nextafter(1,2,0.5)",
+            "nextafter(1,2,2**53)",
+        ] {
+            assert_eq!(
+                evaluate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn computes_binary64_remainders_without_rounding_the_quotient() {
         for (query, expected) in [
             ("remainder(7,4)", -1.0),

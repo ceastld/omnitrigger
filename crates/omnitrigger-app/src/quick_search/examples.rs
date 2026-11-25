@@ -3528,6 +3528,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "向指定浮点数移动三个可表示的位置",
+        query: "nextafter(2**52,2**53,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按最近整数商求余数，中点取偶数商",
         query: "remainder(6,4)",
     },
