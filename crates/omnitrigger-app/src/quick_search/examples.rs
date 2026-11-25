@@ -5236,6 +5236,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看 CSV 列号、原表头和同名列数量",
+        query: "CSV: 列清单 编号,备注,备注,,\" 备注 \"\n001,茶,米,,已核对",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计各列的空值、不同值和重复值种数",
         query: "CSV: 列值概览 [\"备注\",1] 编号,备注\n001,\"茶,咖啡\"\n1,\"茶,咖啡\"\n001,\" \"\n,\"\"",
     },

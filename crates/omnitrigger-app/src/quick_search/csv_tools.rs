@@ -237,6 +237,7 @@ pub(super) enum CsvError {
     LengthCheckArguments,
     HeaderCheckArguments,
     HeaderCheckTooLarge,
+    ColumnDirectoryTooLarge,
     RegexCheckColumnsArguments,
     RegexCheckColumnsInputTooLarge,
     RegexIssuesTooLarge,
@@ -591,6 +592,7 @@ impl CsvError {
             Self::LengthCheckArguments => "填写列列表和 [长度单位,最小长度,最大长度]，最小长度不能大于最大长度",
             Self::HeaderCheckArguments => "用非空的 JSON 字符串数组填写预期列名和顺序",
             Self::HeaderCheckTooLarge => "表头检查结果超过 1 MiB，请缩小表格范围",
+            Self::ColumnDirectoryTooLarge => "列清单超过 1 MiB，请缩小表格范围",
             Self::RegexCheckColumnsArguments => "填写列名或列号列表和正则表达式",
             Self::RegexCheckColumnsInputTooLarge => "所选列的文本合计超过 16 KiB，请缩小表格范围",
             Self::RegexIssuesTooLarge => "正则检查结果超过 1 MiB，请缩小表格范围",
@@ -1293,6 +1295,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "依次处理" | "pipeline" => return Err(CsvError::NestedPipeline),
+        "列清单" | "column-directory" => return csv_column_directory(input),
         "加权平均" | "weighted-mean" => return csv_weighted_mean(input),
         "拟合列" | "fit-columns" => return append_fit_columns(input),
         "函数筛选" | "filter-function" => return filter_function_rows(input),
@@ -8151,6 +8154,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
         operation.to_ascii_lowercase().as_str(),
         "检查表头"
             | "check-header"
+            | "列清单"
+            | "column-directory"
             | "检查数值列"
             | "check-numeric-columns"
             | "检查日期列"
@@ -8363,6 +8368,26 @@ fn csv_layout_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewD
         _ => return None,
     };
     Some(projected.map(|rows| (write_rows(&rows, ','), rows)))
+}
+
+fn csv_column_directory(input: &str) -> Result<String, CsvError> {
+    let rows = read_table_for_preview(input, ',')?;
+    let header = rows.first().ok_or(CsvError::MissingInput)?;
+    let mut uses = HashMap::new();
+    for name in header {
+        *uses.entry(name.as_str()).or_insert(0usize) += 1;
+    }
+    let mut output = String::from("列号,列名,同名列数");
+    for (index, name) in header.iter().enumerate() {
+        let number = (index + 1).to_string();
+        let count = uses[name.as_str()].to_string();
+        append_bounded_csv_row(
+            &mut output,
+            [number.as_str(), name.as_str(), count.as_str()].into_iter(),
+            CsvError::ColumnDirectoryTooLarge,
+        )?;
+    }
+    Ok(output)
 }
 
 fn csv_value_profile(input: &str) -> Result<CsvPreviewData, CsvError> {
@@ -11849,6 +11874,36 @@ mod tests {
         assert_eq!(
             transform_csv("空值统计 [2,\"备注\"] 编号,备注\n001,茶"),
             Err(CsvError::NamedColumnArguments)
+        );
+    }
+
+    #[test]
+    fn lists_csv_columns_in_order_including_blank_and_duplicate_names() {
+        let query = "列清单 \u{feff}A,a,A,\" A \",,\"B,C\",\"甲\n乙\"\n1,2,3,4,5,6,7";
+        let expected = concat!(
+            "列号,列名,同名列数\r\n1,A,2\r\n2,a,1\r\n3,A,2\r\n4, A ,1\r\n",
+            "5,\"\",1\r\n6,\"B,C\",1\r\n7,\"甲\n乙\",1",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(
+            csv_table_preview(query)
+                .unwrap()
+                .map(|(text, _)| text)
+                .as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            transform_csv("column-directory ,n,").as_deref(),
+            Ok("列号,列名,同名列数\r\n1,\"\",2\r\n2,n,1\r\n3,\"\",2")
+        );
+        assert_eq!(
+            transform_csv("列清单 A,B\n1"),
+            Err(CsvError::DifferentColumnCount)
+        );
+        let large = format!("列清单 {}", "x".repeat(MAX_EXPANDED_CSV_BYTES));
+        assert_eq!(
+            transform_csv(&large),
+            Err(CsvError::ColumnDirectoryTooLarge)
         );
     }
 
