@@ -248,6 +248,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     match operation.to_ascii_lowercase().as_str() {
         "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
+        "连续计数csv" | "count-consecutive-lines-csv" => {
+            Some(count_consecutive_lines_csv(text))
+        }
         "markdown标题csv" | "markdown-headings-csv" => Some(markdown_headings_csv(text)),
         "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
         "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
@@ -953,6 +956,32 @@ fn number_lines_csv(input: &str) -> Result<String, TextError> {
         append_bounded_csv_row(
             &mut csv,
             [number.as_str(), line].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn count_consecutive_lines_csv(input: &str) -> Result<String, TextError> {
+    let text = text_payload(input)?;
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut lines = numbered_text_lines(text, logical_newline_pattern()).peekable();
+    let mut csv = String::from("起始行,次数,原文");
+    while let Some((index, line)) = lines.next() {
+        if line.contains('\0') {
+            return Err(TextError::NullCharacter);
+        }
+        let mut count = 1;
+        while lines.next_if(|&(_, next)| next == line).is_some() {
+            count += 1;
+        }
+        let start = (index + 1).to_string();
+        let count = count.to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [start.as_str(), count.as_str(), line].into_iter(),
             TextError::ResultTooLarge,
         )?;
     }
@@ -4035,6 +4064,22 @@ mod tests {
         }
         let entire = format!("context-lines [\"x\",{0},{0}] a\nx\nz", usize::MAX);
         assert_eq!(transform_text(&entire).as_deref(), Ok("a\nx\nz"));
+    }
+
+    #[test]
+    fn counts_adjacent_identical_lines_without_merging_separate_groups() {
+        let input = "连续计数CSV \"告警,茶\r\n告警,茶\u{2028}\u{2029}\n告警,茶\r正常\n\"";
+        let expected =
+            "起始行,次数,原文\r\n1,2,\"告警,茶\"\r\n3,2,\"\"\r\n5,1,\"告警,茶\"\r\n6,1,正常";
+        assert_eq!(text_csv_report(input), Some(Ok(expected.to_owned())));
+        assert_eq!(
+            transform_text("连续计数CSV \"\""),
+            Err(TextError::MissingText)
+        );
+        assert_eq!(
+            transform_text("连续计数CSV \"含\0空字符\""),
+            Err(TextError::NullCharacter)
+        );
     }
 
     #[test]

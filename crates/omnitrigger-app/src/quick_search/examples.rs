@@ -4172,6 +4172,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计连续相同的日志行",
+        query: "文本: 连续计数CSV\n正常\n正常\n告警\n正常",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按分隔符拆分成行",
         query: "文本: 拆分成行 \"、\" 苹果、梨",
     },
