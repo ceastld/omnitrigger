@@ -75,6 +75,7 @@ pub(super) enum TextError {
     IncompleteLineComparison,
     InvalidLineComparison,
     TooManyDiffLines,
+    DiffContextArguments,
     TooManyEditGraphemes,
     TooManyCommonSubstringGraphemes,
     EditDistanceWorkLimit,
@@ -130,6 +131,9 @@ impl TextError {
             Self::IncompleteLineComparison => "输入两组加引号的文本，组间用空格分开",
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
             Self::TooManyDiffLines => "逐行比较最多支持每组 512 行",
+            Self::DiffContextArguments => {
+                "填写变更前后的行数和两段加引号的文本，例如 [1,2] \"旧值\" \"新值\""
+            }
             Self::TooManyEditGraphemes => "编辑距离最多支持每段 512 个字素簇",
             Self::TooManyCommonSubstringGraphemes => "公共片段最多支持每段 512 个字素簇",
             Self::EditDistanceWorkLimit => "编辑距离计算量过大，请缩小数据范围",
@@ -224,6 +228,8 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     match operation.to_ascii_lowercase().as_str() {
         "markdown标题csv" | "markdown-headings-csv" => Some(markdown_headings_csv(text)),
+        "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
+        "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
         _ => None,
     }
 }
@@ -299,8 +305,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "行对称差" | "symmetric-difference-lines" => {
             return compare_line_sets(text, LineSetOperation::SymmetricDifference);
         }
-        "逐行比较" | "diff-lines" => return diff_lines(text, LineOutput::Text),
-        "逐行比较csv" | "diff-lines-csv" => return diff_lines(text, LineOutput::Csv),
+        "逐行比较" | "diff-lines" => return diff_lines(text, LineOutput::Text, None),
         "编辑距离" | "edit-distance" | "levenshtein" => return edit_distance(text),
         "公共片段" | "common-substring" => return common_substring(text),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
@@ -1895,7 +1900,17 @@ enum LineChange {
     Added,
 }
 
-fn diff_lines(input: &str, output: LineOutput) -> Result<String, TextError> {
+fn diff_context_csv(input: &str) -> Result<String, TextError> {
+    let (context, pair) =
+        json_argument_and_tail::<(usize, usize)>(input).ok_or(TextError::DiffContextArguments)?;
+    diff_lines(pair, LineOutput::Csv, Some(context))
+}
+
+fn diff_lines(
+    input: &str,
+    output: LineOutput,
+    context: Option<(usize, usize)>,
+) -> Result<String, TextError> {
     let (before, after) = read_text_pair(input)?;
     let before: Vec<_> = before.lines().take(MAX_DIFF_LINES + 1).collect();
     let after: Vec<_> = after.lines().take(MAX_DIFF_LINES + 1).collect();
@@ -1918,10 +1933,7 @@ fn diff_lines(input: &str, output: LineOutput) -> Result<String, TextError> {
             };
         }
     }
-    let mut result = match output {
-        LineOutput::Text => String::new(),
-        LineOutput::Csv => "操作,原行号,新行号,内容".to_owned(),
-    };
+    let mut changes = Vec::with_capacity(before.len() + after.len());
     let (mut left, mut right) = (0, 0);
     while left < before.len() || right < after.len() {
         let (change, line) =
@@ -1942,6 +1954,33 @@ fn diff_lines(input: &str, output: LineOutput) -> Result<String, TextError> {
                 right += 1;
                 (LineChange::Added, line)
             };
+        changes.push((change, line, left, right));
+    }
+    let included = context.map(|(preceding, following)| {
+        let mut included = vec![false; changes.len()];
+        let mut through = 0;
+        for (index, (change, _, _, _)) in changes.iter().enumerate() {
+            if matches!(change, LineChange::Unchanged) {
+                continue;
+            }
+            let start = index.saturating_sub(preceding).max(through);
+            let end = index
+                .saturating_add(following)
+                .saturating_add(1)
+                .min(changes.len());
+            included[start..end].fill(true);
+            through = end;
+        }
+        included
+    });
+    let mut result = match output {
+        LineOutput::Text => String::new(),
+        LineOutput::Csv => "操作,原行号,新行号,内容".to_owned(),
+    };
+    for (index, (change, line, left, right)) in changes.into_iter().enumerate() {
+        if included.as_ref().is_some_and(|shown| !shown[index]) {
+            continue;
+        }
         match output {
             LineOutput::Text => {
                 let prefix = match change {
@@ -2358,6 +2397,33 @@ mod tests {
         assert_eq!(
             transform_text(r#"逐行比较 "一" 二"#),
             Err(TextError::InvalidLineComparison)
+        );
+    }
+
+    #[test]
+    fn exports_only_changed_lines_and_the_requested_surrounding_context() {
+        let pair = r#" "远处\n表头\n旧值\n保留\n较远" "远处\n表头\n新值\n保留\n较远""#;
+        let expected = concat!(
+            "操作,原行号,新行号,内容\r\n",
+            "相同,2,2,表头\r\n",
+            "删除,3,\"\",旧值\r\n",
+            "新增,\"\",3,新值\r\n",
+            "相同,4,4,保留",
+        );
+        let query = format!("差异上下文CSV [1,1]{pair}");
+        assert_eq!(transform_text(&query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(&query), Some(Ok(expected.to_owned())));
+        assert_eq!(
+            transform_text(&format!("DIFF-CONTEXT-CSV [0,0]{pair}")).as_deref(),
+            Ok("操作,原行号,新行号,内容\r\n删除,3,\"\",旧值\r\n新增,\"\",3,新值"),
+        );
+        assert_eq!(
+            transform_text(r#"差异上下文CSV [3,3] "同" "同""#).as_deref(),
+            Ok("操作,原行号,新行号,内容"),
+        );
+        assert_eq!(
+            transform_text(r#"差异上下文CSV [-1,0] "旧值" "新值""#),
+            Err(TextError::DiffContextArguments),
         );
     }
 

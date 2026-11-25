@@ -3925,6 +3925,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"文本: 逐行比较CSV "苹果\n梨\n茶" "苹果\n柿子\n茶""#,
     },
     Example {
+        icon: Icon::Layers,
+        title: "预览文本变更及指定数量的上下文",
+        query: r#"文本: 差异上下文CSV [1,1] "远处\n表头\n旧值\n保留\n较远" "远处\n表头\n新值\n保留\n较远""#,
+    },
+    Example {
         icon: Icon::Terminal,
         title: "计算两段文字在字素簇层面的编辑距离",
         query: r#"文本: 编辑距离 "猫👩‍💻" "猫🧑‍💻""#,
