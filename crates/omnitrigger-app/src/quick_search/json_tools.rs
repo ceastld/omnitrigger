@@ -16,7 +16,7 @@ use super::fraction::{ensure_exact_size, parse_fraction_literal};
 use super::operators::{FieldSortOrder, NumberComparison, MAX_SORT_FIELDS};
 use super::statistics::{median_sorted_values, MAX_VALUES};
 use super::text_tools::compare_natural;
-use super::InputValidationReport;
+use super::{input_line_column, is_validation_operation, InputValidationReport};
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
@@ -284,15 +284,11 @@ fn split_json_operation(query: &str) -> Option<(&str, &str)> {
     Some((operation, source))
 }
 
-pub(super) fn is_json_validation_operation(operation: &str) -> bool {
-    operation == "校验" || operation.eq_ignore_ascii_case("validate")
-}
-
 pub(super) fn json_validation_report(
     query: &str,
 ) -> Option<Result<InputValidationReport, JsonError>> {
     let (operation, source) = split_json_operation(query)?;
-    is_json_validation_operation(operation).then(|| {
+    is_validation_operation(operation).then(|| {
         validate_json(source).map(|report| report.offset_error_span(query.len() - source.len()))
     })
 }
@@ -333,15 +329,7 @@ fn validate_json(source: &str) -> Result<InputValidationReport, JsonError> {
         .chars()
         .next()
         .map_or(start, |ch| start + ch.len_utf8());
-    let before = &source[..start];
-    let line = before.bytes().filter(|&byte| byte == b'\n').count() + 1;
-    let column = before
-        .rsplit('\n')
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .count()
-        + 1;
+    let (line, column) = input_line_column(&source[..start]);
     let reason = json_line_error_reason(&error);
     Ok(InputValidationReport {
         text: format!("{reason} · 第 {line} 行 · 第 {column} 列"),
@@ -391,7 +379,7 @@ fn is_json_lines_output(operation: &str) -> bool {
 fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String, JsonError> {
     let (operation, raw_source) = split_json_operation(query).ok_or(JsonError::Incomplete)?;
     let operation = operation.to_ascii_lowercase();
-    if is_json_validation_operation(&operation) {
+    if is_validation_operation(&operation) {
         return validate_json(raw_source).map(|report| report.text);
     }
     if let Some(operation) = JsonCsvOperation::from_name(&operation) {

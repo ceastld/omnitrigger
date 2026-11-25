@@ -1,7 +1,7 @@
 use crate::trigger_browse::{FacetValue, ScopeKind, StatusKind};
 
 use super::{
-    calculator::narrow_ascii_graphic, json_tools::is_json_validation_operation,
+    calculator::narrow_ascii_graphic, is_validation_operation,
     text_tools::preserves_operand_trailing_whitespace,
 };
 
@@ -89,11 +89,11 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         let scope = parse_scope(prefix)?;
         let term = term.trim_start();
         let keep_trailing = scope == Scope::Csv
-            || (scope == Scope::Json
+            || (matches!(scope, Scope::Json | Scope::Toml)
                 && term
                     .split_whitespace()
                     .next()
-                    .is_some_and(is_json_validation_operation))
+                    .is_some_and(is_validation_operation))
             || (scope == Scope::TextTools
                 && term
                     .split_whitespace()

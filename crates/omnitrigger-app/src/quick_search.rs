@@ -239,6 +239,22 @@ impl InputValidationReport {
     }
 }
 
+fn is_validation_operation(operation: &str) -> bool {
+    operation == "校验" || operation.eq_ignore_ascii_case("validate")
+}
+
+fn input_line_column(prefix: &str) -> (usize, usize) {
+    let line = prefix.bytes().filter(|&byte| byte == b'\n').count() + 1;
+    let column = prefix
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count()
+        + 1;
+    (line, column)
+}
+
 impl ResultValue {
     fn from_validation(report: InputValidationReport, scope: Scope) -> Self {
         Self {
@@ -727,8 +743,8 @@ impl ValueError {
                 return format!("第 {row} 个数据行 · {cause}").into();
             }
             Self::Json(error) => error.message(),
-            Self::Toml(TomlError::Invalid { line, column }) => {
-                return format!("TOML 语法有误 · 第 {line} 行第 {column} 列").into();
+            Self::Toml(TomlError::Invalid { line, column, .. }) => {
+                return toml_tools::syntax_error_message(line, column).into();
             }
             Self::Toml(error) => error.message(),
             Self::Csv(error) => error.message(),
@@ -1205,10 +1221,19 @@ impl Results {
                         Self::text_value(transform_json(term).map_err(ValueError::Json))
                     }
                 }
-                Scope::Toml => match toml_tools::toml_csv_report(term) {
-                    Some(report) => Self::table_value(report.map_err(ValueError::Toml)),
-                    None => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
-                },
+                Scope::Toml => {
+                    if let Some(report) = toml_tools::toml_validation_report(term) {
+                        Self::Value(
+                            report
+                                .map(|report| ResultValue::from_validation(report, scope))
+                                .map_err(ValueError::Toml),
+                        )
+                    } else if let Some(report) = toml_tools::toml_csv_report(term) {
+                        Self::table_value(report.map_err(ValueError::Toml))
+                    } else {
+                        Self::text_value(transform_toml(term).map_err(ValueError::Toml))
+                    }
+                }
                 Scope::Csv => {
                     if let Some(report) = csv_tools::csv_validation_report(term) {
                         Self::Value(
@@ -6498,6 +6523,7 @@ mod tests {
         for (query, location) in [
             ("CSV: 校验 a,b\n1,\"未闭合", "第 2 条记录 · 第 2 列"),
             ("JSON: 校验 [\n  1,\n]", "第 3 行 · 第 1 列"),
+            ("TOML: 校验 [server", "第 1 行第 8 列"),
         ] {
             let result = for_query(query, &[]);
             let report = result.refillable_text().unwrap().to_owned();
@@ -7158,6 +7184,8 @@ mod tests {
             ("  JSON： 校验\r\n{\r\n  \"参数\": \"茶\"坏\r\n}   ", "坏"),
             ("JSON: VALIDATE [\"😀\",好]", "好"),
             ("JSON: 校验 [1,\r\n  ", ""),
+            ("TOML： 校验\r\nname = '茶'\r\nname = '咖啡' ", "name"),
+            ("TOML: 校验 list = [1,2", ""),
             (
                 "CSV: 校验 a,b\r\n01,\"甲\n乙\",多余\r\n02",
                 "01,\"甲\n乙\",多余",
@@ -7174,6 +7202,9 @@ mod tests {
             event.is_held = false;
             search.key_down(&event, window, cx);
             let input = search.input.read(cx);
+            if invalid.is_empty() {
+                assert_eq!(input.selection(), query.len()..query.len());
+            }
             assert_eq!(&query[input.selection()], invalid);
             assert_eq!(input.text(), query);
         }

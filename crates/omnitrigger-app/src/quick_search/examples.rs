@@ -4294,6 +4294,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位 TOML 配置中的重复键",
+        query: "TOML: 校验\nname = '茶'\nname = '咖啡'",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将 TOML 配置转为可复制的 JSON",
         query: "TOML: 转JSON date = 2024-02-29\nnumber = 9_007_199_254_740_993",
     },

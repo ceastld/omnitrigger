@@ -9704,7 +9704,7 @@ pub(super) fn csv_validation_report(
     query: &str,
 ) -> Option<Result<InputValidationReport, CsvError>> {
     let (operation, input) = split_argument(query)?;
-    if operation != "校验" && !operation.eq_ignore_ascii_case("validate") {
+    if !super::is_validation_operation(operation) {
         return None;
     }
     let offset = query.len() - input.len();
