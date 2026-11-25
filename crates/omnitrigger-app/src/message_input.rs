@@ -338,6 +338,11 @@ impl MessageInput {
         self.select_range(logical_line_range(&self.content, self.head), cx);
     }
 
+    pub(super) fn jump_logical_line(&mut self, down: bool, extend: bool, cx: &mut Context<Self>) {
+        let offset = logical_line_jump(&self.content, self.head, down);
+        self.move_to(offset, extend, cx);
+    }
+
     pub(super) fn move_cursor_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.content.is_char_boundary(offset) {
             self.move_to(offset, false, cx);
@@ -1036,6 +1041,23 @@ fn logical_line_range(text: &str, cursor: usize) -> Range<usize> {
     start..end
 }
 
+fn logical_line_jump(text: &str, cursor: usize, down: bool) -> usize {
+    let line = logical_line_range(text, cursor);
+    if down {
+        // 行尾的换行符是一个字素，包含 CRLF。
+        let break_len = text[line.end..].graphemes(true).next().map_or(0, str::len);
+        return line.end + break_len;
+    }
+    if cursor != line.start {
+        return line.start;
+    }
+    let previous_end = text[..line.start]
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(0, |(offset, _)| offset);
+    logical_line_range(text, previous_end).start
+}
+
 fn word_start_before(text: &str, offset: usize) -> usize {
     text.unicode_word_indices()
         .take_while(|&(start, _)| start < offset)
@@ -1165,6 +1187,27 @@ mod tests {
         let text = "甲\u{2028}乙\u{2029}丙";
         assert_eq!(logical_line_range(text, 9), 6..9);
         assert_eq!(logical_line_range(text, 12), 12..text.len());
+    }
+
+    #[test]
+    fn jumps_logical_lines_without_stopping_inside_line_breaks() {
+        let text = "甲\r\n乙\n\r🍵\u{2028}尾";
+        for (cursor, up, down) in [
+            (0, 0, 5),
+            (3, 0, 5),
+            (4, 0, 5),
+            (5, 0, 9),
+            (8, 5, 9),
+            (9, 5, 10),
+            (10, 9, 17),
+            (17, 10, 20),
+            (text.len(), 17, text.len()),
+        ] {
+            assert_eq!(logical_line_jump(text, cursor, false), up);
+            assert_eq!(logical_line_jump(text, cursor, true), down);
+        }
+        assert_eq!(logical_line_jump("", 0, false), 0);
+        assert_eq!(logical_line_jump("", 0, true), 0);
     }
 
     #[test]
