@@ -247,6 +247,7 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
     is_raw_text_operation(operation)
         || is_trim_line_ends_operation(operation)
         || is_line_end_whitespace_csv_operation(operation)
+        || is_line_break_positions_csv_operation(operation)
         || is_fixed_width_csv_operation(operation)
         || is_line_lengths_csv_operation(operation)
         || is_display_width_csv_operation(operation)
@@ -269,6 +270,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     if is_line_end_whitespace_csv_operation(operation) {
         return Some(line_end_whitespace_csv(text));
+    }
+    if is_line_break_positions_csv_operation(operation) {
+        return Some(line_break_positions_csv(text));
     }
     if is_display_width_csv_operation(operation) {
         return Some(display_width_csv(text));
@@ -789,6 +793,45 @@ fn limit_empty_lines(text: &str, limit: usize) -> String {
         start = end;
     }
     result
+}
+
+fn is_line_break_positions_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("换行位置CSV")
+        || operation.eq_ignore_ascii_case("line-break-positions-csv")
+}
+
+fn line_break_positions_csv(text: &str) -> Result<String, TextError> {
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut csv = String::from("行号,换行类型,字节位置,码位位置");
+    let mut byte_end = 0;
+    let mut codepoints = 0;
+    for (index, line_break) in logical_newline_pattern().find_iter(text).enumerate() {
+        let label = match line_break.as_str() {
+            "\r\n" => "CRLF",
+            "\n" => "LF",
+            "\r" => "CR",
+            "\u{2028}" => "LS",
+            "\u{2029}" => "PS",
+            _ => unreachable!("只匹配支持的换行符"),
+        };
+        codepoints += text[byte_end..line_break.start()].chars().count();
+        let fields = [
+            (index + 1).to_string(),
+            label.to_owned(),
+            (line_break.start() + 1).to_string(),
+            (codepoints + 1).to_string(),
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
+            TextError::ResultTooLarge,
+        )?;
+        codepoints += line_break.as_str().chars().count();
+        byte_end = line_break.end();
+    }
+    Ok(csv)
 }
 
 fn count_line_endings(text: &str) -> String {
@@ -3128,6 +3171,30 @@ mod tests {
         );
         let unlimited = format!("空行上限 {} \" 甲\n\n\n乙 \"", usize::MAX);
         assert_eq!(transform_text(&unlimited).as_deref(), Ok(" 甲\n\n\n乙 "));
+    }
+
+    #[test]
+    fn reports_byte_and_codepoint_positions_of_all_logical_line_breaks() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 换行位置CSV\r\n甲\r\nb\r中\n\u{2028}\u{2029}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok(concat!(
+                "行号,换行类型,字节位置,码位位置",
+                "\r\n1,CRLF,4,2",
+                "\r\n2,CR,7,5",
+                "\r\n3,LF,11,7",
+                "\r\n4,LS,12,8",
+                "\r\n5,PS,15,9",
+                "\r\n6,LF,18,10",
+            )),
+        );
+        assert_eq!(
+            transform_text("line-break-positions-csv 中文").as_deref(),
+            Ok("行号,换行类型,字节位置,码位位置")
+        );
     }
 
     #[test]

@@ -4232,6 +4232,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位 CRLF、LF 和 Unicode 分隔符",
+        query: "文本: 换行位置CSV\n甲\r\n乙\n丙\u{2028}丁\r",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计 CRLF、LF 和 CR 换行符",
         query: "文本: 换行统计 \"甲\r\n乙\r丙\n\"",
     },
