@@ -1873,6 +1873,7 @@ pub(super) struct QuickSearch {
     application_refresh: ApplicationRefresh,
     input_before_help: Option<String>,
     input_before_calculation_history: Option<String>,
+    input_before_query_history: Option<String>,
     input_before_bookmarks: Option<String>,
     input_before_table_search: Option<TableSearchOrigin>,
     table_search_return: Option<TableSearchOrigin>,
@@ -1995,6 +1996,7 @@ impl QuickSearch {
             application_refresh: ApplicationRefresh::NotRequested,
             input_before_help: None,
             input_before_calculation_history: None,
+            input_before_query_history: None,
             input_before_bookmarks: None,
             input_before_table_search: None,
             table_search_return: None,
@@ -2072,6 +2074,15 @@ impl QuickSearch {
             })
         {
             self.input_before_calculation_history = None;
+        }
+        if self.input_before_query_history.is_some()
+            && !Self::is_query_history(query)
+            && !self
+                .input_before_help
+                .as_deref()
+                .is_some_and(Self::is_query_history)
+        {
+            self.input_before_query_history = None;
         }
         if self.input_before_bookmarks.is_some()
             && !Self::is_bookmark_query(query)
@@ -2762,6 +2773,29 @@ impl QuickSearch {
         }
     }
 
+    fn is_query_history(query: &str) -> bool {
+        matches!(scoped_query(query), Some((Scope::QueryHistory, _)))
+    }
+
+    fn toggle_query_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.input.read(cx).text();
+        if Self::is_query_history(&query) {
+            if let Some(previous) = self.input_before_query_history.take() {
+                self.fill_query(previous, window, cx);
+            }
+        } else if Self::shows_help(&query, &self.results)
+            && self
+                .input_before_help
+                .as_deref()
+                .is_some_and(Self::is_query_history)
+        {
+            self.toggle_help(window, cx);
+        } else {
+            self.input_before_query_history = Some(query);
+            self.fill_query("查询历史: ", window, cx);
+        }
+    }
+
     fn bookmark_target<'a>(&'a self, query: &'a str) -> Option<&'a str> {
         if let Results::Bookmarks(items) = &self.results {
             return Some(&items.get(self.selected)?.expression);
@@ -3154,6 +3188,11 @@ impl QuickSearch {
                     Some((Scope::OpenWindows, _)) => self.load_open_windows(window, cx),
                     Some((Scope::Applications, _)) => self.load_applications(window, cx),
                     _ => return,
+                }
+            }
+            "f6" => {
+                if !event.is_held {
+                    self.toggle_query_history(window, cx);
                 }
             }
             "enter" => {
@@ -4206,6 +4245,15 @@ impl Render for QuickSearch {
         } else {
             Some("用法 F1")
         };
+        let query_history_action = if naming_bookmark {
+            None
+        } else if query.trim().is_empty() {
+            Some("查询历史 F6")
+        } else if self.input_before_query_history.is_some() && Self::is_query_history(&query) {
+            Some("返回 F6")
+        } else {
+            None
+        };
         let bookmark_action = if naming_bookmark {
             None
         } else if query.trim().is_empty() {
@@ -4263,6 +4311,23 @@ impl Render for QuickSearch {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.fill_query("工具: ", window, cx);
                                 })),
+                        )
+                    })
+                    .when_some(query_history_action, |header, label| {
+                        header.child(
+                            button(
+                                "toggle-quick-search-query-history",
+                                label,
+                                Tone::Ghost,
+                                true,
+                            )
+                            .h(px(24.))
+                            .px(px(10.))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.toggle_query_history(window, cx);
+                                },
+                            )),
                         )
                     })
                     .when_some(help_action, |header, label| {
@@ -6501,6 +6566,10 @@ mod tests {
                             ("ctrl-shift-enter", false),
                             ("shift-enter", false),
                             ("shift-enter", true),
+                            ("f6", true),
+                            ("f6", false),
+                            ("f6", true),
+                            ("f6", false),
                             ("ctrl-r", true),
                             ("ctrl-r", false),
                             ("ctrl-r", true),
@@ -7140,6 +7209,10 @@ mod tests {
                 "换行验证甲",
                 "换行验证甲",
                 "换行验证甲\n",
+                "换行验证甲\n",
+                "换行验证甲\n",
+                "查询历史: ",
+                "查询历史: ",
                 "换行验证甲\n",
                 "换行验证甲\n",
                 "算式历史: 换行验证甲\n",
