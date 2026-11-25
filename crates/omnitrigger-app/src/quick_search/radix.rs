@@ -14,6 +14,7 @@ use super::fraction::{repeating_radix, MAX_REPEATING_DECIMAL_PLACES};
 const MAX_INTEGER_BITS: u64 = 8192;
 const MAX_GRAY_TABLE_ROWS: u16 = 256;
 const MAX_SHEET_COLUMN: u32 = 16_384;
+const MAX_SHEET_ROW: u32 = 1_048_576;
 const MAX_ROMAN_VALUE: u16 = 3999;
 const ROMAN_DIGITS: [(u16, &str); 13] = [
     (1000, "M"),
@@ -63,6 +64,7 @@ pub(super) enum RadixError {
     FloatFractionNonfinite,
     FloatAdjacentNan,
     SheetColumnArguments,
+    SheetCellArguments,
     RomanArguments,
     RomanRange,
     FractionalArguments,
@@ -114,6 +116,7 @@ impl RadixError {
                 "填写 8 至 8192 的 8 倍数位宽和非负整数，例如 字节倒序 32 @ 0x12345678"
             }
             Self::SheetColumnArguments => "填写 A 至 XFD 的列字母，或 1 至 16384 的整数列号",
+            Self::SheetCellArguments => "填写单个单元格，例如 B3 或 R3C2，范围为 A1 至 XFD1048576",
             Self::RomanArguments => "填写常用写法的罗马数字，例如 IV、CDXCIX 或 MMXXVI",
             Self::RomanRange => "填写 1 至 3999 的十进制整数，例如 2026",
             Self::FractionalArguments => "填写小数、原进制和目标进制，例如 10.625 从 10 到 2",
@@ -256,6 +259,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
         return convert_sheet_column(arguments);
     }
+    if operation == "单元格地址" || operation.eq_ignore_ascii_case("cell-address") {
+        return convert_sheet_cell(arguments).ok_or(RadixError::SheetCellArguments);
+    }
     if operation == "罗马数字" || operation.eq_ignore_ascii_case("roman") {
         return convert_roman(arguments);
     }
@@ -383,26 +389,68 @@ fn format_roman(mut value: u16) -> String {
 
 fn convert_sheet_column(input: &str) -> Result<String, RadixError> {
     let input = input.trim();
-    if (1..=3).contains(&input.len()) && input.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        let column = input.bytes().fold(0_u32, |column, letter| {
-            column * 26 + u32::from(letter.to_ascii_uppercase() - b'A' + 1)
-        });
-        return (column <= MAX_SHEET_COLUMN)
-            .then(|| column.to_string())
-            .ok_or(RadixError::SheetColumnArguments);
+    if let Some(column) = sheet_column_number(input) {
+        return Ok(column.to_string());
     }
-    let mut column = input
+    let column = input
         .parse::<u32>()
         .ok()
         .filter(|column| (1..=MAX_SHEET_COLUMN).contains(column))
         .ok_or(RadixError::SheetColumnArguments)?;
+    Ok(sheet_column_letters(column))
+}
+
+fn sheet_column_number(letters: &str) -> Option<u32> {
+    if !(1..=3).contains(&letters.len()) || !letters.bytes().all(|byte| byte.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let column = letters.bytes().fold(0_u32, |column, letter| {
+        column * 26 + u32::from(letter.to_ascii_uppercase() - b'A' + 1)
+    });
+    (column <= MAX_SHEET_COLUMN).then_some(column)
+}
+
+fn sheet_column_letters(mut column: u32) -> String {
     let mut letters = Vec::with_capacity(3);
     while column > 0 {
         column -= 1;
         letters.push(char::from(b'A' + (column % 26) as u8));
         column /= 26;
     }
-    Ok(letters.into_iter().rev().collect())
+    letters.into_iter().rev().collect()
+}
+
+fn convert_sheet_cell(input: &str) -> Option<String> {
+    let input = input.trim();
+    if let Some((row, column)) = input
+        .strip_prefix(['R', 'r'])
+        .and_then(|cell| cell.split_once(['C', 'c']))
+        .and_then(|(row, column)| {
+            Some((
+                sheet_coordinate(row, MAX_SHEET_ROW)?,
+                sheet_coordinate(column, MAX_SHEET_COLUMN)?,
+            ))
+        })
+    {
+        return Some(format!("${}${row}", sheet_column_letters(column)));
+    }
+
+    let cell = input.strip_prefix('$').unwrap_or(input);
+    let (column, row) = cell.split_at(cell.find(|ch: char| !ch.is_ascii_alphabetic())?);
+    let column = sheet_column_number(column)?;
+    let row = sheet_coordinate(row.strip_prefix('$').unwrap_or(row), MAX_SHEET_ROW)?;
+    Some(format!("R{row}C{column}"))
+}
+
+fn sheet_coordinate(value: &str, maximum: u32) -> Option<u32> {
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value
+        .parse()
+        .ok()
+        .filter(|number| (1..=maximum).contains(number))
 }
 
 pub(super) fn convert_radix_integer(
@@ -1393,6 +1441,52 @@ mod tests {
             assert_eq!(
                 convert_arbitrary_radix(&format!("表格列号 {input}")),
                 Err(RadixError::SheetColumnArguments),
+            );
+        }
+    }
+
+    #[test]
+    fn converts_absolute_sheet_cell_addresses_in_both_directions() {
+        for (query, expected) in [
+            ("单元格地址 B3", "R3C2"),
+            ("单元格地址 $b$3", "R3C2"),
+            ("单元格地址 B$3", "R3C2"),
+            ("单元格地址 ＄Ｂ３", "R3C2"),
+            ("单元格地址 R1", "R1C18"),
+            ("单元格地址 RC1", "R1C471"),
+            ("CELL-ADDRESS r3c2", "$B$3"),
+            ("单元格地址 XFD1048576", "R1048576C16384"),
+            ("单元格地址 R1048576C16384", "$XFD$1048576"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for input in [
+            "",
+            "A0",
+            "A1048577",
+            "XFE1",
+            "R0C1",
+            "R1C0",
+            "R1C16385",
+            "R1048577C1",
+            "R[1]C[2]",
+            "A1:B2",
+            "Sheet1!A1",
+            "A+1",
+            "R1C+1",
+            "$$B3",
+            "B3$",
+            "B",
+            "$1",
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(&format!("单元格地址 {input}")),
+                Err(RadixError::SheetCellArguments),
+                "{input}"
             );
         }
     }

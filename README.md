@@ -238,6 +238,7 @@
 - 用 `进制: 汉明距离 0b1010,0b1100` 得到双方不同的位数 `2`。用 `进制: 位比对 0xA5,0xAD` 可同时看到不同位数和位号，该例只有第 `3` 位不同。低位从 `0` 编号，较短的整数按高位补零比较。支持最多 8192 位的非负整数。 [NIST 汉明距离定义](https://xlinux.nist.gov/dads/HTML/HammingDistance.html)
 - 用 `进制: 位比对CSV 0b1010,0b1100` 可逐位预览发生变化的位号、原位和新位。此例的第 `1` 位由 `1` 变为 `0`，第 `2` 位由 `0` 变为 `1`。相同的整数只输出表头。结果可复制为 CSV，也可交给 `处理:` 的后续表格步骤。
 - 输入 `进制: 表格列号 AA` 得到 `27`，输入 `进制: 表格列号 703` 得到 `AAA`。按工作表从 1 开始的列号换算，范围为 `A` 到 `XFD`，列字母不区分大小写。 [Excel 列号](https://support.microsoft.com/en-us/excel/functions/column-function) [Excel 工作表列数上限](https://support.microsoft.com/en-us/excel/excel-specifications-and-limits)
+- 用 `进制: 单元格地址 $B$3` 得到 `R3C2`，输入 `进制: 单元格地址 R3C2` 得到绝对地址 `$B$3`。A1 格式也可直接填 `B3`。接受 `A1` 到 `XFD1048576` 范围内的单个单元格。 [Excel 地址格式](https://support.microsoft.com/en-us/excel/get-started/overview-of-formulas-in-excel) [Excel 工作表大小](https://support.microsoft.com/en-us/excel/excel-specifications-and-limits)
 - 输入 `进制: 罗马数字 2026` 得到 `MMXXVI`，输入 `进制: 罗马数字 CDXCIX` 得到 `499`。整数范围为 1 至 3999。支持常用的减法写法，例如 `IV` 和 `IX`，字母不区分大小写。 [经典罗马数字示例](https://support.microsoft.com/en-us/excel/functions/roman-function)
 - 输入 `分数: 42/56` 可约分为 `3/4`，输入 `分数: 0.125` 可精确转为 `1/8`。
 - 输入 `分数: 计算 (1/2+1/3)*6` 可得到 `5`，`分数: 计算 0.1+0.2` 得到 `3/10`。支持括号和四则运算。
