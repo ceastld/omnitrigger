@@ -501,6 +501,7 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "markdown还原" | "markdown-unescape" => Ok(unescape_markdown(text)),
         "windows参数" | "windows-arguments" => windows_arguments(text),
         "powershell数组" | "powershell-array" => powershell_array(text),
+        "posix参数" | "posix-arguments" => posix_arguments(text),
         _ => Err(TextError::UnknownOperation),
     }
 }
@@ -549,6 +550,23 @@ fn powershell_array(input: &str) -> Result<String, TextError> {
         }
     }
     output.push(')');
+    Ok(output)
+}
+
+fn posix_arguments(input: &str) -> Result<String, TextError> {
+    let arguments = argument_strings(input)?;
+    let mut output = String::new();
+    for argument in &arguments {
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        output.push('\'');
+        output.push_str(&argument.replace('\'', "'\\''"));
+        output.push('\'');
+        if output.len() > MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::ResultTooLarge);
+        }
+    }
     Ok(output)
 }
 
@@ -3831,6 +3849,28 @@ mod tests {
             transform_text(&oversized),
             Err(TextError::WindowsCommandLimit)
         );
+    }
+
+    #[test]
+    fn quotes_posix_shell_arguments_without_expanding_their_contents() {
+        assert_eq!(
+            transform_text(r#"POSIX参数 ["O'Brien","$HOME","a b\\","line\nbreak",""]"#).as_deref(),
+            Ok("'O'\\''Brien' '$HOME' 'a b\\' 'line\nbreak' ''")
+        );
+        assert_eq!(transform_text("posix-arguments []").as_deref(), Ok(""));
+        assert_eq!(
+            transform_text(r#"POSIX参数 ["a\u0000b"]"#),
+            Err(TextError::ArgumentNull)
+        );
+        assert_eq!(
+            transform_text("POSIX参数 [1]"),
+            Err(TextError::ArgumentArray)
+        );
+        let large = format!(
+            r#"POSIX参数 ["{}"]"#,
+            "'".repeat(MAX_EXPANDED_TEXT_BYTES / 4)
+        );
+        assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
     }
 
     #[test]
