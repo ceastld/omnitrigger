@@ -45,6 +45,7 @@ mod scatter_plot;
 mod scientific;
 mod scope;
 mod settings_sections;
+mod shortcut_help;
 mod solid;
 mod statistics;
 mod table_preview;
@@ -836,6 +837,9 @@ impl Results {
             }
             return match scope {
                 Scope::ToolIndex => Self::Help(tool_index_examples(term)),
+                Scope::SearchShortcuts => {
+                    Self::table_value(Ok(shortcut_help::shortcut_table(term)))
+                }
                 Scope::ExampleHistory => Self::Help(recent.examples.matching(term)),
                 Scope::Bookmarks => recent.bookmarks.load_error().map_or_else(
                     || Self::Bookmarks(recent.bookmarks.matching(term)),
@@ -8892,6 +8896,31 @@ mod tests {
         assert!(matches!(
             for_query("触发预设：", &[]),
             Results::Destinations(items) if items == [Destination::Page(Page::Presets)]
+        ));
+    }
+
+    #[test]
+    fn searches_shortcut_help_by_keys_and_context() {
+        let results = for_query("搜索快捷键: 表格 ctrl+shift", &[]);
+        assert!(matches!(
+            &results,
+            Results::Value(Ok(ResultValue {
+                kind: ValueKind::Table(_),
+                ..
+            }))
+        ));
+        let text = results.refillable_text().unwrap();
+        assert!(text.contains("Ctrl+Shift+PageUp"));
+        assert!(text.contains("Ctrl+Shift+C"));
+        assert!(!text.contains("Ctrl+Shift+R"));
+        let shortcut = for_query("SEARCH SHORTCUTS: Ａｌｔ＋Ｆ２", &[]);
+        assert_eq!(
+            shortcut.refillable_text(),
+            Some("场景,按键,操作\r\n计算,Alt+F2,切换普通计算与精确分数计算")
+        );
+        assert!(matches!(
+            for_query("快捷键", &[]),
+            Results::Destinations(items) if items.contains(&Destination::Page(Page::Triggers))
         ));
     }
 

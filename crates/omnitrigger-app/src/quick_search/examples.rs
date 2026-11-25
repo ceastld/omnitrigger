@@ -6648,6 +6648,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "将有限连分数还原为精确分数",
         query: "分数: 从连分数 [3,7,16]",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "查找搜索框里的快捷键",
+        query: "搜索快捷键:",
+    },
 ];
 
 pub(super) fn search_key(text: &str) -> String {
