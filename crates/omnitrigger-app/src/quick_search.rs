@@ -2281,6 +2281,7 @@ pub(super) struct QuickSearch {
     file_search_return: Option<FileSearchReturn>,
     result_save: ResultSaveState,
     result_copied: bool,
+    copied_file_path: Option<String>,
     input_file_load: InputFileLoadState,
     previous_input: RememberedSearchInput,
     bookmark_limit_reached: bool,
@@ -2365,6 +2366,7 @@ impl QuickSearch {
             }
             let query = input.text();
             this.result_copied = false;
+            this.copied_file_path = None;
             if matches!(&this.result_save, ResultSaveState::Finished { query: saved, .. } if saved != &query) {
                 this.result_save = ResultSaveState::Ready;
             }
@@ -2413,6 +2415,7 @@ impl QuickSearch {
             file_search_return: None,
             result_save: ResultSaveState::Ready,
             result_copied: false,
+            copied_file_path: None,
             input_file_load: InputFileLoadState::Ready,
             previous_input,
             bookmark_limit_reached: false,
@@ -3065,11 +3068,14 @@ impl QuickSearch {
     }
 
     fn prepare_in_place_copy(&mut self, cx: &mut Context<Self>) -> Option<ClipboardItem> {
-        let Results::Value(Ok(value)) = &self.results else {
-            return None;
+        let item = if let Results::Value(Ok(value)) = &self.results {
+            self.result_copied = true;
+            self.prepare_value_copy(value, cx)
+        } else {
+            let path = self.results.local_file_path(self.selected)?;
+            self.copied_file_path = Some(path.to_owned());
+            ClipboardItem::new_string(path.to_owned())
         };
-        let item = self.prepare_value_copy(value, cx);
-        self.result_copied = true;
         cx.notify();
         Some(item)
     }
@@ -4185,7 +4191,9 @@ impl QuickSearch {
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "enter" {
                 if event.is_held {
-                    if matches!(self.results, Results::Value(Ok(_))) {
+                    if matches!(self.results, Results::Value(Ok(_)))
+                        || self.results.local_file_path(self.selected).is_some()
+                    {
                         cx.stop_propagation();
                     }
                 } else if let Some(item) = self.prepare_in_place_copy(cx) {
@@ -5693,6 +5701,11 @@ impl QuickSearch {
                                             Destination::TextHistoryQuery(_) => "Enter 查找",
                                             Destination::KnownFolder(_) => "Tab 查找 · Enter 打开",
                                             Destination::OpenWindow(_) => "Enter 切换",
+                                            Destination::LocalFile { path, .. }
+                                                if self.copied_file_path.as_ref() == Some(path) =>
+                                            {
+                                                "已复制路径"
+                                            }
                                             Destination::LocalFile {
                                                 is_directory: true, ..
                                             } => "Tab 进入 · Enter 复制路径",
@@ -8659,6 +8672,18 @@ mod tests {
         search.fill_query("2**10", window, cx);
         search.refresh_results("2**10", window, cx);
         assert_eq!(search.copy_button_label("复制"), "复制");
+
+        const PATH: &str = r"C:\工作\报告\状态 001.txt";
+        let query = "最近预览: 状态";
+        search.index.recent.file_previews.record(PATH);
+        search.fill_query(query, window, cx);
+        search.refresh_results(query, window, cx);
+        search.key_down(&held, window, cx);
+        assert!(search.copied_file_path.is_none());
+        let item = search.prepare_in_place_copy(cx).unwrap();
+        assert_eq!(item.text().as_deref(), Some(PATH));
+        assert_eq!(search.copied_file_path.as_deref(), Some(PATH));
+        assert_eq!(search.input.read(cx).text_ref(), query);
     }
 
     #[cfg(target_os = "windows")]
