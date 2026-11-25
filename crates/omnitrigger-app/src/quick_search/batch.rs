@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use super::{
     cidr::calculate_cidr, conversion::convert_wave, csv_tools::csv_cell, decibel::convert_decibels,
     solid::calculate_solid, tempo::calculate_tempo,
@@ -12,6 +14,39 @@ pub(super) enum BatchError<E> {
 pub(super) fn batch_arguments<'a>(query: &'a str, name: &str, alias: &str) -> Option<&'a str> {
     let (operation, arguments) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
     (operation == name || operation.eq_ignore_ascii_case(alias)).then_some(arguments)
+}
+
+pub(super) enum BatchCalculationKind {
+    Standard,
+    StandardCsv,
+    Exact,
+    ExactCsv,
+}
+
+pub(super) fn batch_calculation_input(input: &str) -> (BatchCalculationKind, &str) {
+    for (name, alias, kind) in [
+        ("分数", "exact", BatchCalculationKind::Exact),
+        ("分数对照", "exact-csv", BatchCalculationKind::ExactCsv),
+        ("对照", "csv", BatchCalculationKind::StandardCsv),
+    ] {
+        if let Some(arguments) = batch_arguments(input, name, alias) {
+            return (kind, arguments);
+        }
+    }
+    (BatchCalculationKind::Standard, input)
+}
+
+pub(super) fn batch_line_range(input: &str, line: usize) -> Option<Range<usize>> {
+    let mut offset = 0;
+    for (index, part) in input.split_inclusive('\n').enumerate() {
+        if index + 1 == line {
+            let trimmed = part.trim();
+            let start = offset + part.len() - part.trim_start().len();
+            return (!trimmed.is_empty()).then_some(start..start + trimmed.len());
+        }
+        offset += part.len();
+    }
+    None
 }
 
 pub(super) enum BatchToolOutput {

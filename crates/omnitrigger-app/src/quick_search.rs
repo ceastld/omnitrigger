@@ -85,7 +85,8 @@ use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex, RecentApplications};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use batch::{
-    batch_arguments, map_batch_csv, map_batch_lines, map_tool_batch, BatchError, BatchToolOutput,
+    batch_arguments, batch_calculation_input, batch_line_range, map_batch_csv, map_batch_lines,
+    map_tool_batch, BatchCalculationKind, BatchError, BatchToolOutput,
 };
 use calculator::{calculate, calculate_with_answers, looks_like_calculation, CalculationError};
 use calendar::{
@@ -883,30 +884,23 @@ impl Results {
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::BatchCalculation => {
-                    if let Some(arguments) = batch_arguments(term, "分数", "exact") {
-                        Self::text_value(
-                            map_batch_lines(arguments, |query| {
-                                calculate_fraction(query).map(|value| value.to_string())
-                            })
-                            .map_err(ValueError::BatchFraction),
-                        )
-                    } else if let Some(arguments) = batch_arguments(term, "分数对照", "exact-csv")
-                    {
-                        Self::table_value(
-                            map_batch_csv(arguments, "算式", |query| {
-                                calculate_fraction(query).map(|value| value.to_string())
-                            })
-                            .map_err(ValueError::BatchFraction),
-                        )
-                    } else if let Some(arguments) = batch_arguments(term, "对照", "csv") {
-                        Self::table_value(
-                            map_batch_csv(arguments, "算式", calculate)
+                    let (kind, input) = batch_calculation_input(term);
+                    let exact =
+                        |query: &str| calculate_fraction(query).map(|value| value.to_string());
+                    match kind {
+                        BatchCalculationKind::Standard => Self::text_value(
+                            map_batch_lines(input, calculate).map_err(ValueError::BatchCalculation),
+                        ),
+                        BatchCalculationKind::StandardCsv => Self::table_value(
+                            map_batch_csv(input, "算式", calculate)
                                 .map_err(ValueError::BatchCalculation),
-                        )
-                    } else {
-                        Self::text_value(
-                            map_batch_lines(term, calculate).map_err(ValueError::BatchCalculation),
-                        )
+                        ),
+                        BatchCalculationKind::Exact => Self::text_value(
+                            map_batch_lines(input, exact).map_err(ValueError::BatchFraction),
+                        ),
+                        BatchCalculationKind::ExactCsv => Self::table_value(
+                            map_batch_csv(input, "算式", exact).map_err(ValueError::BatchFraction),
+                        ),
                     }
                 }
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
@@ -3305,6 +3299,39 @@ impl QuickSearch {
         true
     }
 
+    fn batch_error_range(&self, cx: &App) -> Option<Range<usize>> {
+        let line = match &self.results {
+            Results::Value(Err(ValueError::BatchCalculation(BatchError::Row { line, .. })))
+            | Results::Value(Err(ValueError::BatchFraction(BatchError::Row { line, .. }))) => *line,
+            _ => return None,
+        };
+        let query = self.input.read(cx).text_ref();
+        if !matches!(scoped_query(query), Some((Scope::BatchCalculation, _))) {
+            return None;
+        }
+        let (_, term) = query.split_once([':', '：'])?;
+        let (_, input) = batch_calculation_input(term.trim_start());
+        let start = query.len() - input.len();
+        batch_line_range(input, line).map(|range| start + range.start..start + range.end)
+    }
+
+    fn select_batch_error_line(
+        &self,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(range) = self.batch_error_range(cx) else {
+            return false;
+        };
+        if !is_held {
+            self.input
+                .update(cx, |input, cx| input.select_range(range, cx));
+            window.focus(&self.input.focus_handle(cx));
+        }
+        true
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.read(cx).is_composing() {
             return;
@@ -3455,7 +3482,8 @@ impl QuickSearch {
                     event.is_held,
                     window,
                     cx,
-                ) || (!event.is_held && self.reveal_selected_file(window, cx))
+                ) || self.select_batch_error_line(event.is_held, window, cx)
+                    || (!event.is_held && self.reveal_selected_file(window, cx))
                 {
                     cx.stop_propagation();
                 }
@@ -4330,6 +4358,20 @@ impl QuickSearch {
                         .child(message.clone())
                         .tooltip(theme::text_tooltip(message)),
                 )
+                .when(self.batch_error_range(cx).is_some(), |row| {
+                    row.child(
+                        button(
+                            "locate-batch-error",
+                            "定位错误行 Alt+Enter",
+                            Tone::Ghost,
+                            true,
+                        )
+                        .flex_none()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.select_batch_error_line(false, window, cx);
+                        })),
+                    )
+                })
             }
             Results::RefilledInput => row
                 .text_color(rgb(theme::TEXT_MUTED))
@@ -6904,6 +6946,32 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_batch_error_selection(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        for (query, invalid) in [
+            ("批量计算: 1+2\r\n\r\n  1/0  \r\n4+5", "1/0"),
+            ("批量计算： 分数对照 1/2\r\n  2//0  \r\n3/4", "2//0"),
+        ] {
+            search.fill_query(query, window, cx);
+            search.refresh_results(query, window, cx);
+            let mut event = KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("alt-enter").unwrap(),
+                is_held: true,
+            };
+            search.key_down(&event, window, cx);
+            assert_eq!(search.input.read(cx).selection(), query.len()..query.len());
+            event.is_held = false;
+            search.key_down(&event, window, cx);
+            let input = search.input.read(cx);
+            assert_eq!(&query[input.selection()], invalid);
+            assert_eq!(input.text(), query);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_table_paging(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -7836,6 +7904,7 @@ mod tests {
                         })
                         .unwrap();
                     reopened.update(cx, verify_table_paging).unwrap();
+                    reopened.update(cx, verify_batch_error_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened
