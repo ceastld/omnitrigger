@@ -985,6 +985,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算不放回抽取的命中次数落在指定区间的概率",
+        query: "统计: 超几何区间概率 10,4,3,1..2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求不放回抽取达到目标累计概率的最小命中数",
         query: "统计: 超几何分位点 10,4,3,90%",
     },
@@ -6843,6 +6848,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "超几何概率表",
                     "超几何累计",
                     "超几何至少",
+                    "超几何区间概率",
                     "超几何分位点",
                     "超几何摘要",
                     "独立性卡方",

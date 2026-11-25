@@ -59,6 +59,7 @@ pub(super) enum StatisticsError {
     GeometricQuantileArguments,
     GeometricQuantileLimit,
     HypergeometricArguments,
+    HypergeometricRangeArguments,
     HypergeometricDistributionArguments,
     HypergeometricQuantileArguments,
     HypergeometricTableRows,
@@ -131,6 +132,9 @@ impl StatisticsError {
             Self::GeometricQuantileLimit => "1024 次试验内达不到给定累计概率",
             Self::HypergeometricArguments => {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
+            }
+            Self::HypergeometricRangeArguments => {
+                "依次填写总数、目标项数、抽取数和非负命中数区间，例如 10,4,3,1..2。总数最多 4096"
             }
             Self::HypergeometricDistributionArguments => {
                 "依次填写总数、目标项数和抽取数，例如 10,4,3。总数最多 4096"
@@ -389,6 +393,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "超几何至少" | "hypergeometric-at-least" => {
             return hypergeometric_probability(values, DiscreteEvent::AtLeast)
+        }
+        "超几何区间概率" | "hypergeometric-range" => {
+            return hypergeometric_range_probability(values)
         }
         "超几何概率表" | "hypergeometric-table" => return hypergeometric_csv(values),
         "超几何摘要" | "hypergeometric-summary" => return hypergeometric_summary(values),
@@ -2094,17 +2101,47 @@ fn hypergeometric_probability(
     event: DiscreteEvent,
 ) -> Result<String, StatisticsError> {
     let invalid = StatisticsError::HypergeometricArguments;
-    let (parameters, hits) = input.rsplit_once(',').ok_or(invalid)?;
-    let [total, marked, draws] = hypergeometric_parameters(parameters.split(','), invalid)?;
+    let (parameters, hits) = hypergeometric_event_arguments(input, invalid)?;
     let hits = hits.trim().parse::<u32>().map_err(|_| invalid)?;
+    let requested = match event {
+        DiscreteEvent::Exactly => hits..=hits,
+        DiscreteEvent::AtMost => 0..=hits,
+        DiscreteEvent::AtLeast => hits..=parameters[2],
+    };
+    hypergeometric_probability_for_counts(parameters, requested)
+}
+
+fn hypergeometric_event_arguments(
+    input: &str,
+    invalid: StatisticsError,
+) -> Result<([u32; 3], &str), StatisticsError> {
+    let (parameters, hits) = input.rsplit_once(',').ok_or(invalid)?;
+    Ok((
+        hypergeometric_parameters(parameters.split(','), invalid)?,
+        hits,
+    ))
+}
+
+fn hypergeometric_range_probability(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::HypergeometricRangeArguments;
+    let (parameters, range) = hypergeometric_event_arguments(input, invalid)?;
+    let (first, last) = range.split_once("..").ok_or(invalid)?;
+    let first = first.trim().parse::<u32>().map_err(|_| invalid)?;
+    let last = last.trim().parse::<u32>().map_err(|_| invalid)?;
+    if first > last {
+        return Err(invalid);
+    }
+    hypergeometric_probability_for_counts(parameters, first..=last)
+}
+
+fn hypergeometric_probability_for_counts(
+    [total, marked, draws]: [u32; 3],
+    requested: RangeInclusive<u32>,
+) -> Result<String, StatisticsError> {
     let unmarked = total - marked;
     let first = draws.saturating_sub(unmarked);
     let last = marked.min(draws);
-    let counts = match event {
-        DiscreteEvent::Exactly => hits.max(first)..=hits.min(last),
-        DiscreteEvent::AtMost => first..=hits.min(last),
-        DiscreteEvent::AtLeast => hits.max(first)..=last,
-    };
+    let counts = first.max(*requested.start())..=last.min(*requested.end());
     if counts.is_empty() {
         return Ok("0".to_owned());
     }
@@ -3338,6 +3375,34 @@ mod tests {
             calculate_statistics("超几何分位点 10,4,3,101%"),
             Err(StatisticsError::InvalidProbability)
         );
+    }
+
+    #[test]
+    fn computes_inclusive_hypergeometric_intervals_only_over_possible_counts() {
+        for (query, expected) in [
+            ("超几何区间概率 10,4,3,1..2", "4/5"),
+            ("hypergeometric-range 10,4,3,2..99", "1/3"),
+            ("超几何区间概率 ５，４，４，２ .. ３", "4/5"),
+            ("超几何区间概率 5,4,4,0..2", "0"),
+            ("超几何区间概率 5,4,4,4..4", "1/5"),
+            ("超几何区间概率 0,0,0,0..0", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "超几何区间概率 10,4,3,2..1",
+            "超几何区间概率 10,4,3,-1..2",
+            "超几何区间概率 4097,4,3,1..2",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::HypergeometricRangeArguments)
+            );
+        }
     }
 
     #[test]
