@@ -2968,7 +2968,7 @@ fn pointer_parse_error(error: serde_json::Error) -> JsonError {
     }
 }
 
-fn pointer_and_source(query: &str) -> Result<(String, &str), JsonError> {
+pub(super) fn pointer_and_source(query: &str) -> Result<(String, &str), JsonError> {
     let (pointer, source) = if query.starts_with('"') {
         let mut strings = serde_json::Deserializer::from_str(query).into_iter::<String>();
         let pointer = strings
@@ -3020,7 +3020,7 @@ fn select_member<'a>(value: &'a RawValue, key: &str) -> Result<&'a RawValue, Jso
     }
 }
 
-fn json_array_index(key: &str) -> Result<usize, JsonError> {
+pub(super) fn json_array_index(key: &str) -> Result<usize, JsonError> {
     if (key.len() > 1 && key.starts_with('0')) || !key.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(JsonError::MissingValue);
     }
