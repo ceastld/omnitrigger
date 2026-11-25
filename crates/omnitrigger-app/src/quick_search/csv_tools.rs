@@ -950,7 +950,7 @@ enum Operation {
         source: ColumnReference,
         groups: Vec<ColumnReference>,
         ascending: bool,
-        dense: bool,
+        ranking: CsvRanking,
     },
     ShareColumn {
         name: String,
@@ -1072,6 +1072,14 @@ enum ColumnArithmetic {
     Multiply,
     Divide,
     Formula(String),
+}
+
+#[derive(Clone, Copy)]
+enum CsvRanking {
+    Competition,
+    Dense,
+    PercentRank,
+    CumulativeDistribution,
 }
 
 enum RunningColumnComputation {
@@ -2243,6 +2251,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "dense-rank-column"
         | "升序密集排名列"
         | "ascending-dense-rank-column"
+        | "百分位排名列"
+        | "percent-rank-column"
+        | "降序百分位排名列"
+        | "descending-percent-rank-column"
+        | "累积分布列"
+        | "cume-dist-column"
+        | "降序累积分布列"
+        | "descending-cume-dist-column"
         | "占比列"
         | "share-column") => {
             let ((name, source, groups), data) =
@@ -2258,24 +2274,30 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     groups,
                 }
             } else {
+                let (ascending, ranking) = match kind {
+                    "升序排名列" | "ascending-rank-column" => (true, CsvRanking::Competition),
+                    "密集排名列" | "dense-rank-column" => (false, CsvRanking::Dense),
+                    "升序密集排名列" | "ascending-dense-rank-column" => {
+                        (true, CsvRanking::Dense)
+                    }
+                    "百分位排名列" | "percent-rank-column" => (true, CsvRanking::PercentRank),
+                    "降序百分位排名列" | "descending-percent-rank-column" => {
+                        (false, CsvRanking::PercentRank)
+                    }
+                    "累积分布列" | "cume-dist-column" => {
+                        (true, CsvRanking::CumulativeDistribution)
+                    }
+                    "降序累积分布列" | "descending-cume-dist-column" => {
+                        (false, CsvRanking::CumulativeDistribution)
+                    }
+                    _ => (false, CsvRanking::Competition),
+                };
                 Operation::RankColumn {
                     name,
                     source,
                     groups,
-                    ascending: matches!(
-                        kind,
-                        "升序排名列"
-                            | "ascending-rank-column"
-                            | "升序密集排名列"
-                            | "ascending-dense-rank-column"
-                    ),
-                    dense: matches!(
-                        kind,
-                        "密集排名列"
-                            | "dense-rank-column"
-                            | "升序密集排名列"
-                            | "ascending-dense-rank-column"
-                    ),
+                    ascending,
+                    ranking,
                 }
             }
         }
@@ -2969,8 +2991,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             source,
             groups,
             ascending,
-            dense,
-        } => rank_column(&rows, &name, source, &groups, ascending, dense),
+            ranking,
+        } => rank_column(&rows, &name, source, &groups, ascending, ranking),
         Operation::ShareColumn {
             name,
             source,
@@ -4677,13 +4699,18 @@ fn rank_function_rows(input: &str) -> Result<String, CsvError> {
         return Err(invalid);
     }
     let FunctionRows { rows, values } = read_function_rows(data, &columns, &expression, invalid)?;
-    let mut ranks = vec![None; values.len()];
+    let mut ranks = vec![String::new(); values.len()];
     let mut ranked_values: Vec<_> = values
         .into_iter()
         .enumerate()
         .filter_map(|(index, value)| value.map(|value| (value, index)))
         .collect();
-    assign_csv_ranks(&mut ranked_values, ascending, false, &mut ranks);
+    assign_csv_ranks(
+        &mut ranked_values,
+        ascending,
+        CsvRanking::Competition,
+        &mut ranks,
+    );
     write_csv_ranks(&rows[0], &rows[1..], &name, ranks)
 }
 
@@ -5201,7 +5228,7 @@ fn rank_column(
     source: ColumnReference,
     groups: &[ColumnReference],
     ascending: bool,
-    dense: bool,
+    ranking: CsvRanking,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -5225,9 +5252,9 @@ fn rank_column(
             .or_default()
             .push((value, index));
     }
-    let mut ranks = vec![None; records.len()];
+    let mut ranks = vec![String::new(); records.len()];
     for group in grouped_rows.values_mut() {
-        assign_csv_ranks(group, ascending, dense, &mut ranks);
+        assign_csv_ranks(group, ascending, ranking, &mut ranks);
     }
     write_csv_ranks(header, records, name, ranks)
 }
@@ -5235,8 +5262,8 @@ fn rank_column(
 fn assign_csv_ranks<Value: PartialOrd>(
     group: &mut [(Value, usize)],
     ascending: bool,
-    dense: bool,
-    ranks: &mut [Option<usize>],
+    ranking: CsvRanking,
+    ranks: &mut [String],
 ) {
     group.sort_unstable_by(|left, right| {
         let order = left.0.partial_cmp(&right.0).expect("参与排名的数值可比较");
@@ -5246,12 +5273,25 @@ fn assign_csv_ranks<Value: PartialOrd>(
             order.reverse()
         }
     });
-    let mut rank = 1;
-    for (position, (value, index)) in group.iter().enumerate() {
-        if position > 0 && *value != group[position - 1].0 {
-            rank = if dense { rank + 1 } else { position + 1 };
+    let total = group.len();
+    let mut earlier = 0;
+    for (position, peers) in group.chunk_by(|left, right| left.0 == right.0).enumerate() {
+        let end = earlier + peers.len();
+        let rank = match ranking {
+            CsvRanking::Competition => (earlier + 1).to_string(),
+            CsvRanking::Dense => (position + 1).to_string(),
+            CsvRanking::PercentRank if total == 1 => "0".into(),
+            CsvRanking::PercentRank => {
+                BigRational::new(earlier.into(), (total - 1).into()).to_string()
+            }
+            CsvRanking::CumulativeDistribution => {
+                BigRational::new(end.into(), total.into()).to_string()
+            }
+        };
+        for (_, index) in peers {
+            ranks[*index].clone_from(&rank);
         }
-        ranks[*index] = Some(rank);
+        earlier = end;
     }
 }
 
@@ -5259,14 +5299,11 @@ fn write_csv_ranks(
     header: &[String],
     records: &[Vec<String>],
     name: &str,
-    ranks: Vec<Option<usize>>,
+    ranks: Vec<String>,
 ) -> Result<String, CsvError> {
     let mut ranks = ranks.into_iter();
     write_appended_column(header, records, name, |_| {
-        Ok(ranks
-            .next()
-            .flatten()
-            .map_or_else(String::new, |rank| rank.to_string()))
+        Ok(ranks.next().unwrap_or_default())
     })
 }
 
@@ -13845,6 +13882,40 @@ null"#
         assert!(matches!(
             transform_csv("rank-column [\"名次\",1,[]]\n金额\n1\n坏值"),
             Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn reports_exact_percent_ranks_and_cumulative_distribution_with_ties() {
+        let data = "部门,金额\n北,1/2\n南,2\n北,3/2\n北,0.50\n北,0\n北,";
+        for (command, expected) in [
+            (
+                "百分位排名列",
+                "部门,金额,位置\r\n北,1/2,1/3\r\n南,2,0\r\n北,3/2,1\r\n北,0.50,1/3\r\n北,0,0\r\n北,\"\",\"\"",
+            ),
+            (
+                "累积分布列",
+                "部门,金额,位置\r\n北,1/2,3/4\r\n南,2,1\r\n北,3/2,1\r\n北,0.50,3/4\r\n北,0,1/4\r\n北,\"\",\"\"",
+            ),
+            (
+                "descending-percent-rank-column",
+                "部门,金额,位置\r\n北,1/2,1/3\r\n南,2,0\r\n北,3/2,0\r\n北,0.50,1/3\r\n北,0,1\r\n北,\"\",\"\"",
+            ),
+            (
+                "降序累积分布列",
+                "部门,金额,位置\r\n北,1/2,3/4\r\n南,2,1\r\n北,3/2,1/4\r\n北,0.50,3/4\r\n北,0,1\r\n北,\"\",\"\"",
+            ),
+        ] {
+            let query = format!("{command} [\"位置\",2,[\"部门\"]]\n{data}");
+            assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            transform_csv("cume-dist-column [\"位置\",1,[]]\n金额").as_deref(),
+            Ok("金额,位置")
+        );
+        assert!(matches!(
+            transform_csv("percent-rank-column [\"位置\",1,[]]\n金额\n坏值"),
+            Err(CsvError::DataRowValue { row: 1, .. })
         ));
     }
 

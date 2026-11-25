@@ -5235,6 +5235,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按组追加精确的百分位排名",
+        query: "CSV: 百分位排名列 [\"相对位置\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/2\n南,2\n北,3/2\n北,0.50\n北,0",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看同组小于或等于本行的数值所占比例",
+        query: "CSV: 累积分布列 [\"累计比例\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/2\n南,2\n北,3/2\n北,0.50\n北,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算每行金额占本部门合计的比例",
         query: "CSV: 占比列 [\"占比\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,2/3\n南,6",
     },
