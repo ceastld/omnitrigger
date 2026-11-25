@@ -208,10 +208,13 @@ impl MessageInput {
         }
     }
 
-    pub(super) fn select_suffix(&mut self, start: usize, cx: &mut Context<Self>) {
-        if self.content.is_char_boundary(start) {
-            self.anchor = self.content.len();
-            self.move_to(start, true, cx);
+    pub(super) fn select_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        if range.start <= range.end
+            && self.content.is_char_boundary(range.start)
+            && self.content.is_char_boundary(range.end)
+        {
+            self.anchor = range.end;
+            self.move_to(range.start, true, cx);
         }
     }
 

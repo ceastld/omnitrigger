@@ -64,7 +64,7 @@ mod wheel_slots;
 mod wheels;
 mod windows_settings;
 
-use std::{cell::RefCell, io::Read, path::Path, rc::Rc, sync::Arc};
+use std::{cell::RefCell, io::Read, ops::Range, path::Path, rc::Rc, sync::Arc};
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
@@ -3120,9 +3120,9 @@ impl QuickSearch {
         self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
     }
 
-    fn select_example_suffix(
+    fn select_example_range(
         &self,
-        selection_start: fn(&Example) -> Option<usize>,
+        selection_range: fn(&Example) -> Option<Range<usize>>,
         is_held: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -3134,14 +3134,14 @@ impl QuickSearch {
             return false;
         };
         let example = &EXAMPLES[index];
-        let Some(start) = selection_start(example) else {
+        let Some(range) = selection_range(example) else {
             return false;
         };
         if !is_held {
             self.index.recent.examples.record(index);
             self.fill_query(example.query, window, cx);
             self.input
-                .update(cx, |input, cx| input.select_suffix(start, cx));
+                .update(cx, |input, cx| input.select_range(range, cx));
         }
         true
     }
@@ -3186,7 +3186,7 @@ impl QuickSearch {
                 }
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "tab" {
-                if self.select_example_suffix(Example::argument_start, event.is_held, window, cx) {
+                if self.select_example_range(Example::argument_range, event.is_held, window, cx) {
                     cx.stop_propagation();
                 }
             } else if modifiers == 1
@@ -3252,8 +3252,12 @@ impl QuickSearch {
                     cx.stop_propagation();
                 }
             } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "enter" {
-                if self.select_example_suffix(Example::data_start, event.is_held, window, cx)
-                    || (!event.is_held && self.reveal_selected_file(window, cx))
+                if self.select_example_range(
+                    |example| example.data_start().map(|start| start..example.query.len()),
+                    event.is_held,
+                    window,
+                    cx,
+                ) || (!event.is_held && self.reveal_selected_file(window, cx))
                 {
                     cx.stop_propagation();
                 }
@@ -3586,7 +3590,7 @@ impl QuickSearch {
                                     "F1 用法 · Tab 填入"
                                 } else if example.data_start().is_some() {
                                     "Shift+Tab 改参数 · Alt+Enter 换数据"
-                                } else if example.argument_start().is_some() {
+                                } else if example.argument_range().is_some() {
                                     "Tab 填入 · Shift+Tab 改参数"
                                 } else {
                                     "Tab 填入"
@@ -6619,6 +6623,28 @@ mod tests {
             search.refresh_results(&query, window, cx);
             assert_eq!(search.results.refillable_text(), Some(expected));
         }
+        let prefix = "分数: 计算 root(";
+        search.fill_query(prefix, window, cx);
+        search.refresh_results(prefix, window, cx);
+        search.key_down(
+            &KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
+                is_held: false,
+            },
+            window,
+            cx,
+        );
+        let input = search.input.read(cx);
+        let example = input.text();
+        assert_eq!(example, "分数: 计算 root(-125/343,3)");
+        assert_eq!(input.selection(), prefix.len()..example.len() - 1);
+        search.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "1/8,3", window, cx);
+        });
+        let query = search.input.read(cx).text();
+        assert_eq!(query, "分数: 计算 root(1/8,3)");
+        search.refresh_results(&query, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("1/2"));
     }
 
     #[cfg(target_os = "windows")]
@@ -7156,7 +7182,7 @@ mod tests {
                             let filter = "收藏: 每周";
                             search.fill_query(filter, window, cx);
                             search.input.update(cx, |input, cx| {
-                                input.select_suffix("收藏: ".len(), cx);
+                                input.select_range("收藏: ".len()..filter.len(), cx);
                             });
                             search.refresh_results(filter, window, cx);
                             search.key_down(&key("f1", false), window, cx);
@@ -7198,7 +7224,7 @@ mod tests {
                             };
                             let history = key("ctrl-r");
                             search.fill_query(" 2**10 ", window, cx);
-                            search.input.update(cx, |input, cx| input.select_suffix(2, cx));
+                            search.input.update(cx, |input, cx| input.select_range(2.." 2**10 ".len(), cx));
                             search.key_down(&history, window, cx);
                             let opened = search.input.read(cx).text();
                             let filter = "算式历史: １０２４";
@@ -7261,7 +7287,7 @@ mod tests {
                                     let filter = format!("{intermediate}待测试");
                                     search.fill_query(&filter, window, cx);
                                     search.input.update(cx, |input, cx| {
-                                        input.select_suffix(intermediate.len(), cx);
+                                        input.select_range(intermediate.len()..filter.len(), cx);
                                     });
                                     search.refresh_results(&filter, window, cx);
                                     assert_eq!(press(search, second, window, cx), innermost);

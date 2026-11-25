@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{ops::Range, sync::OnceLock};
 
 use crate::assets::Icon;
 
@@ -95,6 +95,35 @@ impl Example {
             data.contains(['\r', '\n']) && !data.trim().is_empty()
         };
         has_data.then_some(self.query.len() - data.len())
+    }
+
+    pub(super) fn argument_range(&self) -> Option<Range<usize>> {
+        self.calculator_argument_range()
+            .or_else(|| self.argument_start().map(|start| start..self.query.len()))
+    }
+
+    fn calculator_argument_range(&self) -> Option<Range<usize>> {
+        let query = self.query.trim_end();
+        let expression = match scoped_query(query) {
+            Some((Scope::Fraction, term)) => fraction_command_expression(term)?,
+            Some(_) => return None,
+            None => query.trim_start(),
+        };
+        let (name, rest) = split_name(expression);
+        if !name.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
+            return None;
+        }
+        let arguments = rest.trim_start().strip_prefix('(')?.strip_suffix(')')?;
+        let mut depth = 0usize;
+        for byte in arguments.bytes() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => depth = depth.checked_sub(1)?,
+                _ => {}
+            }
+        }
+        let end = query.len() - 1;
+        (depth == 0 && !arguments.trim().is_empty()).then_some(end - arguments.len()..end)
     }
 
     pub(super) fn argument_start(&self) -> Option<usize> {
@@ -7439,6 +7468,29 @@ mod tests {
                 query,
             };
             assert_eq!(example.data_start().map(|start| &query[start..]), expected);
+        }
+    }
+
+    #[test]
+    fn selects_the_arguments_inside_a_complete_calculator_function() {
+        for (query, expected) in [
+            ("root(-125/343,3)", Some("-125/343,3")),
+            ("分数: 计算 root(-125/343,3)", Some("-125/343,3")),
+            ("sin(radians(90))", Some("radians(90)")),
+            ("分数: 计算 sqrt(4)+root(1/8,3)", None),
+            ("2**10", None),
+            ("gcd()", None),
+        ] {
+            let example = Example {
+                icon: Icon::Terminal,
+                title: "函数参数",
+                query,
+            };
+            let range = example.argument_range();
+            assert_eq!(range.clone().map(|range| &query[range]), expected);
+            if let Some(range) = range {
+                assert_eq!(&query[range.end..], ")");
+            }
         }
     }
 
