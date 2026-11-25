@@ -116,7 +116,7 @@ use duration::{
 use equation::{solve_equation_output, solve_linear_system, EquationError, EquationOutput};
 use examples::{
     example_help_query, fraction_function_examples, function_examples, matching_examples,
-    tool_index_examples, tool_operation_examples, Example, EXAMPLES,
+    query_argument_range, tool_index_examples, tool_operation_examples, Example, EXAMPLES,
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
@@ -3638,6 +3638,23 @@ impl QuickSearch {
         true
     }
 
+    fn select_query_arguments(
+        &self,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(range) = query_argument_range(self.input.read(cx).text_ref()) else {
+            return false;
+        };
+        if !is_held {
+            self.input
+                .update(cx, |input, cx| input.select_range(range, cx));
+            window.focus(&self.input.focus_handle(cx));
+        }
+        true
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(jump) = &self.line_jump {
             let key = &event.keystroke;
@@ -3742,6 +3759,13 @@ impl QuickSearch {
                     self.input
                         .update(cx, |input, cx| input.duplicate_logical_line(cx));
                 }
+                cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "a"
+                && self.select_query_arguments(event.is_held, window, cx)
+            {
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "l" {
                 if !event.is_held {
@@ -7571,6 +7595,35 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_query_argument_selection(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        for (query, expected) in [
+            ("sqrt(81+19)", "81+19"),
+            ("分数：计算 1/3+1/6", "1/3+1/6"),
+            ("文本: 大写 北京", "北京"),
+            (
+                "JSON: 校验行CSV\r\nnull\r\n{\"编号\":1}",
+                "null\r\n{\"编号\":1}",
+            ),
+        ] {
+            search.fill_query(query, window, cx);
+            let mut event = KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("ctrl-shift-a").unwrap(),
+                is_held: true,
+            };
+            search.key_down(&event, window, cx);
+            assert_eq!(search.input.read(cx).selection(), query.len()..query.len());
+            event.is_held = false;
+            search.key_down(&event, window, cx);
+            assert_eq!(&query[search.input.read(cx).selection()], expected);
+            assert_eq!(search.input.read(cx).text(), query);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_go_to_input_line(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -8668,6 +8721,7 @@ mod tests {
                     reopened.update(cx, verify_result_copy_in_place).unwrap();
                     reopened.update(cx, verify_input_error_selection).unwrap();
                     reopened.update(cx, verify_go_to_input_line).unwrap();
+                    reopened.update(cx, verify_query_argument_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
@@ -8712,6 +8766,20 @@ mod tests {
                             })
                             .unwrap();
                     }
+                    reopened
+                        .update(cx, |search, window, cx| search.fill_query("sqrt(81+19)", window, cx))
+                        .unwrap();
+                    window_handle
+                        .update(cx, |_, window, cx| {
+                            window.dispatch_keystroke(gpui::Keystroke::parse("ctrl-shift-a").unwrap(), cx);
+                        })
+                        .unwrap();
+                    reopened
+                        .update(cx, |search, _, cx| {
+                            let input = search.input.read(cx);
+                            assert_eq!(&input.text_ref()[input.selection()], "81+19");
+                        })
+                        .unwrap();
                     let multiline = "CSV: 表格预览 名称,数量\r\n绿茶,1\n米,2";
                     let line_start = multiline.find("绿茶").unwrap();
                     let line_end = line_start + "绿茶,1".len();

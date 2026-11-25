@@ -98,70 +98,79 @@ impl Example {
     }
 
     pub(super) fn argument_range(&self) -> Option<Range<usize>> {
-        self.calculator_argument_range()
-            .or_else(|| self.argument_start().map(|start| start..self.query.len()))
+        query_argument_range(self.query)
     }
 
-    fn calculator_argument_range(&self) -> Option<Range<usize>> {
-        let query = self.query.trim_end();
-        let (expression, exact) = match scoped_query(query) {
-            Some((Scope::Fraction, term)) => (fraction_command_expression(term)?, true),
-            Some(_) => return None,
-            None => (query.trim_start(), false),
-        };
-        let end = query.len();
-        if let Some(arguments) = standalone_function_arguments(expression) {
-            return Some(end - 1 - arguments.len()..end - 1);
-        }
-        (exact && !expression.is_empty()).then_some(end - expression.len()..end)
-    }
-
+    #[cfg(test)]
     pub(super) fn argument_start(&self) -> Option<usize> {
-        let (prefix, input) = self.query.split_once([':', '：'])?;
-        let scope = parse_scope(prefix)?;
-        if scope == Scope::DataPipeline {
-            let (_, arguments) = split_pipeline_input(input);
-            let (_, data) = json_argument_and_tail::<Vec<serde::de::IgnoredAny>>(arguments)?;
-            return (!data.is_empty()).then_some(self.query.len() - data.len());
-        }
-        let input = input.trim_start();
-        let operation_and_arguments = input.split_once(char::is_whitespace);
-        let operation = operation_and_arguments.map_or(input, |(operation, _)| operation);
-        let named_operation = replaceable_tool_operations(scope)
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(operation));
-        if matches!(scope, Scope::Equation | Scope::LinearSystem) && !named_operation {
-            return (!input.is_empty()).then_some(self.query.len() - input.len());
-        }
-        let (_, arguments) = operation_and_arguments?;
-        if !matches!(
-            scope,
-            Scope::Json
-                | Scope::Toml
-                | Scope::Csv
-                | Scope::TextTools
-                | Scope::UrlEncoding
-                | Scope::Path
-                | Scope::Uuid
-                | Scope::Ulid
-                | Scope::Isbn
-                | Scope::Gtin
-                | Scope::Circuit
-                | Scope::Complex
-                | Scope::Circle
-                | Scope::Vector
-                | Scope::Matrix
-        ) && !named_operation
-        {
-            return None;
-        }
-        let arguments = if scope == Scope::Circuit && !named_operation {
-            input
-        } else {
-            arguments.trim_start()
-        };
-        (!arguments.is_empty()).then_some(self.query.len() - arguments.len())
+        query_argument_start(self.query)
     }
+}
+
+pub(super) fn query_argument_range(query: &str) -> Option<Range<usize>> {
+    calculator_argument_range(query)
+        .or_else(|| query_argument_start(query).map(|start| start..query.len()))
+}
+
+fn calculator_argument_range(query: &str) -> Option<Range<usize>> {
+    let query = query.trim_end();
+    let (expression, exact) = match scoped_query(query) {
+        Some((Scope::Fraction, term)) => (fraction_command_expression(term)?, true),
+        Some(_) => return None,
+        None => (query.trim_start(), false),
+    };
+    let end = query.len();
+    if let Some(arguments) = standalone_function_arguments(expression) {
+        return Some(end - 1 - arguments.len()..end - 1);
+    }
+    (exact && !expression.is_empty()).then_some(end - expression.len()..end)
+}
+
+fn query_argument_start(query: &str) -> Option<usize> {
+    let (prefix, input) = query.split_once([':', '：'])?;
+    let scope = parse_scope(prefix)?;
+    if scope == Scope::DataPipeline {
+        let (_, arguments) = split_pipeline_input(input);
+        let (_, data) = json_argument_and_tail::<Vec<serde::de::IgnoredAny>>(arguments)?;
+        return (!data.is_empty()).then_some(query.len() - data.len());
+    }
+    let input = input.trim_start();
+    let operation_and_arguments = input.split_once(char::is_whitespace);
+    let operation = operation_and_arguments.map_or(input, |(operation, _)| operation);
+    let named_operation = replaceable_tool_operations(scope)
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(operation));
+    if matches!(scope, Scope::Equation | Scope::LinearSystem) && !named_operation {
+        return (!input.is_empty()).then_some(query.len() - input.len());
+    }
+    let (_, arguments) = operation_and_arguments?;
+    if !matches!(
+        scope,
+        Scope::Json
+            | Scope::Toml
+            | Scope::Csv
+            | Scope::TextTools
+            | Scope::UrlEncoding
+            | Scope::Path
+            | Scope::Uuid
+            | Scope::Ulid
+            | Scope::Isbn
+            | Scope::Gtin
+            | Scope::Circuit
+            | Scope::Complex
+            | Scope::Circle
+            | Scope::Vector
+            | Scope::Matrix
+    ) && !named_operation
+    {
+        return None;
+    }
+    let arguments = if scope == Scope::Circuit && !named_operation {
+        input
+    } else {
+        arguments.trim_start()
+    };
+    (!arguments.is_empty()).then_some(query.len() - arguments.len())
 }
 
 pub(super) const EXAMPLES: &[Example] = &[
