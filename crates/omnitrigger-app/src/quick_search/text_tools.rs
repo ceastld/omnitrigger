@@ -27,6 +27,7 @@ use super::{
 };
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
+const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const MAX_REGEX_FREQUENCY_INPUT_BYTES: usize = 16 * 1024;
 const MAX_DIFF_LINES: usize = 512;
 const MAX_COMPARISON_GRAPHEMES: usize = 512;
@@ -107,6 +108,7 @@ pub(super) enum TextError {
     RegexFrequencyInputTooLarge,
     NullCharacter,
     InvalidBase64,
+    InvalidBase32,
     InvalidHexBytes,
     InvalidUtf8,
     InvalidHexUtf16Units,
@@ -168,6 +170,7 @@ impl TextError {
             Self::RegexFrequencyInputTooLarge => "正则频数的原文超过 16 KiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
+            Self::InvalidBase32 => "Base32 编码无效",
             Self::InvalidHexBytes => "输入成对的十六进制数字，例如 E5 8C 97",
             Self::InvalidUtf8 => "解码结果不是 UTF-8 文本",
             Self::InvalidHexUtf16Units => {
@@ -443,6 +446,8 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "base64解码" | "base64-decode" => decode_base64(text, &STANDARD, &STANDARD_NO_PAD),
         "base64url编码" | "base64url-encode" => Ok(URL_SAFE_NO_PAD.encode(text)),
         "base64url解码" | "base64url-decode" => decode_base64(text, &URL_SAFE, &URL_SAFE_NO_PAD),
+        "base32编码" | "base32-encode" => Ok(encode_base32(text.as_bytes())),
+        "base32解码" | "base32-decode" => decode_base32(text),
         "utf8编码" | "utf8-hex" => Ok(encode_hex_units(text.bytes(), 2)),
         "utf8解码" | "utf8-hex-decode" => decode_utf8_bytes(text),
         "utf16编码" | "utf16-hex" => Ok(encode_hex_units(text.encode_utf16(), 4)),
@@ -1131,6 +1136,70 @@ fn decode_base64(
         .decode(encoded)
         .map_err(|_| TextError::InvalidBase64)?;
     decoded_utf8(bytes)
+}
+
+fn encode_base32(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    for block in bytes.chunks(5) {
+        let bits = block.len() * 8;
+        let word = block
+            .iter()
+            .fold(0_u64, |word, &byte| (word << 8) | u64::from(byte));
+        let word = word << (40 - bits);
+        let symbols = bits.div_ceil(5);
+        for index in 0..symbols {
+            let digit = ((word >> (35 - 5 * index)) & 31) as usize;
+            encoded.push(char::from(BASE32_ALPHABET[digit]));
+        }
+        encoded.extend(std::iter::repeat_n('=', 8 - symbols));
+    }
+    encoded
+}
+
+fn decode_base32(text: &str) -> Result<String, TextError> {
+    let encoded: Vec<_> = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    let data_end = encoded
+        .iter()
+        .position(|&byte| byte == b'=')
+        .unwrap_or(encoded.len());
+    let expected_padding = match data_end % 8 {
+        0 => 0,
+        2 => 6,
+        4 => 4,
+        5 => 3,
+        7 => 1,
+        _ => return Err(TextError::InvalidBase32),
+    };
+    let (data, padding) = encoded.split_at(data_end);
+    if !padding.is_empty()
+        && (padding.len() != expected_padding || !padding.iter().all(|&byte| byte == b'='))
+    {
+        return Err(TextError::InvalidBase32);
+    }
+    let mut decoded = Vec::with_capacity(data.len() / 8 * 5 + data.len() % 8 * 5 / 8);
+    for block in data.chunks(8) {
+        let mut word = 0_u64;
+        for &symbol in block {
+            let digit = match symbol.to_ascii_uppercase() {
+                upper @ b'A'..=b'Z' => upper - b'A',
+                b'2'..=b'7' => symbol - b'2' + 26,
+                _ => return Err(TextError::InvalidBase32),
+            };
+            word = (word << 5) | u64::from(digit);
+        }
+        let bits = block.len() * 5;
+        let unused = bits % 8;
+        if word & ((1 << unused) - 1) != 0 {
+            return Err(TextError::InvalidBase32);
+        }
+        for index in (0..bits / 8).rev() {
+            decoded.push((word >> (8 * index + unused)) as u8);
+        }
+    }
+    decoded_utf8(decoded)
 }
 
 fn decoded_utf8(bytes: Vec<u8>) -> Result<String, TextError> {
@@ -3221,6 +3290,42 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn encodes_and_decodes_rfc_base32_and_validates_padding_bits() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "MY======"),
+            ("fo", "MZXQ===="),
+            ("foo", "MZXW6==="),
+            ("foob", "MZXW6YQ="),
+            ("fooba", "MZXW6YTB"),
+            ("foobar", "MZXW6YTBOI======"),
+        ] {
+            assert_eq!(encode_base32(plain.as_bytes()), encoded);
+            assert_eq!(decode_base32(encoded).as_deref(), Ok(plain));
+            let lowercase = encoded.trim_end_matches('=').to_ascii_lowercase();
+            assert_eq!(decode_base32(&lowercase).as_deref(), Ok(plain));
+        }
+        let text = " 北京🫖 ";
+        assert_eq!(
+            decode_base32(&encode_base32(text.as_bytes())).as_deref(),
+            Ok(text)
+        );
+        assert_eq!(
+            transform_text("BASE32解码 \"mz\r\nxw6===\"").as_deref(),
+            Ok("foo")
+        );
+        for malformed in ["M", "MZ======", "MY===", "M=Y=====", "1A", "MY======A", "="] {
+            assert_eq!(
+                decode_base32(malformed),
+                Err(TextError::InvalidBase32),
+                "{malformed}"
+            );
+        }
+        assert_eq!(decode_base32("74======"), Err(TextError::InvalidUtf8));
+        assert_eq!(decode_base32("AA======"), Err(TextError::NullCharacter));
     }
 
     #[test]

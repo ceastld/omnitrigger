@@ -4316,6 +4316,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用标准 Base32 字母表编码文本",
+        query: "文本: Base32编码 foo",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "解码 Base32 格式的 UTF-8 文本",
+        query: "文本: Base32解码 MZXW6===",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看 Unicode 码位",
         query: "文本: 码位 北京",
     },
