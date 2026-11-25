@@ -2060,7 +2060,7 @@ struct ResultRefill {
 }
 
 enum RefillKind {
-    Result,
+    Result { evaluated: bool },
     File { path: String },
 }
 
@@ -2297,19 +2297,6 @@ impl QuickSearch {
             }
             this.bookmark_limit_reached = false;
             this.bookmark_save_error = None;
-            if !this.has_refilled_input(&query)
-                && this.index.wheel_slots.is_none()
-                && matches!(scoped_query(query.trim()), Some((Scope::WheelSlots, term)) if !term.is_empty())
-            {
-                this.index.wheel_slots = Some(this.workspace.upgrade().map_or_else(Vec::new, |workspace| {
-                    let workspace = workspace.read(cx);
-                    if workspace.wheels_error.is_none() {
-                        index_slots(&workspace.wheels.wheels)
-                    } else {
-                        Vec::new()
-                    }
-                }));
-            }
             this.refresh_results(&query, window, cx);
             if !query.trim().is_empty() && !this.has_temporary_query() {
                 *this.index.recent.last_input.borrow_mut() = RememberedSearchInput {
@@ -2495,6 +2482,20 @@ impl QuickSearch {
             self.result_refill = None;
         }
         let refilled = self.has_refilled_input(query);
+        if !refilled
+            && self.index.wheel_slots.is_none()
+            && matches!(scoped_query(query.trim()), Some((Scope::WheelSlots, term)) if !term.is_empty())
+        {
+            self.index.wheel_slots =
+                Some(self.workspace.upgrade().map_or_else(Vec::new, |workspace| {
+                    let workspace = workspace.read(cx);
+                    if workspace.wheels_error.is_none() {
+                        index_slots(&workspace.wheels.wheels)
+                    } else {
+                        Vec::new()
+                    }
+                }));
+        }
         let next = if refilled {
             Results::RefilledInput
         } else {
@@ -3159,7 +3160,7 @@ impl QuickSearch {
         self.result_refill = Some(ResultRefill {
             original,
             inserted: inserted.clone(),
-            kind: RefillKind::Result,
+            kind: RefillKind::Result { evaluated: false },
         });
         self.input
             .update(cx, |input, cx| input.set_text(inserted, cx));
@@ -3257,7 +3258,8 @@ impl QuickSearch {
 
     fn has_refilled_input(&self, query: &str) -> bool {
         self.result_refill.as_ref().is_some_and(|refill| {
-            matches!(refill.kind, RefillKind::Result) && refill.inserted == query
+            matches!(refill.kind, RefillKind::Result { evaluated: false })
+                && refill.inserted == query
         })
     }
 
@@ -4017,7 +4019,21 @@ impl QuickSearch {
                     self.toggle_bookmark_browser(window, cx);
                 }
             }
-            "f5" if !matches!(self.results, Results::RefilledInput) => {
+            "f5" if matches!(self.results, Results::RefilledInput) => {
+                if !event.is_held && !self.file_operation_in_progress() {
+                    if let Some(ResultRefill {
+                        kind: RefillKind::Result { evaluated },
+                        ..
+                    }) = &mut self.result_refill
+                    {
+                        *evaluated = true;
+                        let query = self.input.read(cx).text();
+                        self.result_save = ResultSaveState::Ready;
+                        self.refresh_results(&query, window, cx);
+                    }
+                }
+            }
+            "f5" => {
                 let query = self.input.read(cx).text();
                 match scoped_query(query.trim()) {
                     Some((Scope::LocalFiles | Scope::OpenWindows | Scope::Applications, _))
@@ -4909,7 +4925,7 @@ impl QuickSearch {
             }
             Results::RefilledInput => row
                 .text_color(rgb(theme::TEXT_MUTED))
-                .child("可在结果前添加下一条命令"),
+                .child("可在结果前添加下一条命令，也可按 F5 执行当前输入"),
             Results::Help(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("未找到用法示例"),
@@ -5300,7 +5316,7 @@ impl Render for QuickSearch {
             None
         } else if let Some(refill) = &self.result_refill {
             Some(match &refill.kind {
-                RefillKind::Result => "恢复输入 F3",
+                RefillKind::Result { .. } => "恢复输入 F3",
                 RefillKind::File { .. } => "回到文件 F3",
             })
         } else {
@@ -8238,6 +8254,31 @@ mod tests {
         assert_eq!(search.input.read(cx).selection(), 0..0);
         search.refresh_results(decimal, window, cx);
         assert!(matches!(search.results, Results::RefilledInput));
+        search.key_down(&key(false), window, cx);
+        assert_eq!(search.input.read(cx).text(), original);
+
+        let original = "进制: 浮点分解 0.375";
+        let expression = "ldexp(0.75,-1)";
+        search.fill_query(original, window, cx);
+        search.refresh_results(original, window, cx);
+        search.key_down(&key(false), window, cx);
+        assert_eq!(search.input.read(cx).text(), expression);
+        search.refresh_results(expression, window, cx);
+        search
+            .input
+            .update(cx, |input, cx| input.move_cursor_to(6, cx));
+        let mut refresh = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("f5").unwrap(),
+            is_held: true,
+        };
+        search.key_down(&refresh, window, cx);
+        assert!(matches!(search.results, Results::RefilledInput));
+        refresh.is_held = false;
+        search.key_down(&refresh, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("0.375"));
+        assert_eq!(search.input.read(cx).selection(), 6..6);
+        search.refresh_results(expression, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("0.375"));
         search.key_down(&key(false), window, cx);
         assert_eq!(search.input.read(cx).text(), original);
     }
