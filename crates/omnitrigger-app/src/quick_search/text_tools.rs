@@ -252,6 +252,8 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
         "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
         "差异块csv" | "diff-blocks-csv" => Some(diff_blocks_csv(text)),
+        "正则取表" | "regex-to-csv" => Some(regex_captures_to_csv(text, false)),
+        "正则定位取表" | "regex-positions-to-csv" => Some(regex_captures_to_csv(text, true)),
         "正则替换明细csv" | "regex-replacement-csv" => Some(regex_replacement_csv(text)),
         "正则频数csv" | "regex-frequency-csv" => Some(regex_group_frequency_csv(text)),
         _ => None,
@@ -359,10 +361,6 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
                 .join("\n"));
         }
         "正则取组" | "regex-capture" => return extract_regex_group(text),
-        "正则取表" | "regex-to-csv" => return regex_captures_to_csv(text, false),
-        "正则定位取表" | "regex-positions-to-csv" => {
-            return regex_captures_to_csv(text, true)
-        }
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }

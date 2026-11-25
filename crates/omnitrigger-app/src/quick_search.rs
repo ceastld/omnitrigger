@@ -6113,6 +6113,30 @@ mod tests {
     }
 
     #[test]
+    fn previews_regex_capture_reports_as_tables_and_preserves_their_csv() {
+        for (query, expected) in [
+            (
+                r#"文本: 正则取表 "(?<id>[0-9]+):([^;]+)" 001:茶,咖啡;002:梨"#,
+                "id,2\r\n001,\"茶,咖啡\"\r\n002,梨",
+            ),
+            (r#"文本: regex-to-csv "([0-9]+)?X" X"#, "1\r\n\"\""),
+            (
+                r#"文本: 正则定位取表 "([0-9]+)" 无数字"#,
+                "原文行号,原文列号,1",
+            ),
+            (
+                r#"处理: ["文本: 正则定位取表 \"(ID=[0-9]+)\""] 前缀 ID=1"#,
+                "原文行号,原文列号,1\r\n1,4,ID=1",
+            ),
+        ] {
+            let result = for_query(query, &[]);
+            assert_eq!(result.refillable_text(), Some(expected), "{query}");
+            let table = result.table_preview().expect("正则取表结果可预览");
+            assert_eq!(table.page_csv(0, 0), expected, "{query}");
+        }
+    }
+
+    #[test]
     fn continues_single_clock_durations_without_reusing_ratios_or_lists() {
         for (query, expected) in [
             ("时长: 缩放 01:30:00 @ 2/3", Some("时长: 01:00:00")),
