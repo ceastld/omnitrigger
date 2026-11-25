@@ -22,6 +22,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "pi" | "π" | "Π" => return Some(NamedValue::Constant(PI)),
         "e" => return Some(NamedValue::Constant(E)),
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
+        "isclose" => return Some(NamedValue::Aggregate(is_close)),
         "fsum" => return Some(NamedValue::Aggregate(exact_float_sum)),
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
@@ -494,6 +495,20 @@ fn exact_float_sum(values: &[f64]) -> f64 {
         return f64::from_bits(sign | (EXPONENT_MASK << FRACTION_BITS));
     }
     f64::from_bits(sign | (exponent << FRACTION_BITS) | (mantissa & FRACTION_MASK))
+}
+
+fn is_close(values: &[f64]) -> f64 {
+    let (left, right, relative, absolute) = match *values {
+        [left, right] => (left, right, 1e-9, 0.),
+        [left, right, relative] => (left, right, relative, 0.),
+        [left, right, relative, absolute] => (left, right, relative, absolute),
+        _ => return f64::NAN,
+    };
+    if !(0.0..1.0).contains(&relative) || absolute < 0. {
+        return f64::NAN;
+    }
+    let limit = absolute.max(relative * left.abs().max(right.abs()));
+    f64::from(u8::from((left - right).abs() <= limit))
 }
 
 pub(super) fn average(values: &[f64]) -> f64 {

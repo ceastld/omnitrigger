@@ -3441,6 +3441,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "判断两个计算结果是否在容差内",
+        query: "isclose(0.1+0.2,0.3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "大数相消时保留浮点加法中的小数值",
         query: "fsum(1e16,1,-1e16)",
     },

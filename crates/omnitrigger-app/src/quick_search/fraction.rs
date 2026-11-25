@@ -53,6 +53,7 @@ pub(super) enum FractionError {
     InterpolationInterval,
     InterpolationRange,
     ClampBounds,
+    ToleranceArguments,
     QuantileArguments,
     SampleVarianceCount,
     RationalStandardDeviation,
@@ -115,6 +116,7 @@ impl FractionError {
             Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
             Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
             Self::ClampBounds => "clamp 的下界须小于或等于上界",
+            Self::ToleranceArguments => "isclose 须填写两个数，相对容差为 0 至小于 1，绝对容差须非负",
             Self::QuantileArguments => {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
             }
@@ -1828,6 +1830,10 @@ impl FractionParser<'_> {
             ensure_exact_size(&rate)?;
             return Ok(rate);
         }
+        if name == "isclose" {
+            self.remaining = rest;
+            return self.is_close_function();
+        }
         if name == "clamp" {
             self.remaining = rest;
             return self.clamp_function();
@@ -2224,6 +2230,37 @@ impl FractionParser<'_> {
                 .map_err(|_| FractionError::RationalStandardDeviation);
         }
         Ok(variance)
+    }
+
+    fn is_close_function(&mut self) -> Result<BigRational, FractionError> {
+        let values = self.list_function_arguments()?;
+        if !(2..=4).contains(&values.len()) {
+            return Err(FractionError::ToleranceArguments);
+        }
+        let mut values = values.into_iter();
+        let left = values.next().expect("已检查第一个数存在");
+        let right = values.next().expect("已检查第二个数存在");
+        let relative = values
+            .next()
+            .unwrap_or_else(|| BigRational::new(1.into(), 1_000_000_000.into()));
+        let absolute = values.next().unwrap_or_default();
+        if relative.numer().sign() == Sign::Minus
+            || relative.numer() >= relative.denom()
+            || absolute.numer().sign() == Sign::Minus
+        {
+            return Err(FractionError::ToleranceArguments);
+        }
+        let magnitude = |value: &BigRational| {
+            if value.numer().sign() == Sign::Minus {
+                -value
+            } else {
+                value.clone()
+            }
+        };
+        let distance = magnitude(&(&left - &right));
+        let close =
+            distance <= absolute || distance <= relative * magnitude(&left).max(magnitude(&right));
+        Ok(BigRational::from_integer(u8::from(close).into()))
     }
 
     fn clamp_function(&mut self) -> Result<BigRational, FractionError> {
@@ -2983,6 +3020,25 @@ mod tests {
     fn sums_rational_arguments_to_fsum_without_averaging() {
         for (query, expected) in [("fsum(1/3,1/6)", "1/2"), ("FSUM(2**80,1/7,-2**80)*7", "1")] {
             assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn compares_exact_values_with_relative_and_absolute_tolerances() {
+        for (query, expected) in [
+            ("isclose(1/3,0.33,0,1/300)", "1"),
+            ("isclose(1/3,0.33,0,1/301)", "0"),
+            ("isclose(2**80,2**80+1)", "1"),
+            ("isclose(2**80,2**80+1,0)", "0"),
+            ("isclose(0,0.01,0,1/100)*7", "7"),
+        ] {
+            assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
+        }
+        for query in ["isclose(1)", "isclose(1,1,1)", "isclose(1,1,0,-1)"] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::ToleranceArguments)
+            );
         }
     }
 

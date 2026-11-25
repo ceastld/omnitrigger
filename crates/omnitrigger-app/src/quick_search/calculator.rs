@@ -883,6 +883,23 @@ mod tests {
     }
 
     #[test]
+    fn compares_decimal_results_without_forgetting_relative_or_absolute_tolerance() {
+        for (query, expected) in [
+            ("isclose(0.1+0.2,0.3)", "1"),
+            ("isclose(0.1+0.2,0.3,0)", "0"),
+            ("isclose(1,1.125,0,0.125)", "1"),
+            ("isclose(1,1.125,0,0.0625)", "0"),
+            ("isclose(0,0.1)", "0"),
+            ("isclose(1e308,-1e308,0.99)", "0"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["isclose(1)", "isclose(1,1,1)", "isclose(1,1,0,-1)"] {
+            assert_eq!(calculate(query), Err(CalculationError::FunctionDomain));
+        }
+    }
+
+    #[test]
     fn averages_values_by_nonnegative_weights_without_overflow() {
         for (query, expected) in [
             ("wavg(80,2,90,3)", "86"),
