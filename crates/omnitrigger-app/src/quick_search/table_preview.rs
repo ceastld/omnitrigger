@@ -86,6 +86,17 @@ impl TablePreview {
         self.columns.div_ceil(self.columns_per_page)
     }
 
+    pub(super) fn page_row_position(&self, page: usize) -> Option<(usize, usize)> {
+        let pages = self.row_pages();
+        (pages > 1 && page < pages).then(|| (1 + page * MAX_DATA_ROWS, self.data_rows))
+    }
+
+    pub(super) fn page_for_data_row(&self, number: usize) -> Option<usize> {
+        (1..=self.data_rows)
+            .contains(&number)
+            .then(|| (number - 1) / MAX_DATA_ROWS)
+    }
+
     pub(super) fn spans_pages(&self) -> bool {
         self.row_pages() > 1 || self.column_pages() > 1
     }

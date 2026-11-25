@@ -2026,9 +2026,16 @@ struct BookmarkNameEdit {
     filter: String,
 }
 
+#[derive(Clone, Copy)]
+enum LineJumpTarget {
+    Input,
+    TableRows,
+}
+
 struct LineJump {
     input: Entity<MessageInput>,
     total: usize,
+    target: LineJumpTarget,
     _changes: Subscription,
 }
 
@@ -2365,7 +2372,12 @@ impl QuickSearch {
         cx.notify();
     }
 
-    fn open_line_jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_line_jump(
+        &mut self,
+        target: LineJumpTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.line_jump.is_some()
             || self.bookmark_name_edit.is_some()
             || self.file_operation_in_progress()
@@ -2373,7 +2385,15 @@ impl QuickSearch {
         {
             return;
         }
-        let Some((number, total)) = self.input.read(cx).line_position() else {
+        let position = match target {
+            LineJumpTarget::Input => self.input.read(cx).line_position(),
+            LineJumpTarget::TableRows if self.expanded_value_pages.is_none() => self
+                .results
+                .table_preview()
+                .and_then(|table| table.page_row_position(self.table_pages.rows)),
+            LineJumpTarget::TableRows => None,
+        };
+        let Some((number, total)) = position else {
             return;
         };
         let input = cx.new(|cx| {
@@ -2389,6 +2409,7 @@ impl QuickSearch {
         self.line_jump = Some(LineJump {
             input,
             total,
+            target,
             _changes: changes,
         });
         window.resize(size(px(WIDTH), px(LINE_JUMP_HEIGHT)));
@@ -2403,11 +2424,25 @@ impl QuickSearch {
             let Some(number) = jump.number(cx) else {
                 return;
             };
-            if !self
-                .input
-                .update(cx, |input, cx| input.go_to_line(number, cx))
-            {
-                return;
+            match jump.target {
+                LineJumpTarget::Input => {
+                    if !self
+                        .input
+                        .update(cx, |input, cx| input.go_to_line(number, cx))
+                    {
+                        return;
+                    }
+                }
+                LineJumpTarget::TableRows => {
+                    let Some(page) = self
+                        .results
+                        .table_preview()
+                        .and_then(|table| table.page_for_data_row(number))
+                    else {
+                        return;
+                    };
+                    self.table_pages.rows = page;
+                }
             }
         }
         self.line_jump = None;
@@ -3780,9 +3815,17 @@ impl QuickSearch {
                         .update(cx, |input, cx| input.select_current_line(cx));
                 }
                 cx.stop_propagation();
-            } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "g" {
+            } else if keystroke.modifiers.control
+                && (modifiers == 1 || (modifiers == 2 && keystroke.modifiers.shift))
+                && keystroke.key == "g"
+            {
                 if !event.is_held {
-                    self.open_line_jump(window, cx);
+                    let target = if keystroke.modifiers.shift {
+                        LineJumpTarget::TableRows
+                    } else {
+                        LineJumpTarget::Input
+                    };
+                    self.open_line_jump(target, window, cx);
                 }
                 if self.line_jump.is_some() {
                     cx.stop_propagation();
@@ -4443,6 +4486,21 @@ impl QuickSearch {
                     "Shift+PageDown 右页 · Ctrl+Shift+PageDown 最后一组列",
                 ),
             };
+        let counter = format!("{dimension} {}/{count}", page + 1);
+        let counter = match axis {
+            TableAxis::Rows => div().child(
+                button("jump-table-row", counter, Tone::Ghost, true)
+                    .h(px(TABLE_PAGER_HEIGHT))
+                    .px(px(3.))
+                    .tooltip(theme::text_tooltip(
+                        "Ctrl+Shift+G 跳到包含指定数据行的页".into(),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_line_jump(LineJumpTarget::TableRows, window, cx);
+                    })),
+            ),
+            TableAxis::Columns => div().child(counter),
+        };
         div()
             .flex()
             .flex_none()
@@ -4457,7 +4515,7 @@ impl QuickSearch {
                         this.change_table_page(axis, PageChange::Previous, cx);
                     })),
             )
-            .child(format!("{dimension} {}/{count}", page + 1))
+            .child(counter)
             .child(
                 button(next_id, next_label, Tone::Ghost, page + 1 < count)
                     .h(px(TABLE_PAGER_HEIGHT))
@@ -4521,7 +4579,12 @@ impl QuickSearch {
                     .h(px(TABLE_PAGER_HEIGHT))
                     .px(px(8.))
                     .tooltip(theme::text_tooltip(
-                        "Ctrl+Shift+T 复制完整表格。Ctrl+Shift+Enter 复制本页 TSV".into(),
+                        if table.spans_pages() {
+                            "Ctrl+Shift+T 复制完整表格。Ctrl+Shift+Enter 复制本页 TSV"
+                        } else {
+                            "Ctrl+Shift+T 复制完整表格"
+                        }
+                        .into(),
                     ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.copy_table(TableCopy::Tsv, false, window, cx);
@@ -5155,20 +5218,24 @@ impl QuickSearch {
             .py(px(10.))
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|this, _: &OpenLineJump, window, cx| {
-                this.open_line_jump(window, cx);
+                this.open_line_jump(LineJumpTarget::Input, window, cx);
             }))
     }
 
     fn render_line_jump(jump: &LineJump, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let valid = jump.number(cx).is_some();
         let focused = jump.input.focus_handle(cx).is_focused(window);
+        let title = match jump.target {
+            LineJumpTarget::Input => "跳到输入行",
+            LineJumpTarget::TableRows => "跳到表格数据行所在页",
+        };
         Self::frame(cx)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("跳到输入行"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                     .child(
                         button("cancel-line-jump", "Esc 返回", Tone::Ghost, true)
                             .h(px(24.))
@@ -7750,6 +7817,8 @@ mod tests {
         press(search, "f2", window, cx);
         assert!(search.expanded_value_pages.is_some());
         assert!(!search.copy_table(TableCopy::CurrentPageTsv, true, window, cx));
+        press(search, "ctrl-shift-g", window, cx);
+        assert!(search.line_jump.is_none());
         press(search, "pageup", window, cx);
         press(search, "ctrl-shift-pagedown", window, cx);
         assert_eq!(pages(search), (2, 1));
@@ -7757,9 +7826,40 @@ mod tests {
         assert_eq!(pages(search), (2, 1));
         assert!(search.expanded_value_pages.is_none());
         assert_eq!(search.results.refillable_text(), Some(data.as_str()));
+        let selection = search.input.read(cx).selection();
+        search.key_down(
+            &KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("ctrl-shift-g").unwrap(),
+                is_held: true,
+            },
+            window,
+            cx,
+        );
+        assert!(search.line_jump.is_none());
+        press(search, "ctrl-shift-g", window, cx);
+        let jump = search.line_jump.as_ref().unwrap();
+        assert_eq!(jump.total, 15);
+        assert_eq!(jump.number(cx), Some(13));
+        let entry = jump.input.clone();
+        entry.update(cx, |input, cx| input.set_text("16", cx));
+        press(search, "enter", window, cx);
+        assert!(search.line_jump.is_some());
+        press(search, "escape", window, cx);
+        assert!(search.line_jump.is_none());
+        assert_eq!(pages(search), (2, 1));
+        press(search, "ctrl-shift-g", window, cx);
+        let entry = search.line_jump.as_ref().unwrap().input.clone();
+        entry.update(cx, |input, cx| input.set_text("７", cx));
+        press(search, "enter", window, cx);
+        assert!(search.line_jump.is_none());
+        assert_eq!(pages(search), (1, 1));
+        assert_eq!(search.input.read(cx).text(), query);
+        assert_eq!(search.input.read(cx).selection(), selection);
         search.fill_query("CSV: 表格预览 x,y\n1,2", window, cx);
         search.refresh_results("CSV: 表格预览 x,y\n1,2", window, cx);
         assert_eq!(pages(search), (0, 0));
+        press(search, "ctrl-shift-g", window, cx);
+        assert!(search.line_jump.is_none());
     }
 
     #[cfg(target_os = "windows")]

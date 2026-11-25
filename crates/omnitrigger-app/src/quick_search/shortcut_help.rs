@@ -47,6 +47,7 @@ const SHORTCUTS: &[[&str; 3]] = &[
     ["表格", "PageDown", "向下翻行页"],
     ["表格", "Ctrl+PageUp", "跳到第一组行"],
     ["表格", "Ctrl+PageDown", "跳到最后一组行"],
+    ["表格", "Ctrl+Shift+G", "跳到包含指定数据行的页"],
     ["表格", "Shift+PageUp", "向左翻列页"],
     ["表格", "Shift+PageDown", "向右翻列页"],
     ["表格", "Ctrl+Shift+PageUp", "跳到第一组列"],
