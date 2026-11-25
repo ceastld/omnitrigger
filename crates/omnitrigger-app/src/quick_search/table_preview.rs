@@ -98,6 +98,10 @@ impl TablePreview {
         write_rows(self.visible_rows(row_page, column_page), ',')
     }
 
+    pub(super) fn page_tsv(&self, row_page: usize, column_page: usize) -> String {
+        write_rows(self.visible_rows(row_page, column_page), '\t')
+    }
+
     pub(super) fn tsv(&self) -> String {
         write_rows(&self.rows, '\t')
     }
@@ -260,6 +264,10 @@ mod tests {
             "name,note\r\n\"绿茶,冰\",\" 原样\n\"\"备注\"\" \"\r\n\"\",  "
         );
         assert_eq!(preview.page_csv(1, 0), "id,label\r\n7,末页\r\n8,末页");
+        assert_eq!(
+            preview.page_tsv(1, 1),
+            "name\tnote\r\n绿茶,冰\t\" 原样\n\"\"备注\"\" \"\r\n\"\"\t  "
+        );
     }
 
     #[test]

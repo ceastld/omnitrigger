@@ -780,6 +780,7 @@
 - 按 `Ctrl+Shift+PageUp` 可跳到第一组列，按 `Ctrl+Shift+PageDown` 可跳到最后一组列，当前行页保持原位。
 - 多页表格中，按 `Ctrl+Shift+C` 或点击「复制本页」可复制当前页的行和列。结果包含该页的表头和完整单元格内容。
 - 要粘贴到电子表格时，可按 `Ctrl+Shift+T` 或点「复制 TSV」。剪贴板会包含表头和所有行列。单元格里的制表符、引号和换行按 TSV 引号规则保留。
+- 多页表格中按 `Ctrl+Shift+Enter` 可复制当前可见行和列的 TSV，包含这组列的表头。可翻到需要的一页，再粘贴到电子表格。
 - 输入 `CSV: Markdown` 加空格和数据可生成 Markdown 表格，首行作为表头，单元格中的竖线会转义，换行写为 `<br>`。用 `CSV: 转置` 可交换行列，结果仍为 CSV。 [GFM 表格语法](https://github.github.com/gfm/#tables-extension-)
 - 输入 `CSV: Markdown对齐 ["左","中","右"]` 再粘贴三列表格，可分别指定左对齐、居中和右对齐。使用 `默认` 可沿用渲染器的默认对齐，每一列对应数组中的一项。 [GFM 表格对齐语法](https://github.github.com/gfm/#tables-extension-)
 - 用 `CSV: 从Markdown` 粘贴 Markdown 表格可转回 CSV。首行保留为表头，第二行的对齐标记移除。转义的竖线还原为单元格内的文字，`<br>` 转为换行。缺少的尾列补空，超过表头列数时会提示。

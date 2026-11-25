@@ -1970,6 +1970,7 @@ enum TableAxis {
 #[derive(Clone, Copy)]
 enum TableCopy {
     CurrentPage,
+    CurrentPageTsv,
     Tsv,
 }
 
@@ -2843,7 +2844,7 @@ impl QuickSearch {
         let Some(table) = self.results.table_preview() else {
             return false;
         };
-        if matches!(format, TableCopy::CurrentPage)
+        if matches!(format, TableCopy::CurrentPage | TableCopy::CurrentPageTsv)
             && (self.expanded_value_pages.is_some() || !table.spans_pages())
         {
             return false;
@@ -2852,6 +2853,9 @@ impl QuickSearch {
             let text = match format {
                 TableCopy::CurrentPage => {
                     table.page_csv(self.table_pages.rows, self.table_pages.columns)
+                }
+                TableCopy::CurrentPageTsv => {
+                    table.page_tsv(self.table_pages.rows, self.table_pages.columns)
                 }
                 TableCopy::Tsv => table.tsv(),
             };
@@ -3716,6 +3720,9 @@ impl QuickSearch {
                 && match keystroke.key.as_str() {
                     "c" => self.copy_table(TableCopy::CurrentPage, event.is_held, window, cx),
                     "t" => self.copy_table(TableCopy::Tsv, event.is_held, window, cx),
+                    "enter" => {
+                        self.copy_table(TableCopy::CurrentPageTsv, event.is_held, window, cx)
+                    }
                     _ => false,
                 }
             {
@@ -4514,7 +4521,7 @@ impl QuickSearch {
                     .h(px(TABLE_PAGER_HEIGHT))
                     .px(px(8.))
                     .tooltip(theme::text_tooltip(
-                        "Ctrl+Shift+T 复制完整表格为 TSV".into(),
+                        "Ctrl+Shift+T 复制完整表格。Ctrl+Shift+Enter 复制本页 TSV".into(),
                     ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.copy_table(TableCopy::Tsv, false, window, cx);
@@ -7739,8 +7746,10 @@ mod tests {
         assert_eq!(pages(search), (1, 1));
         press(search, "ctrl-pagedown", window, cx);
         assert_eq!(pages(search), (2, 1));
+        assert!(search.copy_table(TableCopy::CurrentPageTsv, true, window, cx));
         press(search, "f2", window, cx);
         assert!(search.expanded_value_pages.is_some());
+        assert!(!search.copy_table(TableCopy::CurrentPageTsv, true, window, cx));
         press(search, "pageup", window, cx);
         press(search, "ctrl-shift-pagedown", window, cx);
         assert_eq!(pages(search), (2, 1));
