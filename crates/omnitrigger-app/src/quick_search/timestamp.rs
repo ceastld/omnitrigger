@@ -21,6 +21,7 @@ use super::duration::{
 const MAX_TARGET_ZONES: usize = 8;
 const MAX_SERIES_TIMESTAMPS: usize = 128;
 const MAX_DAILY_DURATION_ROWS: usize = 128;
+const MAX_ABSOLUTE_INTERVALS: usize = 32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
@@ -41,6 +42,8 @@ pub(super) enum TimestampError {
     InvalidDuration,
     IntervalEndpoints,
     IntervalOutput(DurationError),
+    AbsoluteIntervalsArguments,
+    AbsoluteIntervalOrder,
     AlignmentArguments,
     SeriesArguments,
     UnsupportedPrecision,
@@ -71,6 +74,10 @@ impl TimestampError {
             Self::InvalidDuration => "请输入要加减的时长，例如 时间戳: 现在 + 90分钟",
             Self::IntervalEndpoints => "用 到 或 至 隔开两个带时区的时间",
             Self::IntervalOutput(error) => error.message(),
+            Self::AbsoluteIntervalsArguments => {
+                "填写 1 至 32 段 [开始,结束]，例如 [[\"0s\",\"10s\"],[\"5s\",\"15s\"]]"
+            }
+            Self::AbsoluteIntervalOrder => "每段时间的结束须晚于开始",
             Self::AlignmentArguments => "填写正的时间步长和时间，例如 15分钟 @ 1700000000",
             Self::SeriesArguments => "填写起始时刻、正步长和 1 至 128 项，可指定一个目标时区",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
@@ -182,6 +189,12 @@ enum TimestampReport {
     DailyDurations,
     OffsetChanges,
     DailyClock,
+    AbsoluteIntervals(IntervalOperation),
+}
+
+enum IntervalOperation {
+    Merge,
+    Intersection,
 }
 
 impl TimestampReport {
@@ -192,6 +205,12 @@ impl TimestampReport {
             "逐日时长" | "daily-durations" => Some(Self::DailyDurations),
             "偏移变更" | "offset-changes" => Some(Self::OffsetChanges),
             "每日同刻" | "daily-clock" => Some(Self::DailyClock),
+            "区间合并" | "merge-intervals" => {
+                Some(Self::AbsoluteIntervals(IntervalOperation::Merge))
+            }
+            "区间交集" | "intersect-intervals" => {
+                Some(Self::AbsoluteIntervals(IntervalOperation::Intersection))
+            }
             _ => None,
         }
     }
@@ -223,6 +242,9 @@ fn convert_timestamp_with_local(
         Some(TimestampReport::DailyDurations) => return daily_durations(argument, now),
         Some(TimestampReport::OffsetChanges) => return timezone_offset_changes(argument),
         Some(TimestampReport::DailyClock) => return daily_clock_series(argument),
+        Some(TimestampReport::AbsoluteIntervals(operation)) => {
+            return absolute_intervals_csv(argument, now, operation);
+        }
         Some(TimestampReport::Zones) => true,
         None => false,
     };
@@ -711,6 +733,68 @@ fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, Timesta
     format_timestamp_delta(end - start, output)
 }
 
+fn absolute_intervals_csv(
+    input: &str,
+    now: DateTime<Utc>,
+    operation: IntervalOperation,
+) -> Result<String, TimestampError> {
+    let invalid = TimestampError::AbsoluteIntervalsArguments;
+    let intervals: Vec<[String; 2]> = serde_json::from_str(input).map_err(|_| invalid)?;
+    if !(1..=MAX_ABSOLUTE_INTERVALS).contains(&intervals.len()) {
+        return Err(invalid);
+    }
+    let intervals = intervals
+        .into_iter()
+        .map(|[start, end]| {
+            let start = interval_endpoint(start.trim(), Some(now))?;
+            let end = interval_endpoint(end.trim(), Some(now))?;
+            if start >= end {
+                return Err(TimestampError::AbsoluteIntervalOrder);
+            }
+            Ok((start, end))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let intervals = match operation {
+        IntervalOperation::Merge => merge_absolute_intervals(intervals),
+        IntervalOperation::Intersection => intervals
+            .into_iter()
+            .reduce(|(start, end), (other_start, other_end)| {
+                (start.max(other_start), end.min(other_end))
+            })
+            .filter(|(start, end)| start < end)
+            .into_iter()
+            .collect(),
+    };
+    let mut result = String::from("开始UTC,结束UTC,时长");
+    for (start, end) in intervals {
+        let duration = format_absolute_elapsed(start, end)?;
+        result.push_str(&format!(
+            "\r\n{},{},{duration}",
+            format_utc_instant(start),
+            format_utc_instant(end),
+        ));
+    }
+    Ok(result)
+}
+
+fn merge_absolute_intervals(
+    mut intervals: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    intervals.sort_unstable();
+    let mut merged: Vec<(_, DateTime<Utc>)> = Vec::new();
+    for (start, end) in intervals {
+        if let Some((_, merged_end)) = merged
+            .last_mut()
+            .filter(|(_, merged_end)| start <= *merged_end)
+        {
+            *merged_end = (*merged_end).max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
 fn interval_nanos(
     input: &str,
     now: DateTime<Utc>,
@@ -825,9 +909,13 @@ pub(super) fn timestamp_alignment_converter(
     };
     Ok(move |input: &str| {
         let time = align_instant(absolute_timestamp(input)?, step, direction)?;
-        let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
-        Ok(time.to_rfc3339_opts(unit.date_format(), true))
+        Ok(format_utc_instant(time))
     })
+}
+
+fn format_utc_instant(time: DateTime<Utc>) -> String {
+    let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
+    time.to_rfc3339_opts(unit.date_format(), true)
 }
 
 fn format_timestamp_delta(delta: i128, output: Option<&str>) -> Result<String, TimestampError> {
@@ -1159,6 +1247,40 @@ mod tests {
         assert_eq!(
             convert_timestamp("偏移变更 26 UTC", now),
             Err(TimestampError::OffsetChangesArguments),
+        );
+    }
+
+    #[test]
+    fn merges_and_intersects_half_open_intervals_on_the_utc_timeline() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = concat!(
+            r#"区间交集 [["2026-03-08T01:30:00-05:00","2026-03-08T04:00:00-04:00"],"#,
+            r#"["2026-03-08T07:00:00Z","2026-03-08T08:15:00Z"]]"#,
+        );
+        assert!(is_timestamp_report(query));
+        assert_eq!(
+            convert_timestamp(query, now).as_deref(),
+            Ok("开始UTC,结束UTC,时长\r\n2026-03-08T07:00:00Z,2026-03-08T08:00:00Z,01:00:00")
+        );
+        assert_eq!(
+            convert_timestamp(
+                r#"MERGE-INTERVALS [["5s","6s"],["现在","1s"],["-1s","0s"]]"#,
+                now
+            )
+            .as_deref(),
+            Ok(concat!(
+                "开始UTC,结束UTC,时长\r\n",
+                "1969-12-31T23:59:59Z,1970-01-01T00:00:01Z,00:00:02\r\n",
+                "1970-01-01T00:00:05Z,1970-01-01T00:00:06Z,00:00:01",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp(r#"区间交集 [["0s","1ns"],["1ns","2ns"]]"#, now).as_deref(),
+            Ok("开始UTC,结束UTC,时长")
+        );
+        assert_eq!(
+            convert_timestamp(r#"区间合并 [["1ns","0s"]]"#, now),
+            Err(TimestampError::AbsoluteIntervalOrder)
         );
     }
 

@@ -2796,6 +2796,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "合并有重叠或相邻的 UTC 时间区间",
+        query: r#"时间戳: 区间合并 [["0s","10s"],["10s","20s"],["30s","40s"]]"#,
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "求多个时间区间共同覆盖的时段",
+        query: r#"时间戳: 区间交集 [["0s","10s"],["5s","15s"],["8s","9s"]]"#,
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按当地日期查看两个时刻之间的实际时长",
         query: "时间戳: 逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York",
     },
@@ -6786,6 +6796,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "时区CSV",
                     "时区候选",
                     "日区间",
+                    "区间合并",
+                    "区间交集",
                     "逐日时长",
                     "偏移变更",
                     "每日同刻",
