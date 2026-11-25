@@ -25,6 +25,7 @@ const SHORTCUTS: &[[&str; 3]] = &[
     ["计算", "Alt+F2", "切换普通计算与精确分数计算"],
     ["批量计算", "Alt+Enter", "选中出错的算式"],
     ["CSV 校验", "Alt+Enter", "定位首处语法或列数错误"],
+    ["TSV 校验", "Alt+Enter", "定位首处语法或列数错误"],
     ["JSON 校验", "Alt+Enter", "定位首处语法错误"],
     ["JSON Lines 校验", "Alt+Enter", "选中第一条无效记录"],
     ["TOML 校验", "Alt+Enter", "定位首处语法错误"],

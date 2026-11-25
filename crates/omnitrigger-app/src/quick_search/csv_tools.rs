@@ -1265,6 +1265,9 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
 }
 
 fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, CsvError> {
+    if let Some(delimiter) = validation_delimiter(operation) {
+        return validate_csv(input, delimiter).map(|report| report.text);
+    }
     if let Some(table) = coordinate_line_table(operation, input) {
         return table?.to_csv();
     }
@@ -1352,7 +1355,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "曲线差积分" | "curve-difference-integral" => {
             return coordinate_curve_integral(input, false)
         }
-        "校验" | "validate" => return validate_csv(input).map(|report| report.text),
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
         "内连接" | "inner-join" => return join_csv(input, JoinKind::Inner),
@@ -9783,22 +9785,33 @@ pub(super) fn csv_validation_report(
     query: &str,
 ) -> Option<Result<InputValidationReport, CsvError>> {
     let (operation, input) = split_argument(query)?;
-    if !super::is_validation_operation(operation) {
-        return None;
-    }
+    let delimiter = validation_delimiter(operation)?;
     let offset = query.len() - input.len();
-    Some(validate_csv(input).map(|report| report.offset_error_span(offset)))
+    Some(validate_csv(input, delimiter).map(|report| report.offset_error_span(offset)))
 }
 
-fn validate_csv(input: &str) -> Result<InputValidationReport, CsvError> {
+fn validation_delimiter(operation: &str) -> Option<char> {
+    if super::is_validation_operation(operation) {
+        Some(',')
+    } else if operation.eq_ignore_ascii_case("校验tsv")
+        || operation.eq_ignore_ascii_case("validate-tsv")
+    {
+        Some('\t')
+    } else {
+        None
+    }
+}
+
+fn validate_csv(input: &str, delimiter: char) -> Result<InputValidationReport, CsvError> {
     let data = input.strip_prefix('\u{feff}').unwrap_or(input);
     if data.is_empty() {
         return Err(CsvError::MissingInput);
     }
     let offset = input.len() - data.len();
+    let format = if delimiter == '\t' { "TSV" } else { "CSV" };
     let mut record_spans = Vec::new();
     Ok(
-        match read_delimited_rows(data, ',', false, Some(&mut record_spans)) {
+        match read_delimited_rows(data, delimiter, false, Some(&mut record_spans)) {
             Ok(rows) => {
                 let width = rows[0].len();
                 let error_span = rows.iter().zip(record_spans).find_map(|(row, range)| {
@@ -9811,7 +9824,7 @@ fn validate_csv(input: &str) -> Result<InputValidationReport, CsvError> {
             }
             Err(error) => InputValidationReport {
                 text: format!(
-                    "CSV 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
+                    "{format} 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
                     error.record,
                     error.column,
                     error.kind.message()
@@ -11848,6 +11861,28 @@ mod tests {
             .unwrap()
             .error_span
             .is_none());
+    }
+
+    #[test]
+    fn locates_tsv_syntax_and_column_count_errors_without_converting_the_input() {
+        let width_mismatch =
+            "校验TSV\r\n\u{feff}编号\t备注\r\n001\t\"茶\n咖啡\"\r\n002\t梨\t额外\r\n003";
+        let report = csv_validation_report(width_mismatch).unwrap().unwrap();
+        assert_eq!(&width_mismatch[report.error_span.unwrap()], "002\t梨\t额外");
+        assert!(report.text.contains("第 3 条记录有 3 列"));
+        assert_eq!(transform_csv(width_mismatch), Ok(report.text));
+
+        let bad_quote = "VALIDATE-TSV a\tb\n1\t\"茶\"坏";
+        let report = csv_validation_report(bad_quote).unwrap().unwrap();
+        assert_eq!(&bad_quote[report.error_span.unwrap()], "坏");
+        assert!(report.text.contains("TSV 语法错误 · 第 2 条记录 · 第 2 列"));
+        assert_eq!(transform_csv(bad_quote), Ok(report.text));
+
+        let valid = csv_validation_report("校验TSV 编号\t备注\n001\t茶,咖啡")
+            .unwrap()
+            .unwrap();
+        assert!(valid.error_span.is_none());
+        assert_eq!(valid.text, "2 条记录 · 每条 2 列");
     }
 
     #[test]

@@ -4749,6 +4749,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位制表符分隔数据中列数不一致的记录",
+        query: "CSV: 校验TSV 编号\t说明\n001\t\"茶\n咖啡\"\n002\t梨\t额外",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "依次去掉空行、删除指定记录并选择列",
         query: "CSV: 依次处理 [\"去空行\",\"删行 2\",\"选列 2,1\"] 编号,商品\n001,茶\n\n002,梨\n003,咖啡",
     },
