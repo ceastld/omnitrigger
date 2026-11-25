@@ -2068,6 +2068,7 @@ impl QuickSearch {
             let mut input = MessageInput::new(cx)
                 .embedded()
                 .with_preserved_whitespace()
+                .with_undo_history()
                 .with_character_limit(INPUT_CHARACTER_LIMIT + 1);
             input.set_placeholder(SEARCH_PLACEHOLDER);
             input
@@ -3250,6 +3251,19 @@ impl QuickSearch {
         }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers.number_of_modifiers();
+        if keystroke.modifiers.control {
+            let redo = match (keystroke.key.as_str(), modifiers, keystroke.modifiers.shift) {
+                ("z", 1, false) => Some(false),
+                ("y", 1, false) | ("z", 2, true) => Some(true),
+                _ => None,
+            };
+            if let Some(redo) = redo {
+                self.input
+                    .update(cx, |input, cx| input.step_edit_history(redo, cx));
+                cx.stop_propagation();
+                return;
+            }
+        }
         if self.bookmark_name_edit.is_some() {
             if modifiers == 0 && matches!(keystroke.key.as_str(), "enter" | "escape") {
                 if !event.is_held {
@@ -7681,6 +7695,42 @@ mod tests {
                         ("ctrl-backspace", "300", 0..0),
                         ("ctrl-right", "300", 3..3),
                         ("ctrl-backspace", "", 0..0),
+                        ("ctrl-z", "300", 3..3),
+                        ("ctrl-z", "1 + 300", 0..4),
+                        ("ctrl-y", "300", 3..3),
+                        ("ctrl-shift-z", "", 0..0),
+                        ("ctrl-z", "300", 3..3),
+                        ("home", "300", 0..0),
+                        ("delete", "00", 0..0),
+                        ("ctrl-y", "00", 0..0),
+                    ] {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(input.text(), text, "{key}");
+                                assert_eq!(input.selection(), selection, "{key}");
+                            })
+                            .unwrap();
+                    }
+                    let ime_prefix = "文本: 大写 ";
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query(ime_prefix, window, cx);
+                            search.input.update(cx, |input, cx| {
+                                input.replace_and_mark_text_in_range(None, "n", Some(1..1), window, cx);
+                                input.replace_and_mark_text_in_range(None, "ni", Some(2..2), window, cx);
+                                input.replace_text_in_range(None, "你", window, cx);
+                            });
+                        })
+                        .unwrap();
+                    for (key, text, selection) in [
+                        ("ctrl-z", ime_prefix, ime_prefix.len()..ime_prefix.len()),
+                        ("ctrl-y", "文本: 大写 你", "文本: 大写 你".len().."文本: 大写 你".len()),
                     ] {
                         window_handle
                             .update(cx, |_, window, cx| {

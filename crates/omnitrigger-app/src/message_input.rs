@@ -1,6 +1,6 @@
 //! 单行消息输入：文本由平台输入法提交，键绑定仅处理编辑命令。
 
-use std::ops::Range;
+use std::{collections::VecDeque, ops::Range};
 
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
@@ -14,6 +14,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::theme::{self, rgb};
 
 const MAX_CHARACTERS: usize = 2000;
+const EDIT_HISTORY_LIMIT: usize = 32;
 const KEY_CONTEXT: &str = "OmniTriggerMessageInput";
 
 actions!(
@@ -80,12 +81,25 @@ pub(super) struct MessageSelection {
     head: usize,
 }
 
+struct EditSnapshot {
+    text: SharedString,
+    selection: MessageSelection,
+}
+
+#[derive(Default)]
+struct EditHistory {
+    undo: VecDeque<EditSnapshot>,
+    redo: Vec<EditSnapshot>,
+    pending: Option<EditSnapshot>,
+}
+
 pub struct MessageInput {
     character_limit: usize,
     mode: TextMode,
     focus: FocusHandle,
     content: SharedString,
     edit_revision: u64,
+    edit_history: Option<EditHistory>,
     placeholder: SharedString,
     anchor: usize,
     head: usize,
@@ -107,6 +121,7 @@ impl MessageInput {
             focus: cx.focus_handle(),
             content: SharedString::default(),
             edit_revision: 0,
+            edit_history: None,
             placeholder: "触发时显示的文字".into(),
             anchor: 0,
             head: 0,
@@ -166,6 +181,11 @@ impl MessageInput {
         self
     }
 
+    pub(super) fn with_undo_history(mut self) -> Self {
+        self.edit_history = Some(EditHistory::default());
+        self
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
         let text = if self.mode == TextMode::Json {
@@ -175,6 +195,9 @@ impl MessageInput {
         };
         self.content = prepare_input(&text, self.character_limit, self.mode).into();
         self.edit_revision = self.edit_revision.wrapping_add(1);
+        if let Some(history) = &mut self.edit_history {
+            *history = EditHistory::default();
+        }
         // 载入已有消息时从开头显示，避免长消息只露出结尾。
         self.anchor = 0;
         self.head = 0;
@@ -193,6 +216,60 @@ impl MessageInput {
         MessageSelection {
             anchor: self.anchor,
             head: self.head,
+        }
+    }
+
+    fn edit_snapshot(&self) -> EditSnapshot {
+        EditSnapshot {
+            text: self.content.clone(),
+            selection: self.selection_position(),
+        }
+    }
+
+    fn finish_edit(&mut self) {
+        let Some(history) = &mut self.edit_history else {
+            return;
+        };
+        let Some(previous) = history.pending.take() else {
+            return;
+        };
+        if previous.text != self.content {
+            history.redo.clear();
+            if history.undo.len() == EDIT_HISTORY_LIMIT {
+                history.undo.pop_front();
+            }
+            history.undo.push_back(previous);
+        }
+    }
+
+    pub(super) fn step_edit_history(&mut self, redo: bool, cx: &mut Context<Self>) {
+        if self.is_composing() {
+            return;
+        }
+        let current = self.edit_snapshot();
+        let Some(history) = &mut self.edit_history else {
+            return;
+        };
+        if history.pending.is_some() {
+            return;
+        }
+        let previous = if redo {
+            history
+                .redo
+                .pop()
+                .inspect(|_| history.undo.push_back(current))
+        } else {
+            history
+                .undo
+                .pop_back()
+                .inspect(|_| history.redo.push(current))
+        };
+        if let Some(previous) = previous {
+            self.content = previous.text;
+            self.edit_revision = self.edit_revision.wrapping_add(1);
+            self.layout = None;
+            self.dragging = false;
+            self.restore_selection(previous.selection, cx);
         }
     }
 
@@ -328,42 +405,36 @@ impl MessageInput {
         self.move_to(self.content.len(), true, cx);
     }
 
-    fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection().is_empty() {
-            self.anchor = self.previous();
-        }
-        self.replace_text_in_range(None, "", window, cx);
+    fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        self.delete_toward(Self::previous, cx);
     }
 
-    fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection().is_empty() {
-            self.anchor = self.next();
-        }
-        self.replace_text_in_range(None, "", window, cx);
+    fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
+        self.delete_toward(Self::next, cx);
     }
 
     fn delete_previous_word(
         &mut self,
         _: &DeletePreviousWord,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.selection().is_empty() {
-            self.anchor = word_start_before(&self.content, self.head);
-        }
-        self.replace_text_in_range(None, "", window, cx);
+        self.delete_toward(|input| word_start_before(&input.content, input.head), cx);
     }
 
-    fn delete_next_word(
-        &mut self,
-        _: &DeleteNextWord,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.selection().is_empty() {
-            self.anchor = word_start_after(&self.content, self.head);
-        }
-        self.replace_text_in_range(None, "", window, cx);
+    fn delete_next_word(&mut self, _: &DeleteNextWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.delete_toward(|input| word_start_after(&input.content, input.head), cx);
+    }
+
+    fn delete_toward(&mut self, offset: impl FnOnce(&Self) -> usize, cx: &mut Context<Self>) {
+        let range = self.marked.clone().or_else(|| {
+            self.selection().is_empty().then(|| {
+                let offset = offset(self);
+                self.head.min(offset)..self.head.max(offset)
+            })
+        });
+        self.replace(range, "", false, None);
+        cx.notify();
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -414,13 +485,12 @@ impl MessageInput {
 
     fn replace(
         &mut self,
-        range_utf16: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         text: &str,
         marked: bool,
         selected: Option<Range<usize>>,
     ) {
-        let range = range_utf16
-            .map(|range| from_utf16(&self.content, range))
+        let range = range
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection());
         let escaped;
@@ -447,6 +517,14 @@ impl MessageInput {
             self.character_limit,
             self.mode,
         );
+        let selection_before_edit = self.selection_position();
+        if let Some(history) = &mut self.edit_history {
+            // 一段输入法组合只保留开始前的快照。
+            history.pending.get_or_insert_with(|| EditSnapshot {
+                text: self.content.clone(),
+                selection: selection_before_edit,
+            });
+        }
         self.content = replacement.text.into();
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.marked = (marked && !replacement.inserted.is_empty()).then_some(replacement.inserted);
@@ -454,6 +532,9 @@ impl MessageInput {
         self.head = replacement.selection.end;
         // 重新绘制前旧字形布局不能用于命中或输入法坐标。
         self.layout = None;
+        if !marked {
+            self.finish_edit();
+        }
     }
 }
 
@@ -490,6 +571,7 @@ impl EntityInputHandler for MessageInput {
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.marked = None;
+        self.finish_edit();
         cx.notify();
     }
 
@@ -500,6 +582,7 @@ impl EntityInputHandler for MessageInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let range = range.map(|range| from_utf16(&self.content, range));
         self.replace(range, text, false, None);
         cx.notify();
     }
@@ -512,6 +595,7 @@ impl EntityInputHandler for MessageInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let range = range.map(|range| from_utf16(&self.content, range));
         self.replace(range, text, true, selected);
         cx.notify();
     }
@@ -564,6 +648,7 @@ impl Render for MessageInput {
             self.blur_subscription =
                 Some(cx.on_blur(&self.focus.clone(), window, |input, _, cx| {
                     input.marked = None;
+                    input.finish_edit();
                     input.dragging = false;
                     cx.notify();
                 }));
