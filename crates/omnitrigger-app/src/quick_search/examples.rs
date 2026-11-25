@@ -48,6 +48,10 @@ impl Example {
                     | "filter-any-jsonl"
                     | "行路径去重"
                     | "unique-jsonl-by-pointers"
+                    | "行路径去重留末"
+                    | "last-jsonl-by-pointers"
+                    | "多路径去重留末"
+                    | "last-by-pointers"
                     | "多条件筛选"
                     | "filter-all"
                     | "任一条件筛选"
@@ -80,7 +84,9 @@ impl Example {
                 | "行任一筛选"
                 | "filter-any-jsonl"
                 | "行路径去重"
-                | "unique-jsonl-by-pointers" => {
+                | "unique-jsonl-by-pointers"
+                | "行路径去重留末"
+                | "last-jsonl-by-pointers" => {
                     read_json_lines(data).is_ok_and(|rows| !rows.is_empty())
                 }
                 _ => serde_json::from_str::<&serde_json::value::RawValue>(data).is_ok(),
@@ -4449,6 +4455,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留每组 JSONL 的最后一条",
+        query: "JSON: 行路径去重留末 [\"/编号\"]\n{\"编号\":\"001\",\"金额\":1.00}\n{\"编号\":\"002\",\"金额\":9}\n{\"编号\":\"001\",\"金额\":1.20}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定顺序选出 JSON 对象的字段",
         query: r#"JSON: 选键 ["编号","状态"] [{"状态":true,"编号":"001","备注":"茶"},{"编号":"002"}]"#,
     },
@@ -4596,6 +4607,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按多个路径对 JSON 记录去重",
         query: r#"JSON: 多路径去重 ["/地区","/月份"] [{"地区":"北","月份":1.00,"编号":"001"},{"地区":"南","月份":1},{"地区":"北","月份":1e0,"编号":"002"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "保留每组 JSON 的末项",
+        query: r#"JSON: 多路径去重留末 ["/地区","/月份"] [{"地区":"北","月份":1.00,"编号":"001"},{"地区":"南","月份":1},{"地区":"北","月份":1e0,"编号":"002"}]"#,
     },
     Example {
         icon: Icon::Terminal,

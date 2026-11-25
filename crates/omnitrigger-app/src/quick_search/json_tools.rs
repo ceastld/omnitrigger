@@ -313,6 +313,8 @@ fn is_json_lines_output(operation: &str) -> bool {
             | "filter-any-jsonl"
             | "行路径去重"
             | "unique-jsonl-by-pointers"
+            | "行路径去重留末"
+            | "last-jsonl-by-pointers"
     )
 }
 
@@ -356,6 +358,12 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "行路径去重" | "unique-jsonl-by-pointers" => return deduplicate_json_lines(source),
         "多路径去重" | "unique-by-pointers" => return match_json_by_pointers(source, false),
+        "多路径去重留末" | "last-by-pointers" => {
+            return retain_last_json_by_paths(source, false)
+        }
+        "行路径去重留末" | "last-jsonl-by-pointers" => {
+            return retain_last_json_by_paths(source, true)
+        }
         "多路径查重复" | "duplicates-by-pointers" => {
             return match_json_by_pointers(source, true)
         }
@@ -1224,6 +1232,32 @@ fn deduplicate_json_lines(query: &str) -> Result<String, JsonError> {
         }
     }
     Ok(retained.join("\n"))
+}
+
+fn retain_last_json_by_paths(query: &str, json_lines: bool) -> Result<String, JsonError> {
+    let (minimum, invalid) = if json_lines {
+        (1, JsonError::LineUniquePaths)
+    } else {
+        (2, JsonError::UniquePaths)
+    };
+    let (paths, source) = distinct_json_paths_and_source(query, minimum, invalid)?;
+    let items = if json_lines {
+        read_json_lines(source)?
+    } else {
+        read_json_array(source)?
+    };
+    let mut last_position = HashMap::new();
+    for (position, &item) in items.iter().enumerate() {
+        last_position.insert(json_scalar_key(item, &paths)?, position);
+    }
+    let mut positions: Vec<_> = last_position.into_values().collect();
+    positions.sort_unstable();
+    let retained = positions.into_iter().map(|position| items[position]);
+    if json_lines {
+        return Ok(retained.map(RawValue::get).collect::<Vec<_>>().join("\n"));
+    }
+    Ok(serde_json::to_string(&retained.collect::<Vec<_>>())
+        .expect("有效的原始 JSON 值可以直接序列化"))
 }
 
 fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, JsonError> {
@@ -3821,6 +3855,37 @@ mod tests {
         assert_eq!(
             transform_json(r#"多路径查重复 ["/a","/b"] [{"a":1,"b":2},{"a":1}]"#),
             Err(JsonError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn keeps_last_records_by_exact_path_values_in_their_original_order() {
+        let source = [
+            r#"{"组":"A","键":1.00,"状态":"旧"}"#,
+            r#"{"组":"B","键":null}"#,
+            r#"{"组":"A","键":"1"}"#,
+            r#"{"组":"A","键":1e0,"状态":"新"}"#,
+        ];
+        let expected = &source[1..];
+        let query = format!("多路径去重留末 [\"/组\",\"/键\"] [{}]", source.join(","));
+        assert_eq!(
+            transform_json(&query),
+            Ok(format!("[{}]", expected.join(",")))
+        );
+        let query = format!("行路径去重留末 [\"/键\"]\n{}", source.join("\r\n"));
+        let output = expected.join("\n");
+        assert_eq!(transform_json(&query), Ok(output.clone()));
+        assert!(matches!(
+            result_format(&query, &output),
+            Some(JsonResultFormat::JsonLines)
+        ));
+        assert_eq!(
+            transform_json(r#"last-by-pointers ["/组","/键"] [{"组":"A"}]"#),
+            Err(JsonError::MissingValue),
+        );
+        assert_eq!(
+            transform_json(r#"last-by-pointers ["/组","/键"] []"#).as_deref(),
+            Ok("[]"),
         );
     }
 
