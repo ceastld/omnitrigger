@@ -3352,6 +3352,14 @@ impl QuickSearch {
                     }
                     cx.stop_propagation();
                 }
+            } else if keystroke.modifiers.alt
+                && (modifiers == 1 || (modifiers == 2 && keystroke.modifiers.shift))
+                && matches!(keystroke.key.as_str(), "home" | "end")
+            {
+                self.input.update(cx, |input, cx| {
+                    input.move_to_line_edge(keystroke.key == "end", keystroke.modifiers.shift, cx);
+                });
+                cx.stop_propagation();
             } else if modifiers == 1
                 && keystroke.modifiers.shift
                 && keystroke.key == "f3"
@@ -7841,6 +7849,40 @@ mod tests {
                                 let input = search.input.read(cx);
                                 assert_eq!(input.text(), text, "{key}");
                                 assert_eq!(input.selection(), selection, "{key}");
+                            })
+                            .unwrap();
+                    }
+                    let multiline = "CSV: 表格预览 名称,数量\r\n绿茶,1\n米,2";
+                    let line_start = multiline.find("绿茶").unwrap();
+                    let line_end = line_start + "绿茶,1".len();
+                    let revision = reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query(multiline, window, cx);
+                            search.input.update(cx, |input, cx| {
+                                input.move_cursor_to(line_start + "绿茶".len(), cx);
+                                input.edit_revision()
+                            })
+                        })
+                        .unwrap();
+                    for (key, expected) in [
+                        ("alt-home", line_start..line_start),
+                        ("alt-shift-end", line_start..line_end),
+                        ("alt-end", line_end..line_end),
+                        ("alt-shift-home", line_start..line_end),
+                        ("home", 0..0),
+                        ("end", multiline.len()..multiline.len()),
+                    ] {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(input.selection(), expected, "{key}");
+                                assert_eq!(input.text(), multiline);
+                                assert_eq!(input.edit_revision(), revision);
                             })
                             .unwrap();
                     }

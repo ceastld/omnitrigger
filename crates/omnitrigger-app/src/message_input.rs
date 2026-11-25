@@ -325,6 +325,11 @@ impl MessageInput {
         self.move_to(self.content.len(), false, cx);
     }
 
+    pub(super) fn move_to_line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
+        let line = logical_line_range(&self.content, self.head);
+        self.move_to(if end { line.end } else { line.start }, extend, cx);
+    }
+
     pub(super) fn move_cursor_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.content.is_char_boundary(offset) {
             self.move_to(offset, false, cx);
@@ -1004,6 +1009,25 @@ pub(super) fn input_preview(text: impl Into<SharedString>) -> SharedString {
     visible_input(&text.into()).0
 }
 
+fn logical_line_range(text: &str, cursor: usize) -> Range<usize> {
+    let bytes = text.as_bytes();
+    // 把 CRLF 当作一个换行，落在两字符之间的光标仍属于上一行。
+    let cursor = if cursor > 0 && bytes[cursor - 1] == b'\r' && bytes.get(cursor) == Some(&b'\n') {
+        cursor - 1
+    } else {
+        cursor
+    };
+    let is_line_break = |ch| matches!(ch, '\r' | '\n' | '\u{2028}' | '\u{2029}');
+    let start = text[..cursor]
+        .char_indices()
+        .rfind(|&(_, ch)| is_line_break(ch))
+        .map_or(0, |(offset, ch)| offset + ch.len_utf8());
+    let end = text[cursor..]
+        .find(is_line_break)
+        .map_or(text.len(), |offset| cursor + offset);
+    start..end
+}
+
 fn word_start_before(text: &str, offset: usize) -> usize {
     text.unicode_word_indices()
         .take_while(|&(start, _)| start < offset)
@@ -1114,6 +1138,26 @@ fn to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_logical_lines_with_mixed_newlines_and_unicode() {
+        let text = "甲\r\n乙\n\r丙";
+        for (cursor, expected) in [
+            (0, 0..3),
+            (3, 0..3),
+            (4, 0..3),
+            (5, 5..8),
+            (8, 5..8),
+            (9, 9..9),
+            (text.len(), 10..text.len()),
+        ] {
+            assert_eq!(logical_line_range(text, cursor), expected);
+        }
+        assert_eq!(logical_line_range("", 0), 0..0);
+        let text = "甲\u{2028}乙\u{2029}丙";
+        assert_eq!(logical_line_range(text, 9), 6..9);
+        assert_eq!(logical_line_range(text, 12), 12..text.len());
+    }
 
     #[test]
     fn finds_word_starts_across_operators_whitespace_and_combining_characters() {
