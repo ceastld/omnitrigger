@@ -165,6 +165,8 @@ const EXAMPLE_PAGE_SIZE: usize = 8;
 const MAX_VALUE_LINES: usize = 6;
 const EXPANDED_VALUE_LINES: usize = 12;
 const VALUE_LINE_HEIGHT: f32 = 18.;
+const TABLE_PAGER_HEIGHT: f32 = 20.;
+const TABLE_FOOTER_ROW_GAP: f32 = 4.;
 
 const PAGES: [(Page, &str); 9] = [
     (Page::Triggers, "热键 快捷键 组合 trigger shortcut hotkey"),
@@ -253,7 +255,14 @@ impl ResultValue {
 
     fn visual_preview_height(&self) -> Option<f32> {
         match &self.kind {
-            ValueKind::Table(table) => Some(table.preview_height()),
+            ValueKind::Table(table) => {
+                let extra = if table.spans_both_axes() {
+                    TABLE_PAGER_HEIGHT + TABLE_FOOTER_ROW_GAP
+                } else {
+                    0.
+                };
+                Some(table.preview_height() + extra)
+            }
             ValueKind::CorrelationPlot(plot) => Some(plot.preview_height()),
             ValueKind::Scatter(_) | ValueKind::BoxPlot(_) | ValueKind::BinPlot(_) => {
                 Some(scatter_plot::PREVIEW_HEIGHT)
@@ -3782,7 +3791,7 @@ impl QuickSearch {
             .gap(px(4.))
             .child(
                 button(prev_id, prev_label, Tone::Ghost, page > 0)
-                    .h(px(20.))
+                    .h(px(TABLE_PAGER_HEIGHT))
                     .px(px(7.))
                     .tooltip(theme::text_tooltip(prev_key.into()))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -3792,13 +3801,72 @@ impl QuickSearch {
             .child(format!("{dimension} {}/{count}", page + 1))
             .child(
                 button(next_id, next_label, Tone::Ghost, page + 1 < count)
-                    .h(px(20.))
+                    .h(px(TABLE_PAGER_HEIGHT))
                     .px(px(7.))
                     .tooltip(theme::text_tooltip(next_key.into()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.change_table_page(axis, PageChange::Next, cx);
                     })),
             )
+    }
+
+    fn table_footer(&self, table: &table_preview::TablePreview, cx: &mut Context<Self>) -> Div {
+        let actions = Self::visual_preview_footer("F2 查看原文", cx)
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .when(
+                self.input_before_table_search.is_some() || self.searchable_table_text().is_some(),
+                |footer| {
+                    let (label, hint) = if self.input_before_table_search.is_some() {
+                        ("返回", "Ctrl+F 恢复原查询")
+                    } else {
+                        ("查找", "Ctrl+F 在当前表格查找")
+                    };
+                    footer.child(
+                        button("search-current-table", label, Tone::Ghost, true)
+                            .h(px(TABLE_PAGER_HEIGHT))
+                            .px(px(8.))
+                            .tooltip(theme::text_tooltip(hint.into()))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_table_search(window, cx);
+                            })),
+                    )
+                },
+            )
+            .when(table.spans_pages(), |footer| {
+                footer.child(
+                    button("copy-table-page", "复制本页", Tone::Ghost, true)
+                        .h(px(TABLE_PAGER_HEIGHT))
+                        .px(px(8.))
+                        .tooltip(theme::text_tooltip("Ctrl+Shift+C 复制本页 CSV".into()))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.copy_table_page(false, window, cx);
+                        })),
+                )
+            });
+        let pagination = div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .when(table.row_pages() > 1, |pager| {
+                pager.child(self.table_page_controls(TableAxis::Rows, table.row_pages(), cx))
+            })
+            .when(table.column_pages() > 1, |pager| {
+                pager.child(self.table_page_controls(TableAxis::Columns, table.column_pages(), cx))
+            });
+        if table.spans_both_axes() {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(TABLE_FOOTER_ROW_GAP))
+                .child(actions)
+                .child(pagination.justify_end().px(px(10.)))
+        } else {
+            actions
+                .child(div().flex_1())
+                .when(table.spans_pages(), |footer| footer.child(pagination))
+        }
     }
 
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
@@ -3811,56 +3879,7 @@ impl QuickSearch {
                 table.legend(),
                 table.render(self.table_pages.rows, self.table_pages.columns),
                 "复制 CSV  Enter",
-                Self::visual_preview_footer("F2 查看原文", cx)
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .when(
-                        self.input_before_table_search.is_some()
-                            || self.searchable_table_text().is_some(),
-                        |footer| {
-                            let (label, hint) = if self.input_before_table_search.is_some() {
-                                ("返回", "Ctrl+F 恢复原查询")
-                            } else {
-                                ("查找", "Ctrl+F 在当前表格查找")
-                            };
-                            footer.child(
-                                button("search-current-table", label, Tone::Ghost, true)
-                                    .h(px(20.))
-                                    .px(px(8.))
-                                    .tooltip(theme::text_tooltip(hint.into()))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_table_search(window, cx);
-                                    })),
-                            )
-                        },
-                    )
-                    .when(table.spans_pages(), |footer| {
-                        footer.child(
-                            button("copy-table-page", "复制本页", Tone::Ghost, true)
-                                .h(px(20.))
-                                .px(px(8.))
-                                .tooltip(theme::text_tooltip("Ctrl+Shift+C 复制本页 CSV".into()))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.copy_table_page(false, window, cx);
-                                })),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .when(table.row_pages() > 1, |footer| {
-                        footer.child(self.table_page_controls(
-                            TableAxis::Rows,
-                            table.row_pages(),
-                            cx,
-                        ))
-                    })
-                    .when(table.column_pages() > 1, |footer| {
-                        footer.child(self.table_page_controls(
-                            TableAxis::Columns,
-                            table.column_pages(),
-                            cx,
-                        ))
-                    }),
+                self.table_footer(table, cx),
                 cx,
             ),
             Results::Value(Ok(ResultValue {
@@ -5827,6 +5846,19 @@ mod tests {
             transform_json(r#"行数组转CSV ["品名","金额"] [["茶"]]"#),
             Err(JsonError::CsvRows)
         );
+    }
+
+    #[test]
+    fn reserves_a_second_footer_row_only_when_table_paginates_on_both_axes() {
+        for (data_rows, extra) in [(2, 0.), (8, TABLE_PAGER_HEIGHT + TABLE_FOOTER_ROW_GAP)] {
+            let csv = format!("A,B,C,D,E,F,G,H{}", "\n1,2,3,4,5,6,7,8".repeat(data_rows));
+            let result = Results::table_value(Ok(csv));
+            let table = result.table_preview().expect("应返回表格");
+            assert_eq!(
+                result.height(MAX_VALUE_LINES),
+                158. + (table.preview_height() + extra) + 52.
+            );
+        }
     }
 
     #[test]

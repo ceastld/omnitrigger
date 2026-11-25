@@ -77,6 +77,10 @@ impl TablePreview {
         self.row_pages() > 1 || self.column_pages() > 1
     }
 
+    pub(super) fn spans_both_axes(&self) -> bool {
+        self.row_pages() > 1 && self.column_pages() > 1
+    }
+
     pub(super) fn page_csv(&self, row_page: usize, column_page: usize) -> String {
         write_rows(self.visible_rows(row_page, column_page), ',')
     }
