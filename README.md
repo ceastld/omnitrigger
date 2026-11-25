@@ -647,6 +647,7 @@
 - 输入 `文本: 短横线命名 HTTPServer2URL` 得到 `http-server2-url`。输入 `文本: 大驼峰命名 http-server2-url` 得到 `HttpServer2Url`。
 - 输入 `文本: 替换 "北京" "上海" 北京 A+B` 得到 `上海 A+B`。在替换内容中可用 `""` 删除、用 `"\n"` 换行。`文本: 倒序 你好ABC` 得到 `CBA好你`，并保留组合字符的完整性。
 - 输入 `文本: SHA-256 北京` 或 `文本: SHA-512 abc` 可计算 UTF-8 文本的摘要。可用引号保留开头和末尾的空格。
+- 输入 `文本: CRC32 123456789` 得到 `cbf43926`，用 `CRC32C` 得到 `e3069283`。两种算法均按 UTF-8 字节计算，并输出八位十六进制值。用引号保留原文首尾空白。 [RFC 1952 的 CRC32](https://www.rfc-editor.org/rfc/rfc1952#section-2.3.1) [RFC 3720 的 CRC32C](https://www.rfc-editor.org/rfc/rfc3720#section-12.1)
 - 输入 `URL: 编码 北京 A+B` 可把文本转换为 URL 参数值，得到 `%E5%8C%97%E4%BA%AC%20A%2BB`。用 `URL: 解码` 加上编码后的值即可还原文本，解码保留原样写入的加号。
 - 输入 `URL: 表单编码 北京 A+B` 得到 `%E5%8C%97%E4%BA%AC+A%2BB`。用 `URL: 表单解码` 还原时，`+` 表示空格，`%2B` 表示加号。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc` 可逐行查看解码后的名称和值。也可粘贴查询串，结果按原有顺序保留重名参数。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)

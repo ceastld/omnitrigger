@@ -4316,6 +4316,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算 UTF-8 文本的 CRC32 校验值",
+        query: "文本: CRC32 123456789",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算 UTF-8 文本的 CRC32C 校验值",
+        query: "文本: CRC32C 123456789",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "Base64 编码文本",
         query: "文本: Base64编码 北京",
     },

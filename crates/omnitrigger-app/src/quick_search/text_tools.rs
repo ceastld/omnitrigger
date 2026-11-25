@@ -33,6 +33,8 @@ const MAX_DIFF_LINES: usize = 512;
 const MAX_COMPARISON_GRAPHEMES: usize = 512;
 pub(super) const MAX_TEXT_COMPARISON_WORK: usize = 1024 * 1024;
 const MAX_PIPELINE_STEPS: usize = 8;
+const CRC32_TABLE: [u32; 256] = crc_table(0xedb8_8320);
+const CRC32C_TABLE: [u32; 256] = crc_table(0x82f6_3b78);
 
 #[derive(Clone, Copy)]
 pub(super) enum TextLengthUnit {
@@ -443,6 +445,8 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "按行计数" | "line-counts" => Ok(count_lines(text)),
         "sha256" | "sha-256" => Ok(format!("{:x}", Sha256::digest(text.as_bytes()))),
         "sha512" | "sha-512" => Ok(format!("{:x}", Sha512::digest(text.as_bytes()))),
+        "crc32" | "crc-32" => Ok(format!("{:08x}", crc32(text.as_bytes(), &CRC32_TABLE))),
+        "crc32c" | "crc-32c" => Ok(format!("{:08x}", crc32(text.as_bytes(), &CRC32C_TABLE))),
         "base64编码" | "base64-encode" => Ok(STANDARD.encode(text)),
         "base64解码" | "base64-decode" => decode_base64(text, &STANDARD, &STANDARD_NO_PAD),
         "base64url编码" | "base64url-encode" => Ok(URL_SAFE_NO_PAD.encode(text)),
@@ -1135,6 +1139,36 @@ fn decode_code_points(text: &str) -> Result<String, TextError> {
             Ok(character)
         })
         .collect()
+}
+
+const fn crc_table(reflected_polynomial: u32) -> [u32; 256] {
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < table.len() {
+        let mut remainder = index as u32;
+        let mut bits = 0;
+        while bits < 8 {
+            let correction = if remainder & 1 == 0 {
+                0
+            } else {
+                reflected_polynomial
+            };
+            remainder = (remainder >> 1) ^ correction;
+            bits += 1;
+        }
+        table[index] = remainder;
+        index += 1;
+    }
+    table
+}
+
+fn crc32(bytes: &[u8], table: &[u32; 256]) -> u32 {
+    let mut remainder = u32::MAX;
+    for &byte in bytes {
+        let index = usize::from(remainder as u8 ^ byte);
+        remainder = (remainder >> 8) ^ table[index];
+    }
+    !remainder
 }
 
 fn decode_base64(
@@ -3859,6 +3893,22 @@ mod tests {
         }
         let entire = format!("context-lines [\"x\",{0},{0}] a\nx\nz", usize::MAX);
         assert_eq!(transform_text(&entire).as_deref(), Ok("a\nx\nz"));
+    }
+
+    #[test]
+    fn calculates_both_crc32_variants_over_the_exact_utf8_text() {
+        for (query, expected) in [
+            ("CRC32 123456789", "cbf43926"),
+            ("CRC32C 123456789", "e3069283"),
+            ("crc-32 北京", "cc6b7e91"),
+            ("crc-32c 北京", "a95fb32f"),
+            ("CRC32 \" 空\r\n \"", "9f31c5d0"),
+            ("CRC32C \" 空\r\n \"", "a348b23c"),
+            ("CRC32 \"\"", "00000000"),
+            ("CRC32C \"\"", "00000000"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]
