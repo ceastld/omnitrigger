@@ -184,6 +184,7 @@ enum JsonCsvOperation {
     Lines,
     Paths,
     LinePaths,
+    WildcardPaths,
     LineGroupCounts,
     LineGroupSummaries,
     LineGroupMedians,
@@ -202,6 +203,7 @@ impl JsonCsvOperation {
             "行转csv" | "jsonl-to-csv" => Some(Self::Lines),
             "路径转csv" | "pointers-to-csv" => Some(Self::Paths),
             "行路径转csv" | "jsonl-pointers-to-csv" => Some(Self::LinePaths),
+            "通配路径csv" | "wildcard-paths-csv" => Some(Self::WildcardPaths),
             "行分组计数csv" | "jsonl-group-counts-csv" => Some(Self::LineGroupCounts),
             "行分组统计csv" | "jsonl-group-statistics-csv" => Some(Self::LineGroupSummaries),
             "行分组中位数csv" | "jsonl-group-median-csv" => Some(Self::LineGroupMedians),
@@ -223,6 +225,7 @@ impl JsonCsvOperation {
             | Self::Lines
             | Self::Paths
             | Self::LinePaths
+            | Self::WildcardPaths
             | Self::LineGroupCounts
             | Self::LineGroupSummaries
             | Self::LineGroupMedians
@@ -245,6 +248,7 @@ impl JsonCsvOperation {
             Self::Lines => json_lines_to_csv(source),
             Self::Paths => json_paths_to_csv(source, read_json_array),
             Self::LinePaths => json_paths_to_csv(source, read_json_lines),
+            Self::WildcardPaths => json_wildcard_paths_csv(source),
             Self::LineGroupCounts => count_json_line_groups_csv(source),
             Self::LineGroupSummaries => summarize_json_line_groups_csv(source),
             Self::LineGroupMedians => median_json_line_groups_csv(source),
@@ -599,10 +603,15 @@ fn select_json_paths(query: &str) -> Result<String, JsonError> {
     Ok(result)
 }
 
-fn select_json_wildcard(query: &str) -> Result<String, JsonError> {
+fn wildcard_arguments(query: &str) -> Result<(Vec<Option<String>>, &str), JsonError> {
     let (path, source) = json_value_and_source(query, JsonError::WildcardPathArguments)?;
     let segments = serde_json::from_str::<Vec<Option<String>>>(path.get())
         .map_err(|_| JsonError::WildcardPathArguments)?;
+    Ok((segments, source))
+}
+
+fn select_json_wildcard(query: &str) -> Result<String, JsonError> {
+    let (segments, source) = wildcard_arguments(query)?;
     json_wildcard_values(source, &segments)
 }
 
@@ -610,37 +619,8 @@ pub(super) fn json_wildcard_values(
     source: &str,
     segments: &[Option<String>],
 ) -> Result<String, JsonError> {
-    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
-    let mut matches = vec![root];
-    for segment in segments {
-        let mut children = Vec::new();
-        for value in matches {
-            if let Some(key) = segment {
-                match select_member(value, key) {
-                    Ok(child) => children.push(child),
-                    Err(JsonError::MissingValue) => (),
-                    Err(error) => return Err(error),
-                }
-            } else {
-                let raw = value.get();
-                match raw.as_bytes()[0] {
-                    b'{' => children.extend(
-                        read_unique_object_entries(raw)?
-                            .into_iter()
-                            .map(|(_, child)| child),
-                    ),
-                    b'[' => children.extend(read_json_array(raw)?),
-                    _ => (),
-                }
-            }
-        }
-        if children.is_empty() {
-            return Ok("[]".into());
-        }
-        matches = children;
-    }
     let mut output = String::from("[");
-    for value in matches {
+    visit_json_wildcard_matches(source, segments, false, |_, value| {
         let separator = if output.len() > 1 { "," } else { "" };
         let raw = value.get();
         if output.len() + separator.len() + raw.len() + 1 > MAX_PRETTY_BYTES {
@@ -648,9 +628,84 @@ pub(super) fn json_wildcard_values(
         }
         output.push_str(separator);
         output.push_str(raw);
-    }
+        Ok(())
+    })?;
     output.push(']');
     Ok(output)
+}
+
+fn json_wildcard_paths_csv(query: &str) -> Result<String, JsonError> {
+    let (segments, source) = wildcard_arguments(query)?;
+    let mut output = String::from("指针,类型,原值");
+    visit_json_wildcard_matches(source, &segments, true, |pointer, value| {
+        if pointer.contains('\0') {
+            return Err(JsonError::CsvNullCharacter);
+        }
+        append_bounded_csv_row(
+            &mut output,
+            [pointer, json_type_name(value), value.get()].into_iter(),
+            JsonError::CsvOutputTooLarge,
+        )
+    })?;
+    Ok(output)
+}
+
+fn visit_json_wildcard_matches(
+    source: &str,
+    segments: &[Option<String>],
+    include_pointer: bool,
+    mut visit: impl FnMut(&str, &RawValue) -> Result<(), JsonError>,
+) -> Result<(), JsonError> {
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut pending = vec![(root, 0, None::<(usize, String)>)];
+    let mut pointer = String::new();
+    while let Some((value, depth, key)) = pending.pop() {
+        if let Some((parent_length, key)) = key {
+            pointer.truncate(parent_length);
+            append_pointer_key(&mut pointer, &key);
+        }
+        let Some(segment) = segments.get(depth) else {
+            visit(&pointer, value)?;
+            continue;
+        };
+        let parent_length = pointer.len();
+        if let Some(key) = segment {
+            match select_member(value, key) {
+                Ok(child) => pending.push((
+                    child,
+                    depth + 1,
+                    include_pointer.then(|| (parent_length, key.clone())),
+                )),
+                Err(JsonError::MissingValue) => (),
+                Err(error) => return Err(error),
+            }
+        } else {
+            let raw = value.get();
+            // 倒序入栈使弹出的子项沿用原文顺序。
+            match raw.as_bytes()[0] {
+                b'{' => pending.extend(read_unique_object_entries(raw)?.into_iter().rev().map(
+                    |(key, child)| {
+                        (
+                            child,
+                            depth + 1,
+                            include_pointer.then_some((parent_length, key)),
+                        )
+                    },
+                )),
+                b'[' => pending.extend(read_json_array(raw)?.into_iter().enumerate().rev().map(
+                    |(index, child)| {
+                        (
+                            child,
+                            depth + 1,
+                            include_pointer.then(|| (parent_length, index.to_string())),
+                        )
+                    },
+                )),
+                _ => (),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn selected_pointers(query: &str) -> Result<(Vec<String>, &str), JsonError> {
@@ -3397,6 +3452,29 @@ mod tests {
         assert_eq!(
             transform_json(r#"找键 "x" {"对象":{"x":null,"\u0078":1}}"#),
             Err(JsonError::DuplicateKey)
+        );
+    }
+
+    #[test]
+    fn previews_wildcard_matches_with_exact_pointers_types_and_raw_values() {
+        let query = r#"通配路径CSV [null,null,"金额"] {"a/b":[{"金额":1.20},{},{"金额":null}],"~":[{"金额":9007199254740993}]}"#;
+        let expected = concat!(
+            "指针,类型,原值\r\n/a~1b/0/金额,number,1.20\r\n",
+            "/a~1b/2/金额,null,null\r\n/~0/0/金额,number,9007199254740993",
+        );
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json(r#"wildcard-paths-csv [] 1.00"#).as_deref(),
+            Ok("指针,类型,原值\r\n\"\",number,1.00"),
+        );
+        assert_eq!(
+            transform_json(r#"通配路径CSV ["不存在"] {"字段":0}"#).as_deref(),
+            Ok("指针,类型,原值"),
+        );
+        assert_eq!(
+            transform_json(r#"通配路径CSV [null] {"\u0000":1}"#),
+            Err(JsonError::CsvNullCharacter),
         );
     }
 

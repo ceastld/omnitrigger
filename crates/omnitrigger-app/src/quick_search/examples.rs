@@ -4244,6 +4244,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在表格中查看通配匹配的完整路径和原值",
+        query: r#"JSON: 通配路径CSV ["订单",null,"金额"] {"订单":[{"金额":1.20},{"状态":"草稿"},{"金额":null},{"金额":9007199254740993}]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "列出 JSON 对象的顶层键名",
         query: r#"JSON: 键名 {"城市":{"名称":"北京"},"数量":1}"#,
     },
