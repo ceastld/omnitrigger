@@ -4192,6 +4192,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查找包含全部关键词的文本行",
+        query: "文本: 搜索行 \"ok 北\" 北区: OK\n南区: OK\nOK: 北站\n北站待定",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按正则提取匹配行及前后的文本",
         query: "文本: 正则上下文 [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
     },

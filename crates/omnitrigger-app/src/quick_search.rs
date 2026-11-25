@@ -1949,6 +1949,11 @@ impl TablePages {
     }
 }
 
+struct ResultSearchDraft {
+    original: QueryDraft,
+    command: &'static str,
+}
+
 struct QueryDraft {
     text: String,
     selection: MessageSelection,
@@ -1973,6 +1978,7 @@ enum ApplicationRefresh {
 
 const SEARCH_PLACEHOLDER: &str = "搜索页面、触发器，或输入算式";
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
+const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
 
 struct BookmarkNameEdit {
     expression: String,
@@ -2127,7 +2133,7 @@ pub(super) struct QuickSearch {
     input_before_query_history: Option<QueryDraft>,
     input_before_bookmarks: Option<QueryDraft>,
     query_draft_return: Option<QueryDraft>,
-    input_before_table_search: Option<QueryDraft>,
+    input_before_result_search: Option<ResultSearchDraft>,
     result_refill: Option<ResultRefill>,
     file_search_return: Option<FileSearchReturn>,
     result_save: ResultSaveState,
@@ -2270,7 +2276,7 @@ impl QuickSearch {
             input_before_query_history: None,
             input_before_bookmarks: None,
             query_draft_return: None,
-            input_before_table_search: None,
+            input_before_result_search: None,
             result_refill: None,
             file_search_return: None,
             result_save: ResultSaveState::Ready,
@@ -2372,14 +2378,15 @@ impl QuickSearch {
         if !(bookmarks_visible || (history_visible && history_from_bookmarks)) {
             self.input_before_bookmarks = None;
         }
-        if self.input_before_table_search.is_some()
-            && !query.starts_with(TABLE_SEARCH_COMMAND)
-            && !self
-                .input_before_help
-                .as_ref()
-                .is_some_and(|previous| previous.text.starts_with(TABLE_SEARCH_COMMAND))
+        if self
+            .input_before_result_search
+            .as_ref()
+            .is_some_and(|draft| {
+                !query.starts_with(draft.command)
+                    && !before_help.is_some_and(|previous| previous.starts_with(draft.command))
+            })
         {
-            self.input_before_table_search = None;
+            self.input_before_result_search = None;
         }
         if self.results != next {
             self.result_copied = false;
@@ -3048,31 +3055,38 @@ impl QuickSearch {
         true
     }
 
-    fn searchable_table_text(&self) -> Option<&str> {
-        let Results::Value(Ok(ResultValue {
-            text,
-            kind: ValueKind::Table(_),
-        })) = &self.results
-        else {
+    fn searchable_result_text(&self) -> Option<(&'static str, &str)> {
+        let Results::Value(Ok(ResultValue { text, kind })) = &self.results else {
             return None;
         };
-        let available = INPUT_CHARACTER_LIMIT - TABLE_SEARCH_COMMAND.chars().count() - 3;
-        (text.chars().take(available + 1).count() <= available).then_some(text.as_str())
+        let (command, extra) = match kind {
+            ValueKind::Table(_) => (TABLE_SEARCH_COMMAND, 3),
+            ValueKind::Text if text.contains(['\r', '\n']) => (TEXT_SEARCH_COMMAND, 5),
+            _ => return None,
+        };
+        let available = INPUT_CHARACTER_LIMIT - command.chars().count() - extra;
+        (text.chars().take(available + 1).count() <= available).then_some((command, text.as_str()))
     }
 
-    fn toggle_table_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_result_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.read(cx).is_composing() {
             return;
         }
-        if let Some(original) = self.input_before_table_search.take() {
-            self.restore_query_draft(original, window, cx);
-        } else if let Some(text) = self.searchable_table_text() {
-            let query = format!("{TABLE_SEARCH_COMMAND}\"\" {text}");
-            self.input_before_table_search = Some(self.query_draft(cx));
-            self.fill_query(query, window, cx);
-            self.input.update(cx, |input, cx| {
-                input.move_cursor_to(TABLE_SEARCH_COMMAND.len() + 1, cx)
+        if let Some(draft) = self.input_before_result_search.take() {
+            self.restore_query_draft(draft.original, window, cx);
+        } else if let Some((command, text)) = self.searchable_result_text() {
+            let query = if command == TABLE_SEARCH_COMMAND {
+                format!("{command}\"\" {text}")
+            } else {
+                format!("{command}\"\" \"{text}\"")
+            };
+            self.input_before_result_search = Some(ResultSearchDraft {
+                original: self.query_draft(cx),
+                command,
             });
+            self.fill_query(query, window, cx);
+            self.input
+                .update(cx, |input, cx| input.move_cursor_to(command.len() + 1, cx));
         }
     }
 
@@ -3100,7 +3114,7 @@ impl QuickSearch {
             || self.input_before_calculation_history.is_some()
             || self.input_before_query_history.is_some()
             || self.input_before_bookmarks.is_some()
-            || self.input_before_table_search.is_some()
+            || self.input_before_result_search.is_some()
     }
 
     fn query_draft(&self, cx: &Context<Self>) -> QueryDraft {
@@ -3618,11 +3632,11 @@ impl QuickSearch {
             } else if modifiers == 1
                 && keystroke.modifiers.control
                 && keystroke.key == "f"
-                && (self.input_before_table_search.is_some()
-                    || self.searchable_table_text().is_some())
+                && (self.input_before_result_search.is_some()
+                    || self.searchable_result_text().is_some())
             {
                 if !event.is_held {
-                    self.toggle_table_search(window, cx);
+                    self.toggle_result_search(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "d" {
@@ -4274,9 +4288,10 @@ impl QuickSearch {
             .items_center()
             .gap(px(10.))
             .when(
-                self.input_before_table_search.is_some() || self.searchable_table_text().is_some(),
+                self.input_before_result_search.is_some()
+                    || self.searchable_result_text().is_some(),
                 |footer| {
-                    let (label, hint) = if self.input_before_table_search.is_some() {
+                    let (label, hint) = if self.input_before_result_search.is_some() {
                         ("返回", "Ctrl+F 恢复原查询")
                     } else {
                         ("查找", "Ctrl+F 在当前表格查找")
@@ -4287,7 +4302,7 @@ impl QuickSearch {
                             .px(px(8.))
                             .tooltip(theme::text_tooltip(hint.into()))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_table_search(window, cx);
+                                this.toggle_result_search(window, cx);
                             })),
                     )
                 },
@@ -7409,7 +7424,7 @@ mod tests {
         search.key_down(&event("ctrl-f", false), window, cx);
         assert_eq!(search.input.read(cx).text(), QUERY);
         assert_eq!(search.input.read(cx).selection(), selection);
-        assert!(search.input_before_table_search.is_none());
+        assert!(search.input_before_result_search.is_none());
 
         let mut query = "CSV: 表格预览 A,B,C,D,E,F,G,H".to_owned();
         for row in 1..=8 {
@@ -7476,6 +7491,54 @@ mod tests {
         search.refresh_results(QUERY, window, cx);
         assert_eq!(search.expanded_value_pages, Some(pages));
         assert_eq!(search.selected, 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn verify_text_result_search(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        const QUERY: &str = "文本: 原文 北区: OK\r\n南区: OK\r北站待定";
+        let key = |name, is_held| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(name).unwrap(),
+            is_held,
+        };
+        search.fill_query(QUERY, window, cx);
+        search.refresh_results(QUERY, window, cx);
+        let selection = QUERY.find("北区").unwrap()..QUERY.find("\r\n").unwrap();
+        search
+            .input
+            .update(cx, |input, cx| input.select_range(selection.clone(), cx));
+        search.key_down(&key("ctrl-f", false), window, cx);
+        let started = search.input.read(cx).text();
+        assert_eq!(
+            started,
+            "文本: 搜索行 \"\" \"北区: OK\r\n南区: OK\r北站待定\""
+        );
+        let caret = TEXT_SEARCH_COMMAND.len() + 1;
+        assert_eq!(search.input.read(cx).selection(), caret..caret);
+        search.refresh_results(&started, window, cx);
+        assert_eq!(
+            search.results.refillable_text(),
+            Some("北区: OK\r\n南区: OK\r北站待定")
+        );
+        search.key_down(&key("ctrl-f", true), window, cx);
+        assert_eq!(search.input.read(cx).text(), started);
+        search.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "ok 北", window, cx);
+        });
+        let filtered = search.input.read(cx).text();
+        search.refresh_results(&filtered, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("北区: OK"));
+        search.key_down(&key("f1", false), window, cx);
+        let help = search.input.read(cx).text();
+        search.refresh_results(&help, window, cx);
+        assert_eq!(help, "? 文本: 搜索行");
+        search.key_down(&key("ctrl-f", false), window, cx);
+        assert_eq!(search.input.read(cx).text(), QUERY);
+        assert_eq!(search.input.read(cx).selection(), selection);
+        assert!(search.input_before_result_search.is_none());
     }
 
     #[cfg(target_os = "windows")]
@@ -8291,6 +8354,7 @@ mod tests {
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
+                    reopened.update(cx, verify_text_result_search).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             search.fill_query("1 + 24 + 300", window, cx);

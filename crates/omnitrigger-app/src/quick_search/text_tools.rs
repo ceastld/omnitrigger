@@ -21,6 +21,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::{
     calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET},
     csv_tools::{append_bounded_csv_row, csv_cell},
+    examples::search_key,
     fraction::parse_fraction_literal,
     operators::{json_argument_and_tail, select_index_ranges, IndexRangeError},
 };
@@ -288,6 +289,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             return Ok(limit_empty_lines(text_payload(text)?, limit));
         }
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
+        "搜索行" | "search-lines" => return search_text_lines(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "匹配上下文" | "context-lines" => {
@@ -1413,6 +1415,23 @@ fn split_lines(input: &str) -> Result<String, TextError> {
         return Err(TextError::EmptyDelimiter);
     }
     Ok(text.replace(&delimiter, "\n"))
+}
+
+fn search_text_lines(input: &str) -> Result<String, TextError> {
+    let (query, text) = quoted_text_argument(input)?;
+    let query = search_key(&query);
+    let words: Vec<_> = query.split_whitespace().collect();
+    if words.is_empty() {
+        return Ok(text.to_owned());
+    }
+    Ok(newline_pattern()
+        .split(text)
+        .filter(|line| {
+            let key = search_key(line);
+            words.iter().all(|word| key.contains(word))
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
@@ -3634,6 +3653,24 @@ mod tests {
             transform_text(r#"保留行 "" 内容"#),
             Err(TextError::EmptySearchText)
         );
+    }
+
+    #[test]
+    fn searches_text_lines_for_all_keywords_and_keeps_the_original_line_text() {
+        for (input, expected) in [
+            (
+                "搜索行 \"ｏｋ 北\" \"  北区: OK \r南区: OK\r\nOK: 北站\n北站待定\"",
+                "  北区: OK \nOK: 北站",
+            ),
+            (
+                "search-lines \"ＫＥＹ　Ａ\" A:key\nkey B\nkey A",
+                "A:key\nkey A",
+            ),
+            ("搜索行 \"　 \" \"甲\r\n\r乙\n\"", "甲\r\n\r乙\n"),
+            ("搜索行 \"未匹配\" A\nB", ""),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
     }
 
     #[test]
