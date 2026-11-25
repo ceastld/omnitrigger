@@ -1,5 +1,5 @@
 use std::{
-    fmt::Write as _,
+    fmt::{Display, LowerExp, Write as _},
     num::{FpCategory, IntErrorKind},
 };
 
@@ -591,13 +591,27 @@ fn parse_float(input: &str, decode: bool) -> Result<ParsedFloat, RadixError> {
 
 fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
     Ok(match parse_float(input, decode)? {
-        ParsedFloat::Single(value, bits) => {
-            format_float_bits(u64::from(bits), &value.to_string(), value.classify(), 8, 23)
-        }
+        ParsedFloat::Single(value, bits) => format_float_bits(
+            u64::from(bits),
+            &format_float_value(value),
+            value.classify(),
+            8,
+            23,
+        ),
         ParsedFloat::Double(value, bits) => {
-            format_float_bits(bits, &value.to_string(), value.classify(), 11, 52)
+            format_float_bits(bits, &format_float_value(value), value.classify(), 11, 52)
         }
     })
+}
+
+fn format_float_value(value: impl Display + LowerExp) -> String {
+    const MAX_PLAIN_VALUE_LENGTH: usize = 26;
+    let decimal = value.to_string();
+    if decimal.len() <= MAX_PLAIN_VALUE_LENGTH {
+        decimal
+    } else {
+        format!("{value:e}")
+    }
 }
 
 fn float_fraction(input: &str, decode: bool) -> Result<String, RadixError> {
@@ -934,6 +948,22 @@ mod tests {
         assert_eq!(encoded, format!("0b1{}", "0".repeat(8191)));
         let decoded = convert_arbitrary_radix(&format!("读格雷码 {encoded}")).unwrap();
         assert_eq!(decoded, bit_mask(8192).to_string());
+    }
+
+    #[test]
+    fn previews_extreme_float_values_in_round_trippable_scientific_notation() {
+        for (pattern, bits) in [("0x1", 1), ("0x7FEFFFFFFFFFFFFF", 0x7FEF_FFFF_FFFF_FFFF)] {
+            let query = format!("读浮点位 64 @ {pattern}");
+            let report = convert_arbitrary_radix(&query).unwrap();
+            let value = report
+                .lines()
+                .nth(1)
+                .unwrap()
+                .strip_prefix("数值,")
+                .unwrap();
+            assert!(value.contains('e') && value.len() <= 26, "{value}");
+            assert_eq!(value.parse::<f64>().unwrap().to_bits(), bits);
+        }
     }
 
     #[test]
