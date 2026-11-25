@@ -5420,6 +5420,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按组追加最近两笔数值的样本方差",
+        query: "CSV: 移动样本方差列 [\"方差\",\"金额\",[\"部门\"],2]\n部门,金额\n北,1/3\n南,3\n北,4/3\n南,7\n北,10/3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把每个窗口的总体标准差追加为一列",
+        query: "CSV: 移动总体标准差列 [\"标准差\",\"金额\",[],2]\n金额\n1/3\n4/3\n10/3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按部门计算最近两笔金额的分位数",
         query: "CSV: 移动分位数列 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]\n部门,金额\n北,4\n南,8\n北,1\n南,2",
     },

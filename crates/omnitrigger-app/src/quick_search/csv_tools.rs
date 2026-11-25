@@ -25,8 +25,8 @@ use super::scientific::{average, median};
 use super::statistics::{
     interpolate_ordered_quantile, parse_bin_edges, parse_probability, parse_statistical_weight,
     parse_weighted_pair, plot_binned_float_values, plot_binned_unweighted,
-    report_binned_unweighted, unweighted_box_fences, WeightedDistribution, WeightedMean,
-    MAX_QUANTILE_PROBABILITIES,
+    report_binned_unweighted, unweighted_box_fences, variance_unweighted, WeightedDistribution,
+    WeightedMean, MAX_QUANTILE_PROBABILITIES,
 };
 use super::{
     bin_plot::BinPlot,
@@ -194,6 +194,7 @@ pub(super) enum CsvError {
     EditDistanceColumnArguments,
     CommonSubstringColumnArguments,
     MovingQuantileColumnArguments,
+    MovingDispersionColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
     StackArguments,
@@ -518,6 +519,9 @@ impl CsvError {
             }
             Self::MovingQuantileColumnArguments => {
                 "填写新列名、数值列、分组列、窗口大小和分位概率，例如 [\"P25\",\"金额\",[\"部门\"],2,\"25%\"]"
+            }
+            Self::MovingDispersionColumnArguments => {
+                "填写新列名、数值列、分组列和窗口大小。总体窗口为 1 至 128，样本窗口为 2 至 128"
             }
             Self::DataRowValue { cause, .. } => cause,
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
@@ -1136,10 +1140,15 @@ enum RunningColumnComputation {
         width: usize,
         average: bool,
     },
-    MovingQuantile {
+    MovingStatistic {
         width: usize,
-        probability: BigRational,
+        statistic: MovingColumnStatistic,
     },
+}
+
+enum MovingColumnStatistic {
+    Quantile(BigRational),
+    Variance { sample: bool, root: bool },
 }
 
 enum RunningColumnState<'a> {
@@ -1151,10 +1160,10 @@ enum RunningColumnState<'a> {
         width: usize,
         average: bool,
     },
-    MovingQuantile {
+    MovingStatistic {
         values: VecDeque<BigRational>,
         width: usize,
-        probability: &'a BigRational,
+        statistic: &'a MovingColumnStatistic,
     },
 }
 
@@ -2341,7 +2350,54 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 name,
                 source,
                 groups,
-                computation: RunningColumnComputation::MovingQuantile { width, probability },
+                computation: RunningColumnComputation::MovingStatistic {
+                    width,
+                    statistic: MovingColumnStatistic::Quantile(probability),
+                },
+            }
+        }
+        kind @ ("移动样本方差列"
+        | "moving-sample-variance-column"
+        | "移动总体方差列"
+        | "moving-population-variance-column"
+        | "移动样本标准差列"
+        | "moving-sample-stdev-column"
+        | "移动总体标准差列"
+        | "moving-population-stdev-column") => {
+            let ((name, source, groups, width), data) =
+                json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>, usize)>(
+                    input,
+                    CsvError::MovingDispersionColumnArguments,
+                )?;
+            let sample = matches!(
+                kind,
+                "移动样本方差列"
+                    | "moving-sample-variance-column"
+                    | "移动样本标准差列"
+                    | "moving-sample-stdev-column"
+            );
+            let root = matches!(
+                kind,
+                "移动样本标准差列"
+                    | "moving-sample-stdev-column"
+                    | "移动总体标准差列"
+                    | "moving-population-stdev-column"
+            );
+            if !((1 + usize::from(sample))..=MAX_VALUES).contains(&width)
+                || name.trim().is_empty()
+                || name.contains('\0')
+            {
+                return Err(CsvError::MovingDispersionColumnArguments);
+            }
+            input = data;
+            Operation::RunningColumn {
+                name,
+                source,
+                groups,
+                computation: RunningColumnComputation::MovingStatistic {
+                    width,
+                    statistic: MovingColumnStatistic::Variance { sample, root },
+                },
             }
         }
         kind @ ("排名列"
@@ -5408,11 +5464,11 @@ fn running_column(
                     width: *width,
                     average: *average,
                 },
-                RunningColumnComputation::MovingQuantile { width, probability } => {
-                    RunningColumnState::MovingQuantile {
+                RunningColumnComputation::MovingStatistic { width, statistic } => {
+                    RunningColumnState::MovingStatistic {
                         values: VecDeque::new(),
                         width: *width,
-                        probability,
+                        statistic,
                     }
                 }
             });
@@ -5471,10 +5527,10 @@ fn running_column(
                 ensure_exact_size(&mean).map_err(|error| error_at_row(error.message()))?;
                 Ok(mean.to_string())
             }
-            RunningColumnState::MovingQuantile {
+            RunningColumnState::MovingStatistic {
                 values,
                 width,
-                probability,
+                statistic,
             } => {
                 let Some(value) = value else {
                     return Ok(String::new());
@@ -5486,13 +5542,28 @@ fn running_column(
                 if values.len() < *width {
                     return Ok(String::new());
                 }
-                let mut ordered: Vec<_> = values.iter().collect();
-                ordered.sort_unstable();
-                let quantile = interpolate_ordered_quantile(*width as u64, probability, |rank| {
-                    ordered[rank as usize]
-                })
-                .map_err(|error| error_at_row(error.message()))?;
-                Ok(quantile.to_string())
+                match statistic {
+                    MovingColumnStatistic::Quantile(probability) => {
+                        let mut ordered: Vec<_> = values.iter().collect();
+                        ordered.sort_unstable();
+                        let quantile =
+                            interpolate_ordered_quantile(*width as u64, probability, |rank| {
+                                ordered[rank as usize]
+                            })
+                            .map_err(|error| error_at_row(error.message()))?;
+                        Ok(quantile.to_string())
+                    }
+                    MovingColumnStatistic::Variance { sample, root } => {
+                        let variance =
+                            variance_unweighted(values.iter().cloned().collect(), *sample)
+                                .map_err(|error| error_at_row(error.message()))?
+                                .expect("已检查样本窗口至少包含两个数值");
+                        if *root {
+                            return Ok(format_square_root(&variance));
+                        }
+                        Ok(variance.to_string())
+                    }
+                }
             }
         }
     })
@@ -8068,6 +8139,14 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "timestamp-window-sum-column"
             | "时间窗口平均列"
             | "timestamp-window-average-column"
+            | "移动样本方差列"
+            | "moving-sample-variance-column"
+            | "移动总体方差列"
+            | "moving-population-variance-column"
+            | "移动样本标准差列"
+            | "moving-sample-stdev-column"
+            | "移动总体标准差列"
+            | "moving-population-stdev-column"
             | "百分位排名列"
             | "percent-rank-column"
             | "降序百分位排名列"
@@ -14305,6 +14384,35 @@ null"#
                 row: 3,
                 cause: StatisticsError::ZeroPreviousValue.message(),
             })
+        );
+    }
+
+    #[test]
+    fn appends_grouped_moving_sample_variance_and_population_deviation() {
+        let source = "\n部门,金额\n北,1/3\n南,3\n北,\n北,4/3\n南,7\n北,10/3";
+        let expected = [
+            ("移动样本方差列", "1/2", "8", "2"),
+            ("移动总体方差列", "1/4", "4", "1"),
+            ("moving-sample-stdev-column", "√(1/2)", "√8", "√2"),
+            ("moving-population-stdev-column", "1/2", "2", "1"),
+        ];
+        for (kind, first, south, second) in expected {
+            let input = format!("{kind} [\"结果\",\"金额\",[\"部门\"],2]{source}");
+            let output = format!(
+                "部门,金额,结果\r\n北,1/3,\"\"\r\n南,3,\"\"\r\n北,\"\",\"\"\r\n北,4/3,{first}\r\n南,7,{south}\r\n北,10/3,{second}"
+            );
+            assert_eq!(transform_csv(&input), Ok(output.clone()), "{kind}");
+            let (text, table) = csv_table_preview(&input).unwrap().unwrap();
+            assert_eq!(text, output);
+            assert_eq!(table.page_csv(0, 0), output);
+        }
+        assert_eq!(
+            transform_csv("移动样本方差列 [\"结果\",1,[],1] 金额"),
+            Err(CsvError::MovingDispersionColumnArguments)
+        );
+        assert_eq!(
+            transform_csv("移动总体方差列 [\"结果\",1,[],1]\n金额\n-1/3").as_deref(),
+            Ok("金额,结果\r\n-1/3,0")
         );
     }
 
