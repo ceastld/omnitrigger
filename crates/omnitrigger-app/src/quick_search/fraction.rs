@@ -1224,6 +1224,7 @@ pub(super) fn interpolate_fraction(
     Ok(result)
 }
 
+#[derive(Clone, Copy)]
 enum FractionAlignment {
     Nearest,
     Down,
@@ -1233,11 +1234,41 @@ enum FractionAlignment {
 fn align_fraction(input: &str, alignment: FractionAlignment) -> Result<BigRational, FractionError> {
     let (value, step) = split_conversion(input).ok_or(FractionError::AlignmentArguments)?;
     let value = calculate_fraction(value)?;
+    let step = parse_alignment_step(step)?;
+    align_fraction_to_step(value, &step, alignment)
+}
+
+pub(super) fn fraction_alignment_converter(
+    step: &str,
+    direction: &str,
+) -> Result<impl Fn(&str) -> Result<String, FractionError>, FractionError> {
+    let step = parse_alignment_step(step)?;
+    let alignment = match normalize(direction).trim().to_ascii_lowercase().as_str() {
+        "向下" | "floor" => FractionAlignment::Down,
+        "向上" | "ceil" => FractionAlignment::Up,
+        "就近" | "nearest" => FractionAlignment::Nearest,
+        _ => return Err(FractionError::AlignmentArguments),
+    };
+    Ok(move |value: &str| {
+        let result = align_fraction_to_step(calculate_fraction(value)?, &step, alignment)?;
+        Ok(result.to_string())
+    })
+}
+
+fn parse_alignment_step(step: &str) -> Result<BigRational, FractionError> {
     let step = calculate_fraction(step)?;
     if step.numer().sign() != Sign::Plus {
         return Err(FractionError::AlignmentArguments);
     }
-    let ratio = value / &step;
+    Ok(step)
+}
+
+fn align_fraction_to_step(
+    value: BigRational,
+    step: &BigRational,
+    alignment: FractionAlignment,
+) -> Result<BigRational, FractionError> {
+    let ratio = value / step;
     ensure_exact_size(&ratio)?;
     let multiple = match alignment {
         FractionAlignment::Nearest => rational_round(ratio, 0)?,

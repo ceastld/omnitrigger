@@ -48,8 +48,8 @@ use super::{
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, format_engineering_notation,
         format_significant_digits, format_square_root, format_square_root_sum,
-        interpolate_fraction, parse_fraction_literal, rounded_decimal, FractionError,
-        MAX_DECIMAL_PLACES,
+        fraction_alignment_converter, interpolate_fraction, parse_fraction_literal,
+        rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
     },
     json_tools::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
@@ -159,6 +159,7 @@ pub(super) enum CsvError {
     GroupTimestampSummaryArguments,
     TimestampZoneColumnArguments,
     TimestampAlignmentColumnArguments,
+    NumericAlignmentColumnArguments,
     DurationNumberColumnArguments,
     CidrColumnArguments,
     CidrLookup(CidrError),
@@ -430,6 +431,9 @@ impl CsvError {
             }
             Self::TimestampAlignmentColumnArguments => {
                 "填写新列名、时间戳列、正时间步长和对齐方向，例如 [\"区间开始\",\"时刻\",\"15分钟\",\"向下\"]"
+            }
+            Self::NumericAlignmentColumnArguments => {
+                "填写新列名、数值列、正步长和对齐方向，例如 [\"对齐值\",\"金额\",\"1/4\",\"就近\"]"
             }
             Self::DurationNumberColumnArguments => {
                 "填写新列名、时长列和目标单位，例如 [\"分钟\",\"时长\",\"min\"]"
@@ -2104,6 +2108,23 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 return Err(invalid);
             }
             let convert = exact_duration_converter(&target).map_err(|_| invalid)?;
+            return append_transformed_csv_column(data, &name, source, |row, value| {
+                convert(value).map_err(|error| CsvError::DataRowValue {
+                    row,
+                    cause: error.message(),
+                })
+            });
+        }
+        "数值对齐列" | "numeric-align-column" => {
+            let invalid = CsvError::NumericAlignmentColumnArguments;
+            let ((name, source, step, direction), data) =
+                json_argument_and_data::<(String, ColumnReference, String, String)>(
+                    input, invalid,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(invalid);
+            }
+            let convert = fraction_alignment_converter(&step, &direction).map_err(|_| invalid)?;
             return append_transformed_csv_column(data, &name, source, |row, value| {
                 convert(value).map_err(|error| CsvError::DataRowValue {
                     row,
@@ -7942,6 +7963,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "group-timestamp-difference-column"
             | "时间戳对齐列"
             | "timestamp-align-column"
+            | "数值对齐列"
+            | "numeric-align-column"
             | "组内时间戳偏移列"
             | "group-timestamp-offset-column"
             | "会话编号列"
@@ -14057,6 +14080,42 @@ null"#
             transform_csv(r#"网段名称列 ["名称",1,["192.0.2.0/24"]] 地址"#),
             Err(CsvError::CidrColumnArguments)
         );
+    }
+
+    #[test]
+    fn aligns_csv_numbers_to_exact_step_multiples_and_preserves_the_source_column() {
+        let query = "数值对齐列 [\"对齐值\",\"金额\",\"1/4\",\"就近\"] 编号,金额\n001,-3/8\n002,0.625\n003,9007199254740993.125\n004,";
+        let expected = concat!(
+            "编号,金额,对齐值\r\n",
+            "001,-3/8,-1/2\r\n",
+            "002,0.625,1/2\r\n",
+            "003,9007199254740993.125,9007199254740993\r\n",
+            "004,\"\",\"\"",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(csv_table_preview(query).unwrap().unwrap().0, expected);
+        for (direction, result) in [("向下", "-1/2"), ("ceil", "-1/4")] {
+            let query =
+                format!("numeric-align-column [\"对齐\",1,\"0.25\",\"{direction}\"] 金额\n-3/8");
+            assert_eq!(
+                transform_csv(&query).unwrap(),
+                format!("金额,对齐\r\n-3/8,{result}")
+            );
+        }
+        for query in [
+            "数值对齐列 [\"对齐\",1,\"0\",\"就近\"] 金额",
+            "数值对齐列 [\"对齐\",1,\"-1/4\",\"就近\"] 金额",
+            "数值对齐列 [\"对齐\",1,\"1/4\",\"随机\"] 金额",
+        ] {
+            assert_eq!(
+                transform_csv(query),
+                Err(CsvError::NumericAlignmentColumnArguments)
+            );
+        }
+        assert!(matches!(
+            transform_csv("数值对齐列 [\"对齐\",1,\"1/4\",\"向上\"] 金额\n1/2\n坏值"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
