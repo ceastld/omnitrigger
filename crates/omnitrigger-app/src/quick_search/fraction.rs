@@ -332,9 +332,12 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
             .ok()
             .filter(|digits| (1..=MAX_DECIMAL_PLACES).contains(digits))
             .ok_or(FractionError::SignificantDigits)?;
-        let exponent_step = if engineering { 3 } else { 1 };
-        return calculate_fraction(source)
-            .map(|value| format_significant_notation(value, digits, exponent_step));
+        let format: fn(BigRational, u32) -> String = if engineering {
+            format_engineering_notation
+        } else {
+            format_significant_digits
+        };
+        return calculate_fraction(source).map(|value| format(value, digits));
     }
     if input.contains('(') {
         return from_repeating_decimal(input).map(|value| value.to_string());
@@ -1079,6 +1082,10 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
 
 pub(super) fn format_significant_digits(value: BigRational, digits: u32) -> String {
     format_significant_notation(value, digits, 1)
+}
+
+pub(super) fn format_engineering_notation(value: BigRational, digits: u32) -> String {
+    format_significant_notation(value, digits, 3)
 }
 
 fn format_significant_notation(value: BigRational, digits: u32, exponent_step: i32) -> String {

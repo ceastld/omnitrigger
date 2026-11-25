@@ -46,9 +46,10 @@ use super::{
         format_clock_duration, DurationError,
     },
     fraction::{
-        calculate_fraction_with_variables, ensure_exact_size, format_significant_digits,
-        format_square_root, format_square_root_sum, interpolate_fraction, parse_fraction_literal,
-        rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
+        calculate_fraction_with_variables, ensure_exact_size, format_engineering_notation,
+        format_significant_digits, format_square_root, format_square_root_sum,
+        interpolate_fraction, parse_fraction_literal, rounded_decimal, FractionError,
+        MAX_DECIMAL_PLACES,
     },
     json_tools::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
@@ -829,6 +830,12 @@ impl PivotKind {
     }
 }
 
+enum NumberColumnFormat {
+    Decimal,
+    Scientific,
+    Engineering,
+}
+
 enum Operation {
     Validate,
     PadRows,
@@ -852,7 +859,7 @@ enum Operation {
     RoundColumns {
         columns: Vec<ColumnReference>,
         digits: u32,
-        significant: bool,
+        format: NumberColumnFormat,
     },
     DropEmptyRecords,
     DropEmptyColumns,
@@ -1658,8 +1665,18 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CheckColumnRules(rules, output)
         }
-        "小数列" | "decimal-columns" | "有效数字列" | "significant-columns" => {
-            let significant = matches!(operation.as_str(), "有效数字列" | "significant-columns");
+        "小数列"
+        | "decimal-columns"
+        | "有效数字列"
+        | "significant-columns"
+        | "工程计数列"
+        | "engineering-columns" => {
+            let format = match operation.as_str() {
+                "工程计数列" | "engineering-columns" => NumberColumnFormat::Engineering,
+                "有效数字列" | "significant-columns" => NumberColumnFormat::Scientific,
+                _ => NumberColumnFormat::Decimal,
+            };
+            let significant = !matches!(format, NumberColumnFormat::Decimal);
             let invalid = if significant {
                 CsvError::SignificantColumnsArguments
             } else {
@@ -1676,7 +1693,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             Operation::RoundColumns {
                 columns,
                 digits,
-                significant,
+                format,
             }
         }
         "改列名" | "rename-header" => {
@@ -2718,8 +2735,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::RoundColumns {
             columns,
             digits,
-            significant,
-        } => round_csv_columns(&rows, &columns, digits, significant),
+            format,
+        } => round_csv_columns(&rows, &columns, digits, format),
         Operation::DropEmptyRecords => drop_empty_csv_records(&rows),
         Operation::DropEmptyColumns => drop_empty_csv_columns(&rows),
         Operation::FilterMissingRows { columns, missing } => {
@@ -3978,21 +3995,25 @@ fn round_csv_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
     digits: u32,
-    significant: bool,
+    format: NumberColumnFormat,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-    let (invalid, too_large, format): (_, _, fn(BigRational, u32) -> String) = if significant {
-        (
-            CsvError::SignificantColumnsArguments,
-            CsvError::SignificantColumnsTooLarge,
-            format_significant_digits,
-        )
-    } else {
-        (
+    let (invalid, too_large, format): (_, _, fn(BigRational, u32) -> String) = match format {
+        NumberColumnFormat::Decimal => (
             CsvError::DecimalColumnsArguments,
             CsvError::DecimalColumnsTooLarge,
             rounded_decimal,
-        )
+        ),
+        NumberColumnFormat::Scientific => (
+            CsvError::SignificantColumnsArguments,
+            CsvError::SignificantColumnsTooLarge,
+            format_significant_digits,
+        ),
+        NumberColumnFormat::Engineering => (
+            CsvError::SignificantColumnsArguments,
+            CsvError::SignificantColumnsTooLarge,
+            format_engineering_notation,
+        ),
     };
     let selected: HashSet<_> = resolve_distinct_columns(header, columns, invalid)?
         .into_iter()
@@ -7862,6 +7883,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "regex-capture-columns"
             | "正则展开行"
             | "regex-expand-rows"
+            | "工程计数列"
+            | "engineering-columns"
             | "对比全部列"
             | "compare-all-columns"
             | "分组时长合计"
@@ -10569,6 +10592,21 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn previews_engineering_notation_for_selected_csv_columns() {
+        let query = "工程计数列 [[\"金额\",3],3] 编号,金额,比率\n001,9.995,0.0012345\n002,-999.5,1/3\n003,,0";
+        let expected =
+            "编号,金额,比率\r\n001,10.0e0,1.23e-3\r\n002,-1.00e3,333e-3\r\n003,\"\",0.00e0";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (text, table) = csv_table_preview(query).unwrap().unwrap();
+        assert_eq!(text, expected);
+        assert_eq!(table.row_pages(), 1);
+        assert_eq!(
+            transform_csv("engineering-columns [[1],0] 金额\n10"),
+            Err(CsvError::SignificantColumnsArguments),
+        );
     }
 
     #[test]

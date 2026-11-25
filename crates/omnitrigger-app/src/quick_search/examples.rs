@@ -4884,6 +4884,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用工程计数法显示所选列",
+        query: "CSV: 工程计数列 [[\"金额\",3],3] 编号,金额,比率\n001,9.995,0.0012345\n002,-999.5,1/3\n003,,0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除所有单元格都为空的 CSV 数据行",
         query: "CSV: 去空行 编号,备注\n001,茶\n\n,\n002,梨",
     },
