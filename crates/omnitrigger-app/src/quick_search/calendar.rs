@@ -11,6 +11,7 @@ use num_rational::BigRational;
 use super::calculator::normalize;
 use super::duration::{format_clock_duration, time_of_day, NANOS_PER_DAY};
 use super::fraction::{parse_fraction_literal, repeating_decimal};
+use super::text_tools::logical_newline_pattern;
 
 const MAX_LISTED_DATES: usize = 366;
 const MAX_DATE_RANGES: usize = 32;
@@ -947,6 +948,7 @@ enum DateRangeOperation {
     Intersect,
     Subtract,
     Coverage,
+    Gaps,
 }
 
 fn combine_date_ranges(
@@ -954,18 +956,25 @@ fn combine_date_ranges(
     today: NaiveDate,
     operation: DateRangeOperation,
 ) -> Result<String, DateError> {
-    let (minimum, invalid, input, exceptions) = if matches!(operation, DateRangeOperation::Coverage)
-    {
+    let (minimum, invalid, input, exceptions) = if matches!(
+        operation,
+        DateRangeOperation::Coverage | DateRangeOperation::Gaps
+    ) {
         let (ranges, exceptions) = split_workday_exceptions(input);
         (1, DateError::DateCoverageArguments, ranges, exceptions)
     } else {
         (2, DateError::InvalidDateRanges, input, None)
     };
-    let terms = input.trim().split([';', '\n']);
-    if !(minimum..=MAX_DATE_RANGES).contains(&terms.clone().count()) {
+    let terms: Vec<_> = logical_newline_pattern()
+        .split(input.trim())
+        .flat_map(|line| line.split(';'))
+        .take(MAX_DATE_RANGES + 1)
+        .collect();
+    if !(minimum..=MAX_DATE_RANGES).contains(&terms.len()) {
         return Err(invalid);
     }
     let mut ranges = terms
+        .into_iter()
         .map(|term| {
             let (start, end, remaining) = date_range_operands(term.trim(), today, invalid)?;
             if !remaining.is_empty() {
@@ -993,7 +1002,7 @@ fn combine_date_ranges(
             let (base, exclusions) = ranges.split_at_mut(1);
             return Ok(subtract_date_ranges(base[0], exclusions));
         }
-        DateRangeOperation::Merge | DateRangeOperation::Coverage => {}
+        DateRangeOperation::Merge | DateRangeOperation::Coverage | DateRangeOperation::Gaps => {}
     }
     ranges.sort_unstable();
     let mut merged = Vec::new();
@@ -1007,6 +1016,19 @@ fn combine_date_ranges(
         }
     }
     merged.push(current);
+    if matches!(operation, DateRangeOperation::Gaps) {
+        let exceptions = parse_workday_exceptions(exceptions)?;
+        let mut report = String::from("起始日期,截止日期,天数,工作日");
+        for (&(_, covered_end), &(next_start, _)) in merged.iter().zip(merged.iter().skip(1)) {
+            let start = covered_end + TimeDelta::days(1);
+            let end = next_start - TimeDelta::days(1);
+            let days = end.signed_duration_since(start).num_days() + 1;
+            let workdays =
+                inclusive_workdays(start, end) + workday_adjustment(&exceptions, start..=end);
+            write!(report, "\r\n{start},{end},{days},{workdays}").expect("写入 String 不会出错");
+        }
+        return Ok(report);
+    }
     if matches!(operation, DateRangeOperation::Coverage) {
         let exceptions = parse_workday_exceptions(exceptions)?;
         let mut days = 0;
@@ -1072,6 +1094,7 @@ enum DateRangeSplit {
 enum DateReport {
     Split(DateRangeSplit),
     WeekdayCounts,
+    RangeGaps,
 }
 
 impl DateReport {
@@ -1086,6 +1109,7 @@ impl DateReport {
             "按年拆分csv" | "split-years-csv" => DateRangeSplit::YearsCsv,
             "逐日csv" | "days-csv" => DateRangeSplit::DaysCsv,
             "星期统计" | "weekday-counts" => return Some(Self::WeekdayCounts),
+            "区间空档csv" | "range-gaps-csv" => return Some(Self::RangeGaps),
             _ => return None,
         };
         Some(Self::Split(split))
@@ -1778,6 +1802,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         return match report {
             DateReport::Split(split) => split_date_range(rest, today, split),
             DateReport::WeekdayCounts => count_weekdays_csv(rest, today),
+            DateReport::RangeGaps => combine_date_ranges(rest, today, DateRangeOperation::Gaps),
         };
     }
     match operation.to_ascii_lowercase().as_str() {
@@ -2474,6 +2499,32 @@ mod tests {
         assert_eq!(
             calculate_date(&excessive, today),
             Err(DateError::DateCoverageArguments)
+        );
+    }
+
+    #[test]
+    fn reports_only_internal_gaps_between_merged_occupied_date_ranges() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 28).unwrap();
+        let query = concat!(
+            "区间空档CSV 2024-03-08 至 2024-03-08\r今天至明天\u{2028}",
+            "2024-03-04 至 2024-03-04\r\n2024-03-05 至 2024-03-05",
+            r#" 例外 [["2024-03-01","2024-03-05"],["2024-03-02"]]"#
+        );
+        assert_eq!(
+            calculate_date(query, today).as_deref(),
+            Ok(concat!(
+                "起始日期,截止日期,天数,工作日\r\n",
+                "2024-03-01,2024-03-03,3,1\r\n",
+                "2024-03-06,2024-03-07,2,2"
+            ))
+        );
+        assert_eq!(
+            calculate_date(
+                "RANGE-GAPS-CSV 9999-12-30 至 9999-12-30；9999-12-31 至 9999-12-31",
+                today,
+            )
+            .as_deref(),
+            Ok("起始日期,截止日期,天数,工作日")
         );
     }
 

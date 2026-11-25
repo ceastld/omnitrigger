@@ -3157,6 +3157,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查看占用日期区间之间的空档",
+        query: "日期: 区间空档CSV 2024-02-28 至 2024-02-29; 2024-03-04 至 2024-03-05; 2024-03-08 至 2024-03-08",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "计算多个日期区间合计覆盖的天数和工作日",
         query: "日期: 覆盖天数 2024-02-28 至 2024-03-01; 2024-02-29 至 2024-03-03; 2024-03-05 至 2024-03-06",
     },
@@ -7341,6 +7346,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "合并区间",
             "区间交集",
             "扣除区间",
+            "区间空档CSV",
             "覆盖天数",
             "按月拆分",
             "按月拆分CSV",
