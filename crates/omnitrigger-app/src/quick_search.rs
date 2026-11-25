@@ -115,7 +115,7 @@ use examples::{
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
-use fraction::{calculate_fraction, parse_fraction_literal, simplify_fraction, FractionError};
+use fraction::{calculate_fraction, parse_fraction_literal, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use intervals::{calculate_intervals, IntervalError};
 use json_tools::{transform_json, JsonError};
@@ -1213,16 +1213,18 @@ impl Results {
                         Self::table_value(report.map_err(ValueError::Fraction))
                     } else {
                         Self::Value(
-                            simplify_fraction(term)
-                                .map(|text| ResultValue {
-                                    kind: ValueKind::ExactCalculation {
-                                        // 为括号、运算符和至少一位操作数预留空间。
-                                        can_continue: text.len() <= calculator::QUERY_LIMIT - 4
-                                            && parse_fraction_literal(&text).is_ok(),
-                                    },
-                                    text,
-                                })
-                                .map_err(ValueError::Fraction),
+                            fraction::simplify_fraction_with_answers(term, &|index| {
+                                recent.calculations.exact_number_at(index)
+                            })
+                            .map(|text| ResultValue {
+                                kind: ValueKind::ExactCalculation {
+                                    // 为括号、运算符和至少一位操作数预留空间。
+                                    can_continue: text.len() <= calculator::QUERY_LIMIT - 4
+                                        && parse_fraction_literal(&text).is_ok(),
+                                },
+                                text,
+                            })
+                            .map_err(ValueError::Fraction),
                         )
                     }
                 }
@@ -4543,6 +4545,7 @@ impl Render for QuickSearch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quick_search::fraction::simplify_fraction;
 
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Results {
         SearchIndex {
@@ -8058,6 +8061,35 @@ mod tests {
             )))
         ));
         assert_eq!(for_query("12+3", &[]).refillable_text(), Some("15"));
+    }
+
+    #[test]
+    fn reuses_confirmed_answers_as_exact_fractions_without_float_rounding() {
+        let index = SearchIndex::default();
+        assert!(matches!(
+            index.results("分数: 计算 ans+1"),
+            Results::Value(Err(ValueError::Fraction(FractionError::MissingAnswer)))
+        ));
+        index
+            .recent
+            .calculations
+            .record("高精度数值", "9007199254740993");
+        index.recent.calculations.record("精确比例", "1/3");
+        index.recent.calculations.record("多行结果", "3\n5");
+        assert_eq!(
+            index.results("分数: 计算 ans*3").refillable_text(),
+            Some("1")
+        );
+        assert_eq!(
+            index
+                .results("分数: ＣＡＬＣ ＡＮＳ２ + ans1*3")
+                .refillable_text(),
+            Some("9007199254740994")
+        );
+        assert!(matches!(
+            index.results("分数: 计算 ans3+1"),
+            Results::Value(Err(ValueError::Fraction(FractionError::MissingAnswer)))
+        ));
     }
 
     #[test]

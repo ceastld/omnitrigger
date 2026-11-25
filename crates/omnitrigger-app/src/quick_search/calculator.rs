@@ -70,7 +70,7 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
     format_result(evaluate(query)?)
 }
 
-fn answer_index(name: &str) -> Option<usize> {
+pub(super) fn answer_index(name: &str) -> Option<usize> {
     let prefix = name.get(..3)?;
     if !prefix.eq_ignore_ascii_case("ans") {
         return None;

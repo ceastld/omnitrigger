@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
 
-use super::calculator::{normalize, QUERY_LIMIT};
+use super::calculator::{answer_index, normalize, CalculationError, QUERY_LIMIT};
 use super::conversion::split_conversion;
 use super::csv_tools::append_bounded_csv_row;
 use super::linear_fit::format_power_expression;
@@ -30,6 +30,7 @@ const MAX_CONGRUENCES: usize = 16;
 pub(super) enum FractionError {
     Incomplete,
     Invalid,
+    MissingAnswer,
     ZeroDenominator,
     OutOfRange,
     TooLong,
@@ -81,6 +82,7 @@ impl FractionError {
         match self {
             Self::Incomplete => "输入分数或有限小数，例如 42/56 或 0.125",
             Self::Invalid => "请输入分数、有限小数或用 计算 开头的算式",
+            Self::MissingAnswer => CalculationError::MissingAnswer.message(),
             Self::ZeroDenominator => "分母或除数不能为零",
             Self::OutOfRange => "分子或分母超出整数范围",
             Self::TooLong => "分数算式最多支持 256 个字符",
@@ -192,11 +194,28 @@ pub(super) fn common_divisor(mut left: u128, mut right: u128) -> u128 {
 }
 
 pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
+    simplify_fraction_using(input, None)
+}
+
+pub(super) fn simplify_fraction_with_answers(
+    input: &str,
+    answer_at: &dyn Fn(usize) -> Option<BigRational>,
+) -> Result<String, FractionError> {
+    simplify_fraction_using(input, Some(answer_at))
+}
+
+type ExactAnswerLookup<'a> = &'a dyn Fn(usize) -> Option<BigRational>;
+
+fn simplify_fraction_using(
+    input: &str,
+    answer_at: Option<ExactAnswerLookup<'_>>,
+) -> Result<String, FractionError> {
     let normalized = normalize(input);
     let input = normalized.trim();
     let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     if verb == "计算" || verb.eq_ignore_ascii_case("calc") {
-        return calculate_fraction(expression.trim()).map(|value| value.to_string());
+        return evaluate_fraction(expression.trim(), None, None, answer_at)
+            .map(|value| value.to_string());
     }
     if verb == "循环小数" || verb.eq_ignore_ascii_case("repeating-decimal") {
         return repeating_decimal(&calculate_fraction(expression.trim())?);
@@ -617,6 +636,15 @@ pub(super) fn calculate_fraction_with_variables(
     x: Option<&BigRational>,
     y: Option<&BigRational>,
 ) -> Result<BigRational, FractionError> {
+    evaluate_fraction(input, x, y, None)
+}
+
+fn evaluate_fraction(
+    input: &str,
+    x: Option<&BigRational>,
+    y: Option<&BigRational>,
+    answer_at: Option<ExactAnswerLookup<'_>>,
+) -> Result<BigRational, FractionError> {
     if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(FractionError::TooLong);
     }
@@ -624,6 +652,7 @@ pub(super) fn calculate_fraction_with_variables(
         remaining: input,
         x,
         y,
+        answer_at,
     };
     let value = parser.sum()?;
     if !parser.remaining.trim().is_empty() {
@@ -973,6 +1002,7 @@ pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, Fractio
         remaining: input,
         x: None,
         y: None,
+        answer_at: None,
     };
     let mut value = parser.signed_number()?;
     if parser.consume('/') {
@@ -1465,6 +1495,7 @@ struct FractionParser<'a> {
     remaining: &'a str,
     x: Option<&'a BigRational>,
     y: Option<&'a BigRational>,
+    answer_at: Option<ExactAnswerLookup<'a>>,
 }
 
 impl FractionParser<'_> {
@@ -1568,8 +1599,12 @@ impl FractionParser<'_> {
 
     fn named_value(&mut self) -> Result<BigRational, FractionError> {
         let input = self.remaining.trim_start();
-        let length = input.bytes().take_while(u8::is_ascii_alphabetic).count();
+        let length = input.bytes().take_while(u8::is_ascii_alphanumeric).count();
         let (name, rest) = input.split_at(length);
+        if let (Some(answer_at), Some(index)) = (self.answer_at, answer_index(name)) {
+            self.remaining = rest;
+            return answer_at(index).ok_or(FractionError::MissingAnswer);
+        }
         let variable = match name {
             "x" => self.x,
             "y" => self.y,

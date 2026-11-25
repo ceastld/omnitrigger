@@ -1,5 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
+use num_rational::BigRational;
+
 use super::examples::search_key;
 use super::InputSuggestion;
 
@@ -29,10 +31,20 @@ impl RecentValues {
     }
 
     pub(super) fn number_at(&self, index: usize) -> Option<f64> {
+        self.numeric_value_at(index, |result| super::calculator::evaluate(result).ok())
+    }
+
+    pub(super) fn exact_number_at(&self, index: usize) -> Option<BigRational> {
+        self.numeric_value_at(index, |result| {
+            super::fraction::parse_fraction_literal(result).ok()
+        })
+    }
+
+    fn numeric_value_at<T>(&self, index: usize, parse: impl Fn(&str) -> Option<T>) -> Option<T> {
         self.0
             .borrow()
             .iter()
-            .filter_map(|item| super::calculator::evaluate(&item.result).ok())
+            .filter_map(|item| parse(&item.result))
             .nth(index)
     }
 
