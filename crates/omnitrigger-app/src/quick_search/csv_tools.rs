@@ -231,6 +231,7 @@ pub(super) enum CsvError {
     NumericRangeCheckArguments,
     TimestampRangeCheckArguments,
     ValidationRulesArguments,
+    RuleAnnotationArguments,
     ValidationRulesTooLarge,
     AllowedValuesCheckArguments,
     DecimalColumnsArguments,
@@ -561,6 +562,9 @@ impl CsvError {
             Self::NumericRangeCheckArguments => "填写列列表和两个数值字符串，下界须不大于上界",
             Self::TimestampRangeCheckArguments => "填写列列表和两个明确的时间戳字符串，开始须不晚于结束",
             Self::ValidationRulesArguments => "填写最多 64 条列规则，例如 [[\"日期\",\"日期\"],[\"编号\",\"正则\",\"^A\"]]",
+            Self::RuleAnnotationArguments => {
+                "填写新列名和规则数组，例如 [\"通过\",[[\"日期\",\"日期\"]]]"
+            }
             Self::ValidationRulesTooLarge => "规则检查结果超过 1 MiB，请缩小表格范围",
             Self::AllowedValuesCheckArguments => "填写列列表和非空的允许值列表，每个允许值只写一次",
             Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
@@ -724,6 +728,7 @@ enum ColumnRuleOutput {
     ValidRows,
     InvalidRows,
     Summary,
+    Annotate { name: String, count_failures: bool },
 }
 
 impl ColumnValidation {
@@ -1525,10 +1530,57 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::CheckColumns(columns, validation)
         }
-        "检查规则" | "check-rules" | "规则保留行" | "keep-valid-rows" | "规则问题行"
-        | "keep-invalid-rows" | "规则统计" | "rule-summary" => {
+        "检查规则"
+        | "check-rules"
+        | "规则保留行"
+        | "keep-valid-rows"
+        | "规则问题行"
+        | "keep-invalid-rows"
+        | "规则统计"
+        | "rule-summary"
+        | "规则标记列"
+        | "rule-pass-column"
+        | "规则失败数列"
+        | "rule-failure-count-column" => {
             let invalid = CsvError::ValidationRulesArguments;
-            let (rules, data) = json_argument_and_data::<Vec<ColumnRuleInput>>(input, invalid)?;
+            let (rules, data, output) = match operation.as_str() {
+                "规则标记列"
+                | "rule-pass-column"
+                | "规则失败数列"
+                | "rule-failure-count-column" => {
+                    let annotation_error = CsvError::RuleAnnotationArguments;
+                    let ((name, rules), data) = json_argument_and_data::<(
+                        String,
+                        Vec<ColumnRuleInput>,
+                    )>(input, annotation_error)?;
+                    if name.trim().is_empty() || name.contains('\0') {
+                        return Err(annotation_error);
+                    }
+                    let count_failures = matches!(
+                        operation.as_str(),
+                        "规则失败数列" | "rule-failure-count-column"
+                    );
+                    (
+                        rules,
+                        data,
+                        ColumnRuleOutput::Annotate {
+                            name,
+                            count_failures,
+                        },
+                    )
+                }
+                kind => {
+                    let (rules, data) =
+                        json_argument_and_data::<Vec<ColumnRuleInput>>(input, invalid)?;
+                    let output = match kind {
+                        "规则保留行" | "keep-valid-rows" => ColumnRuleOutput::ValidRows,
+                        "规则问题行" | "keep-invalid-rows" => ColumnRuleOutput::InvalidRows,
+                        "规则统计" | "rule-summary" => ColumnRuleOutput::Summary,
+                        _ => ColumnRuleOutput::Issues,
+                    };
+                    (rules, data, output)
+                }
+            };
             if !(1..=64).contains(&rules.len()) {
                 return Err(invalid);
             }
@@ -1587,12 +1639,6 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             input = data;
-            let output = match operation.as_str() {
-                "规则保留行" | "keep-valid-rows" => ColumnRuleOutput::ValidRows,
-                "规则问题行" | "keep-invalid-rows" => ColumnRuleOutput::InvalidRows,
-                "规则统计" | "rule-summary" => ColumnRuleOutput::Summary,
-                _ => ColumnRuleOutput::Issues,
-            };
             Operation::CheckColumnRules(rules, output)
         }
         "小数列" | "decimal-columns" | "有效数字列" | "significant-columns" => {
@@ -4009,13 +4055,30 @@ fn check_column_rules(
     if matches!(output, ColumnRuleOutput::Summary) {
         return summarize_column_rules(header, records, &rules);
     }
-    let keep_valid = matches!(output, ColumnRuleOutput::ValidRows);
-    let matches = records.iter().filter(|row| {
+    let passes_all = |row: &[String]| {
         rules
             .iter()
             .all(|&(column, rule)| rule.accepts(&row[column]))
-            == keep_valid
-    });
+    };
+    if let ColumnRuleOutput::Annotate {
+        name,
+        count_failures,
+    } = &output
+    {
+        return write_appended_column(header, records, name, |row| {
+            let value = if *count_failures {
+                rules
+                    .iter()
+                    .filter(|&&(column, rule)| !rule.accepts(&row[column]))
+                    .count()
+            } else {
+                usize::from(passes_all(row))
+            };
+            Ok(value.to_string())
+        });
+    }
+    let keep_valid = matches!(output, ColumnRuleOutput::ValidRows);
+    let matches = records.iter().filter(|row| passes_all(row) == keep_valid);
     let mut csv = String::new();
     for row in std::iter::once(header).chain(matches) {
         append_bounded_csv_row(
@@ -7588,6 +7651,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "keep-invalid-rows"
             | "规则统计"
             | "rule-summary"
+            | "规则标记列"
+            | "rule-pass-column"
+            | "规则失败数列"
+            | "rule-failure-count-column"
             | "表头对比"
             | "compare-headers"
             | "对比列"
@@ -10430,6 +10497,33 @@ mod tests {
             transform_csv(r#"检查允许值 [[1],["完成","完成"]] 状态"#),
             Err(CsvError::AllowedValuesCheckArguments),
         );
+    }
+
+    #[test]
+    fn appends_rule_pass_flags_and_failure_counts_to_every_original_record() {
+        let rules = r#"[[1,"正则","^[AB]$"],["日期","日期"]]"#;
+        let input =
+            "编号,日期,备注\nA,2024-02-29,\"有效,原文\"\nB,2023-02-29,一项失败\nX,,两项失败";
+        let flags = format!("规则标记列 [\"通过\",{rules}] {input}");
+        let expected = concat!(
+            "编号,日期,备注,通过\r\nA,2024-02-29,\"有效,原文\",1\r\n",
+            "B,2023-02-29,一项失败,0\r\nX,\"\",两项失败,0",
+        );
+        assert_eq!(transform_csv(&flags).as_deref(), Ok(expected));
+        let (text, _) = csv_table_preview(&flags)
+            .expect("规则标记列应可预览")
+            .unwrap();
+        assert_eq!(text, expected);
+        let counts = format!("rule-failure-count-column [\"失败数\",{rules}] {input}");
+        assert_eq!(
+            transform_csv(&counts).as_deref(),
+            Ok(concat!(
+                "编号,日期,备注,失败数\r\nA,2024-02-29,\"有效,原文\",0\r\n",
+                "B,2023-02-29,一项失败,1\r\nX,\"\",两项失败,2",
+            ))
+        );
+        let collision = format!("规则标记列 [\"编号\",{rules}] {input}");
+        assert_eq!(transform_csv(&collision), Err(CsvError::HeaderNameConflict));
     }
 
     #[test]
