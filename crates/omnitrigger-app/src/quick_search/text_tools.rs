@@ -81,8 +81,8 @@ pub(super) enum TextError {
     IncompleteTextArgument,
     InvalidTextArgument,
     InvalidLineTemplate,
-    WindowsArguments,
-    WindowsArgumentNull,
+    ArgumentArray,
+    ArgumentNull,
     WindowsCommandLimit,
     IncompleteLineComparison,
     InvalidLineComparison,
@@ -145,8 +145,8 @@ impl TextError {
             Self::IncompleteTextArgument => "输入带引号的内容和原文",
             Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
             Self::InvalidLineTemplate => "模板用 {行} 和 {序号} 填入内容，用 {{ 和 }} 输出花括号",
-            Self::WindowsArguments => "用 JSON 字符串数组填写 Windows 程序参数",
-            Self::WindowsArgumentNull => "Windows 命令行参数不能包含空字符 U+0000",
+            Self::ArgumentArray => "请填写 JSON 字符串数组，例如 [\"茶\",\"咖啡\"]",
+            Self::ArgumentNull => "参数文本不能包含空字符 U+0000",
             Self::WindowsCommandLimit => "参数段超过 Windows 命令行的长度上限",
             Self::IncompleteLineComparison => "输入两组加引号的文本，组间用空格分开",
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
@@ -490,16 +490,22 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "markdown转义" | "markdown-escape" => Ok(escape_markdown(text)),
         "markdown还原" | "markdown-unescape" => Ok(unescape_markdown(text)),
         "windows参数" | "windows-arguments" => windows_arguments(text),
+        "powershell数组" | "powershell-array" => powershell_array(text),
         _ => Err(TextError::UnknownOperation),
     }
 }
 
-fn windows_arguments(input: &str) -> Result<String, TextError> {
+fn argument_strings(input: &str) -> Result<Vec<String>, TextError> {
     let arguments: Vec<String> =
-        serde_json::from_str(input).map_err(|_| TextError::WindowsArguments)?;
+        serde_json::from_str(input).map_err(|_| TextError::ArgumentArray)?;
     if arguments.iter().any(|argument| argument.contains('\0')) {
-        return Err(TextError::WindowsArgumentNull);
+        return Err(TextError::ArgumentNull);
     }
+    Ok(arguments)
+}
+
+fn windows_arguments(input: &str) -> Result<String, TextError> {
+    let arguments = argument_strings(input)?;
     let command = crate::profiles::join_arguments(&arguments);
     if command
         .encode_utf16()
@@ -510,6 +516,30 @@ fn windows_arguments(input: &str) -> Result<String, TextError> {
         return Err(TextError::WindowsCommandLimit);
     }
     Ok(command)
+}
+
+fn powershell_array(input: &str) -> Result<String, TextError> {
+    let arguments = argument_strings(input)?;
+    let mut output = String::from("@(");
+    for (index, argument) in arguments.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        output.push('\'');
+        for character in argument.chars() {
+            output.push(character);
+            // PowerShell 把四种弯单引号也识别为引号，成对书写可保留原字符。
+            if matches!(character, '\'' | '\u{2018}'..='\u{201b}') {
+                output.push(character);
+            }
+        }
+        output.push('\'');
+        if output.len() >= MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::ResultTooLarge);
+        }
+    }
+    output.push(')');
+    Ok(output)
 }
 
 fn transform_text_pipeline(input: &str) -> Result<String, TextError> {
@@ -3646,16 +3676,34 @@ mod tests {
         assert_eq!(transform_text("windows-arguments []").as_deref(), Ok(""));
         assert_eq!(
             transform_text(r#"Windows参数 ["a\u0000b"]"#),
-            Err(TextError::WindowsArgumentNull)
+            Err(TextError::ArgumentNull)
         );
         assert_eq!(
             transform_text("Windows参数 [42]"),
-            Err(TextError::WindowsArguments)
+            Err(TextError::ArgumentArray)
         );
         let oversized = format!("Windows参数 [\"{}\"]", "😺".repeat(16_384));
         assert_eq!(
             transform_text(&oversized),
             Err(TextError::WindowsCommandLimit)
+        );
+    }
+
+    #[test]
+    fn creates_literal_powershell_string_arrays_with_straight_and_curved_quotes() {
+        assert_eq!(
+            transform_text(r#"PowerShell数组 ["O'Brien","‘北’","$HOME","C:\\a b\\",""]"#)
+                .as_deref(),
+            Ok(r#"@('O''Brien', '‘‘北’’', '$HOME', 'C:\a b\', '')"#)
+        );
+        assert_eq!(
+            transform_text(r#"powershell-array ["分行\r\n原文"]"#).as_deref(),
+            Ok("@('分行\r\n原文')")
+        );
+        assert_eq!(transform_text("PowerShell数组 []").as_deref(), Ok("@()"));
+        assert_eq!(
+            transform_text(r#"PowerShell数组 ["a\u0000b"]"#),
+            Err(TextError::ArgumentNull)
         );
     }
 

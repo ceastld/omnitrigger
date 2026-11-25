@@ -654,6 +654,7 @@
 - 输入 `文本: HTML转义 <b>茶 & 咖啡</b>` 可转义尖括号、与号和单双引号。用 `HTML还原` 可解码带分号的 `amp`、`lt`、`gt`、`quot`、`apos`、`nbsp` 以及十进制或十六进制数字引用。 [WHATWG 数字字符引用规则](https://html.spec.whatwg.org/multipage/parsing.html#numeric-character-reference-end-state)
 - 输入 `文本: Markdown转义 *茶* [咖啡]` 得到 `\*茶\* \[咖啡\]`，可粘贴到 Markdown 正文。用 `Markdown还原` 可去掉 ASCII 标点前用作转义的反斜杠。 [CommonMark 反斜杠转义](https://spec.commonmark.org/0.31.2/#backslash-escapes)
 - 用 `文本: Windows参数 ["--input","C:\\项目\\报告 01.txt",""]` 可生成 `--input "C:\项目\报告 01.txt" ""`。把结果放在原生 Windows 程序名之后，适用于按 Microsoft C 运行库规则读取参数的程序。空字符串、空格、引号和结尾反斜杠都可保留。 [Microsoft C 命令行参数解析](https://learn.microsoft.com/en-us/cpp/c-language/parsing-c-command-line-arguments)
+- 用 `文本: PowerShell数组 ["O'Brien","$HOME",""]` 得到 `@('O''Brien', '$HOME', '')`。数组元素以单引号字面量输出，可保留引号、变量名原文、换行和空字符串。 [PowerShell 的单引号规则](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_quoting_rules#single-quoted-strings)
 - 用 `文本: Markdown标题CSV` 加上 Markdown 内容，可预览以井号标记的标题、级别和原文行号。标题保留行内标记，反引号或波浪号围栏中的内容会跳过。 [CommonMark 井号标题](https://spec.commonmark.org/0.31.2/#atx-headings)
 - 输入 `文本: 大写 Straße` 得到 `STRASSE`。也可用 `文本: 小写 ÉTÉ` 转成小写，或用 `文本: 合并空白 A   B` 得到 `A B`。
 - 输入 `文本: 转半角 ＡＢＣ１２３！` 得到 `ABC123!`，用 `文本: 转全角 ABC123!` 可转回全角。支持有全角对应形式的 ASCII 字符和空格。 [Unicode 全角字符表](https://www.unicode.org/charts/PDF/UFF00.pdf) [Unicode 表意空格表](https://www.unicode.org/charts/PDF/U3000.pdf)

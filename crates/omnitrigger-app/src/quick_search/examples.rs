@@ -4581,6 +4581,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 JSON 字符串数组转成 PowerShell 字面量",
+        query: r#"文本: PowerShell数组 ["O'Brien","$HOME",""]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "还原 Markdown 的反斜杠转义",
         query: r"文本: Markdown还原 \*茶\* \[咖啡\]",
     },
