@@ -6350,6 +6350,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用多个比较符检查相邻算式的精确值",
+        query: "分数: 比较 1/3 < 0.34 <= 1/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把假分数转换成带分数",
         query: "分数: 带分数 -7/3",
     },

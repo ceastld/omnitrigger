@@ -125,7 +125,9 @@ impl FractionError {
             }
             Self::ContinuedFractionLength => "连分数最多支持 512 项",
             Self::ConvergentOutputTooLarge => "收敛分数的结果超过 1 MiB",
-            Self::ComparisonArguments => "输入两个算式和一个比较符，例如 分数: 比较 1/3 < 0.34",
+            Self::ComparisonArguments => {
+                "用比较符连接至少两个算式，例如 分数: 比较 1/3 < 0.34 <= 1/2"
+            }
             Self::RatioArguments => "输入 2 至 16 个非负数，至少一个大于零，例如 0.5,3/4,1",
             Self::PercentageNotation => "请填写带百分号的数值，例如 12.5% 或 33.(3)%",
             Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
@@ -553,28 +555,41 @@ fn simplify_ratio(input: &str) -> Result<String, FractionError> {
 }
 
 fn compare_fraction_expressions(input: &str) -> Result<String, FractionError> {
-    let (start, length, comparison) = input
-        .char_indices()
-        .find_map(|(index, character)| {
-            let remainder = &input[index..];
-            [2, character.len_utf8()].into_iter().find_map(|length| {
-                let operator = remainder.get(..length)?;
-                NumberComparison::parse(operator).map(|comparison| (index, length, comparison))
-            })
+    let operand = |text: &str| {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(FractionError::ComparisonArguments);
+        }
+        calculate_fraction(text)
+    };
+    let (left, mut comparison, mut remainder) =
+        split_fraction_comparison(input).ok_or(FractionError::ComparisonArguments)?;
+    let mut previous = operand(left)?;
+    let mut satisfied = true;
+    loop {
+        let next = split_fraction_comparison(remainder);
+        let right = next.map_or(remainder, |(right, _, _)| right);
+        let current = operand(right)?;
+        satisfied &= comparison.accepts(previous.cmp(&current));
+        let Some((_, next_comparison, next_remainder)) = next else {
+            break;
+        };
+        previous = current;
+        comparison = next_comparison;
+        remainder = next_remainder;
+    }
+    Ok(if satisfied { "成立" } else { "不成立" }.to_owned())
+}
+
+fn split_fraction_comparison(input: &str) -> Option<(&str, NumberComparison, &str)> {
+    let (start, length, comparison) = input.char_indices().find_map(|(index, character)| {
+        let remainder = &input[index..];
+        [2, character.len_utf8()].into_iter().find_map(|length| {
+            let operator = remainder.get(..length)?;
+            NumberComparison::parse(operator).map(|comparison| (index, length, comparison))
         })
-        .ok_or(FractionError::ComparisonArguments)?;
-    let left = input[..start].trim();
-    let right = input[start + length..].trim();
-    if left.is_empty() || right.is_empty() {
-        return Err(FractionError::ComparisonArguments);
-    }
-    let order = calculate_fraction(left)?.cmp(&calculate_fraction(right)?);
-    Ok(if comparison.accepts(order) {
-        "成立"
-    } else {
-        "不成立"
-    }
-    .to_owned())
+    })?;
+    Some((&input[..start], comparison, &input[start + length..]))
 }
 
 pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
@@ -1851,6 +1866,9 @@ mod tests {
             ("compare 5! == 120", "成立"),
             ("比较 ３／２ ≤ １．５", "成立"),
             ("compare 1.50e0 != 3/2", "不成立"),
+            ("比较 1/3 < 0.34 <= 1/2", "成立"),
+            ("比较 2**53+1 > 2**53 ≥ 2**52", "成立"),
+            ("compare 5! == 120 != 119 >= 120", "不成立"),
         ] {
             assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
         }
@@ -1860,6 +1878,14 @@ mod tests {
         );
         assert_eq!(
             simplify_fraction("比较 2/0 = 1"),
+            Err(FractionError::ZeroDenominator)
+        );
+        assert_eq!(
+            simplify_fraction("比较 1/2 > 0 <"),
+            Err(FractionError::ComparisonArguments)
+        );
+        assert_eq!(
+            simplify_fraction("比较 1 > 2 < 1/0"),
             Err(FractionError::ZeroDenominator)
         );
     }
