@@ -7192,6 +7192,7 @@ mod tests {
             ("  JSON： 校验\r\n{\r\n  \"参数\": \"茶\"坏\r\n}   ", "坏"),
             ("JSON: VALIDATE [\"😀\",好]", "好"),
             ("JSON: 校验 [1,\r\n  ", ""),
+            ("JSON: 校验行\r\nnull\r\n\r\n \"茶\"坏 \r\n[", " \"茶\"坏 "),
             ("TOML： 校验\r\nname = '茶'\r\nname = '咖啡' ", "name"),
             ("TOML: 校验 list = [1,2", ""),
             (

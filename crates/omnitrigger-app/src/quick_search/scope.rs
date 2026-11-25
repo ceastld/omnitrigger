@@ -2,7 +2,7 @@ use crate::trigger_browse::{FacetValue, ScopeKind, StatusKind};
 
 use super::{
     calculator::narrow_ascii_graphic, is_validation_operation,
-    text_tools::preserves_operand_trailing_whitespace,
+    json_tools::is_jsonl_validation_operation, text_tools::preserves_operand_trailing_whitespace,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +94,11 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
                     .split_whitespace()
                     .next()
                     .is_some_and(is_validation_operation))
+            || (scope == Scope::Json
+                && term
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(is_jsonl_validation_operation))
             || (scope == Scope::TextTools
                 && term
                     .split_whitespace()

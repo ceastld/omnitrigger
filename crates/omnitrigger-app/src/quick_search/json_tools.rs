@@ -288,9 +288,18 @@ pub(super) fn json_validation_report(
     query: &str,
 ) -> Option<Result<InputValidationReport, JsonError>> {
     let (operation, source) = split_json_operation(query)?;
-    is_validation_operation(operation).then(|| {
-        validate_json(source).map(|report| report.offset_error_span(query.len() - source.len()))
-    })
+    let report = if is_validation_operation(operation) {
+        validate_json(source)
+    } else if is_jsonl_validation_operation(operation) {
+        validate_json_lines(source)
+    } else {
+        return None;
+    };
+    Some(report.map(|report| report.offset_error_span(query.len() - source.len())))
+}
+
+pub(super) fn is_jsonl_validation_operation(operation: &str) -> bool {
+    operation == "校验行" || operation.eq_ignore_ascii_case("validate-jsonl")
 }
 
 fn validate_json(source: &str) -> Result<InputValidationReport, JsonError> {
@@ -382,6 +391,9 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
     if is_validation_operation(&operation) {
         return validate_json(raw_source).map(|report| report.text);
     }
+    if is_jsonl_validation_operation(&operation) {
+        return validate_json_lines(raw_source).map(|report| report.text);
+    }
     if let Some(operation) = JsonCsvOperation::from_name(&operation) {
         return operation.run(raw_source);
     }
@@ -443,7 +455,6 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "切片" | "slice" => return slice_json_array(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
-        "校验行" | "validate-jsonl" => return validate_json_lines(raw_source),
         "合并对象" | "merge-objects" => return merge_json_objects(source),
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
@@ -1973,13 +1984,22 @@ pub(super) fn json_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-fn validate_json_lines(source: &str) -> Result<String, JsonError> {
+fn validate_json_lines(source: &str) -> Result<InputValidationReport, JsonError> {
     let mut valid = 0;
     let mut errors = Vec::new();
+    let mut error_span = None;
     for (line_number, line) in json_lines(source) {
         match serde_json::from_str::<&RawValue>(line) {
             Ok(_) => valid += 1,
             Err(error) => {
+                error_span.get_or_insert_with(|| {
+                    let start: usize = source
+                        .split_inclusive('\n')
+                        .take(line_number - 1)
+                        .map(str::len)
+                        .sum();
+                    start..start + line.len()
+                });
                 let reason = json_line_error_reason(&error);
                 errors.push(format!("第 {line_number} 行 · {reason}"));
             }
@@ -1989,7 +2009,10 @@ fn validate_json_lines(source: &str) -> Result<String, JsonError> {
         return Err(JsonError::Incomplete);
     }
     errors.insert(0, format!("{} 行有效，{} 行无效", valid, errors.len()));
-    Ok(errors.join("\n"))
+    Ok(InputValidationReport {
+        text: errors.join("\n"),
+        error_span,
+    })
 }
 
 fn validate_json_lines_csv(source: &str) -> Result<String, JsonError> {
@@ -3226,7 +3249,33 @@ mod tests {
             json_validation_report("校验 \r\n\t"),
             Some(Err(JsonError::Incomplete))
         ));
-        assert!(json_validation_report("校验行 {}").is_none());
+        assert!(json_validation_report("校验行CSV {}").is_none());
+    }
+
+    #[test]
+    fn selects_the_first_invalid_json_line_excluding_its_line_break() {
+        for (query, first_invalid, location) in [
+            (
+                "校验行\r\n{}\r\n \t\r\n  \"茶\"坏  \r\nnull\r\n[",
+                "  \"茶\"坏  ",
+                "第 3 行",
+            ),
+            ("VALIDATE-JSONL 1\n  未修复  ", "  未修复  ", "第 2 行"),
+        ] {
+            let report = json_validation_report(query).unwrap().unwrap();
+            assert_eq!(&query[report.error_span.unwrap()], first_invalid);
+            assert!(report.text.contains(location));
+            assert_eq!(transform_json(query), Ok(report.text));
+        }
+        let valid = json_validation_report("校验行 null\r\n \t\r\n{}")
+            .unwrap()
+            .unwrap();
+        assert_eq!(valid.text, "2 行有效，0 行无效");
+        assert!(valid.error_span.is_none());
+        assert!(matches!(
+            json_validation_report("校验行 \r\n\t"),
+            Some(Err(JsonError::Incomplete))
+        ));
     }
 
     #[test]
