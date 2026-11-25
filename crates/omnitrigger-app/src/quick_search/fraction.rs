@@ -9,7 +9,7 @@ use super::csv_tools::append_bounded_csv_row;
 use super::linear_fit::format_power_expression;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
-use super::statistics::median_sorted_values;
+use super::statistics::{interpolate_ordered_quantile, median_sorted_values};
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_MODULAR_POWER_BITS: u64 = 1024;
@@ -49,6 +49,7 @@ pub(super) enum FractionError {
     InterpolationInterval,
     InterpolationRange,
     ClampBounds,
+    QuantileArguments,
     AlignmentArguments,
     RationalSquareRoot,
     RootDegree,
@@ -102,6 +103,9 @@ impl FractionError {
             Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
             Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
             Self::ClampBounds => "clamp 的下界须小于或等于上界",
+            Self::QuantileArguments => {
+                "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
+            }
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::RootDegree => "root 的次数须为 1 至 1024 的整数",
@@ -1683,6 +1687,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.aggregate_function(&name);
         }
+        if matches!(name.as_str(), "quantile" | "percentile") {
+            self.remaining = rest;
+            return self.quantile_function(name == "percentile");
+        }
         if name == "clamp" {
             self.remaining = rest;
             return self.clamp_function();
@@ -1914,7 +1922,7 @@ impl FractionParser<'_> {
         Ok(result)
     }
 
-    fn aggregate_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+    fn list_function_arguments(&mut self) -> Result<Vec<BigRational>, FractionError> {
         if !self.consume('(') {
             return Err(self.expected_token());
         }
@@ -1925,6 +1933,11 @@ impl FractionParser<'_> {
         if !self.consume(')') {
             return Err(self.expected_token());
         }
+        Ok(values)
+    }
+
+    fn aggregate_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+        let mut values = self.list_function_arguments()?;
         if name == "median" {
             values.sort_unstable();
             return median_sorted_values(&values);
@@ -1940,6 +1953,25 @@ impl FractionParser<'_> {
             ensure_exact_size(&total)?;
         }
         Ok(total)
+    }
+
+    fn quantile_function(&mut self, percentage: bool) -> Result<BigRational, FractionError> {
+        let mut values = self.list_function_arguments()?;
+        if values.len() < 2 {
+            return Err(FractionError::QuantileArguments);
+        }
+        let mut probability = values.remove(0);
+        if percentage {
+            probability /= BigInt::from(100);
+        }
+        if probability.numer().sign() == Sign::Minus || probability.numer() > probability.denom() {
+            return Err(FractionError::QuantileArguments);
+        }
+        values.sort_unstable();
+        interpolate_ordered_quantile(values.len() as u64, &probability, |rank| {
+            &values[rank as usize]
+        })
+        .map_err(|_| FractionError::ExactRange)
     }
 
     fn clamp_function(&mut self) -> Result<BigRational, FractionError> {
@@ -2562,6 +2594,37 @@ mod tests {
             ("计算 trunc(-2)*floor(1/3)", "0"),
         ] {
             assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn interpolates_exact_quantiles_inside_calculator_expressions() {
+        for (query, expected) in [
+            ("quantile(1/4,3/2,1/2)", "3/4"),
+            ("percentile(25,4,1,3,2)", "7/4"),
+            (
+                "quantile(1/2,9007199254740993,9007199254740992)",
+                "18014398509481985/2",
+            ),
+            ("quantile(0,-1/2,3)+percentile(100,-1/2,3)", "5/2"),
+            ("quantile(2/3,1/7)", "1/7"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        for query in [
+            "quantile(1/2)",
+            "quantile(-0.01,1,2)",
+            "percentile(101,1,2)",
+        ] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::QuantileArguments),
+                "{query}"
+            );
         }
     }
 

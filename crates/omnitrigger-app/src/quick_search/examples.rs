@@ -6440,6 +6440,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在精确算式中用概率求分位数",
+        query: "分数: 计算 quantile(1/4,3/2,1/2)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在精确算式中用百分数求分位数",
+        query: "分数: 计算 percentile(25,4,1,3,2)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求大整数的最大公约数",
         query: "分数: 计算 gcd(-3 * 2**80, 5 * 2**80)",
     },
