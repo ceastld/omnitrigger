@@ -7621,14 +7621,20 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
 }
 
 pub(super) fn function_examples(query: &str) -> Option<Vec<usize>> {
-    matching_function_examples(query, |example| Some(example.query))
+    static FUNCTIONS: OnceLock<FunctionExampleIndex> = OnceLock::new();
+    matching_function_examples(&search_key(query), &FUNCTIONS, |example| {
+        Some(example.query)
+    })
 }
 
 pub(super) fn fraction_function_examples(query: &str) -> Option<Vec<usize>> {
+    static FUNCTIONS: OnceLock<FunctionExampleIndex> = OnceLock::new();
     let query = search_key(query);
-    matching_function_examples(fraction_command_expression(&query)?, |example| {
-        fraction_command_expression(example.query.strip_prefix("分数: ")?)
-    })
+    matching_function_examples(
+        fraction_command_expression(&query)?,
+        &FUNCTIONS,
+        |example| fraction_command_expression(example.query.strip_prefix("分数: ")?),
+    )
 }
 
 fn standalone_function_arguments(expression: &str) -> Option<&str> {
@@ -7653,14 +7659,16 @@ fn fraction_command_expression(input: &str) -> Option<&str> {
     (verb == "计算" || verb.eq_ignore_ascii_case("calc")).then(|| expression.trim())
 }
 
+type FunctionExampleIndex = Vec<(usize, &'static str)>;
+
 fn matching_function_examples(
     query: &str,
-    expression: fn(&Example) -> Option<&str>,
+    index: &OnceLock<FunctionExampleIndex>,
+    expression: fn(&Example) -> Option<&'static str>,
 ) -> Option<Vec<usize>> {
-    let query = search_key(query);
     let (name, exact) = query
         .strip_suffix('(')
-        .map_or((query.as_str(), false), |name| (name, true));
+        .map_or((query, false), |name| (name, true));
     if name.len() < 2
         || !name.starts_with(|ch: char| ch.is_ascii_alphabetic())
         || !name
@@ -7669,13 +7677,21 @@ fn matching_function_examples(
     {
         return None;
     }
-    let mut matches: Vec<_> = EXAMPLES
+    let functions = index.get_or_init(|| {
+        EXAMPLES
+            .iter()
+            .enumerate()
+            .filter_map(|(index, example)| {
+                let (name, tail) = split_name(expression(example)?);
+                (name.len() >= 2 && tail.starts_with('(')).then_some((index, name))
+            })
+            .collect()
+    });
+    let mut matches: Vec<_> = functions
         .iter()
-        .enumerate()
-        .filter_map(|(index, example)| {
-            let (function, tail) = split_name(expression(example)?);
+        .filter_map(|&(index, function)| {
             let name_matches = function == name || (!exact && function.starts_with(name));
-            (tail.starts_with('(') && name_matches).then_some((function != name, index))
+            name_matches.then_some((function != name, index))
         })
         .collect();
     matches.sort_unstable();
