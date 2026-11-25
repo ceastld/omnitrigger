@@ -1525,6 +1525,34 @@ impl Results {
         }
     }
 
+    fn bookmark_uses_selection(&self) -> bool {
+        matches!(
+            self,
+            Self::Help(_)
+                | Self::Bookmarks(_)
+                | Self::Queries(_)
+                | Self::Calculations(_)
+                | Self::Conversions(_)
+        )
+    }
+
+    fn bookmark_query<'a>(&'a self, query: &'a str, selected: usize) -> Option<&'a str> {
+        if self.bookmark_uses_selection() {
+            return self.suggested_input(selected);
+        }
+        let trimmed = query.trim();
+        (!trimmed.is_empty()
+            && !trimmed.starts_with(['?', '？'])
+            && !matches!(
+                self,
+                Self::FileOptions(_)
+                    | Self::FilterOptions(_)
+                    | Self::BookmarksUnavailable(_)
+                    | Self::Value(Err(ValueError::InputTooLong))
+            ))
+        .then_some(query)
+    }
+
     fn continuation_query(&self) -> Option<String> {
         let Self::Value(Ok(ResultValue { kind, text })) = self else {
             return None;
@@ -2850,23 +2878,6 @@ impl QuickSearch {
         }
     }
 
-    fn bookmark_target<'a>(&'a self, query: &'a str) -> Option<&'a str> {
-        if matches!(self.results, Results::Bookmarks(_) | Results::Queries(_)) {
-            return self.results.suggested_input(self.selected);
-        }
-        let trimmed = query.trim();
-        (!trimmed.is_empty()
-            && !trimmed.starts_with(['?', '？'])
-            && !matches!(
-                self.results,
-                Results::FileOptions(_)
-                    | Results::FilterOptions(_)
-                    | Results::BookmarksUnavailable(_)
-                    | Results::Value(Err(ValueError::InputTooLong))
-            ))
-        .then_some(query)
-    }
-
     fn is_bookmark_query(query: &str) -> bool {
         matches!(scoped_query(query), Some((Scope::Bookmarks, _)))
     }
@@ -2907,7 +2918,7 @@ impl QuickSearch {
             self.toggle_bookmark_browser(window, cx);
             return;
         }
-        let Some(target) = self.bookmark_target(&query) else {
+        let Some(target) = self.results.bookmark_query(&query, self.selected) else {
             return;
         };
         let saved = self.index.recent.bookmarks.toggle(target);
@@ -4325,22 +4336,24 @@ impl Render for QuickSearch {
         } else if query.trim().is_empty() {
             Some(("查看收藏 F4", "F4 或 Ctrl+D 查看收藏".to_owned()))
         } else {
-            self.bookmark_target(&query).map(|target| {
-                let (label, hint) = if let Some(error) = &self.bookmark_save_error {
-                    ("收藏保存失败", error.as_str())
-                } else if matches!(self.results, Results::Bookmarks(_)) {
-                    ("移除所选", "Ctrl+D 移除所选查询")
-                } else if self.index.recent.bookmarks.contains(target) {
-                    ("已收藏", "Ctrl+D 取消收藏")
-                } else if self.bookmark_limit_reached {
-                    ("最多收藏 12 项", "在收藏列表移除一项后再添加")
-                } else if matches!(self.results, Results::Queries(_)) {
-                    ("收藏所选", "Ctrl+D 收藏所选查询")
-                } else {
-                    ("收藏", "Ctrl+D 收藏当前查询")
-                };
-                (label, hint.to_owned())
-            })
+            self.results
+                .bookmark_query(&query, self.selected)
+                .map(|target| {
+                    let (label, hint) = if let Some(error) = &self.bookmark_save_error {
+                        ("收藏保存失败", error.as_str())
+                    } else if matches!(self.results, Results::Bookmarks(_)) {
+                        ("移除所选", "Ctrl+D 移除所选查询")
+                    } else if self.index.recent.bookmarks.contains(target) {
+                        ("已收藏", "Ctrl+D 取消收藏")
+                    } else if self.bookmark_limit_reached {
+                        ("最多收藏 12 项", "在收藏列表移除一项后再添加")
+                    } else if self.results.bookmark_uses_selection() {
+                        ("收藏所选", "Ctrl+D 收藏所选查询")
+                    } else {
+                        ("收藏", "Ctrl+D 收藏当前查询")
+                    };
+                    (label, hint.to_owned())
+                })
         };
         div()
             .id("quick-search")
@@ -7757,6 +7770,31 @@ mod tests {
                 }
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }
+        }
+    }
+
+    #[test]
+    fn bookmarks_the_selected_example_or_history_entry() {
+        let index = SearchIndex::default();
+        let filter = "? 分数: 等差求和";
+        let help = index.results(filter);
+        let query = help.bookmark_query(filter, 0).expect("用法应包含所选示例");
+        assert_eq!(query, "分数: 等差求和 1/3,1/6,5");
+        assert_eq!(help.bookmark_query(filter, usize::MAX), None);
+        assert!(index.recent.bookmarks.toggle(query).unwrap());
+        assert_eq!(
+            index.results("收藏: 等差求和").suggested_input(0),
+            Some(query)
+        );
+        assert!(!index.recent.bookmarks.contains(filter));
+
+        index.recent.calculations.record("2**10", "1024");
+        index.recent.conversions.record("1 GiB to MiB", "1024 MiB");
+        for (filter, query) in [
+            ("算式历史: 1024", "2**10"),
+            ("换算历史: 1024", "1 GiB to MiB"),
+        ] {
+            assert_eq!(index.results(filter).bookmark_query(filter, 0), Some(query));
         }
     }
 
