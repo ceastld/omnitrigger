@@ -6325,6 +6325,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"路径: 文件名 "C:\工作\发布 包.tar.gz""#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "预览多条路径的目录、文件名和扩展名",
+        query: r#"路径: 部件CSV ["C:\\工作\\发布 包.tar.gz","README"]"#,
+    },
+    Example {
         icon: Icon::Layers,
         title: "提取去掉扩展名的文件主名",
         query: r"路径: 主名 C:\工作\发布 包.tar.gz",

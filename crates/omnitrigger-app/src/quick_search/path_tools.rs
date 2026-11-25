@@ -2,8 +2,11 @@ use std::path::{Component, Path, PathBuf, Prefix, MAIN_SEPARATOR_STR};
 
 use url::Url;
 
+use super::csv_tools::append_bounded_csv_row;
+
 const INVALID_PATH_TEXT: [char; 5] = ['\0', '"', '\r', '\n', '\t'];
 const MAX_FILENAME_UNITS: usize = 255;
+const MAX_PATH_REPORT_ROWS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PathError {
@@ -16,6 +19,8 @@ pub(super) enum PathError {
     RelativePartRequired,
     RelativeArguments,
     CommonPathArguments,
+    ReportArguments,
+    ReportTooLarge,
     NormalizationPath,
     AbovePathRoot,
     DifferentRoot,
@@ -44,6 +49,8 @@ impl PathError {
             Self::CommonPathArguments => {
                 "用 JSON 数组填写至少两个普通盘符或共享目录下的绝对路径，路径里省略 .."
             }
+            Self::ReportArguments => "用 JSON 字符串数组填写 1 至 128 条路径",
+            Self::ReportTooLarge => "路径部件表超过 1 MiB",
             Self::NormalizationPath => "请输入普通盘符或共享目录下的绝对路径",
             Self::AbovePathRoot => ".. 超出了盘符或共享根目录",
             Self::DifferentRoot => "输入路径须在同一盘符或同一共享根目录下",
@@ -58,7 +65,18 @@ impl PathError {
     }
 }
 
+pub(super) fn path_csv_report(query: &str) -> Option<Result<String, PathError>> {
+    let (operation, input) = query.split_once(char::is_whitespace)?;
+    match operation.to_ascii_lowercase().as_str() {
+        "部件csv" | "components-csv" => Some(path_components_csv(input)),
+        _ => None,
+    }
+}
+
 pub(super) fn path_component(query: &str) -> Result<String, PathError> {
+    if let Some(report) = path_csv_report(query) {
+        return report;
+    }
     let (operation, input) = query
         .split_once(char::is_whitespace)
         .ok_or(PathError::Incomplete)?;
@@ -96,6 +114,40 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         .filter(|part| !part.is_empty())
         .map(str::to_owned)
         .ok_or(PathError::MissingPart)
+}
+
+fn path_components_csv(input: &str) -> Result<String, PathError> {
+    let paths =
+        serde_json::from_str::<Vec<String>>(input).map_err(|_| PathError::ReportArguments)?;
+    if !(1..=MAX_PATH_REPORT_ROWS).contains(&paths.len()) {
+        return Err(PathError::ReportArguments);
+    }
+    let mut csv = String::from("路径,上一级,文件名,主名,扩展名");
+    for text in &paths {
+        if text.is_empty() || text.contains(INVALID_PATH_TEXT) {
+            return Err(PathError::InvalidPath);
+        }
+        let path = Path::new(text);
+        let parent = path.parent().and_then(Path::to_str).unwrap_or("");
+        let name = path
+            .file_name()
+            .and_then(|part| part.to_str())
+            .unwrap_or("");
+        let stem = path
+            .file_stem()
+            .and_then(|part| part.to_str())
+            .unwrap_or("");
+        let extension = path
+            .extension()
+            .and_then(|part| part.to_str())
+            .unwrap_or("");
+        append_bounded_csv_row(
+            &mut csv,
+            [text.as_str(), parent, name, stem, extension].into_iter(),
+            PathError::ReportTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn safe_filename(input: &str) -> Result<String, PathError> {

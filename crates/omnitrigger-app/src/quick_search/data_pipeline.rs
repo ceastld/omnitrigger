@@ -28,7 +28,7 @@ use super::{
     linear_fit::{calculate_linear_fit, calculate_plot, plot_request},
     matrix::calculate_matrix,
     operators::json_argument_and_tail,
-    path_tools::path_component,
+    path_tools::{path_component, path_csv_report},
     percentage::compare_percentages,
     pitch::convert_pitch,
     radix::{convert_arbitrary_radix, radix_csv_report},
@@ -574,6 +574,9 @@ fn prepare_pipeline_preview(
 ) -> Option<Result<(String, PipelinePreview), DataPipelineError>> {
     match scope {
         Scope::TextTools => text_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
+        Scope::Path => path_csv_report(query).map(|report| {
             report_preview(report.map_err(|cause| cause.message()), error, csv_error)
         }),
         Scope::Toml => toml_csv_report(query).map(|report| {

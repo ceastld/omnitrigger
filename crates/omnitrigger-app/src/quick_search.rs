@@ -132,7 +132,7 @@ use matrix::{calculate_matrix, MatrixError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
-use path_tools::{path_component, PathError};
+use path_tools::{path_component, path_csv_report, PathError};
 use percentage::{compare_percentages, PercentageError};
 use pitch::{convert_pitch, PitchError};
 use polygon::{calculate_polygon, PolygonError};
@@ -1487,7 +1487,10 @@ impl Results {
                 Scope::Matrix => {
                     Self::text_value(calculate_matrix(term).map_err(ValueError::Matrix))
                 }
-                Scope::Path => Self::text_value(path_component(term).map_err(ValueError::Path)),
+                Scope::Path => match path_csv_report(term) {
+                    Some(report) => Self::table_value(report.map_err(ValueError::Path)),
+                    None => Self::text_value(path_component(term).map_err(ValueError::Path)),
+                },
                 Scope::Circle => {
                     Self::text_value(calculate_circle(term).map_err(ValueError::Circle))
                 }
@@ -6110,6 +6113,32 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn previews_path_components_in_input_order_for_direct_queries_and_pipelines() {
+        let expected = concat!(
+            "路径,上一级,文件名,主名,扩展名",
+            "\r\n\"docs/report,final.csv\",docs,\"report,final.csv\",\"report,final\",csv",
+            "\r\nREADME,\"\",README,README,\"\"",
+            "\r\n.,\"\",\"\",\"\",\"\"",
+        );
+        for query in [
+            r#"路径: 部件CSV ["docs/report,final.csv","README","."]"#,
+            r#"处理: ["路径: 部件CSV"] ["docs/report,final.csv","README","."]"#,
+        ] {
+            let result = for_query(query, &[]);
+            assert_eq!(result.refillable_text(), Some(expected), "{query}");
+            assert!(result.table_preview().is_some(), "{query}");
+        }
+        assert_eq!(
+            path_component("部件CSV []"),
+            Err(PathError::ReportArguments)
+        );
+        assert_eq!(
+            path_component(r#"部件CSV ["a\tb"]"#),
+            Err(PathError::InvalidPath)
+        );
     }
 
     #[test]

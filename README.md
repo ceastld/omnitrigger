@@ -682,6 +682,7 @@
 - 用 `URL: 改参数名 ["tag","topic"]` 加上网址，可把解码后名称为 `tag` 的所有参数改名为 `topic`。原值的编码、重名项、无等号的参数和片段都会保留。新名称可含中文和空格。
 - 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `路径: 文件名 "C:\工作\发布 包.tar.gz"` 得到 `发布 包.tar.gz`。换用 `主名`、`扩展名` 或 `上一级`，可分别提取 `发布 包.tar`、`gz` 或 `C:\工作`。操作直接解析粘贴的路径文本。 [Rust 路径组件](https://doc.rust-lang.org/std/path/struct.Path.html)
+- 用 `路径: 部件CSV ["C:\\工作\\发布 包.tar.gz","README"]` 可一起预览每条路径的上一级、文件名、主名和扩展名。缺少的部件留空，结果按原顺序排列，一次可填 1 至 128 条路径。
 - 输入 `路径: 换扩展名 ["C:\\工作\\发布 包.tar.gz",".zip"]` 得到 `C:\工作\发布 包.tar.zip`。用空字符串可删除最后一个扩展名，结果是可复制的路径文本。 [Rust 路径扩展名替换](https://doc.rust-lang.org/std/path/struct.Path.html#method.with_extension)
 - 输入 `路径: 拼接 ["C:\\工作","报告 集","2026.txt"]` 得到 `C:\工作\报告 集\2026.txt`。数组首项为起始路径，后续各项为相对路径。 [Rust 路径拼接规则](https://doc.rust-lang.org/std/path/struct.PathBuf.html#method.push)
 - 输入 `路径: 相对路径 ["C:\\工作\\资料","C:\\工作\\发布\\2026.txt"]` 得到 `..\发布\2026.txt`。数组首项是基准目录，两项须为同一根下的绝对路径，支持普通盘符和 UNC 共享，路径中省略 `..`。搜索框按路径分段比较。 [Rust 路径分段规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.components)
