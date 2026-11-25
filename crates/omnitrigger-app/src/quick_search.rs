@@ -3424,6 +3424,12 @@ impl QuickSearch {
                     }
                     Some((Scope::OpenWindows, _)) => self.load_open_windows(window, cx),
                     Some((Scope::Applications, _)) => self.load_applications(window, cx),
+                    _ if matches!(self.results, Results::Value(_)) => {
+                        if !event.is_held && !self.file_operation_in_progress() {
+                            self.result_save = ResultSaveState::Ready;
+                            self.refresh_results(&query, window, cx);
+                        }
+                    }
                     _ => return,
                 }
             }
@@ -7593,12 +7599,29 @@ mod tests {
                         .update(cx, |search, window, cx| {
                             assert_eq!(search.input.read(cx).selection(), 0..0);
                             assert_eq!(search.results.refillable_text(), Some("10"));
+                            search.result_save = ResultSaveState::Finished {
+                                query: query.to_owned(),
+                                result: Ok(()),
+                            };
+                            let mut refresh = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("f5").unwrap(),
+                                is_held: true,
+                            };
+                            search.key_down(&refresh, window, cx);
+                            assert_eq!(search.results.refillable_text(), Some("10"));
+                            assert!(matches!(search.result_save, ResultSaveState::Finished { .. }));
+                            refresh.is_held = false;
+                            search.key_down(&refresh, window, cx);
+                            assert_eq!(search.input.read(cx).selection(), 0..0);
+                            assert_eq!(search.results.refillable_text(), Some("18"));
+                            assert!(matches!(search.result_save, ResultSaveState::Ready));
+                            search.index.recent.calculations.record("99+1", "100");
                             search.fill_query(query, window, cx);
                         })
                         .unwrap();
                     reopened
                         .update(cx, |search, _, _| {
-                            assert_eq!(search.results.refillable_text(), Some("18"));
+                            assert_eq!(search.results.refillable_text(), Some("101"));
                         })
                         .unwrap();
                     reopened
