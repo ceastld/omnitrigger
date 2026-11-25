@@ -3551,6 +3551,16 @@ impl QuickSearch {
                         .update(cx, |input, cx| input.delete_logical_line(cx));
                 }
                 cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "d"
+            {
+                if !event.is_held {
+                    self.input
+                        .update(cx, |input, cx| input.duplicate_logical_line(cx));
+                }
+                cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "l" {
                 if !event.is_held {
                     self.input
@@ -8310,6 +8320,70 @@ mod tests {
                                 let input = search.input.read(cx);
                                 assert_eq!(input.text(), text, "{key}");
                                 assert_eq!(input.selection(), selection, "{key}");
+                            })
+                            .unwrap();
+                    }
+                    let original = "文本: 计数 甲🍵\r\n乙";
+                    let insert_at = original.find('\r').unwrap();
+                    let caret = insert_at - "🍵".len();
+                    let duplicate = "文本: 计数 甲🍵\r\n文本: 计数 甲🍵\r\n乙";
+                    let duplicate_caret = insert_at + "\r\n".len() + caret;
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query(original, window, cx);
+                            search.input.update(cx, |input, cx| input.select_range(caret..caret, cx));
+                            search.key_down(
+                                &KeyDownEvent {
+                                    keystroke: gpui::Keystroke::parse("ctrl-shift-d").unwrap(),
+                                    is_held: true,
+                                },
+                                window,
+                                cx,
+                            );
+                            assert_eq!(search.input.read(cx).text(), original);
+                        })
+                        .unwrap();
+                    for (key, text, caret) in [
+                        ("ctrl-shift-d", duplicate, duplicate_caret),
+                        ("ctrl-z", original, caret),
+                        ("ctrl-y", duplicate, duplicate_caret),
+                    ] {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(input.text(), text, "{key}");
+                                assert_eq!(input.selection(), caret..caret, "{key}");
+                            })
+                            .unwrap();
+                    }
+                    let last_line = "文本: 计数 甲\u{2028}🍵";
+                    let full_input = "甲".repeat(INPUT_CHARACTER_LIMIT);
+                    for (original, expected) in [
+                        (last_line, "文本: 计数 甲\u{2028}🍵\u{2028}🍵"),
+                        ("甲\r\n", "甲\r\n\r\n"),
+                        ("甲", "甲\n甲"),
+                        (full_input.as_str(), full_input.as_str()),
+                    ] {
+                        reopened
+                            .update(cx, |search, window, cx| {
+                                search.fill_query(original.to_owned(), window, cx)
+                            })
+                            .unwrap();
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse("ctrl-shift-d").unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(input.text(), expected);
+                                assert_eq!(input.selection(), expected.len()..expected.len());
                             })
                             .unwrap();
                     }

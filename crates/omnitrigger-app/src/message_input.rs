@@ -351,6 +351,39 @@ impl MessageInput {
         }
     }
 
+    pub(super) fn duplicate_logical_line(&mut self, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            return;
+        }
+        let text = &self.content;
+        let line = logical_line_range(text, self.head);
+        let separator = if line.end < text.len() {
+            &text[line.end..logical_line_jump(text, line.end, true)]
+        } else if line.start > 0 {
+            &text[previous_line_end(text, line.start)..line.start]
+        } else {
+            "\n"
+        };
+        let line_text = &text[line.clone()];
+        if text.chars().count() + separator.chars().count() + line_text.chars().count()
+            > self.character_limit
+        {
+            return;
+        }
+        let column = separator.encode_utf16().count()
+            + text[line.start..self.head.min(line.end)]
+                .encode_utf16()
+                .count();
+        let insertion = format!("{separator}{line_text}");
+        self.replace(
+            Some(line.end..line.end),
+            &insertion,
+            false,
+            Some(column..column),
+        );
+        cx.notify();
+    }
+
     pub(super) fn move_cursor_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.content.is_char_boundary(offset) {
             self.move_to(offset, false, cx);
@@ -1059,11 +1092,14 @@ fn logical_line_jump(text: &str, cursor: usize, down: bool) -> usize {
     if cursor != line.start {
         return line.start;
     }
-    let previous_end = text[..line.start]
+    logical_line_range(text, previous_line_end(text, line.start)).start
+}
+
+fn previous_line_end(text: &str, start: usize) -> usize {
+    text[..start]
         .grapheme_indices(true)
         .next_back()
-        .map_or(0, |(offset, _)| offset);
-    logical_line_range(text, previous_end).start
+        .map_or(0, |(offset, _)| offset)
 }
 
 fn logical_line_deletion_range(text: &str, cursor: usize) -> Range<usize> {
@@ -1072,8 +1108,7 @@ fn logical_line_deletion_range(text: &str, cursor: usize) -> Range<usize> {
         return line.start..logical_line_jump(text, line.end, true);
     }
     if line.start > 0 {
-        let previous = logical_line_jump(text, line.start, false);
-        return logical_line_range(text, previous).end..line.end;
+        return previous_line_end(text, line.start)..line.end;
     }
     line
 }
