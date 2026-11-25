@@ -719,6 +719,9 @@ impl ValueError {
             Self::Json(JsonError::PatchStep { index, cause }) => {
                 return format!("第 {index} 步补丁失败 · {cause}").into();
             }
+            Self::Csv(CsvError::CellEdit { index, cause }) => {
+                return format!("第 {index} 项单元格修改失败 · {cause}").into();
+            }
             Self::Json(JsonError::PipelineStep { index, cause })
             | Self::Csv(CsvError::PipelineStep { index, cause })
             | Self::Text(TextError::PipelineStep { index, cause })

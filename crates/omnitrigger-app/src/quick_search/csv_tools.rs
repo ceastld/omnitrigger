@@ -116,6 +116,8 @@ pub(super) enum CsvError {
     MissingDataRow,
     CellArguments,
     SetCellArguments,
+    SetCellsArguments,
+    CellEdit { index: usize, cause: &'static str },
     TableRegionArguments,
     GroupRowArguments,
     GroupRowsTooLarge,
@@ -351,6 +353,8 @@ impl CsvError {
             Self::SetCellArguments => {
                 "填写数据行号、列名或列号和新的文本，例如 [2,\"备注\",\"已核对\"]"
             }
+            Self::SetCellsArguments => "填写一组 [数据行号,列名或列号,新文本]，再粘贴 CSV",
+            Self::CellEdit { cause, .. } => cause,
             Self::TableRegionArguments => {
                 "填写数据行范围和一组不同的列，例如 [\"2-4\",[\"备注\",1]]"
             }
@@ -3891,6 +3895,30 @@ fn set_csv_cell(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
     }
     let mut rows = read_table_for_preview(data, ',')?;
     *csv_cell_mut(&mut rows, row, column)? = text;
+    Ok(rows)
+}
+
+fn set_csv_cells(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+    let invalid = CsvError::SetCellsArguments;
+    let (edits, data) =
+        json_argument_and_data::<Vec<(i128, ColumnReference, String)>>(input, invalid)?;
+    if edits.is_empty() {
+        return Err(invalid);
+    }
+    let mut rows = read_table_for_preview(data, ',')?;
+    for (index, (row, column, text)) in edits.into_iter().enumerate() {
+        let cell = if row == 0 {
+            Err(CsvError::SetCellArguments)
+        } else if text.contains('\0') {
+            Err(CsvError::NullReplacementValue)
+        } else {
+            csv_cell_mut(&mut rows, row, column)
+        };
+        *cell.map_err(|error| CsvError::CellEdit {
+            index: index + 1,
+            cause: error.message(),
+        })? = text;
+    }
     Ok(rows)
 }
 
@@ -8365,6 +8393,7 @@ fn csv_layout_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewD
         }
         "取区域" | "pick-region" => pick_table_region(input),
         "改单元格" | "set-cell" => set_csv_cell(input),
+        "批量改单元格" | "set-cells" => set_csv_cells(input),
         _ => return None,
     };
     Some(projected.map(|rows| (write_rows(&rows, ','), rows)))
@@ -13236,6 +13265,47 @@ B,乙
                 "{parameters}"
             );
         }
+    }
+
+    #[test]
+    fn applies_ordered_csv_cell_edits_preserving_the_rest_of_the_table() {
+        let data = "编号,备注\r\n001,原样\r\n002,旧\r\n003,末";
+        let query = format!(
+            r#"批量改单元格 [[1,2,"更新"],[-1,"备注",""],[-3,"备注"," 最后\n值 "]] {data}"#
+        );
+        let expected = "编号,备注\r\n001,\" 最后\n值 \"\r\n002,旧\r\n003,\"\"";
+        assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        assert_eq!(
+            csv_table_preview(&query)
+                .unwrap()
+                .map(|(text, _)| text)
+                .as_deref(),
+            Ok(expected)
+        );
+        let pipeline = format!(
+            r#"依次处理 ["批量改单元格 [[-1,2,\"已核对\"]]","取单元格 [-1,\"备注\"]"] {data}"#
+        );
+        assert_eq!(transform_csv(&pipeline).as_deref(), Ok("已核对"));
+        let invalid = format!(r#"set-cells [[1,2,"更新"],[4,"备注","值"]] {data}"#);
+        assert_eq!(
+            transform_csv(&invalid),
+            Err(CsvError::CellEdit {
+                index: 2,
+                cause: CsvError::MissingDataRow.message()
+            })
+        );
+        let invalid = format!(r#"set-cells [[1,"备注","\u0000"]] {data}"#);
+        assert_eq!(
+            transform_csv(&invalid),
+            Err(CsvError::CellEdit {
+                index: 1,
+                cause: CsvError::NullReplacementValue.message()
+            })
+        );
+        assert_eq!(
+            transform_csv(&format!("set-cells [] {data}")),
+            Err(CsvError::SetCellsArguments)
+        );
     }
 
     #[test]

@@ -5230,6 +5230,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "一次修改多个 CSV 单元格",
+        query: "CSV: 批量改单元格 [[1,\"备注\",\"已核对\"],[-1,2,\"\"]] 编号,备注\n001,待核对\n002,原样\n003,待清空",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "取 CSV 中各组最后一条完整记录",
         query: "CSV: 分组取行 [[\"组\"],-1] 组,编号,备注\nA,001,甲\nB,002,乙\nA,003,\"跨\n行\"\nA,004,丁",
     },
