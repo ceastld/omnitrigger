@@ -4222,6 +4222,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "去掉行尾空白并保留缩进和换行",
+        query: "文本: 逐行去尾空白\n    苹果 \t\r\n  梨\t\n",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计 CRLF、LF 和 CR 换行符",
         query: "文本: 换行统计 \"甲\r\n乙\r丙\n\"",
     },

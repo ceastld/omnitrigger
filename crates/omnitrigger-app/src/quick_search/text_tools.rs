@@ -245,6 +245,7 @@ fn is_display_width_csv_operation(operation: &str) -> bool {
 
 pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
     is_raw_text_operation(operation)
+        || is_trim_line_ends_operation(operation)
         || is_fixed_width_csv_operation(operation)
         || is_line_lengths_csv_operation(operation)
         || is_display_width_csv_operation(operation)
@@ -294,6 +295,16 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         .ok_or(TextError::IncompleteTransform)?;
     if is_raw_text_operation(operation) {
         return Ok(text.to_owned());
+    }
+    if is_trim_line_ends_operation(operation) {
+        let text = input[operation.len()..]
+            .strip_prefix("\r\n")
+            .unwrap_or(text);
+        return Ok(transform_line_slices(
+            text,
+            logical_newline_pattern(),
+            str::trim_end,
+        ));
     }
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
@@ -438,6 +449,11 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "逐行去空白" | "trim-lines" => {
             Ok(text.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
         }
+        operation if is_trim_line_ends_operation(operation) => Ok(transform_line_slices(
+            text,
+            logical_newline_pattern(),
+            str::trim_end,
+        )),
         "去公共缩进" | "dedent" => Ok(remove_common_indent(text)),
         "公共前缀" | "common-prefix" => Ok(common_line_affix(text, false)),
         "公共后缀" | "common-suffix" => Ok(common_line_affix(text, true)),
@@ -1809,6 +1825,23 @@ impl GraphemeRange {
     }
 }
 
+fn is_trim_line_ends_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("逐行去尾空白")
+        || operation.eq_ignore_ascii_case("trim-line-ends")
+}
+
+fn transform_line_slices(text: &str, newlines: &Regex, transform: impl Fn(&str) -> &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for newline in newlines.find_iter(text) {
+        result.push_str(transform(&text[cursor..newline.start()]));
+        result.push_str(newline.as_str());
+        cursor = newline.end();
+    }
+    result.push_str(transform(&text[cursor..]));
+    result
+}
+
 fn slice_line_graphemes(input: &str) -> Result<String, TextError> {
     let (range, text) = input
         .trim_start()
@@ -1816,15 +1849,9 @@ fn slice_line_graphemes(input: &str) -> Result<String, TextError> {
         .ok_or(TextError::InvalidGraphemeRange)?;
     let range = GraphemeRange::parse(range)?;
     let text = text_payload(text)?;
-    let mut result = String::with_capacity(text.len());
-    let mut cursor = 0;
-    for newline in newline_pattern().find_iter(text) {
-        result.push_str(range.slice(&text[cursor..newline.start()]));
-        result.push_str(newline.as_str());
-        cursor = newline.end();
-    }
-    result.push_str(range.slice(&text[cursor..]));
-    Ok(result)
+    Ok(transform_line_slices(text, newline_pattern(), |line| {
+        range.slice(line)
+    }))
 }
 
 pub(super) fn append_padded_text(
@@ -2939,6 +2966,24 @@ mod tests {
             transform_text(&large),
             Err(TextError::PipelineStep { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn strips_trailing_whitespace_without_changing_indentation_or_newlines() {
+        let (_, query) = super::super::scope::scoped_query(concat!(
+            "文本: 逐行去尾空白\r\n",
+            "  中  文 \t\r\n \t\r\t梨\u{3000}\u{2028} 茶 \u{2029} 尾\t ",
+        ))
+        .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok("  中  文\r\n\r\t梨\u{2028} 茶\u{2029} 尾")
+        );
+        assert_eq!(transform_text("trim-line-ends \t ").as_deref(), Ok(""));
+        assert_eq!(
+            transform_text("依次处理 [\"逐行去尾空白\"] \"  甲 \t\r\n 乙\t\"").as_deref(),
+            Ok("  甲\r\n 乙")
+        );
     }
 
     #[test]
