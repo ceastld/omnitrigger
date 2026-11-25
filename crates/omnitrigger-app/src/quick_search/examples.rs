@@ -3573,6 +3573,36 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算双曲正弦",
+        query: "sinh(ln(2))",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算双曲余弦",
+        query: "cosh(ln(2))",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算双曲正切",
+        query: "tanh(ln(2))",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算反双曲正弦",
+        query: "asinh(0.75)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算反双曲余弦",
+        query: "acosh(1.25)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算反双曲正切",
+        query: "atanh(0.6)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "取整（中点取偶）",
         query: "round(2.5)",
     },

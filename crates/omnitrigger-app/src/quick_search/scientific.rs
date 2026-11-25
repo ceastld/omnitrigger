@@ -169,6 +169,18 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sin" => f64::sin,
         "cos" => f64::cos,
         "tan" => f64::tan,
+        "sinh" => f64::sinh,
+        "cosh" => f64::cosh,
+        "tanh" => f64::tanh,
+        "asinh" => f64::asinh,
+        "acosh" => f64::acosh,
+        "atanh" => |value| {
+            if value.abs() < 1. {
+                value.atanh()
+            } else {
+                f64::NAN
+            }
+        },
         "sind" => sin_degrees,
         "cosd" => cos_degrees,
         "tand" => tan_degrees,

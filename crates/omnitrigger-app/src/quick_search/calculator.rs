@@ -898,6 +898,31 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_hyperbolic_functions_and_rejects_invalid_inverse_arguments() {
+        for (query, expected) in [
+            ("sinh(ln(2))", 0.75),
+            ("cosh(ln(2))", 1.25),
+            ("tanh(ln(2))", 0.6),
+            ("asinh(0.75)", std::f64::consts::LN_2),
+            ("acosh(1.25)", std::f64::consts::LN_2),
+            ("atanh(0.6)", std::f64::consts::LN_2),
+            ("asinh(-0.75)", -std::f64::consts::LN_2),
+            ("atanh(-0.6)", -std::f64::consts::LN_2),
+        ] {
+            let result = evaluate(query).unwrap();
+            assert!((result - expected).abs() <= 2.0 * f64::EPSILON, "{query}");
+        }
+        assert_eq!(evaluate("tanh(1000)"), Ok(1.0));
+        for query in ["acosh(0.5)", "atanh(1)", "atanh(-1)", "atanh(2)"] {
+            assert_eq!(
+                evaluate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn steps_toward_a_target_across_binary64_spacing_boundaries_and_zero() {
         for (query, expected) in [
             ("nextafter(1,2)", 1.0_f64.next_up()),
