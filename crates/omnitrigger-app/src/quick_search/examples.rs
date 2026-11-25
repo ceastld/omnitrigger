@@ -6321,6 +6321,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按数据行号把多张 CSV 表横向合并",
+        query: r#"CSV: 横向合并 ["编号,金额\n001,1.50\n002,3","备注\n茶"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定列自然升序排列 CSV 行",
         query: "CSV: 排序 2 编号,名称\n001,文件10\n002,文件2\n003,文件20",
     },

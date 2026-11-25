@@ -1390,6 +1390,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return compare_csv_column(input, ComparisonMode::All)
         }
         "纵向合并" | "stack" => return stack_csv(input),
+        "横向合并" | "bind-columns" => return bind_csv_columns(input),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "数值对象" | "numeric-objects" => {
@@ -3433,11 +3434,16 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
     Ok(output)
 }
 
-fn stack_csv(input: &str) -> Result<String, CsvError> {
+fn csv_stack_inputs(input: &str) -> Result<Vec<String>, CsvError> {
     let inputs: Vec<String> = serde_json::from_str(input).map_err(|_| CsvError::StackArguments)?;
     if !(2..=MAX_STACK_TABLES).contains(&inputs.len()) {
         return Err(CsvError::StackArguments);
     }
+    Ok(inputs)
+}
+
+fn stack_csv(input: &str) -> Result<String, CsvError> {
+    let inputs = csv_stack_inputs(input)?;
     let tables = inputs
         .iter()
         .map(|table| read_rows(table.strip_prefix('\u{feff}').unwrap_or(table), ','))
@@ -3478,6 +3484,26 @@ fn stack_csv(input: &str) -> Result<String, CsvError> {
                 CsvError::JoinTooLarge,
             )?;
         }
+    }
+    Ok(output)
+}
+
+fn bind_csv_columns(input: &str) -> Result<String, CsvError> {
+    let tables = csv_stack_inputs(input)?
+        .iter()
+        .map(|table| read_table_for_preview(table, ','))
+        .collect::<Result<Vec<_>, _>>()?;
+    let widths: Vec<_> = tables.iter().map(|table| table[0].len()).collect();
+    let record_count = tables.iter().map(Vec::len).max().unwrap_or_default();
+    let mut output = String::new();
+    for index in 0..record_count {
+        let cells = tables.iter().zip(&widths).flat_map(|(table, &width)| {
+            let row = table.get(index).map_or(&[][..], Vec::as_slice);
+            row.iter()
+                .map(String::as_str)
+                .chain(std::iter::repeat_n("", width - row.len()))
+        });
+        append_bounded_csv_row(&mut output, cells, CsvError::JoinTooLarge)?;
     }
     Ok(output)
 }
@@ -8184,6 +8210,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "check-header"
             | "列清单"
             | "column-directory"
+            | "纵向合并"
+            | "stack"
+            | "横向合并"
+            | "bind-columns"
             | "检查数值列"
             | "check-numeric-columns"
             | "检查日期列"
@@ -13233,6 +13263,38 @@ B,乙
                 "{parameters}"
             );
         }
+    }
+
+    #[test]
+    fn binds_table_columns_in_input_order_and_pads_shorter_tables() {
+        let query = r#"横向合并 ["编号,备注\n001,\"茶,热\"\n002,米","编号,金额\nX,1.50","待填"]"#;
+        let expected =
+            "编号,备注,编号,金额,待填\r\n001,\"茶,热\",X,1.50,\"\"\r\n002,米,\"\",\"\",\"\"";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(
+            csv_table_preview(query)
+                .unwrap()
+                .map(|(text, _)| text)
+                .as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            transform_csv(r#"bind-columns ["\ufeff编号",",备注"]"#).as_deref(),
+            Ok("编号,\"\",备注")
+        );
+        assert_eq!(
+            transform_csv(r#"bind-columns ["编号",""]"#),
+            Err(CsvError::MissingInput)
+        );
+        assert_eq!(
+            transform_csv(r#"bind-columns ["x,y\n1","备注"]"#),
+            Err(CsvError::DifferentColumnCount)
+        );
+        let large = format!(
+            r#"bind-columns ["A\n{}","B"]"#,
+            "x".repeat(MAX_EXPANDED_CSV_BYTES)
+        );
+        assert_eq!(transform_csv(&large), Err(CsvError::JoinTooLarge));
     }
 
     #[test]
