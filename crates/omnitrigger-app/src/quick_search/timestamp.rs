@@ -11,7 +11,7 @@ use jiff::{
 };
 
 use super::calculator::normalize;
-use super::calendar::parse_complete_date;
+use super::calendar::{iso_quarter_start, parse_complete_date};
 use super::conversion::split_conversion;
 use super::csv_tools::csv_cell;
 use super::duration::{
@@ -66,7 +66,7 @@ impl TimestampError {
             }
             Self::CivilDayArguments => "填写完整日期或顺序正确的日期范围，以及明确时区",
             Self::CivilPeriodArguments => {
-                "填写 ISO 周或年月及明确时区，例如 2026-W10 America/New_York 或 2026-03 UTC"
+                "填写 ISO 周、年月、季度或年份及明确时区，例如 2026-Q1 America/New_York"
             }
             Self::DailyDurationArguments => "用“到”分隔起止时刻，起点须在终点之前或相同，再用 to 指定时区",
             Self::TooManyDurationDays => "逐日时长最多输出 128 个当地日期",
@@ -200,6 +200,8 @@ enum TimestampReport {
 enum CivilPeriod {
     Week,
     Month,
+    Quarter,
+    Year,
 }
 
 enum IntervalOperation {
@@ -217,6 +219,8 @@ impl TimestampReport {
             "日区间" | "day-intervals" => Some(Self::CivilDays),
             "周区间" | "week-intervals" => Some(Self::CivilPeriod(CivilPeriod::Week)),
             "月区间" | "month-intervals" => Some(Self::CivilPeriod(CivilPeriod::Month)),
+            "季度区间" | "quarter-intervals" => Some(Self::CivilPeriod(CivilPeriod::Quarter)),
+            "年区间" | "year-intervals" => Some(Self::CivilPeriod(CivilPeriod::Year)),
             "逐日时长" | "daily-durations" => Some(Self::DailyDurations),
             "偏移变更" | "offset-changes" => Some(Self::OffsetChanges),
             "每日同刻" | "daily-clock" => Some(Self::DailyClock),
@@ -472,15 +476,19 @@ fn civil_period_intervals(input: &str, period: CivilPeriod) -> Result<String, Ti
         .rsplit_once(char::is_whitespace)
         .ok_or(invalid)?;
     let value = value.trim_end();
-    let first_date = match period {
-        CivilPeriod::Week if value.len() == 8 => format!("{value}-1"),
-        CivilPeriod::Month if value.len() == 7 => format!("{value}-01"),
+    let start = match period {
+        CivilPeriod::Week if value.len() == 8 => parse_complete_date(&format!("{value}-1")),
+        CivilPeriod::Month if value.len() == 7 => parse_complete_date(&format!("{value}-01")),
+        CivilPeriod::Quarter => iso_quarter_start(value).ok_or(invalid)?,
+        CivilPeriod::Year if value.len() == 4 => parse_complete_date(&format!("{value}-01-01")),
         _ => return Err(invalid),
-    };
-    let start = parse_complete_date(&first_date).map_err(|_| invalid)?;
+    }
+    .map_err(|_| invalid)?;
     let end = match period {
         CivilPeriod::Week => start.checked_add_days(Days::new(7)),
         CivilPeriod::Month => start.checked_add_months(Months::new(1)),
+        CivilPeriod::Quarter => start.checked_add_months(Months::new(3)),
+        CivilPeriod::Year => start.checked_add_months(Months::new(12)),
     }
     .ok_or(TimestampError::OutOfRange)?;
     civil_intervals(start, end, explicit_timezone(zone, invalid)?)
@@ -1454,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn previews_full_local_weeks_and_months_on_the_utc_timeline() {
+    fn previews_full_local_calendar_periods_on_the_utc_timeline() {
         let now = DateTime::UNIX_EPOCH;
         for (query, expected) in [
             (
@@ -1473,6 +1481,18 @@ mod tests {
                 "month-intervals 2024-02 UTC",
                 "2024-02-01T00:00:00Z,2024-03-01T00:00:00Z,696:00:00",
             ),
+            (
+                "季度区间 2026-Q1 America/New_York",
+                "2026-01-01T05:00:00Z,2026-04-01T04:00:00Z,2159:00:00",
+            ),
+            (
+                "quarter-intervals 2026-q4 America/New_York",
+                "2026-10-01T04:00:00Z,2027-01-01T05:00:00Z,2209:00:00",
+            ),
+            (
+                "年区间 2024 UTC",
+                "2024-01-01T00:00:00Z,2025-01-01T00:00:00Z,8784:00:00",
+            ),
         ] {
             assert!(is_timestamp_report(query));
             assert_eq!(
@@ -1489,6 +1509,13 @@ mod tests {
             convert_timestamp("月区间 2026-13 UTC", now),
             Err(TimestampError::CivilPeriodArguments),
         );
+        for query in ["季度区间 2026-Q5 UTC", "年区间 2024-02 UTC"] {
+            assert_eq!(
+                convert_timestamp(query, now),
+                Err(TimestampError::CivilPeriodArguments),
+                "{query}",
+            );
+        }
     }
 
     #[test]

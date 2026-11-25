@@ -2852,6 +2852,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查看当地季度对应的 UTC 时间范围",
+        query: "时间戳: 季度区间 2026-Q1 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "查看整个日历年对应的 UTC 时间范围",
+        query: "时间戳: 年区间 2024 UTC",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "合并有重叠或相邻的 UTC 时间区间",
         query: r#"时间戳: 区间合并 [["0s","10s"],["10s","20s"],["30s","40s"]]"#,
     },
@@ -6979,6 +6989,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "日区间",
                     "周区间",
                     "月区间",
+                    "季度区间",
+                    "年区间",
                     "区间合并",
                     "区间交集",
                     "区间差集",

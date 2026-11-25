@@ -1436,7 +1436,12 @@ fn inclusive_workdays(start: NaiveDate, end: NaiveDate) -> i64 {
     workday_difference(end, start) + i64::from(start.weekday().number_from_monday() <= 5)
 }
 
-fn quarter_range(year: &str, quarter: &str) -> Result<String, DateError> {
+pub(super) fn iso_quarter_start(input: &str) -> Option<Result<NaiveDate, DateError>> {
+    let (year, quarter) = calendar_period_parts(input, ['Q', 'q'])?;
+    Some(quarter_start(year, quarter))
+}
+
+fn quarter_start(year: &str, quarter: &str) -> Result<NaiveDate, DateError> {
     if quarter.is_empty() {
         return Err(DateError::Incomplete);
     }
@@ -1448,8 +1453,7 @@ fn quarter_range(year: &str, quarter: &str) -> Result<String, DateError> {
     }
     let year = year.parse().map_err(|_| DateError::InvalidQuarter)?;
     let first_month = 1 + u32::from(*quarter - b'1') * 3;
-    let start = NaiveDate::from_ymd_opt(year, first_month, 1).ok_or(DateError::InvalidQuarter)?;
-    month_range(start, 3)
+    NaiveDate::from_ymd_opt(year, first_month, 1).ok_or(DateError::InvalidQuarter)
 }
 
 fn year_range(year: i32) -> Result<String, DateError> {
@@ -1725,8 +1729,8 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     {
         return iso_week_range(year, week);
     }
-    if let Some((year, quarter)) = calendar_period_parts(input, ['Q', 'q']) {
-        return quarter_range(year, quarter);
+    if let Some(start) = iso_quarter_start(input) {
+        return month_range(start?, 3);
     }
     if let Some(year) = iso_year(input.strip_suffix('年').unwrap_or(input).trim_end()) {
         return year_range(year);
