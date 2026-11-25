@@ -1382,6 +1382,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "左表匹配" | "semi-join" => return join_csv(input, JoinKind::MatchedLeft),
         "左表独有" | "anti-join" => return join_csv(input, JoinKind::UnmatchedLeft),
         "表头对比" | "compare-headers" => return compare_csv_headers(input),
+        "对比行" | "compare-rows" => return compare_csv_rows(input),
         "对比列" | "compare-column" => return compare_csv_column(input, ComparisonMode::Text),
         "数值对比列" | "compare-numeric-column" => {
             return compare_csv_column(input, ComparisonMode::Numeric)
@@ -3575,6 +3576,70 @@ fn named_header_positions(header: &[String]) -> Result<HashMap<&str, usize>, Csv
     Ok(positions)
 }
 
+fn align_comparison_headers(old: &[String], new: &[String]) -> Result<Vec<usize>, CsvError> {
+    named_header_positions(old)?;
+    let new_positions = named_header_positions(new)?;
+    if old.len() != new_positions.len() {
+        return Err(CsvError::ComparisonHeaderMismatch);
+    }
+    old.iter()
+        .map(|name| new_positions.get(name.as_str()).map(|index| index - 1))
+        .collect::<Option<Vec<_>>>()
+        .ok_or(CsvError::ComparisonHeaderMismatch)
+}
+
+fn compare_csv_rows(input: &str) -> Result<String, CsvError> {
+    let [old, new] = read_csv_pair(input, CsvError::HeaderComparisonArguments)?;
+    let (old_header, old_rows) = old.split_first().ok_or(CsvError::MissingInput)?;
+    let (new_header, new_rows) = new.split_first().ok_or(CsvError::MissingInput)?;
+    let old_order: Vec<_> = (0..old_header.len()).collect();
+    let new_order = align_comparison_headers(old_header, new_header)?;
+    let mut new_positions: HashMap<_, VecDeque<_>> = HashMap::new();
+    for (index, row) in new_rows.iter().enumerate() {
+        new_positions
+            .entry(column_key(row, &new_order))
+            .or_default()
+            .push_back(index);
+    }
+
+    let mut output = String::new();
+    let labels: Vec<_> = old_header
+        .iter()
+        .map(|name| format!("字段 {name}"))
+        .collect();
+    append_bounded_csv_row(
+        &mut output,
+        ["变更", "数据行"]
+            .into_iter()
+            .chain(labels.iter().map(String::as_str)),
+        CsvError::ColumnComparisonTooLarge,
+    )?;
+    let mut append_change = |change, index: usize, fields: Vec<&str>| {
+        append_bounded_csv_row(
+            &mut output,
+            [change, (index + 1).to_string().as_str()]
+                .into_iter()
+                .chain(fields),
+            CsvError::ColumnComparisonTooLarge,
+        )
+    };
+    let mut new_matched = vec![false; new_rows.len()];
+    for (index, row) in old_rows.iter().enumerate() {
+        let fields = column_key(row, &old_order);
+        if let Some(new_index) = new_positions.get_mut(&fields).and_then(VecDeque::pop_front) {
+            new_matched[new_index] = true;
+        } else {
+            append_change("删除", index, fields)?;
+        }
+    }
+    for (index, row) in new_rows.iter().enumerate() {
+        if !new_matched[index] {
+            append_change("新增", index, column_key(row, &new_order))?;
+        }
+    }
+    Ok(output)
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ComparisonColumns {
@@ -3616,22 +3681,14 @@ fn compare_csv_column(input: &str, mode: ComparisonMode) -> Result<String, CsvEr
     };
     let old_keys = resolve(old_header, &key_columns)?;
     let (new_keys, old_columns, new_columns) = if all_columns {
-        let old_positions = named_header_positions(old_header)?;
-        let new_positions = named_header_positions(new_header)?;
-        if old_positions.len() != new_positions.len()
-            || !old_positions
-                .keys()
-                .all(|column| new_positions.contains_key(column))
-        {
-            return Err(CsvError::ComparisonHeaderMismatch);
-        }
+        let new_order = align_comparison_headers(old_header, new_header)?;
         let old_columns: Vec<_> = (0..old_header.len())
             .filter(|index| !old_keys.contains(index))
             .collect();
         if old_columns.is_empty() {
             return Err(CsvError::NoComparedColumns);
         }
-        let in_new = |&index: &usize| new_positions[old_header[index].as_str()] - 1;
+        let in_new = |&index: &usize| new_order[index];
         let new_keys = old_keys.iter().map(in_new).collect();
         let new_columns = old_columns.iter().map(in_new).collect();
         (new_keys, old_columns, new_columns)
@@ -8248,6 +8305,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "rule-failure-count-column"
             | "表头对比"
             | "compare-headers"
+            | "对比行"
+            | "compare-rows"
             | "对比列"
             | "compare-column"
             | "数值对比列"
@@ -11534,6 +11593,29 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(CsvError::InvalidHeader));
         }
+    }
+
+    #[test]
+    fn compares_csv_rows_by_text_and_pairs_duplicate_occurrences_in_order() {
+        let query = r#"对比行 ["编号,备注\n001,同值\n001,同值\n002,\"逗号,值\"\n003,\n005,相同","备注,编号\n同值,001\n\"逗号,值\",004\n,003\n相同,005\n\"逗号,值\",004"]"#;
+        let expected = "变更,数据行,字段 编号,字段 备注\r\n删除,2,001,同值\r\n删除,3,002,\"逗号,值\"\r\n新增,2,004,\"逗号,值\"\r\n新增,5,004,\"逗号,值\"";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert_eq!(csv_table_preview(query).unwrap().unwrap().0, expected);
+        assert_eq!(
+            transform_csv(
+                r#"compare-rows ["编号,备注\n001,茶\n002,梨","备注,编号\n梨,002\n茶,001"]"#
+            )
+            .as_deref(),
+            Ok("变更,数据行,字段 编号,字段 备注"),
+        );
+        assert_eq!(
+            transform_csv(r#"对比行 ["编号,备注","编号,状态"]"#),
+            Err(CsvError::ComparisonHeaderMismatch),
+        );
+        assert_eq!(
+            transform_csv(r#"对比行 ["编号,编号","编号,备注"]"#),
+            Err(CsvError::InvalidHeader),
+        );
     }
 
     #[test]
