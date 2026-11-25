@@ -145,6 +145,7 @@ impl Example {
                 | Scope::Uuid
                 | Scope::Ulid
                 | Scope::Isbn
+                | Scope::Gtin
                 | Scope::Circuit
                 | Scope::Complex
                 | Scope::Circle
@@ -2818,6 +2819,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把以 978 开头的 ISBN 转回 10 位",
         query: "ISBN: 转10位 9780804429573",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "检查商品条码的校验位",
+        query: "条码: 校验 6291041500213",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "为商品条码追加校验位",
+        query: "条码: 补校验位 629104150021",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把商品条码补成 14 位存储格式",
+        query: "条码: 补齐14位 6291041500213",
     },
     Example {
         icon: Icon::Terminal,
@@ -7566,6 +7582,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Uuid
         | Scope::Ulid
         | Scope::Isbn
+        | Scope::Gtin
         | Scope::Vector
         | Scope::Matrix
         | Scope::Complex

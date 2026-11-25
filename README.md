@@ -1168,6 +1168,7 @@
 - 输入 `UUID: v5 DNS www.example.com` 得到 `2ed6657d-e927-568b-95e1-2665a8aea6a2`。同一命名空间和名称产生同一结果，可选 `DNS`、`URL`、`OID`、`X500` 或任意 UUID。名称以 UTF-8 原文计算，区分大小写，可以用 JSON 双引号保留首尾空格。 [RFC 9562 的 UUIDv5 示例](https://www.rfc-editor.org/rfc/rfc9562.html#appendix-A.4)
 - 输入 `ULID: 时间 01ARZ3NDEKTSV4RRFFQ69G5FAV` 得到 `2016-07-30T23:54:10.259Z`。直接在 `ULID:` 后粘贴标识符，可校验并规范为大写。 [ULID 格式说明](https://github.com/ulid/spec)
 - 用 `ISBN: 校验 978-0-11-000222-4` 检查图书编号的校验位。用 `ISBN: 转13位 0-8044-2957-X` 得到 `9780804429573`。以 `978` 开头的编号可以用 `转10位` 转回，直接输入编号可得到去掉分隔符的格式。 [国际 ISBN 机构](https://www.isbn-international.org/content/what-isbn/10) [美国国会图书馆的转换规则](https://www.loc.gov/programs/preassigned-control-number/isbn-converter/)
+- 用 `条码: 校验 6291041500213` 检查商品条码校验位，用 `条码: 补校验位 629104150021` 得到完整条码 `6291041500213`。支持 8、12、13 和 14 位 GTIN，可保留前导零并用 `补齐14位` 输出 14 位存储格式。 [GS1 商品条码格式及校验规则](https://ref.gs1.org/standards/genspecs/)
 - 时间戳也接受微秒（`us`、`µs`）和纳秒（`ns`）。例如 `时间戳: 1700000000123456us` 得到 `2023-11-14T22:13:20.123456Z`。反查带小数秒的时间会选择能精确表示结果的单位。参见 [RFC 3339 的时间格式](https://www.rfc-editor.org/rfc/rfc3339.html#section-5.6)。
 - 输入 `时间戳: -1ns to ms` 得到 `-0.000001 ms`。可用 `to s`、`to ms`、`to us` 或 `to ns` 选择 Unix 时间戳的输出单位，保留精确小数和正负号。也适用于带时区的时间和时间戳序列。
 - 可直接输入 `时间戳: -0.000001 ms`，得到 `1969-12-31T23:59:59.999999999Z`。Unix 时间戳的输入可以带小数，能精确换算为整数纳秒时保留全部有效位。

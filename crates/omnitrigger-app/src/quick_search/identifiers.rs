@@ -20,6 +20,9 @@ pub(super) enum IdentifierError {
     InvalidIsbn,
     IsbnChecksum,
     IsbnTenUnavailable,
+    InvalidGtin,
+    GtinBodyArguments,
+    GtinChecksum,
     InvalidOperation,
     MissingUuidTime,
     TimeRange,
@@ -37,6 +40,9 @@ impl IdentifierError {
             Self::InvalidIsbn => "输入 10 位或 13 位 ISBN，10 位编号末位可为 X",
             Self::IsbnChecksum => "ISBN 校验位错误",
             Self::IsbnTenUnavailable => "以 979 开头的 ISBN 只有 13 位格式",
+            Self::InvalidGtin => "填写 8、12、13 或 14 位商品条码数字",
+            Self::GtinBodyArguments => "填写待补校验位的 7、11、12 或 13 位商品条码数字",
+            Self::GtinChecksum => "商品条码校验位错误",
             Self::InvalidOperation => "可用 格式 或 时间，UUID 还支持 紧凑、URN 和 v5",
             Self::MissingUuidTime => "请输入带时间字段的 UUIDv1、UUIDv6 或 UUIDv7",
             Self::TimeRange => "标识符的时间超出可显示范围",
@@ -159,9 +165,7 @@ pub(super) fn transform_isbn(query: &str) -> Result<String, IdentifierError> {
         "转13位" | "to-13" => (IsbnOperation::ToThirteen, rest),
         _ => (IsbnOperation::Normalize, query),
     };
-    let isbn: String = source
-        .chars()
-        .filter(|&ch| !ch.is_whitespace() && !matches!(ch, '-' | '\u{2010}' | '\u{2011}'))
+    let isbn: String = identifier_symbols(source)
         .map(|ch| ch.to_ascii_uppercase())
         .collect();
     if isbn.is_empty() {
@@ -204,23 +208,77 @@ pub(super) fn transform_isbn(query: &str) -> Result<String, IdentifierError> {
 }
 
 fn isbn_check_digit(digits: &str, short: bool) -> u8 {
+    if !short {
+        return gtin_check_digit(digits);
+    }
     let sum: u32 = digits
         .bytes()
         .enumerate()
-        .map(|(index, digit)| {
-            let weight = if short {
-                10 - index as u32
-            } else {
-                1 + 2 * (index % 2) as u32
-            };
-            u32::from(digit - b'0') * weight
-        })
+        .map(|(index, digit)| u32::from(digit - b'0') * (10 - index as u32))
         .sum();
-    let modulus = if short { 11 } else { 10 };
-    match (modulus - sum % modulus) % modulus {
+    match (11 - sum % 11) % 11 {
         10 => b'X',
         check => b'0' + check as u8,
     }
+}
+
+pub(super) fn transform_gtin(query: &str) -> Result<String, IdentifierError> {
+    enum Operation {
+        Normalize,
+        Validate,
+        AddCheckDigit,
+        Pad,
+    }
+    let query = normalize(query);
+    let query = query.trim();
+    let (operation, rest) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+    let (operation, source) = match operation.to_ascii_lowercase().as_str() {
+        "格式" | "normalize" => (Operation::Normalize, rest),
+        "校验" | "validate" => (Operation::Validate, rest),
+        "补校验位" | "add-check-digit" => (Operation::AddCheckDigit, rest),
+        "补齐14位" | "pad-14" => (Operation::Pad, rest),
+        _ => (Operation::Normalize, query),
+    };
+    let mut gtin: String = identifier_symbols(source).collect();
+    if gtin.is_empty() {
+        return Err(IdentifierError::Incomplete);
+    }
+    let digits_only = gtin.bytes().all(|byte| byte.is_ascii_digit());
+    if matches!(operation, Operation::AddCheckDigit) {
+        if !digits_only || !matches!(gtin.len(), 7 | 11 | 12 | 13) {
+            return Err(IdentifierError::GtinBodyArguments);
+        }
+        gtin.push(char::from(gtin_check_digit(&gtin)));
+        return Ok(gtin);
+    }
+    if !digits_only || !matches!(gtin.len(), 8 | 12 | 13 | 14) {
+        return Err(IdentifierError::InvalidGtin);
+    }
+    let (body, check_digit) = gtin.split_at(gtin.len() - 1);
+    if check_digit.as_bytes()[0] != gtin_check_digit(body) {
+        return Err(IdentifierError::GtinChecksum);
+    }
+    match operation {
+        Operation::Validate => Ok(format!("GTIN-{} 校验位正确", gtin.len())),
+        Operation::Pad => Ok(format!("{gtin:0>14}")),
+        Operation::Normalize | Operation::AddCheckDigit => Ok(gtin),
+    }
+}
+
+fn gtin_check_digit(digits: &str) -> u8 {
+    let sum: u16 = digits
+        .bytes()
+        .rev()
+        .enumerate()
+        .map(|(index, digit)| u16::from(digit - b'0') * (3 - 2 * (index % 2) as u16))
+        .sum();
+    b'0' + ((10 - sum % 10) % 10) as u8
+}
+
+fn identifier_symbols(source: &str) -> impl Iterator<Item = char> + '_ {
+    source
+        .chars()
+        .filter(|&ch| !ch.is_whitespace() && !matches!(ch, '-' | '\u{2010}' | '\u{2011}'))
 }
 
 fn identifier_input(query: &str) -> Result<(&str, &str), IdentifierError> {
@@ -361,6 +419,35 @@ mod tests {
             transform_uuid("550e8400"),
             Err(IdentifierError::InvalidUuid)
         );
+    }
+
+    #[test]
+    fn validates_completes_and_pads_all_four_gtin_lengths() {
+        for (query, expected) in [
+            ("补校验位 9638507", "96385074"),
+            ("补校验位 03600029145", "036000291452"),
+            ("ADD-CHECK-DIGIT 629104150021", "6291041500213"),
+            ("补校验位 1001234567890", "10012345678902"),
+            ("校验 ９６３８‐５０７４", "GTIN-8 校验位正确"),
+            ("校验 0-36000-29145-2", "GTIN-12 校验位正确"),
+            ("校验 6291041500213", "GTIN-13 校验位正确"),
+            ("校验 10012345678902", "GTIN-14 校验位正确"),
+            ("补齐14位 6291041500213", "06291041500213"),
+            ("pad-14 96385074", "00000096385074"),
+            ("0-36000-29145-2", "036000291452"),
+        ] {
+            assert_eq!(transform_gtin(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("校验 6291041500214", IdentifierError::GtinChecksum),
+            ("校验 629104150021", IdentifierError::GtinChecksum),
+            ("校验 123", IdentifierError::InvalidGtin),
+            ("校验 9638507X", IdentifierError::InvalidGtin),
+            ("补校验位 96385074", IdentifierError::GtinBodyArguments),
+            ("补校验位", IdentifierError::Incomplete),
+        ] {
+            assert_eq!(transform_gtin(query), Err(error), "{query}");
+        }
     }
 
     #[test]
