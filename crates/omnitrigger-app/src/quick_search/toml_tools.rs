@@ -5,7 +5,7 @@ use super::{
     input_line_column, is_validation_operation,
     json_tools::{
         append_pointer_key, json_array_index, json_pointer_tokens, pointer_and_source,
-        read_json_array, read_unique_object_entries, JsonError,
+        read_json_array, read_unique_object_entries, selected_pointers, JsonError,
     },
     InputValidationReport,
 };
@@ -40,7 +40,9 @@ impl TomlError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入 TOML 内容，例如 TOML: 校验 port = 8000",
-            Self::UnknownOperation => "用 校验、取值、转JSON、从JSON 或 叶子CSV 处理 TOML",
+            Self::UnknownOperation => {
+                "用 校验、取值、取多路径、转JSON、从JSON 或 叶子CSV 处理 TOML"
+            }
             Self::Invalid { .. } => "请检查 TOML 语法",
             Self::NonFiniteFloat => "JSON 无法表示 TOML 中的 inf 或 nan",
             Self::InvalidPointer => "填写有效路径，例如 /server/port，空路径可写成 \"\"",
@@ -67,6 +69,8 @@ enum TomlOperation {
     Json,
     FromJson,
     LeavesCsv,
+    Select,
+    SelectPaths,
 }
 
 impl TomlOperation {
@@ -78,6 +82,8 @@ impl TomlOperation {
             "转json" | "to-json" => Ok(Self::Json),
             "从json" | "from-json" => Ok(Self::FromJson),
             "叶子csv" | "leaves-csv" => Ok(Self::LeavesCsv),
+            "取值" | "get" => Ok(Self::Select),
+            "取多路径" | "get-paths" => Ok(Self::SelectPaths),
             "" => Err(TomlError::Incomplete),
             _ => Err(TomlError::UnknownOperation),
         }
@@ -92,19 +98,15 @@ fn split_toml_input(input: &str) -> (&str, &str) {
 
 pub(super) fn transform_toml(input: &str) -> Result<String, TomlError> {
     let (operation, source) = split_toml_input(input);
-    if is_selection(operation) {
-        return select_toml_value(toml_source(source)?);
-    }
     run_toml_operation(TomlOperation::parse(operation)?, source)
-}
-
-fn is_selection(operation: &str) -> bool {
-    operation == "取值" || operation.eq_ignore_ascii_case("get")
 }
 
 pub(super) fn produces_json(input: &str) -> bool {
     let (operation, _) = split_toml_input(input);
-    is_selection(operation) || matches!(TomlOperation::parse(operation), Ok(TomlOperation::Json))
+    matches!(
+        TomlOperation::parse(operation),
+        Ok(TomlOperation::Json | TomlOperation::Select | TomlOperation::SelectPaths)
+    )
 }
 
 pub(super) fn produces_toml(input: &str) -> bool {
@@ -180,7 +182,9 @@ fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, Tom
             Ok(format!("TOML 有效 · {} 个顶层键", table.len()))
         }
         TomlOperation::LeavesCsv => toml_leaves_csv(parse_toml_table(source)?),
-        TomlOperation::Json => write_toml_json(toml::Value::Table(parse_toml_table(source)?)),
+        TomlOperation::Json => write_toml_json(&toml::Value::Table(parse_toml_table(source)?)),
+        TomlOperation::Select => select_toml_value(source),
+        TomlOperation::SelectPaths => select_toml_paths(source),
         TomlOperation::FromJson => {
             let table = json_table(source.trim_start(), 0)?;
             let output =
@@ -248,22 +252,55 @@ fn select_toml_value(input: &str) -> Result<String, TomlError> {
         return Err(TomlError::Incomplete);
     }
     let keys = json_pointer_tokens(&pointer).map_err(|_| TomlError::InvalidPointer)?;
-    let mut value = toml::Value::Table(parse_toml_table(source)?);
+    let root = toml::Value::Table(parse_toml_table(source)?);
+    write_toml_json(toml_path_value(&root, &keys)?)
+}
+
+fn select_toml_paths(input: &str) -> Result<String, TomlError> {
+    let (pointers, source) = selected_pointers(input).map_err(|error| match error {
+        JsonError::Incomplete => TomlError::Incomplete,
+        _ => TomlError::Json(error),
+    })?;
+    let root = toml::Value::Table(parse_toml_table(source)?);
+    let mut json = String::from("{");
+    for (index, pointer) in pointers.into_iter().enumerate() {
+        let keys = json_pointer_tokens(&pointer).map_err(|_| TomlError::InvalidPointer)?;
+        let key = serde_json::to_string(&pointer).map_err(|_| TomlError::Serialization)?;
+        let value = write_toml_json(toml_path_value(&root, &keys)?)?;
+        let separator = usize::from(index > 0);
+        if json.len() + separator + key.len() + value.len() + 2 > MAX_TOML_BYTES {
+            return Err(TomlError::TooLarge);
+        }
+        if index > 0 {
+            json.push(',');
+        }
+        json.push_str(&key);
+        json.push(':');
+        json.push_str(&value);
+    }
+    json.push('}');
+    Ok(json)
+}
+
+fn toml_path_value<'a>(
+    root: &'a toml::Value,
+    keys: &[String],
+) -> Result<&'a toml::Value, TomlError> {
+    let mut value = root;
     for key in keys {
         value = match value {
-            toml::Value::Table(mut fields) => fields.remove(&key),
-            toml::Value::Array(mut items) => json_array_index(&key)
+            toml::Value::Table(fields) => fields.get(key),
+            toml::Value::Array(items) => json_array_index(key)
                 .ok()
-                .filter(|&index| index < items.len())
-                .map(|index| items.swap_remove(index)),
+                .and_then(|index| items.get(index)),
             _ => None,
         }
         .ok_or(TomlError::MissingPointer)?;
     }
-    write_toml_json(value)
+    Ok(value)
 }
 
-fn write_toml_json(value: toml::Value) -> Result<String, TomlError> {
+fn write_toml_json(value: &toml::Value) -> Result<String, TomlError> {
     let json = serde_json::to_string(&json_value(value)?).map_err(|_| TomlError::Serialization)?;
     if json.len() > MAX_TOML_BYTES {
         return Err(TomlError::TooLarge);
@@ -325,25 +362,22 @@ fn toml_leaves_csv(table: toml::Table) -> Result<String, TomlError> {
     Ok(output)
 }
 
-fn json_value(value: toml::Value) -> Result<Value, TomlError> {
+fn json_value(value: &toml::Value) -> Result<Value, TomlError> {
     Ok(match value {
-        toml::Value::String(text) => Value::String(text),
-        toml::Value::Integer(number) => Value::Number(number.into()),
+        toml::Value::String(text) => Value::String(text.clone()),
+        toml::Value::Integer(number) => Value::Number((*number).into()),
         toml::Value::Float(number) => {
-            Value::Number(Number::from_f64(number).ok_or(TomlError::NonFiniteFloat)?)
+            Value::Number(Number::from_f64(*number).ok_or(TomlError::NonFiniteFloat)?)
         }
-        toml::Value::Boolean(flag) => Value::Bool(flag),
+        toml::Value::Boolean(flag) => Value::Bool(*flag),
         toml::Value::Datetime(date) => Value::String(date.to_string()),
-        toml::Value::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(json_value)
-                .collect::<Result<_, _>>()?,
-        ),
+        toml::Value::Array(items) => {
+            Value::Array(items.iter().map(json_value).collect::<Result<_, _>>()?)
+        }
         toml::Value::Table(table) => Value::Object(
             table
-                .into_iter()
-                .map(|(key, value)| json_value(value).map(|value| (key, value)))
+                .iter()
+                .map(|(key, value)| json_value(value).map(|value| (key.clone(), value)))
                 .collect::<Result<Map<_, _>, _>>()?,
         ),
     })
@@ -467,6 +501,33 @@ mod tests {
         );
         assert_eq!(transform_toml("get \"\" x = 1").as_deref(), Ok("{\"x\":1}"));
         assert_eq!(transform_toml("get /missing"), Err(TomlError::Incomplete));
+    }
+
+    #[test]
+    fn selects_multiple_toml_paths_in_request_order_as_json() {
+        let data = "\ndate = 2024-02-29\nweight = nan\n[server]\nports = [8000, 9007199254740993]\n\"a/b~\" = true";
+        let query = format!(r#"取多路径 ["/server/ports/1","/date","/server/a~1b~0"]{data}"#);
+        assert_eq!(
+            transform_toml(&query).as_deref(),
+            Ok(
+                r#"{"/server/ports/1":9007199254740993,"/date":"2024-02-29","/server/a~1b~0":true}"#
+            )
+        );
+        assert!(produces_json(&query));
+        for (paths, error) in [
+            (
+                r#"["/date","/date"]"#,
+                TomlError::Json(JsonError::PointerSelection),
+            ),
+            (r#"["/server/~2"]"#, TomlError::InvalidPointer),
+            (r#"["/date","/server/missing"]"#, TomlError::MissingPointer),
+            (r#"["/weight"]"#, TomlError::NonFiniteFloat),
+        ] {
+            assert_eq!(
+                transform_toml(&format!("get-paths {paths}{data}")),
+                Err(error)
+            );
+        }
     }
 
     #[test]

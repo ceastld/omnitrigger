@@ -828,7 +828,7 @@ fn visit_json_wildcard_matches(
     Ok(())
 }
 
-fn selected_pointers(query: &str) -> Result<(Vec<String>, &str), JsonError> {
+pub(super) fn selected_pointers(query: &str) -> Result<(Vec<String>, &str), JsonError> {
     let (pointers, source) = strings_and_source(query, JsonError::PointerSelection)?;
     if pointers.is_empty() || pointers.iter().collect::<HashSet<_>>().len() != pointers.len() {
         return Err(JsonError::PointerSelection);

@@ -4685,6 +4685,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "一次提取多个 TOML 配置路径",
+        query: "TOML: 取多路径 [\"/server/ports/1\",\"/date\"]\ndate = 2024-02-29\n[server]\nports = [8000, 8080]",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将 TOML 配置转为可复制的 JSON",
         query: "TOML: 转JSON date = 2024-02-29\nnumber = 9_007_199_254_740_993",
     },
