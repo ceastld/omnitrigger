@@ -25,6 +25,7 @@ use super::{
 };
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_REGEX_FREQUENCY_INPUT_BYTES: usize = 16 * 1024;
 const MAX_DIFF_LINES: usize = 512;
 const MAX_COMPARISON_GRAPHEMES: usize = 512;
 pub(super) const MAX_TEXT_COMPARISON_WORK: usize = 1024 * 1024;
@@ -101,6 +102,7 @@ pub(super) enum TextError {
     UnknownRegexGroup,
     MissingRegexCaptures,
     ResultTooLarge,
+    RegexFrequencyInputTooLarge,
     NullCharacter,
     InvalidBase64,
     InvalidHexBytes,
@@ -161,6 +163,7 @@ impl TextError {
             Self::UnknownRegexGroup => "正则表达式中没有指定的捕获组",
             Self::MissingRegexCaptures => "请用括号定义至少一个要输出为列的捕获组",
             Self::ResultTooLarge => "文本结果超过 1 MiB",
+            Self::RegexFrequencyInputTooLarge => "正则频数的原文超过 16 KiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
             Self::InvalidHexBytes => "输入成对的十六进制数字，例如 E5 8C 97",
@@ -231,6 +234,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
         "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
         "正则替换明细csv" | "regex-replacement-csv" => Some(regex_replacement_csv(text)),
+        "正则频数csv" | "regex-frequency-csv" => Some(regex_group_frequency_csv(text)),
         _ => None,
     }
 }
@@ -1546,6 +1550,25 @@ fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
 }
 
 fn extract_regex_group(input: &str) -> Result<String, TextError> {
+    let (pattern, index, text) = regex_group_arguments(input)?;
+    Ok(regex_group_matches(&pattern, index, text)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn regex_group_frequency_csv(input: &str) -> Result<String, TextError> {
+    let (pattern, index, text) = regex_group_arguments(input)?;
+    if text.len() > MAX_REGEX_FREQUENCY_INPUT_BYTES {
+        return Err(TextError::RegexFrequencyInputTooLarge);
+    }
+    let result = frequency_csv("捕获值", regex_group_matches(&pattern, index, text));
+    if result.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    Ok(result)
+}
+
+fn regex_group_arguments(input: &str) -> Result<(Regex, usize, &str), TextError> {
     let (group, input) = input
         .trim_start()
         .split_once(char::is_whitespace)
@@ -1555,14 +1578,19 @@ fn extract_regex_group(input: &str) -> Result<String, TextError> {
         _ => error,
     })?;
     let index = regex_group_index(&pattern, group)?;
+    Ok((pattern, index, text))
+}
 
-    Ok(pattern
+fn regex_group_matches<'a>(
+    pattern: &'a Regex,
+    index: usize,
+    text: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    pattern
         .captures_iter(text)
-        .filter_map(|captures| captures.get(index))
+        .filter_map(move |captures| captures.get(index))
         .filter(|matched| !matched.is_empty())
         .map(|matched| matched.as_str())
-        .collect::<Vec<_>>()
-        .join("\n"))
 }
 
 pub(super) fn regex_group_index(pattern: &Regex, group: &str) -> Result<usize, TextError> {
@@ -2774,6 +2802,39 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn counts_whole_regex_capture_text_in_first_occurrence_order_for_ties() {
+        let query =
+            "正则频数CSV state \"状态(?:=(?<state>[^;]+))?\" 状态=B;状态=A,作业;状态=B;状态;状态=C";
+        let expected = "捕获值,次数\r\nB,2\r\n\"A,作业\",1\r\nC,1";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("正则频数CSV chunk \"(?<chunk>A\\nB)\" A\nB A\nB").as_deref(),
+            Ok("捕获值,次数\r\n\"A\nB\",2")
+        );
+        assert_eq!(
+            transform_text("正则频数CSV 0 \".+\" A\0B"),
+            Err(TextError::NullCharacter)
+        );
+        assert_eq!(
+            transform_text(r#"REGEX-FREQUENCY-CSV 0 "[0-9]+" 没有数字"#).as_deref(),
+            Ok("捕获值,次数")
+        );
+        assert_eq!(
+            transform_text(r#"正则频数CSV unknown "(a)" abc"#),
+            Err(TextError::UnknownRegexGroup)
+        );
+        let large = format!(
+            "正则频数CSV 0 \"a\" {}",
+            "a".repeat(MAX_REGEX_FREQUENCY_INPUT_BYTES + 1)
+        );
+        assert_eq!(
+            transform_text(&large),
+            Err(TextError::RegexFrequencyInputTooLarge)
+        );
     }
 
     #[test]

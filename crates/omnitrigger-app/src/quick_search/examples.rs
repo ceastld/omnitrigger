@@ -3990,6 +3990,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"文本: 正则取组 id "ID=(?<id>[0-9]+)" ID=001 ID=002"#,
     },
     Example {
+        icon: Icon::Layers,
+        title: "统计每种正则捕获值出现的次数",
+        query: r#"文本: 正则频数CSV status "状态=(?<status>[A-Z]+)" 状态=B 状态=A 状态=B 状态=C"#,
+    },
+    Example {
         icon: Icon::Terminal,
         title: "把每次正则匹配的捕获组提取为 CSV",
         query: r#"文本: 正则取表 "(?<id>[0-9]+):([^;]+)" 001:茶,咖啡;002:梨"#,
