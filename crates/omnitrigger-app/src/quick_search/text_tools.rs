@@ -3,6 +3,7 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Write as _,
+    iter::Peekable,
     num::NonZeroUsize,
     sync::OnceLock,
 };
@@ -13,7 +14,7 @@ use base64::{
     },
     Engine,
 };
-use regex::{Regex, RegexBuilder};
+use regex::{Matches, Regex, RegexBuilder};
 use sha2::{Digest, Sha256, Sha512};
 use unicode_normalization::{char::canonical_combining_class, UnicodeNormalization};
 use unicode_segmentation::UnicodeSegmentation;
@@ -1890,29 +1891,32 @@ pub(super) fn regex_group_index(pattern: &Regex, group: &str) -> Result<usize, T
         .ok_or(TextError::UnknownRegexGroup)
 }
 
-struct MatchPosition {
+struct MatchPosition<'text> {
+    text: &'text str,
+    newlines: Peekable<Matches<'static, 'text>>,
     last_start: usize,
     line: usize,
     column: usize,
 }
 
-impl MatchPosition {
-    fn new() -> Self {
+impl<'text> MatchPosition<'text> {
+    fn new(text: &'text str) -> Self {
         Self {
+            text,
+            newlines: logical_newline_pattern().find_iter(text).peekable(),
             last_start: 0,
             line: 1,
             column: 1,
         }
     }
 
-    fn advance(&mut self, text: &str, start: usize) {
-        let between = &text[self.last_start..start];
-        if let Some((before, after)) = between.rsplit_once('\n') {
-            self.line += before.bytes().filter(|&byte| byte == b'\n').count() + 1;
-            self.column = after.chars().count() + 1;
-        } else {
-            self.column += between.chars().count();
+    fn advance(&mut self, start: usize) {
+        while let Some(newline) = self.newlines.next_if(|newline| newline.end() <= start) {
+            self.line += 1;
+            self.column = 1;
+            self.last_start = newline.end();
         }
+        self.column += self.text[self.last_start..start].chars().count();
         self.last_start = start;
     }
 }
@@ -1941,12 +1945,12 @@ fn regex_captures_to_csv(input: &str, include_position: bool) -> Result<String, 
         String::new()
     };
     result.push_str(&capture_headers);
-    let mut position = MatchPosition::new();
+    let mut position = MatchPosition::new(text);
     for captures in pattern.captures_iter(text) {
         result.push_str("\r\n");
         if include_position {
             let start = captures.get(0).expect("组 0 包含整项匹配").start();
-            position.advance(text, start);
+            position.advance(start);
             write!(result, "{},{},", position.line, position.column).expect("写入 String 不会出错");
         }
         for (column, matched) in captures.iter().skip(1).enumerate() {
@@ -2473,12 +2477,12 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
 fn regex_replacement_csv(input: &str) -> Result<String, TextError> {
     let (pattern, replacement, text) = replacement_parts(input)?;
     let pattern = compile_regex(&pattern)?;
-    let mut position = MatchPosition::new();
+    let mut position = MatchPosition::new(text);
     let mut result = String::from("原文行号,原文列号,匹配,替换");
     let mut expanded = String::new();
     for captures in pattern.captures_iter(text) {
         let matched = captures.get_match();
-        position.advance(text, matched.start());
+        position.advance(matched.start());
         expanded.clear();
         captures.expand(&replacement, &mut expanded);
         if matched.as_str().contains('\0') || expanded.contains('\0') {
@@ -3183,6 +3187,30 @@ mod tests {
             transform_text(r#"正则替换明细CSV "不存在" "改" 原文"#).as_deref(),
             Ok("原文行号,原文列号,匹配,替换"),
         );
+    }
+
+    #[test]
+    fn locates_regex_matches_across_mixed_line_separators() {
+        let text = "A ID=1\r\n北🎵 ID=2\rID=3\u{2028} 中ID=4\u{2029}ID=5";
+        let query = format!(r#"正则定位取表 "ID=([0-9]+)" {text}"#);
+        assert_eq!(
+            transform_text(&query).as_deref(),
+            Ok("原文行号,原文列号,1\r\n1,3,1\r\n2,4,2\r\n3,1,3\r\n4,3,4\r\n5,1,5")
+        );
+        let query = format!(r#"正则替换明细CSV "ID=([0-9]+)" "编号:$1" {text}"#);
+        assert_eq!(
+            transform_text(&query).as_deref(),
+            Ok(concat!(
+                "原文行号,原文列号,匹配,替换",
+                "\r\n1,3,ID=1,编号:1\r\n2,4,ID=2,编号:2",
+                "\r\n3,1,ID=3,编号:3\r\n4,3,ID=4,编号:4\r\n5,1,ID=5,编号:5",
+            ))
+        );
+        let mut position = MatchPosition::new("A\r\nB");
+        for (start, expected) in [(1, (1, 2)), (2, (1, 3)), (3, (2, 1))] {
+            position.advance(start);
+            assert_eq!((position.line, position.column), expected);
+        }
     }
 
     #[test]
