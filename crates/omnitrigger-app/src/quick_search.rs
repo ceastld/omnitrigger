@@ -289,11 +289,11 @@ impl ResultValue {
         }
     }
 
-    fn exact_decimal_preview(&self) -> Option<&str> {
+    fn exact_decimal_preview(&self) -> Option<&fraction::DecimalPreview> {
         match &self.kind {
             ValueKind::ExactCalculation {
                 decimal_preview, ..
-            } => decimal_preview.as_deref(),
+            } => decimal_preview.as_ref(),
             _ => None,
         }
     }
@@ -308,7 +308,7 @@ enum ValueKind {
     Calculation,
     ExactCalculation {
         can_continue: bool,
-        decimal_preview: Option<String>,
+        decimal_preview: Option<fraction::DecimalPreview>,
     },
     Conversion(Option<String>),
     Color(u32),
@@ -2825,18 +2825,44 @@ impl QuickSearch {
             }
             self.fill_query(refill.original, window, cx);
         } else if let Some(text) = self.results.refillable_text() {
-            let original = self.input.read(cx).text();
-            self.index.recent.queries.record_exact(&original, "");
-            let inserted = text.to_owned();
-            self.result_refill = Some(ResultRefill {
-                original,
-                inserted: inserted.clone(),
-                kind: RefillKind::Result,
-            });
-            self.input
-                .update(cx, |input, cx| input.set_text(inserted, cx));
-            window.focus(&self.input.focus_handle(cx));
+            self.refill_result_text(text.to_owned(), window, cx);
         }
+    }
+
+    fn refill_result_text(
+        &mut self,
+        inserted: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let original = self.input.read(cx).text();
+        self.index.recent.queries.record_exact(&original, "");
+        self.result_refill = Some(ResultRefill {
+            original,
+            inserted: inserted.clone(),
+            kind: RefillKind::Result,
+        });
+        self.input
+            .update(cx, |input, cx| input.set_text(inserted, cx));
+        window.focus(&self.input.focus_handle(cx));
+    }
+
+    fn refill_decimal_preview(
+        &mut self,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Results::Value(Ok(value)) = &self.results else {
+            return false;
+        };
+        let Some(decimal) = value.exact_decimal_preview() else {
+            return false;
+        };
+        if !is_held {
+            self.refill_result_text(decimal.digits.clone(), window, cx);
+        }
+        true
     }
 
     fn searchable_table_text(&self) -> Option<&str> {
@@ -3261,6 +3287,12 @@ impl QuickSearch {
                 if self.select_example_range(Example::argument_range, event.is_held, window, cx) {
                     cx.stop_propagation();
                 }
+            } else if modifiers == 1
+                && keystroke.modifiers.shift
+                && keystroke.key == "f3"
+                && self.refill_decimal_preview(event.is_held, window, cx)
+            {
+                cx.stop_propagation();
             } else if modifiers == 1
                 && keystroke.modifiers.control
                 && keystroke.key == "f"
@@ -4104,8 +4136,24 @@ impl QuickSearch {
                     .when_some(output.exact_decimal_preview(), |result, decimal| {
                         result.child(
                             Self::result_footer()
-                                .font_family(theme::MONO_FONT)
-                                .child(decimal.to_owned()),
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(div().font_family(theme::MONO_FONT).child(decimal.label()))
+                                .child(
+                                    button(
+                                        "refill-quick-search-decimal",
+                                        "填回小数 Shift+F3",
+                                        Tone::Ghost,
+                                        true,
+                                    )
+                                    .h(px(18.))
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.refill_decimal_preview(false, window, cx);
+                                        },
+                                    )),
+                                ),
                         )
                     })
                     .when_some(output.continuation_hint(), |result, hint| {
@@ -5182,7 +5230,13 @@ mod tests {
                 panic!("应得到精确计算结果：{query}");
             };
             assert_eq!(value.text, text);
-            assert_eq!(value.exact_decimal_preview(), decimal);
+            assert_eq!(
+                value
+                    .exact_decimal_preview()
+                    .map(|preview| preview.label())
+                    .as_deref(),
+                decimal
+            );
         }
     }
 
@@ -6906,6 +6960,25 @@ mod tests {
         search.refresh_results(&next, window, cx);
         assert!(search.result_refill.is_none());
         assert_eq!(search.results.refillable_text(), Some("hello\nworld"));
+
+        let original = "分数: 计算 1/3";
+        let decimal = "0.333333333333";
+        search.fill_query(original, window, cx);
+        search.refresh_results(original, window, cx);
+        let mut shortcut = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("shift-f3").unwrap(),
+            is_held: true,
+        };
+        search.key_down(&shortcut, window, cx);
+        assert_eq!(search.input.read(cx).text(), original);
+        shortcut.is_held = false;
+        search.key_down(&shortcut, window, cx);
+        assert_eq!(search.input.read(cx).text(), decimal);
+        assert_eq!(search.input.read(cx).selection(), 0..0);
+        search.refresh_results(decimal, window, cx);
+        assert!(matches!(search.results, Results::RefilledInput));
+        search.key_down(&key(false), window, cx);
+        assert_eq!(search.input.read(cx).text(), original);
     }
 
     #[cfg(target_os = "windows")]

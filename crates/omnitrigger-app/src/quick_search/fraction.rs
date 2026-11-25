@@ -1135,7 +1135,20 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places)
 }
 
-pub(super) fn decimal_preview(value: &BigRational) -> Option<String> {
+#[derive(PartialEq, Eq)]
+pub(super) struct DecimalPreview {
+    pub(super) digits: String,
+    equal: bool,
+}
+
+impl DecimalPreview {
+    pub(super) fn label(&self) -> String {
+        let mark = if self.equal { "=" } else { "≈" };
+        format!("{mark} {}", self.digits)
+    }
+}
+
+pub(super) fn decimal_preview(value: &BigRational) -> Option<DecimalPreview> {
     if value.is_integer() || value.numer().bits().max(value.denom().bits()) > 256 {
         return None;
     }
@@ -1147,8 +1160,10 @@ pub(super) fn decimal_preview(value: &BigRational) -> Option<String> {
         fixed.to_owned()
     };
     let equal = parse_confirmed_fraction(&decimal).is_ok_and(|parsed| parsed == *value);
-    let mark = if equal { "=" } else { "≈" };
-    Some(format!("{mark} {decimal}"))
+    Some(DecimalPreview {
+        digits: decimal,
+        equal,
+    })
 }
 
 pub(super) fn format_significant_digits(value: BigRational, digits: u32) -> String {
