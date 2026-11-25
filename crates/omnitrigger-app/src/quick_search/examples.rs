@@ -4227,6 +4227,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看各行末尾空白的位置和字符",
+        query: "文本: 行尾空白CSV\n  苹果 \t\r\n梨\n茶\u{3000}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计 CRLF、LF 和 CR 换行符",
         query: "文本: 换行统计 \"甲\r\n乙\r丙\n\"",
     },

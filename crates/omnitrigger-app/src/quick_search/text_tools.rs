@@ -246,6 +246,7 @@ fn is_display_width_csv_operation(operation: &str) -> bool {
 pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
     is_raw_text_operation(operation)
         || is_trim_line_ends_operation(operation)
+        || is_line_end_whitespace_csv_operation(operation)
         || is_fixed_width_csv_operation(operation)
         || is_line_lengths_csv_operation(operation)
         || is_display_width_csv_operation(operation)
@@ -265,6 +266,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     if is_line_lengths_csv_operation(operation) {
         return Some(line_lengths_csv(text));
+    }
+    if is_line_end_whitespace_csv_operation(operation) {
+        return Some(line_end_whitespace_csv(text));
     }
     if is_display_width_csv_operation(operation) {
         return Some(display_width_csv(text));
@@ -1147,6 +1151,37 @@ fn count_consecutive_lines_csv(input: &str) -> Result<String, TextError> {
         append_bounded_csv_row(
             &mut csv,
             [start.as_str(), count.as_str(), line].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn is_line_end_whitespace_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("行尾空白CSV")
+        || operation.eq_ignore_ascii_case("trailing-whitespace-csv")
+}
+
+fn line_end_whitespace_csv(text: &str) -> Result<String, TextError> {
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut csv = String::from("行号,起始列,空白码位数,空白字符");
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        let content = line.trim_end();
+        let trailing = &line[content.len()..];
+        if trailing.is_empty() {
+            continue;
+        }
+        let fields = [
+            (index + 1).to_string(),
+            (content.chars().count() + 1).to_string(),
+            trailing.chars().count().to_string(),
+            show_whitespace(trailing),
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
             TextError::ResultTooLarge,
         )?;
     }
@@ -4321,6 +4356,28 @@ mod tests {
                 Err(TextError::CsvColumnCount)
             );
         }
+    }
+
+    #[test]
+    fn reports_only_lines_with_trailing_whitespace_at_the_original_columns() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 行尾空白CSV\r\n  A\t \r\nB\r中\u{3000}\t\u{2028}\t\u{2029}\u{301}尾 ",
+        )
+        .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok(concat!(
+                "行号,起始列,空白码位数,空白字符",
+                "\r\n1,4,2,␉␠",
+                "\r\n3,2,2,<U+3000>␉",
+                "\r\n4,1,1,␉",
+                "\r\n5,3,1,␠",
+            ))
+        );
+        assert_eq!(
+            transform_text("trailing-whitespace-csv ABC\r\nDEF").as_deref(),
+            Ok("行号,起始列,空白码位数,空白字符")
+        );
     }
 
     #[test]
