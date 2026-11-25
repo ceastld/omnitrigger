@@ -276,14 +276,24 @@ impl ResultValue {
 
     fn continuation_hint(&self) -> Option<&'static str> {
         match &self.kind {
-            ValueKind::Calculation | ValueKind::ExactCalculation { can_continue: true } => {
-                Some("Tab 继续计算")
-            }
+            ValueKind::Calculation
+            | ValueKind::ExactCalculation {
+                can_continue: true, ..
+            } => Some("Tab 继续计算"),
             ValueKind::Conversion(Some(_)) => Some("Tab 换目标"),
             ValueKind::CalendarDate => Some("Tab 继续日期计算"),
             ValueKind::ClockDuration => Some("Tab 继续时长计算"),
             ValueKind::TimestampInstant => Some("Tab 继续换时区"),
             ValueKind::Color(_) => Some("Tab 继续处理颜色"),
+            _ => None,
+        }
+    }
+
+    fn exact_decimal_preview(&self) -> Option<&str> {
+        match &self.kind {
+            ValueKind::ExactCalculation {
+                decimal_preview, ..
+            } => decimal_preview.as_deref(),
             _ => None,
         }
     }
@@ -296,7 +306,10 @@ enum ValueKind {
     ClockDuration,
     TimestampInstant,
     Calculation,
-    ExactCalculation { can_continue: bool },
+    ExactCalculation {
+        can_continue: bool,
+        decimal_preview: Option<String>,
+    },
     Conversion(Option<String>),
     Color(u32),
     ColorContrast([u32; 2]),
@@ -1228,11 +1241,18 @@ impl Results {
                             fraction::simplify_fraction_with_answers(term, &|index| {
                                 recent.calculations.exact_number_at(index)
                             })
-                            .map(|text| ResultValue {
-                                kind: ValueKind::ExactCalculation {
-                                    can_continue: fraction::parse_confirmed_fraction(&text).is_ok(),
-                                },
-                                text,
+                            .map(|text| {
+                                let exact = fraction::parse_confirmed_fraction(&text).ok();
+                                ResultValue {
+                                    kind: ValueKind::ExactCalculation {
+                                        can_continue: exact.is_some(),
+                                        decimal_preview: exact
+                                            .as_ref()
+                                            .filter(|_| text.contains('/'))
+                                            .and_then(fraction::decimal_preview),
+                                    },
+                                    text,
+                                }
                             })
                             .map_err(ValueError::Fraction),
                         )
@@ -1610,14 +1630,12 @@ impl Results {
             ValueKind::Calculation if text.starts_with('-') => Some(format!("({text})")),
             ValueKind::Calculation => Some(text.clone()),
             // 为括号、运算符和至少一位操作数留出空间。
-            ValueKind::ExactCalculation { can_continue: true }
-                if text.len() > calculator::QUERY_LIMIT - 4 =>
-            {
-                Some("分数: 计算 (ans)".to_owned())
-            }
-            ValueKind::ExactCalculation { can_continue: true } => {
-                Some(format!("分数: 计算 ({text})"))
-            }
+            ValueKind::ExactCalculation {
+                can_continue: true, ..
+            } if text.len() > calculator::QUERY_LIMIT - 4 => Some("分数: 计算 (ans)".to_owned()),
+            ValueKind::ExactCalculation {
+                can_continue: true, ..
+            } => Some(format!("分数: 计算 ({text})")),
             ValueKind::Conversion(Some(query)) => Some(query.clone()),
             ValueKind::CalendarDate => Some(format!("日期: {}", text.trim())),
             ValueKind::ClockDuration => Some(format!("时长: {text}")),
@@ -1712,6 +1730,7 @@ impl Results {
                     return 158. + preview + 52.;
                 }
                 let hints = usize::from(value.continuation_hint().is_some())
+                    + usize::from(value.exact_decimal_preview().is_some())
                     + usize::from(self.value_preview_expandable());
                 158. + value_extra_height(&value.text, value_line_limit) + hints as f32 * 24.
             }
@@ -4076,6 +4095,13 @@ impl QuickSearch {
                     .flex()
                     .flex_col()
                     .child(row)
+                    .when_some(output.exact_decimal_preview(), |result, decimal| {
+                        result.child(
+                            Self::result_footer()
+                                .font_family(theme::MONO_FONT)
+                                .child(decimal.to_owned()),
+                        )
+                    })
                     .when_some(output.continuation_hint(), |result, hint| {
                         result.child(
                             Self::selection_hint(hint)
@@ -5129,6 +5155,28 @@ mod tests {
                 expected,
                 "{query}"
             );
+        }
+    }
+
+    #[test]
+    fn shows_decimal_previews_alongside_exact_fraction_results() {
+        for (query, text, decimal) in [
+            ("分数: 计算 1/3", "1/3", Some("≈ 0.333333333333")),
+            ("分数: 计算 -1/4", "-1/4", Some("= -0.25")),
+            (
+                "分数: 计算 1e-20",
+                "1/100000000000000000000",
+                Some("= 1.00000000000e-20"),
+            ),
+            ("分数: 计算 6/3", "2", None),
+            ("分数: 小数 1/3 to 8", "0.33333333", None),
+            ("分数: 循环小数 1/3", "0.(3)", None),
+        ] {
+            let Results::Value(Ok(value)) = for_query(query, &[]) else {
+                panic!("应得到精确计算结果：{query}");
+            };
+            assert_eq!(value.text, text);
+            assert_eq!(value.exact_decimal_preview(), decimal);
         }
     }
 

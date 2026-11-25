@@ -1131,6 +1131,22 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places)
 }
 
+pub(super) fn decimal_preview(value: &BigRational) -> Option<String> {
+    if value.is_integer() || value.numer().bits().max(value.denom().bits()) > 256 {
+        return None;
+    }
+    let fixed = rounded_decimal(value.clone(), 12);
+    let fixed = fixed.trim_end_matches('0').trim_end_matches('.');
+    let decimal = if fixed == "0" || fixed.len() > 28 {
+        format_significant_digits(value.clone(), 12)
+    } else {
+        fixed.to_owned()
+    };
+    let equal = parse_confirmed_fraction(&decimal).is_ok_and(|parsed| parsed == *value);
+    let mark = if equal { "=" } else { "≈" };
+    Some(format!("{mark} {decimal}"))
+}
+
 pub(super) fn format_significant_digits(value: BigRational, digits: u32) -> String {
     format_significant_notation(value, digits, 1)
 }
