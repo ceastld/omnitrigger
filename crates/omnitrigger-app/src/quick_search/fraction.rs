@@ -220,15 +220,15 @@ fn simplify_fraction_using(
     let normalized = normalize(input);
     let input = normalized.trim();
     let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    let calculate = |source: &str| evaluate_fraction(source, None, None, answer_at);
     if verb == "计算" || verb.eq_ignore_ascii_case("calc") {
-        return evaluate_fraction(expression.trim(), None, None, answer_at)
-            .map(|value| value.to_string());
+        return calculate(expression.trim()).map(|value| value.to_string());
     }
     if verb == "循环小数" || verb.eq_ignore_ascii_case("repeating-decimal") {
-        return repeating_decimal(&calculate_fraction(expression.trim())?);
+        return repeating_decimal(&calculate(expression.trim())?);
     }
     if verb == "百分比" || verb.eq_ignore_ascii_case("percent") {
-        return format_exact_percentage(calculate_fraction(expression.trim())?);
+        return format_exact_percentage(calculate(expression.trim())?);
     }
     if verb == "从百分比" || verb.eq_ignore_ascii_case("from-percent") {
         let input = expression
@@ -276,10 +276,10 @@ fn simplify_fraction_using(
         return fraction_sequence_sum(expression, true);
     }
     if verb == "连分数" || verb.eq_ignore_ascii_case("continued-fraction") {
-        return continued_fraction(calculate_fraction(expression.trim())?);
+        return continued_fraction(calculate(expression.trim())?);
     }
     if verb == "收敛分数" || verb.eq_ignore_ascii_case("convergents") {
-        return fraction_convergents(calculate_fraction(expression.trim())?);
+        return fraction_convergents(calculate(expression.trim())?);
     }
     if verb == "从连分数" || verb.eq_ignore_ascii_case("from-continued-fraction") {
         return from_continued_fraction(expression.trim()).map(|value| value.to_string());
@@ -288,7 +288,7 @@ fn simplify_fraction_using(
         return compare_fraction_expressions(expression);
     }
     if verb == "带分数" || verb.eq_ignore_ascii_case("mixed") {
-        return calculate_fraction(expression).map(format_mixed_fraction);
+        return calculate(expression).map(format_mixed_fraction);
     }
     if verb == "从带分数" || verb.eq_ignore_ascii_case("from-mixed") {
         return parse_mixed_fraction(expression.trim()).map(|value| value.to_string());
@@ -301,7 +301,7 @@ fn simplify_fraction_using(
             .ok()
             .filter(|limit| (1..=MAX_APPROXIMATION_DENOMINATOR).contains(limit))
             .ok_or(FractionError::DenominatorLimit)?;
-        let approximation = approximate_fraction(calculate_fraction(value)?, limit);
+        let approximation = approximate_fraction(calculate(value)?, limit);
         ensure_exact_size(&approximation)?;
         return Ok(approximation.to_string());
     }
@@ -309,10 +309,10 @@ fn simplify_fraction_using(
         return simplify_ratio(expression);
     }
     if verb == "质因数分解" || verb.eq_ignore_ascii_case("factorize") {
-        return prime_factorization(&calculate_fraction(expression)?);
+        return prime_factorization(&calculate(expression)?);
     }
     if verb == "因数统计" || verb.eq_ignore_ascii_case("divisor-stats") {
-        return positive_divisor_stats(&calculate_fraction(expression)?);
+        return positive_divisor_stats(&calculate(expression)?);
     }
     if verb == "商和余数" || verb.eq_ignore_ascii_case("divmod") {
         return describe_quotient_and_remainder(expression);
@@ -345,7 +345,7 @@ fn simplify_fraction_using(
         if places > MAX_DECIMAL_PLACES {
             return Err(FractionError::DecimalPlaces);
         }
-        return calculate_fraction(source).map(|value| rounded_decimal(value, places));
+        return calculate(source).map(|value| rounded_decimal(value, places));
     }
     let engineering = verb == "工程计数法" || verb.eq_ignore_ascii_case("engineering-notation");
     if engineering || verb == "有效数字" || verb.eq_ignore_ascii_case("significant-digits") {
@@ -363,7 +363,7 @@ fn simplify_fraction_using(
         } else {
             format_significant_digits
         };
-        return calculate_fraction(source).map(|value| format(value, digits));
+        return calculate(source).map(|value| format(value, digits));
     }
     if input.contains('(') {
         return from_repeating_decimal(input).map(|value| value.to_string());

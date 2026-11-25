@@ -8581,6 +8581,25 @@ mod tests {
             index.results("分数: 计算 ans3+1"),
             Results::Value(Err(ValueError::Fraction(FractionError::MissingAnswer)))
         ));
+        for (query, expected) in [
+            ("分数: 小数 ans to 8", "0.33333333"),
+            ("分数: 循环小数 ans", "0.(3)"),
+            ("分数: 百分比 ans1*3", "100%"),
+            ("分数: 有效数字 ans1 to 4", "3.333e-1"),
+            ("分数: 工程计数法 ans1 to 4", "333.3e-3"),
+            ("分数: 限分母 ans1 to 2", "1/2"),
+            ("分数: 带分数 ans2+1/4", "9007199254740993 1/4"),
+        ] {
+            assert_eq!(
+                index.results(query).refillable_text(),
+                Some(expected),
+                "{query}"
+            );
+        }
+        assert!(matches!(
+            index.results("分数: 小数 ans3 to 8"),
+            Results::Value(Err(ValueError::Fraction(FractionError::MissingAnswer)))
+        ));
     }
 
     #[test]
