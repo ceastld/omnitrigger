@@ -343,6 +343,14 @@ impl MessageInput {
         self.move_to(offset, extend, cx);
     }
 
+    pub(super) fn delete_logical_line(&mut self, cx: &mut Context<Self>) {
+        let range = logical_line_deletion_range(&self.content, self.head);
+        if !range.is_empty() {
+            self.replace(Some(range), "", false, None);
+            cx.notify();
+        }
+    }
+
     pub(super) fn move_cursor_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.content.is_char_boundary(offset) {
             self.move_to(offset, false, cx);
@@ -1058,6 +1066,18 @@ fn logical_line_jump(text: &str, cursor: usize, down: bool) -> usize {
     logical_line_range(text, previous_end).start
 }
 
+fn logical_line_deletion_range(text: &str, cursor: usize) -> Range<usize> {
+    let line = logical_line_range(text, cursor);
+    if line.end < text.len() {
+        return line.start..logical_line_jump(text, line.end, true);
+    }
+    if line.start > 0 {
+        let previous = logical_line_jump(text, line.start, false);
+        return logical_line_range(text, previous).end..line.end;
+    }
+    line
+}
+
 fn word_start_before(text: &str, offset: usize) -> usize {
     text.unicode_word_indices()
         .take_while(|&(start, _)| start < offset)
@@ -1208,6 +1228,25 @@ mod tests {
         }
         assert_eq!(logical_line_jump("", 0, false), 0);
         assert_eq!(logical_line_jump("", 0, true), 0);
+    }
+
+    #[test]
+    fn deletes_whole_logical_lines_with_complete_line_breaks() {
+        let text = "甲\r\n乙\n\r🍵\u{2028}尾";
+        for (cursor, expected) in [
+            (0, 0..5),
+            (4, 0..5),
+            (5, 5..9),
+            (9, 9..10),
+            (10, 10..17),
+            (17, 14..20),
+            (20, 14..20),
+        ] {
+            assert_eq!(logical_line_deletion_range(text, cursor), expected);
+        }
+        assert_eq!(logical_line_deletion_range("a\r\n", 3), 1..3);
+        assert_eq!(logical_line_deletion_range("甲", 3), 0..3);
+        assert_eq!(logical_line_deletion_range("", 0), 0..0);
     }
 
     #[test]

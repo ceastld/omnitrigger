@@ -3541,6 +3541,16 @@ impl QuickSearch {
                 if self.select_example_range(Example::argument_range, event.is_held, window, cx) {
                     cx.stop_propagation();
                 }
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "k"
+            {
+                if !event.is_held {
+                    self.input
+                        .update(cx, |input, cx| input.delete_logical_line(cx));
+                }
+                cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "l" {
                 if !event.is_held {
                     self.input
@@ -8281,6 +8291,25 @@ mod tests {
                                 assert_eq!(input.selection(), expected, "{key}");
                                 assert_eq!(input.text(), multiline);
                                 assert_eq!(input.edit_revision(), revision);
+                            })
+                            .unwrap();
+                    }
+                    let after_delete = &multiline[..line_end];
+                    for (key, text, selection) in [
+                        ("ctrl-shift-k", after_delete, line_end..line_end),
+                        ("ctrl-z", multiline, multiline.len()..multiline.len()),
+                        ("ctrl-y", after_delete, line_end..line_end),
+                    ] {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(input.text(), text, "{key}");
+                                assert_eq!(input.selection(), selection, "{key}");
                             })
                             .unwrap();
                     }
