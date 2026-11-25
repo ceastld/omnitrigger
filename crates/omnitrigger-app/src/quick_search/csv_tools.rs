@@ -113,6 +113,7 @@ pub(super) enum CsvError {
     InvalidRowRange,
     MissingDataRow,
     CellArguments,
+    SetCellArguments,
     TableRegionArguments,
     GroupRowArguments,
     GroupRowsTooLarge,
@@ -339,6 +340,9 @@ impl CsvError {
             Self::MissingDataRow => "指定行号超出了表头之后的数据行数",
             Self::CellArguments => {
                 "填写数据行号和列名或列号，例如 [2,\"备注\"]。首条数据行是 1，末条是 -1"
+            }
+            Self::SetCellArguments => {
+                "填写数据行号、列名或列号和新的文本，例如 [2,\"备注\",\"已核对\"]"
             }
             Self::TableRegionArguments => {
                 "填写数据行范围和一组不同的列，例如 [\"2-4\",[\"备注\",1]]"
@@ -3803,12 +3807,34 @@ fn pick_csv_cell(input: &str) -> Result<String, CsvError> {
         return Err(invalid);
     }
     let mut rows = read_table_for_preview(data, ',')?;
+    Ok(std::mem::take(csv_cell_mut(&mut rows, row, column)?))
+}
+
+fn set_csv_cell(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+    let invalid = CsvError::SetCellArguments;
+    let ((row, column, text), data) =
+        json_argument_and_data::<(i128, ColumnReference, String)>(input, invalid)?;
+    if row == 0 {
+        return Err(invalid);
+    }
+    if text.contains('\0') {
+        return Err(CsvError::NullReplacementValue);
+    }
+    let mut rows = read_table_for_preview(data, ',')?;
+    *csv_cell_mut(&mut rows, row, column)? = text;
+    Ok(rows)
+}
+
+fn csv_cell_mut(
+    rows: &mut [Vec<String>],
+    row: i128,
+    column: ColumnReference,
+) -> Result<&mut String, CsvError> {
     let header = rows.first().ok_or(CsvError::MissingInput)?;
     let column = column.resolve(header)?;
     validate_column_width(&[column], header.len())?;
     let index = relative_data_row_index(row, rows.len() - 1).ok_or(CsvError::MissingDataRow)?;
-    let record = &mut rows[index + 1];
-    Ok(std::mem::take(&mut record[column]))
+    Ok(&mut rows[index + 1][column])
 }
 
 fn relative_data_row_index(row: i128, count: usize) -> Option<usize> {
@@ -8174,6 +8200,7 @@ fn csv_layout_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewD
             )
         }
         "取区域" | "pick-region" => pick_table_region(input),
+        "改单元格" | "set-cell" => set_csv_cell(input),
         _ => return None,
     };
     Some(projected.map(|rows| (write_rows(&rows, ','), rows)))
@@ -12766,6 +12793,38 @@ B,乙
         ] {
             assert_eq!(
                 transform_csv(&format!("取区域 {parameters} {data}")),
+                Err(error),
+                "{parameters}"
+            );
+        }
+    }
+
+    #[test]
+    fn replaces_an_addressed_csv_cell_without_rewriting_other_cell_values() {
+        let data = "编号,备注\r\n001,\" 原样\n备注 \"\r\n002,旧\r\n003,末";
+        let query = format!(r#"改单元格 [2,"备注","含,逗号\n\"引号\" "] {data}"#);
+        let expected =
+            "编号,备注\r\n001,\" 原样\n备注 \"\r\n002,\"含,逗号\n\"\"引号\"\" \"\r\n003,末";
+        let (csv, _) = csv_table_preview(&query).unwrap().unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        let clear = format!(r#"SET-CELL [-1,2,""] {data}"#);
+        assert_eq!(
+            transform_csv(&clear).as_deref(),
+            Ok("编号,备注\r\n001,\" 原样\n备注 \"\r\n002,旧\r\n003,\"\"")
+        );
+        let pipeline =
+            format!(r#"依次处理 ["改单元格 [-2,\"备注\",\"核对\"]","取单元格 [2,2]"] {data}"#);
+        assert_eq!(transform_csv(&pipeline).as_deref(), Ok("核对"));
+        for (parameters, error) in [
+            (r#"[0,2,"新"]"#, CsvError::SetCellArguments),
+            (r#"[-4,2,"新"]"#, CsvError::MissingDataRow),
+            (r#"[1,"名称","新"]"#, CsvError::MissingColumnName),
+            (r#"[1,2,99]"#, CsvError::SetCellArguments),
+            (r#"[1,2,"\u0000"]"#, CsvError::NullReplacementValue),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("改单元格 {parameters} {data}")),
                 Err(error),
                 "{parameters}"
             );

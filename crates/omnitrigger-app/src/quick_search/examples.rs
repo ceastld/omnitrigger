@@ -4804,6 +4804,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按行号和列名修改一个 CSV 单元格",
+        query: "CSV: 改单元格 [2,\"备注\",\"已核对\"] 编号,备注\n001,原样\n002,待核对\n003,原样",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "取 CSV 中各组最后一条完整记录",
         query: "CSV: 分组取行 [[\"组\"],-1] 组,编号,备注\nA,001,甲\nB,002,乙\nA,003,\"跨\n行\"\nA,004,丁",
     },
