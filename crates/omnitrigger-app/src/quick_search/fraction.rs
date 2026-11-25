@@ -363,9 +363,11 @@ fn simplify_fraction_using(
     if let Some(alignment) = alignment {
         return align_fraction(expression.trim(), alignment).map(|value| value.to_string());
     }
-    if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
-        let (source, places) =
-            split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
+    let grouped = verb == "千分位" || verb.eq_ignore_ascii_case("grouped-decimal");
+    if grouped || verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
+        let (source, places) = split_conversion(expression.trim())
+            .or_else(|| grouped.then_some((expression.trim(), "0")))
+            .ok_or(FractionError::Incomplete)?;
         let places = places.trim();
         let places = places
             .strip_suffix("位小数")
@@ -379,7 +381,12 @@ fn simplify_fraction_using(
         if places > MAX_DECIMAL_PLACES {
             return Err(FractionError::DecimalPlaces);
         }
-        return calculate(source).map(|value| rounded_decimal(value, places));
+        let decimal = rounded_decimal(calculate(source)?, places);
+        return Ok(if grouped {
+            group_decimal_digits(&decimal)
+        } else {
+            decimal
+        });
     }
     let engineering = verb == "工程计数法" || verb.eq_ignore_ascii_case("engineering-notation");
     if engineering || verb == "有效数字" || verb.eq_ignore_ascii_case("significant-digits") {
@@ -1172,6 +1179,23 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     let numerator = value.numer().magnitude() * unit;
     let rounded = round_magnitude_to_even(&numerator, value.denom().magnitude());
     format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places)
+}
+
+fn group_decimal_digits(decimal: &str) -> String {
+    let digits = decimal.strip_prefix('-').unwrap_or(decimal);
+    let (integer, fractional) = digits.split_at(digits.find('.').unwrap_or(digits.len()));
+    let mut grouped = String::with_capacity(decimal.len() + integer.len().saturating_sub(1) / 3);
+    if decimal.starts_with('-') {
+        grouped.push('-');
+    }
+    for (index, digit) in integer.char_indices() {
+        if index > 0 && (integer.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped.push_str(fractional);
+    grouped
 }
 
 #[derive(PartialEq, Eq)]
@@ -3618,6 +3642,23 @@ mod tests {
                 Err(FractionError::RoundPlaces)
             );
         }
+    }
+
+    #[test]
+    fn groups_integer_digits_after_exact_decimal_rounding() {
+        for (query, expected) in [
+            ("千分位 1234567", "1,234,567"),
+            ("grouped-decimal -2469135/2 to 2", "-1,234,567.50"),
+            ("千分位 999999.995 to 2", "1,000,000.00"),
+            ("千分位 1/8 to 2", "0.12"),
+            ("千分位 2万+3千 to 2", "23,000.00"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("千分位 42 to 101"),
+            Err(FractionError::DecimalPlaces)
+        );
     }
 
     #[test]

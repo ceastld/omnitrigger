@@ -6696,6 +6696,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用千分位显示舍入后的数值",
+        query: "分数: 千分位 1234567/2 to 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按有效数字输出科学计数法",
         query: "分数: 有效数字 9.995 to 3",
     },
@@ -7368,6 +7373,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "范围大小",
             "罗马数字",
             "小数",
+            "千分位",
         ],
         Scope::ExactData => &["单位表"],
         Scope::Duration => &[
