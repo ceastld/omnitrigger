@@ -110,6 +110,7 @@ pub(super) enum CsvError {
     NoColumnsRemain,
     InvalidRowRange,
     MissingDataRow,
+    CellArguments,
     MissingColumnName,
     AmbiguousColumnName,
     RenameArguments,
@@ -323,6 +324,7 @@ impl CsvError {
             Self::NoColumnsRemain => "需要至少保留一列",
             Self::InvalidRowRange => "填写从 1 开始的数据行号或区间，例如 2,4-6",
             Self::MissingDataRow => "指定行号超出了表头之后的数据行数",
+            Self::CellArguments => "填写从 1 开始的数据行号和列名或列号，例如 [2,\"备注\"]",
             Self::MissingColumnName => "表头中找不到所选列名",
             Self::AmbiguousColumnName => "表头中存在多个同名列",
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
@@ -1311,6 +1313,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 keep_selected: matches!(operation, "取行" | "pick-rows"),
             }
         }
+        "取单元格" | "pick-cell" => return pick_csv_cell(input),
         "去空白" | "trim-columns" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
@@ -3497,6 +3500,20 @@ fn column_number(input: &str) -> Result<usize, CsvError> {
         .ok()
         .filter(|&number| number > 0)
         .ok_or(CsvError::InvalidColumns)
+}
+
+fn pick_csv_cell(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::CellArguments;
+    let ((row, column), data) = json_argument_and_data::<(usize, ColumnReference)>(input, invalid)?;
+    if row == 0 {
+        return Err(invalid);
+    }
+    let mut rows = read_table_for_preview(data, ',')?;
+    let header = rows.first().ok_or(CsvError::MissingInput)?;
+    let column = column.resolve(header)?;
+    validate_column_width(&[column], header.len())?;
+    let record = rows.get_mut(row).ok_or(CsvError::MissingDataRow)?;
+    Ok(std::mem::take(&mut record[column]))
 }
 
 fn select_data_rows(
@@ -11184,6 +11201,31 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn picks_a_data_cell_without_treating_embedded_line_breaks_as_records() {
+        let data = "编号,备注\r\n001,茶\r\n002,\" 梨,\r\n\"\"苹果\"\" \"\r\n003,";
+        assert_eq!(
+            transform_csv(&format!("取单元格 [2,\"备注\"] {data}")).as_deref(),
+            Ok(" 梨,\r\n\"苹果\" ")
+        );
+        assert_eq!(
+            transform_csv(&format!("PICK-CELL [1,1] {data}")).as_deref(),
+            Ok("001")
+        );
+        assert_eq!(
+            transform_csv(&format!("取单元格 [3,2] {data}")).as_deref(),
+            Ok("")
+        );
+        assert_eq!(
+            transform_csv(&format!("取单元格 [0,1] {data}")),
+            Err(CsvError::CellArguments)
+        );
+        assert_eq!(
+            transform_csv(&format!("取单元格 [4,1] {data}")),
+            Err(CsvError::MissingDataRow)
+        );
     }
 
     #[test]

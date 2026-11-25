@@ -4576,6 +4576,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按数据行和列名取一个 CSV 单元格",
+        query: "CSV: 取单元格 [2,\"备注\"] 编号,备注\n001,茶\n002,\" 梨,苹果\n第二行 \"\n003,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按行号删除指定 CSV 数据行",
         query: "CSV: 删行 2,4 编号,备注\n001,茶\n002,梨\n003,苹果\n004,柿子",
     },
