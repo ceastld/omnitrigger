@@ -1,6 +1,4 @@
-use std::{iter, ops::Range, sync::OnceLock};
-
-use regex::Regex;
+use std::{iter, ops::Range};
 
 use super::{
     cidr::calculate_cidr,
@@ -9,6 +7,7 @@ use super::{
     decibel::convert_decibels,
     solid::calculate_solid,
     tempo::calculate_tempo,
+    text_tools::logical_newline_pattern,
     InputTableReport,
 };
 
@@ -136,11 +135,8 @@ pub(super) fn batch_calculation_report(
 }
 
 fn nonempty_batch_lines(input: &str) -> impl Iterator<Item = (usize, Range<usize>, &str)> {
-    static BREAKS: OnceLock<Regex> = OnceLock::new();
-    let breaks = BREAKS
-        .get_or_init(|| Regex::new(r"\r\n|[\r\n\u{2028}\u{2029}]").expect("固定的换行表达式有效"));
     let mut start = 0;
-    breaks
+    logical_newline_pattern()
         .find_iter(input)
         .map(|line_break| line_break.range())
         .chain(iter::once(input.len()..input.len()))

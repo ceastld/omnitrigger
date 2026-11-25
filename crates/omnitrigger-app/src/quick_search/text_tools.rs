@@ -99,6 +99,8 @@ pub(super) enum TextError {
     InvalidGraphemeRange,
     MissingLine,
     InvalidNumberLine,
+    InvalidLineNumbering,
+    LineNumberOverflow,
     InvalidLineEnding,
     EmptySearchText,
     LineContextArguments,
@@ -157,6 +159,8 @@ impl TextError {
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::EdgeLineCount => "填写正整数行数，例如 文本: 取末尾行 2",
             Self::InvalidLineStep => "填写起始行号和正整数步长，例如 文本: 间隔取行 2,3",
+            Self::InvalidLineNumbering => "用 JSON 填写起始编号和步长，例如 [100,10]",
+            Self::LineNumberOverflow => "至少一个编号超出 64 位有符号整数范围",
             Self::EmptyLineLimit => "填写每段空行最多保留的行数，例如 文本: 空行上限 2",
             Self::LineContextArguments => "填写关键词、前置行数和后置行数，例如 [\"错误\",1,2]",
             Self::InvalidGraphemeRange => "填写字素位置或区间，例如 2-4 或 -3..-1。负数从末尾计",
@@ -237,6 +241,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         return Some(line_lengths_csv(text));
     }
     match operation.to_ascii_lowercase().as_str() {
+        "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
         "markdown标题csv" | "markdown-headings-csv" => Some(markdown_headings_csv(text)),
         "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
         "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
@@ -631,6 +636,12 @@ pub(super) fn newline_pattern() -> &'static Regex {
     NEWLINES.get_or_init(|| Regex::new(r"\r\n|\n|\r").expect("固定的换行表达式有效"))
 }
 
+pub(super) fn logical_newline_pattern() -> &'static Regex {
+    static NEWLINES: OnceLock<Regex> = OnceLock::new();
+    NEWLINES
+        .get_or_init(|| Regex::new(r"\r\n|[\r\n\u{2028}\u{2029}]").expect("固定的换行表达式有效"))
+}
+
 fn limit_empty_lines(text: &str, limit: usize) -> String {
     let mut result = String::with_capacity(text.len());
     let mut start = 0;
@@ -909,16 +920,45 @@ fn strip_latin_accents(text: &str) -> String {
         .into_owned()
 }
 
+fn numbered_text_lines<'text>(
+    text: &'text str,
+    newlines: &'static Regex,
+) -> impl Iterator<Item = (usize, &'text str)> + 'text {
+    let mut lines = newlines.split(text).enumerate().peekable();
+    std::iter::from_fn(move || {
+        let (index, line) = lines.next()?;
+        (lines.peek().is_some() || !line.is_empty()).then_some((index, line))
+    })
+}
+
+fn number_lines_csv(input: &str) -> Result<String, TextError> {
+    let ((start, step), text) =
+        json_argument_and_tail::<(i64, i64)>(input).ok_or(TextError::InvalidLineNumbering)?;
+    let text = text_payload(text)?;
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut csv = String::from("编号,原文");
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        let number = i128::from(start) + i128::from(step) * index as i128;
+        let number = i64::try_from(number)
+            .map_err(|_| TextError::LineNumberOverflow)?
+            .to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [number.as_str(), line].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
 fn line_lengths_csv(text: &str) -> Result<String, TextError> {
     if text.is_empty() {
         return Err(TextError::MissingText);
     }
     let mut csv = String::from("行号,字素簇,码位,UTF-16单元,UTF-8字节");
-    let mut lines = newline_pattern().split(text).enumerate().peekable();
-    while let Some((index, line)) = lines.next() {
-        if line.is_empty() && lines.peek().is_none() {
-            break;
-        }
+    for (index, line) in numbered_text_lines(text, newline_pattern()) {
         let fields = [
             index + 1,
             line.graphemes(true).count(),
@@ -3893,6 +3933,30 @@ mod tests {
         }
         let entire = format!("context-lines [\"x\",{0},{0}] a\nx\nz", usize::MAX);
         assert_eq!(transform_text(&entire).as_deref(), Ok("a\nx\nz"));
+    }
+
+    #[test]
+    fn exports_custom_line_numbers_and_retains_empty_lines_across_separators() {
+        assert_eq!(
+            transform_text("编号CSV [100,10] \" 甲,一\r\n\r乙\u{2028}\u{2029}丙\n\"").as_deref(),
+            Ok("编号,原文\r\n100,\" 甲,一\"\r\n110,\"\"\r\n120,乙\r\n130,\"\"\r\n140,丙")
+        );
+        assert_eq!(
+            transform_text("number-lines-csv [1,-2] 甲\n乙\n丙").as_deref(),
+            Ok("编号,原文\r\n1,甲\r\n-1,乙\r\n-3,丙")
+        );
+        assert_eq!(
+            transform_text("编号CSV [9223372036854775807,1] 甲").as_deref(),
+            Ok("编号,原文\r\n9223372036854775807,甲")
+        );
+        assert_eq!(
+            transform_text("编号CSV [9223372036854775807,1] 甲\n乙"),
+            Err(TextError::LineNumberOverflow)
+        );
+        assert_eq!(
+            transform_text("编号CSV [100,0.5] 甲"),
+            Err(TextError::InvalidLineNumbering)
+        );
     }
 
     #[test]

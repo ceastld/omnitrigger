@@ -4128,6 +4128,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "为每行生成自定起点和步长的编号",
+        query: "文本: 编号CSV [100,10]\n北区\n\n南区",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按分隔符拆分成行",
         query: "文本: 拆分成行 \"、\" 苹果、梨",
     },
