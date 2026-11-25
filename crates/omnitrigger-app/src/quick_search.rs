@@ -107,7 +107,9 @@ use conversion::{
 use csv_tools::{transform_csv, CsvError};
 use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelinePreview};
 use decibel::{convert_decibels, DecibelError};
-use duration::{convert_duration, convert_exact_duration, is_clock_duration, DurationError};
+use duration::{
+    convert_duration, convert_exact_duration, is_clock_duration, is_duration_report, DurationError,
+};
 use equation::{solve_equation_output, solve_linear_system, EquationError, EquationOutput};
 use examples::{
     example_help_query, fraction_function_examples, function_examples, matching_examples,
@@ -1480,6 +1482,9 @@ impl Results {
     }
 
     fn duration_value(query: &str) -> Self {
+        if is_duration_report(query) {
+            return Self::table_value(convert_duration(query).map_err(ValueError::Duration));
+        }
         Self::Value(
             convert_duration(query)
                 .map_err(ValueError::Duration)
@@ -5051,6 +5056,19 @@ mod tests {
     }
 
     #[test]
+    fn previews_duration_quantiles_as_tables_in_search_and_pipelines() {
+        let expected = "分位数,时长\r\n25%,00:00:01.75\r\n0.5,00:00:02.5\r\n3/4,00:00:03.25";
+        for query in [
+            r#"时长: 分位表 ["25%",0.5,"3/4"] 3s,1s,2s,4s"#,
+            r#"处理: ["时长: 分位表 [\"25%\",0.5,\"3/4\"]"] 3s,1s,2s,4s"#,
+        ] {
+            let result = for_query(query, &[]);
+            assert!(result.table_preview().is_some(), "{query}");
+            assert_eq!(result.refillable_text(), Some(expected), "{query}");
+        }
+    }
+
+    #[test]
     fn previews_timestamp_reports_as_tables_without_changing_their_csv() {
         for term in [
             "时区ＣＳＶ 1ns to UTC, +08:00",
@@ -7859,6 +7877,7 @@ mod tests {
                     "时长: 频数中位数 01:00@2,02:00@2",
                     "时长: 中位数 01:25,02:40,00:55",
                     "时长: 分位数 75% 3s,1s,2s,4s",
+                    "时长: 分位表 [\"25%\",0.5,\"3/4\"] 3s,1s,2s,4s",
                     "时长: 最短 01:25,02:40,00:55",
                     "时长: 最长 01:25,02:40,00:55",
                     "时长: 极差 01:25,02:40,00:55",

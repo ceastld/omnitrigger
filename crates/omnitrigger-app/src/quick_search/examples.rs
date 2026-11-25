@@ -2200,6 +2200,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "在表格中比较多个时长分位数",
+        query: r#"时长: 分位表 ["25%",0.5,"3/4"] 3s,1s,2s,4s"#,
+    },
+    Example {
+        icon: Icon::Clock,
         title: "从一组时长中找出最短值",
         query: "时长: 最短 01:25,02:40,00:55",
     },
@@ -6869,6 +6874,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "向上取整",
             "中位数",
             "分位数",
+            "分位表",
             "最短",
             "最长",
             "极差",

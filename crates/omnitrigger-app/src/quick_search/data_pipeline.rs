@@ -18,7 +18,7 @@ use super::{
         scatter_arguments, transform_csv, ColumnReference, CsvError,
     },
     decibel::convert_decibels,
-    duration::convert_duration,
+    duration::{convert_duration, is_duration_report},
     equation::{equation_chart, solve_equation, solve_linear_system},
     fraction::{fraction_csv_report, simplify_fraction},
     json_tools::{
@@ -590,6 +590,10 @@ fn prepare_pipeline_preview(
         }),
         Scope::Timestamp if is_timestamp_report(query) => {
             let report = convert_timestamp(query, now.to_utc()).map_err(|cause| cause.message());
+            Some(report_preview(report, error, csv_error))
+        }
+        Scope::Duration if is_duration_report(query) => {
+            let report = convert_duration(query).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))
         }
         Scope::Cidr => cidr_csv_report(query).map(|report| {

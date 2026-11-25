@@ -2,10 +2,13 @@ use std::time::Duration;
 
 use num_bigint::BigInt;
 use num_rational::BigRational;
+use serde_json::value::RawValue;
 
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
+use super::csv_tools::write_rows;
 use super::fraction::calculate_fraction;
+use super::operators::json_argument_and_tail;
 use super::ratio_allocation::{allocate_shares, split_allocation, RatioAllocationError};
 use super::statistics::{interpolate_ordered_quantile, parse_probability};
 
@@ -16,6 +19,7 @@ const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
 const MAX_FRACTION_DIGITS: usize = 16;
 const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
 const MAX_DURATION_QUANTILE_TERMS: usize = 128;
+const MAX_DURATION_QUANTILE_LEVELS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DurationError {
@@ -32,6 +36,7 @@ pub(super) enum DurationError {
     DivisionByZero,
     InvalidFrequency,
     InvalidQuantileArguments,
+    InvalidQuantileTableArguments,
     InvalidScaleFactor,
     InvalidRoundingArguments,
     InvalidAllocation,
@@ -61,6 +66,9 @@ impl DurationError {
             Self::InvalidFrequency => "按 时长@次数 填写每组，次数须为正整数",
             Self::InvalidQuantileArguments => {
                 "填写 0 至 1 的概率及 1 至 128 个时长，例如 75% 1s,2s,3s,4s"
+            }
+            Self::InvalidQuantileTableArguments => {
+                "填写 1 至 16 个概率的 JSON 数组和时长列表，例如 [\"25%\",0.5,\"3/4\"] 1s,2s,3s,4s"
             }
             Self::InvalidScaleFactor => "用 @ 分隔时长和缩放系数，系数可写 2/3、50% 或精确算式",
             Self::InvalidRoundingArguments => "用 @ 分隔时长和正的舍入步长，例如 01:07:30 @ 15分钟",
@@ -99,6 +107,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
     if matches!(operation, "分摊" | "allocate") {
         return allocate_duration(values, output);
+    }
+    if is_duration_report(operation) {
+        return duration_quantiles_table(values, output);
     }
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
@@ -422,6 +433,15 @@ fn median_duration_list(input: &str, use_frequencies: bool) -> Result<i128, Dura
     Err(DurationError::Incomplete)
 }
 
+pub(super) fn is_duration_report(query: &str) -> bool {
+    query.split_whitespace().next().is_some_and(|operation| {
+        matches!(
+            normalize(operation).to_ascii_lowercase().as_str(),
+            "分位表" | "quantiles-csv"
+        )
+    })
+}
+
 fn quantile_duration_list(input: &str) -> Result<i128, DurationError> {
     let invalid = DurationError::InvalidQuantileArguments;
     let (probability, durations) = input
@@ -429,6 +449,14 @@ fn quantile_duration_list(input: &str) -> Result<i128, DurationError> {
         .split_once(char::is_whitespace)
         .ok_or(invalid)?;
     let probability = parse_probability(probability).map_err(|_| invalid)?;
+    let values = ordered_duration_values(durations, invalid)?;
+    duration_quantile_nanos(&values, &probability)
+}
+
+fn ordered_duration_values(
+    durations: &str,
+    invalid: DurationError,
+) -> Result<Vec<BigRational>, DurationError> {
     let mut values = duration_list_values(durations)
         .take(MAX_DURATION_QUANTILE_TERMS + 1)
         .map(|value| value.map(|nanos| BigRational::from_integer(nanos.into())))
@@ -437,7 +465,14 @@ fn quantile_duration_list(input: &str) -> Result<i128, DurationError> {
         return Err(invalid);
     }
     values.sort_unstable();
-    let value = interpolate_ordered_quantile(values.len() as u64, &probability, |rank| {
+    Ok(values)
+}
+
+fn duration_quantile_nanos(
+    values: &[BigRational],
+    probability: &BigRational,
+) -> Result<i128, DurationError> {
+    let value = interpolate_ordered_quantile(values.len() as u64, probability, |rank| {
         &values[rank as usize]
     })
     .map_err(|_| DurationError::OutOfRange)?;
@@ -445,6 +480,36 @@ fn quantile_duration_list(input: &str) -> Result<i128, DurationError> {
         return Err(DurationError::Precision);
     }
     i128::try_from(value.to_integer()).map_err(|_| DurationError::OutOfRange)
+}
+
+fn duration_quantiles_table(input: &str, output: Option<&str>) -> Result<String, DurationError> {
+    let invalid = DurationError::InvalidQuantileTableArguments;
+    let (probabilities, durations) =
+        json_argument_and_tail::<Vec<Box<RawValue>>>(input.trim_start()).ok_or(invalid)?;
+    if !(1..=MAX_DURATION_QUANTILE_LEVELS).contains(&probabilities.len()) {
+        return Err(invalid);
+    }
+    let values = ordered_duration_values(durations, invalid)?;
+    let mut rows = vec![["分位数".to_owned(), "时长".to_owned()]];
+    for raw in probabilities {
+        let label = if raw.get().starts_with('"') {
+            serde_json::from_str::<String>(raw.get()).map_err(|_| invalid)?
+        } else {
+            raw.get().to_owned()
+        };
+        let label = label.trim();
+        let probability = parse_probability(label).map_err(|_| invalid)?;
+        let time = duration_quantile_nanos(&values, &probability)?;
+        let sign = if time < 0 { "-" } else { "" };
+        let nanos = time.unsigned_abs();
+        let formatted = if let Some(unit) = output {
+            format_duration_unit(nanos, sign, unit)?
+        } else {
+            format_clock_duration(nanos, sign)
+        };
+        rows.push([label.to_owned(), formatted]);
+    }
+    Ok(write_rows(&rows, ','))
 }
 
 pub(super) fn format_clock_duration(nanos: u128, sign: &str) -> String {
@@ -947,6 +1012,33 @@ mod tests {
         assert_eq!(
             convert_duration("range -18446744073709551615s,18446744073709551615s"),
             Err(DurationError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn previews_multiple_duration_quantiles_in_requested_order() {
+        for (query, expected) in [
+            (
+                r#"分位表 ["75%",0.5,"1/4"] 3s,1s,2s,4s"#,
+                "分位数,时长\r\n75%,00:00:03.25\r\n0.5,00:00:02.5\r\n1/4,00:00:01.75",
+            ),
+            (
+                r#"quantiles-csv ["0%","100%"] -1s,2s to ms"#,
+                "分位数,时长\r\n0%,-1000 ms\r\n100%,2000 ms",
+            ),
+        ] {
+            assert!(is_duration_report(query));
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["分位表 [] 1ns", "分位表 [true] 1ns", "分位表 [1.1] 1ns"] {
+            assert_eq!(
+                convert_duration(query),
+                Err(DurationError::InvalidQuantileTableArguments)
+            );
+        }
+        assert_eq!(
+            convert_duration("分位表 [0.5] 1ns,2ns"),
+            Err(DurationError::Precision)
         );
     }
 
