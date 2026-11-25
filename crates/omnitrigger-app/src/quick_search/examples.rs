@@ -3523,6 +3523,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按最近整数商求余数，中点取偶数商",
+        query: "remainder(6,4)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算皮尔逊相关系数",
         query: "corr(1,2,2,4,3,6)",
     },

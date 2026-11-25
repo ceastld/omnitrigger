@@ -1849,6 +1849,23 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.is_close_function();
         }
+        if name == "remainder" {
+            self.remaining = rest;
+            let [dividend, divisor]: [BigRational; 2] = self
+                .fixed_function_arguments(2)?
+                .try_into()
+                .expect("remainder 有两个参数");
+            if divisor.numer().sign() == Sign::NoSign {
+                return Err(FractionError::ZeroDenominator);
+            }
+            let quotient = &dividend / &divisor;
+            let magnitude =
+                round_magnitude_to_even(quotient.numer().magnitude(), quotient.denom().magnitude());
+            let rounded = BigInt::from_biguint(quotient.numer().sign(), magnitude);
+            let remainder = dividend - divisor * rounded;
+            ensure_exact_size(&remainder)?;
+            return Ok(remainder);
+        }
         if name == "clamp" {
             self.remaining = rest;
             return self.clamp_function();
@@ -3103,6 +3120,24 @@ mod tests {
             assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
         }
         assert!(calculate_fraction("fma(2,3)").is_err());
+    }
+
+    #[test]
+    fn computes_nearest_rational_remainder_with_even_quotient_at_ties() {
+        for (query, expected) in [
+            ("remainder(3/2,1)", "-1/2"),
+            ("remainder(5/2,1)", "1/2"),
+            ("remainder(-3/2,1)", "1/2"),
+            ("remainder(7/6,-1/3)", "-1/6"),
+            ("remainder((2**1000)**5+1,1/(2**1000)**5)", "0"),
+        ] {
+            assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
+        }
+        assert_eq!(
+            calculate_fraction("remainder(3,0)"),
+            Err(FractionError::ZeroDenominator)
+        );
+        assert!(calculate_fraction("remainder(3)").is_err());
     }
 
     #[test]

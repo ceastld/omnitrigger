@@ -23,6 +23,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "e" => return Some(NamedValue::Constant(E)),
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "isclose" => return Some(NamedValue::Aggregate(is_close)),
+        "remainder" => return Some(NamedValue::Aggregate(nearest_remainder)),
         "fsum" => return Some(NamedValue::Aggregate(exact_float_sum)),
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
@@ -509,6 +510,36 @@ fn exact_float_sum(values: &[f64]) -> f64 {
         return f64::from_bits(sign | (EXPONENT_MASK << FRACTION_BITS));
     }
     f64::from_bits(sign | (exponent << FRACTION_BITS) | (mantissa & FRACTION_MASK))
+}
+
+fn nearest_remainder(values: &[f64]) -> f64 {
+    let [dividend, divisor] = *values else {
+        return f64::NAN;
+    };
+    let remainder = dividend % divisor;
+    if !remainder.is_finite() || divisor.is_infinite() {
+        return remainder;
+    }
+
+    let magnitude = remainder.abs();
+    let divisor = divisor.abs();
+    // 与互补余数比较，避免极小的除数在减半时舍入。
+    let complement = divisor - magnitude;
+    if magnitude < complement {
+        return remainder;
+    }
+    if magnitude == complement {
+        let period = divisor + divisor;
+        let offset = if period.is_finite() {
+            dividend.abs() % period
+        } else {
+            dividend.abs()
+        };
+        if offset < divisor {
+            return remainder;
+        }
+    }
+    -complement.copysign(dividend)
 }
 
 fn is_close(values: &[f64]) -> f64 {

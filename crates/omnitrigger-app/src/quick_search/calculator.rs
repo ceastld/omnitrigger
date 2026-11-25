@@ -898,6 +898,34 @@ mod tests {
     }
 
     #[test]
+    fn computes_binary64_remainders_without_rounding_the_quotient() {
+        for (query, expected) in [
+            ("remainder(7,4)", -1.0),
+            ("remainder(6,4)", -2.0),
+            ("remainder(10,4)", 2.0),
+            ("remainder(-6,4)", 2.0),
+            ("remainder(6,-4)", -2.0),
+            ("remainder(2**53,3)", -1.0),
+            ("remainder(1e-323,1.5e-323)", -f64::from_bits(1)),
+            ("remainder(1.5*2**1023,2**1023)", -2.0_f64.powi(1022)),
+        ] {
+            assert_eq!(evaluate(query), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            evaluate("remainder(-6,3)").unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            evaluate("remainder(3,0)"),
+            Err(CalculationError::FunctionDomain)
+        );
+        assert_eq!(
+            evaluate("remainder(3)"),
+            Err(CalculationError::FunctionDomain)
+        );
+    }
+
+    #[test]
     fn measures_binary64_spacing_at_zero_powers_of_two_and_both_extremes() {
         for (query, expected) in [
             ("ulp(0)", f64::from_bits(1)),
