@@ -198,6 +198,8 @@ enum IntervalOperation {
     Difference,
 }
 
+type AbsoluteInterval = (DateTime<Utc>, DateTime<Utc>);
+
 impl TimestampReport {
     fn from_operation(operation: &str) -> Option<Self> {
         match operation.to_ascii_lowercase().as_str() {
@@ -237,6 +239,9 @@ fn convert_timestamp_with_local(
     let (operation, argument) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     if operation == "间隔" || operation.eq_ignore_ascii_case("between") {
         return timestamp_interval(argument, now);
+    }
+    if operation == "覆盖时长" || operation.eq_ignore_ascii_case("covered-duration") {
+        return absolute_intervals_covered_duration(argument, now);
     }
     if operation == "时区候选" || operation.eq_ignore_ascii_case("zone-candidates") {
         return timestamp_candidates(argument, &to_local);
@@ -737,17 +742,16 @@ fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, Timesta
     format_timestamp_delta(end - start, output)
 }
 
-fn absolute_intervals_csv(
+fn parse_absolute_intervals(
     input: &str,
     now: DateTime<Utc>,
-    operation: IntervalOperation,
-) -> Result<String, TimestampError> {
+) -> Result<Vec<AbsoluteInterval>, TimestampError> {
     let invalid = TimestampError::AbsoluteIntervalsArguments;
     let intervals: Vec<[String; 2]> = serde_json::from_str(input).map_err(|_| invalid)?;
     if !(1..=MAX_ABSOLUTE_INTERVALS).contains(&intervals.len()) {
         return Err(invalid);
     }
-    let intervals = intervals
+    intervals
         .into_iter()
         .map(|[start, end]| {
             let start = interval_endpoint(start.trim(), Some(now))?;
@@ -757,7 +761,26 @@ fn absolute_intervals_csv(
             }
             Ok((start, end))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect()
+}
+
+fn absolute_intervals_covered_duration(
+    input: &str,
+    now: DateTime<Utc>,
+) -> Result<String, TimestampError> {
+    let total = merge_absolute_intervals(parse_absolute_intervals(input, now)?)
+        .into_iter()
+        .map(|(start, end)| absolute_elapsed_nanoseconds(start, end))
+        .sum();
+    format_timestamp_delta(total, None)
+}
+
+fn absolute_intervals_csv(
+    input: &str,
+    now: DateTime<Utc>,
+    operation: IntervalOperation,
+) -> Result<String, TimestampError> {
+    let intervals = parse_absolute_intervals(input, now)?;
     let intervals = match operation {
         IntervalOperation::Merge => merge_absolute_intervals(intervals),
         IntervalOperation::Intersection => intervals
@@ -782,11 +805,9 @@ fn absolute_intervals_csv(
     Ok(result)
 }
 
-fn merge_absolute_intervals(
-    mut intervals: Vec<(DateTime<Utc>, DateTime<Utc>)>,
-) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+fn merge_absolute_intervals(mut intervals: Vec<AbsoluteInterval>) -> Vec<AbsoluteInterval> {
     intervals.sort_unstable();
-    let mut merged: Vec<(_, DateTime<Utc>)> = Vec::new();
+    let mut merged: Vec<AbsoluteInterval> = Vec::new();
     for (start, end) in intervals {
         if let Some((_, merged_end)) = merged
             .last_mut()
@@ -800,9 +821,7 @@ fn merge_absolute_intervals(
     merged
 }
 
-fn subtract_absolute_intervals(
-    mut intervals: Vec<(DateTime<Utc>, DateTime<Utc>)>,
-) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+fn subtract_absolute_intervals(mut intervals: Vec<AbsoluteInterval>) -> Vec<AbsoluteInterval> {
     let (source, cuts) = intervals.split_first_mut().expect("已验证至少有一段时间");
     let (mut start, end) = *source;
     cuts.sort_unstable();
@@ -1311,6 +1330,29 @@ mod tests {
         assert_eq!(
             convert_timestamp(r#"区间合并 [["1ns","0s"]]"#, now),
             Err(TimestampError::AbsoluteIntervalOrder)
+        );
+    }
+
+    #[test]
+    fn sums_duration_after_merging_overlapping_absolute_intervals() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = r#"覆盖时长 [["0s","10s"],["5s","15s"],["20s","26s"]]"#;
+        assert_eq!(convert_timestamp(query, now).as_deref(), Ok("00:00:21"));
+        assert_eq!(
+            convert_timestamp(
+                r#"COVERED-DURATION [["10ns","12ns"],["-1ns","2ns"],["现在","3ns"],["3ns","4ns"]]"#,
+                now,
+            )
+            .as_deref(),
+            Ok("00:00:00.000000007"),
+        );
+        assert_eq!(
+            convert_timestamp(r#"覆盖时长 [["0s","0s"]]"#, now),
+            Err(TimestampError::AbsoluteIntervalOrder),
+        );
+        assert_eq!(
+            convert_timestamp("覆盖时长 []", now),
+            Err(TimestampError::AbsoluteIntervalsArguments),
         );
     }
 
