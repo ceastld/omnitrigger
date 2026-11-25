@@ -898,6 +898,19 @@ mod tests {
     }
 
     #[test]
+    fn computes_log_sum_exp_for_overflowing_exponents_and_tiny_corrections() {
+        let ln_two = std::f64::consts::LN_2;
+        for query in ["logsumexp(1000,1000)-1000", "logsumexp(-1000,-1000)+1000"] {
+            assert!((evaluate(query).unwrap() - ln_two).abs() < 1e-12, "{query}");
+        }
+        let tiny = evaluate("logsumexp(0,-50)").unwrap();
+        assert!(tiny > 0.0);
+        assert!((tiny / (-50.0_f64).exp() - 1.0).abs() < 4.0 * f64::EPSILON);
+        assert_eq!(evaluate("logsumexp(-1234)"), Ok(-1234.0));
+        assert!((evaluate("logsumexp(0,0,0)").unwrap() - 3.0_f64.ln()).abs() <= f64::EPSILON);
+    }
+
+    #[test]
     fn evaluates_hyperbolic_functions_and_rejects_invalid_inverse_arguments() {
         for (query, expected) in [
             ("sinh(ln(2))", 0.75),

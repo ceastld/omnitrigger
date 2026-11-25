@@ -32,6 +32,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             }));
         }
         "fsum" => return Some(NamedValue::Aggregate(exact_float_sum)),
+        "logsumexp" => return Some(NamedValue::Aggregate(log_sum_exp)),
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
@@ -474,6 +475,24 @@ fn permutations(values: &[f64]) -> f64 {
         }
     }
     result as f64
+}
+
+fn log_sum_exp(values: &[f64]) -> f64 {
+    let Some((largest_index, &largest)) = values
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+    else {
+        return f64::NAN;
+    };
+    // 提出最大的指数项，单独保留它对应的 1，避免微小的和在取对数前丢失。
+    let rest = values
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != largest_index)
+        .map(|(_, value)| (value - largest).exp())
+        .sum::<f64>();
+    largest + rest.ln_1p()
 }
 
 fn exact_float_sum(values: &[f64]) -> f64 {
