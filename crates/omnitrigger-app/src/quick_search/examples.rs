@@ -1834,6 +1834,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r"窗口: 标题正则=^报告[0-9]+",
     },
     Example {
+        icon: Icon::Search,
+        title: "按正则表达式排除窗口标题",
+        query: r"窗口: 标题正则=^报告 排除标题正则=草稿",
+    },
+    Example {
         icon: Icon::Grid,
         title: "把窗口按程序和标题排序",
         query: "窗口: 排序=进程",

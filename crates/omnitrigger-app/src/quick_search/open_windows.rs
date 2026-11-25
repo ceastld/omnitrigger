@@ -93,7 +93,7 @@ impl WindowQueryError {
                 "状态可用 已最小化 或 未最小化。每类进程条件填写一次，单个文件名含空格时加双引号。"
             }
             Self::ProcessList => "填写包含程序文件名的非空 JSON 数组，同一个名称只填一次。",
-            Self::TitleRegex => "填写一个有效的标题正则表达式，含空格时用双引号包住。",
+            Self::TitleRegex => "标题正则与排除标题正则可各填一次，表达式含空格时用双引号包住。",
             Self::Order => "排序可用 标题 或 进程，每次查询可指定一种排序。",
             Self::RepeatedExport => "每次查询只填写一种输出格式。",
             Self::ExportSelection { .. } => "请缩短查询后选择输出格式。",
@@ -174,6 +174,7 @@ struct WindowFilter {
     excluded_process: Option<HashSet<String>>,
     minimized: Option<bool>,
     title_regex: Option<Regex>,
+    excluded_title_regex: Option<Regex>,
     order: Option<WindowOrder>,
     export: Option<WindowExport>,
     terms: String,
@@ -192,6 +193,16 @@ impl WindowFilter {
 
     fn matches_state(&self, minimized: bool) -> bool {
         self.minimized.is_none_or(|expected| expected == minimized)
+    }
+
+    fn matches_title(&self, title: &str) -> bool {
+        self.title_regex
+            .as_ref()
+            .is_none_or(|pattern| pattern.is_match(title))
+            && !self
+                .excluded_title_regex
+                .as_ref()
+                .is_some_and(|pattern| pattern.is_match(title))
     }
 }
 
@@ -291,10 +302,7 @@ impl OpenWindowsIndex {
             .filter(|window| {
                 filter.matches_process(&window.process_key)
                     && filter.matches_state(window.window.minimized)
-                    && filter
-                        .title_regex
-                        .as_ref()
-                        .is_none_or(|pattern| pattern.is_match(&window.window.title))
+                    && filter.matches_title(&window.window.title)
             })
             .filter_map(|window| {
                 let process_key = if filter.process.is_some() {
@@ -440,6 +448,7 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
     let mut excluded_process = None;
     let mut minimized = None;
     let mut title_regex = None;
+    let mut excluded_title_regex = None;
     let mut order = None;
     let mut export = None;
     while let Some((name, input)) = query.split_once(['=', '＝']) {
@@ -494,13 +503,19 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
                 query = rest.trim_start();
                 continue;
             }
-            "标题正则" | "title-regex" => {
-                if title_regex.is_some() {
+            option @ ("标题正则" | "title-regex" | "排除标题正则" | "exclude-title-regex") =>
+            {
+                let slot = if matches!(option, "标题正则" | "title-regex") {
+                    &mut title_regex
+                } else {
+                    &mut excluded_title_regex
+                };
+                if slot.is_some() {
                     return Err(TitleRegex);
                 }
                 let (pattern, rest) =
                     query_option_value(input, |character| character == '"').ok_or(TitleRegex)?;
-                title_regex = Some(compile_regex(pattern).map_err(|_| TitleRegex)?);
+                *slot = Some(compile_regex(pattern).map_err(|_| TitleRegex)?);
                 query = rest;
                 continue;
             }
@@ -545,6 +560,7 @@ fn window_query(mut query: &str) -> Result<WindowFilter, WindowQueryError> {
         excluded_process,
         minimized,
         title_regex,
+        excluded_title_regex,
         order,
         export,
         terms: search_key(query),
@@ -881,6 +897,38 @@ mod tests {
                 ),
                 "{query}"
             );
+        }
+    }
+
+    #[test]
+    fn excludes_matching_raw_titles_alongside_other_window_conditions() {
+        let filter = window_query(
+            r#"标题正则="^Budget " 排除标题正则＝"(?i) draft$" 进程=notes.exe 状态=已最小化 预算"#,
+        )
+        .unwrap();
+        assert!(filter.matches_title("Budget Ａ"));
+        assert!(!filter.matches_title("Budget Ａ DRAFT"));
+        assert!(!filter.matches_title("Other Ａ"));
+        assert!(filter.matches_process("notes.exe"));
+        assert!(filter.matches_state(true));
+        assert_eq!(filter.terms, "预算");
+        let filter = window_query(r"exclude-title-regex=Ａ").unwrap();
+        assert!(!filter.matches_title("Budget Ａ"));
+        assert!(filter.matches_title("Budget A"));
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        assert!(matches!(
+            index.results("输出=JSON 标题正则=^报告 排除标题正则=草稿"),
+            Results::Value(Ok(result)) if result.text == "[]"
+        ));
+        for query in [
+            "排除标题正则=",
+            "排除标题正则=[",
+            "排除标题正则=甲 exclude-title-regex=乙",
+        ] {
+            assert!(matches!(
+                window_query(query),
+                Err(WindowQueryError::TitleRegex)
+            ));
         }
     }
 
