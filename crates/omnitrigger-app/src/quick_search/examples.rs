@@ -144,6 +144,7 @@ impl Example {
                 | Scope::Path
                 | Scope::Uuid
                 | Scope::Ulid
+                | Scope::Isbn
                 | Scope::Circuit
                 | Scope::Complex
                 | Scope::Circle
@@ -2787,6 +2788,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "读取 UUID 中的 UTC 时间",
         query: "UUID: 时间 017f22e2-79b0-7cc3-98c4-dc0c0c07398f",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "检查图书 ISBN 的校验位",
+        query: "ISBN: 校验 978-0-11-000222-4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把 10 位图书编号转成 13 位 ISBN",
+        query: "ISBN: 转13位 0-8044-2957-X",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把以 978 开头的 ISBN 转回 10 位",
+        query: "ISBN: 转10位 9780804429573",
     },
     Example {
         icon: Icon::Terminal,
@@ -7474,6 +7490,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Percentage
         | Scope::Uuid
         | Scope::Ulid
+        | Scope::Isbn
         | Scope::Vector
         | Scope::Matrix
         | Scope::Complex

@@ -17,6 +17,9 @@ pub(super) enum IdentifierError {
     InvalidUuidNamespace,
     InvalidUuidName,
     InvalidUlid,
+    InvalidIsbn,
+    IsbnChecksum,
+    IsbnTenUnavailable,
     InvalidOperation,
     MissingUuidTime,
     TimeRange,
@@ -31,6 +34,9 @@ impl IdentifierError {
             Self::InvalidUuidNamespace => "命名空间可用 DNS、URL、OID、X500 或 UUID",
             Self::InvalidUuidName => "用有效的 JSON 字符串引用名称，例如 \" 名称 \"",
             Self::InvalidUlid => "ULID 须为 26 位 Crockford Base32，首位为 0 至 7",
+            Self::InvalidIsbn => "输入 10 位或 13 位 ISBN，10 位编号末位可为 X",
+            Self::IsbnChecksum => "ISBN 校验位错误",
+            Self::IsbnTenUnavailable => "以 979 开头的 ISBN 只有 13 位格式",
             Self::InvalidOperation => "可用 格式 或 时间，UUID 还支持 紧凑、URN 和 v5",
             Self::MissingUuidTime => "请输入带时间字段的 UUIDv1、UUIDv6 或 UUIDv7",
             Self::TimeRange => "标识符的时间超出可显示范围",
@@ -136,6 +142,87 @@ pub(super) fn transform_ulid(query: &str) -> Result<String, IdentifierError> {
     }
 }
 
+pub(super) fn transform_isbn(query: &str) -> Result<String, IdentifierError> {
+    enum IsbnOperation {
+        Normalize,
+        Validate,
+        ToTen,
+        ToThirteen,
+    }
+    let query = normalize(query);
+    let query = query.trim();
+    let (operation, rest) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+    let (operation, source) = match operation.to_ascii_lowercase().as_str() {
+        "格式" | "normalize" => (IsbnOperation::Normalize, rest),
+        "校验" | "validate" => (IsbnOperation::Validate, rest),
+        "转10位" | "to-10" => (IsbnOperation::ToTen, rest),
+        "转13位" | "to-13" => (IsbnOperation::ToThirteen, rest),
+        _ => (IsbnOperation::Normalize, query),
+    };
+    let isbn: String = source
+        .chars()
+        .filter(|&ch| !ch.is_whitespace() && !matches!(ch, '-' | '\u{2010}' | '\u{2011}'))
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect();
+    if isbn.is_empty() {
+        return Err(IdentifierError::Incomplete);
+    }
+    let short = isbn.len() == 10;
+    let book_prefix =
+        isbn.starts_with("978") || (isbn.starts_with("979") && !isbn.starts_with("9790"));
+    let valid_shape = short || (isbn.len() == 13 && book_prefix);
+    if !isbn.is_ascii() || !valid_shape {
+        return Err(IdentifierError::InvalidIsbn);
+    }
+    let (digits, provided) = isbn.split_at(isbn.len() - 1);
+    if !digits.bytes().all(|digit| digit.is_ascii_digit())
+        || !(provided.as_bytes()[0].is_ascii_digit() || (short && provided == "X"))
+    {
+        return Err(IdentifierError::InvalidIsbn);
+    }
+    if provided.as_bytes()[0] != isbn_check_digit(digits, short) {
+        return Err(IdentifierError::IsbnChecksum);
+    }
+    match operation {
+        IsbnOperation::Normalize => Ok(isbn),
+        IsbnOperation::Validate => Ok(format!("ISBN-{} 校验位正确", isbn.len())),
+        IsbnOperation::ToThirteen if short => {
+            let mut result = format!("978{digits}");
+            result.push(char::from(isbn_check_digit(&result, false)));
+            Ok(result)
+        }
+        IsbnOperation::ToTen if !short => {
+            let mut result = digits
+                .strip_prefix("978")
+                .ok_or(IdentifierError::IsbnTenUnavailable)?
+                .to_owned();
+            result.push(char::from(isbn_check_digit(&result, true)));
+            Ok(result)
+        }
+        IsbnOperation::ToTen | IsbnOperation::ToThirteen => Ok(isbn),
+    }
+}
+
+fn isbn_check_digit(digits: &str, short: bool) -> u8 {
+    let sum: u32 = digits
+        .bytes()
+        .enumerate()
+        .map(|(index, digit)| {
+            let weight = if short {
+                10 - index as u32
+            } else {
+                1 + 2 * (index % 2) as u32
+            };
+            u32::from(digit - b'0') * weight
+        })
+        .sum();
+    let modulus = if short { 11 } else { 10 };
+    match (modulus - sum % modulus) % modulus {
+        10 => b'X',
+        check => b'0' + check as u8,
+    }
+}
+
 fn identifier_input(query: &str) -> Result<(&str, &str), IdentifierError> {
     let query = query.trim();
     if query.is_empty() {
@@ -153,6 +240,33 @@ fn format_time(time: Option<DateTime<Utc>>) -> Result<String, IdentifierError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checks_and_converts_book_numbers_with_fullwidth_and_hyphenated_input() {
+        for (input, output) in [
+            ("０‑８０４４‑２９５７‑ｘ", "080442957X"),
+            ("0 8044 2957 X", "080442957X"),
+            ("校验 978-0-11-000222-4", "ISBN-13 校验位正确"),
+            ("转13位 0-8044-2957-X", "9780804429573"),
+            ("TO-10 9780804429573", "080442957X"),
+            ("转13位 9791090636071", "9791090636071"),
+        ] {
+            assert_eq!(transform_isbn(input).as_deref(), Ok(output));
+        }
+        assert_eq!(
+            transform_isbn("校验 9780110002225"),
+            Err(IdentifierError::IsbnChecksum)
+        );
+        assert_eq!(
+            transform_isbn("校验 9790000000001"),
+            Err(IdentifierError::InvalidIsbn)
+        );
+        assert_eq!(
+            transform_isbn("转10位 9791090636071"),
+            Err(IdentifierError::IsbnTenUnavailable)
+        );
+        assert_eq!(transform_isbn("校验"), Err(IdentifierError::Incomplete));
+    }
 
     #[test]
     fn generates_rfc_uuid_v5_values_and_preserves_quoted_utf8_names() {

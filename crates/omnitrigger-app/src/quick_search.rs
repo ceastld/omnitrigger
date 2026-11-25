@@ -120,7 +120,7 @@ use examples::{
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
 use fraction::{calculate_fraction, FractionError};
-use identifiers::{transform_ulid, transform_uuid, IdentifierError};
+use identifiers::{transform_isbn, transform_ulid, transform_uuid, IdentifierError};
 use intervals::{calculate_intervals, IntervalError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
@@ -1171,6 +1171,9 @@ impl Results {
                 }
                 Scope::Ulid => {
                     Self::text_value(transform_ulid(term).map_err(ValueError::Identifier))
+                }
+                Scope::Isbn => {
+                    Self::text_value(transform_isbn(term).map_err(ValueError::Identifier))
                 }
                 Scope::Color => {
                     let palette = batch_arguments(term, "色阶", "palette")
