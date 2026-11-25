@@ -453,6 +453,7 @@ pub(super) struct SearchIndex {
 struct RememberedSearchInput {
     query: String,
     selection: Option<MessageSelection>,
+    preview_origin: Option<FileSearchReturn>,
 }
 
 #[derive(Clone, Default)]
@@ -2140,9 +2141,20 @@ enum FilePreviewAction {
     Refresh,
 }
 
+#[derive(Clone)]
 struct FileSearchReturn {
     query: String,
     path: String,
+}
+
+impl FileSearchReturn {
+    fn into_preview(self, inserted: String) -> ResultRefill {
+        ResultRefill {
+            original: self.query,
+            inserted,
+            kind: RefillKind::File { path: self.path },
+        }
+    }
 }
 
 enum ResultSaveState {
@@ -2378,9 +2390,11 @@ impl QuickSearch {
             this.bookmark_save_error = None;
             this.refresh_results(&query, window, cx);
             if !query.trim().is_empty() && !this.has_temporary_query() {
+                let preview_origin = this.file_preview_origin(&query);
                 *this.index.recent.last_input.borrow_mut() = RememberedSearchInput {
                     query,
                     selection: Some(selection),
+                    preview_origin,
                 };
             }
         });
@@ -3274,6 +3288,20 @@ impl QuickSearch {
         }
     }
 
+    fn file_preview_origin(&self, query: &str) -> Option<FileSearchReturn> {
+        let refill = self
+            .result_refill
+            .as_ref()
+            .filter(|refill| refill.inserted == query)?;
+        let RefillKind::File { path } = &refill.kind else {
+            return None;
+        };
+        Some(FileSearchReturn {
+            query: refill.original.clone(),
+            path: path.clone(),
+        })
+    }
+
     fn read_text_file_preview(
         &mut self,
         path: String,
@@ -3654,15 +3682,6 @@ impl QuickSearch {
 
     fn query_draft(&self, cx: &Context<Self>) -> QueryDraft {
         let input = self.input.read(cx);
-        let preview_origin = self.result_refill.as_ref().and_then(|refill| {
-            let RefillKind::File { path } = &refill.kind else {
-                return None;
-            };
-            (refill.inserted == input.text_ref()).then(|| FileSearchReturn {
-                query: refill.original.clone(),
-                path: path.clone(),
-            })
-        });
         QueryDraft {
             text: input.text(),
             selection: input.selection_position(),
@@ -3673,7 +3692,7 @@ impl QuickSearch {
                 .map(str::to_owned),
             table_pages: self.results.table_preview().map(|_| self.table_pages),
             expanded_value: self.expanded_value_pages.is_some(),
-            preview_origin,
+            preview_origin: self.file_preview_origin(input.text_ref()),
         }
     }
 
@@ -3686,11 +3705,7 @@ impl QuickSearch {
         let text = draft.text.clone();
         let selection = draft.selection;
         if let Some(origin) = draft.preview_origin.take() {
-            self.result_refill = Some(ResultRefill {
-                original: origin.query,
-                inserted: text.clone(),
-                kind: RefillKind::File { path: origin.path },
-            });
+            self.result_refill = Some(origin.into_preview(text.clone()));
         }
         self.query_draft_return = Some(draft);
         self.input.update(cx, |input, cx| {
@@ -4191,6 +4206,10 @@ impl QuickSearch {
                 && keystroke.key == "r"
             {
                 if !event.is_held && !self.previous_input.query.is_empty() {
+                    if let Some(origin) = self.previous_input.preview_origin.clone() {
+                        self.result_refill =
+                            Some(origin.into_preview(self.previous_input.query.clone()));
+                    }
                     self.fill_query(self.previous_input.query.clone(), window, cx);
                     if let Some(selection) = self.previous_input.selection {
                         self.input
@@ -6029,6 +6048,7 @@ impl Render for QuickSearch {
         let naming_bookmark = self.bookmark_name_edit.is_some();
         let selected_text_file = self.results.selected_text_file(self.selected).is_some();
         let preview_path = self.file_preview_path();
+        let action_padding = px(if preview_path.is_some() { 4. } else { 10. });
         let title = if naming_bookmark {
             "命名收藏"
         } else {
@@ -6101,7 +6121,9 @@ impl Render for QuickSearch {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title.to_owned())
                             .when_some(preview_path, |title, path| {
-                                title.tooltip(theme::text_tooltip(path.to_owned().into()))
+                                title
+                                    .mr(px(6.))
+                                    .tooltip(theme::text_tooltip(path.to_owned().into()))
                             }),
                     )
                     .when(!naming_bookmark && query.trim().is_empty(), |header| {
@@ -6134,7 +6156,7 @@ impl Render for QuickSearch {
                         header.child(
                             button("toggle-quick-search-help", label, Tone::Ghost, true)
                                 .h(px(24.))
-                                .px(px(10.))
+                                .px(action_padding)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_help(window, cx);
                                 })),
@@ -6169,7 +6191,7 @@ impl Render for QuickSearch {
                                     !self.file_operation_in_progress(),
                                 )
                                 .h(px(24.))
-                                .px(px(10.))
+                                .px(action_padding)
                                 .tooltip(theme::text_tooltip(hint.to_owned().into()))
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
@@ -6207,7 +6229,7 @@ impl Render for QuickSearch {
                             header.child(
                                 button("refill-quick-search-result", label, Tone::Ghost, true)
                                     .h(px(24.))
-                                    .px(px(10.))
+                                    .px(action_padding)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.refill_result(window, cx);
                                     })),
@@ -6219,7 +6241,7 @@ impl Render for QuickSearch {
                             // 操作改变时使用新的按钮标识，结束上一次的悬停提示。
                             button(label, label, Tone::Ghost, true)
                                 .h(px(24.))
-                                .px(px(10.))
+                                .px(action_padding)
                                 .tooltip(theme::text_tooltip(hint.into()))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_bookmark(window, cx);
@@ -6270,7 +6292,7 @@ impl Render for QuickSearch {
                                 enabled && !self.file_operation_in_progress(),
                             )
                             .h(px(24.))
-                            .px(px(10.))
+                            .px(action_padding)
                             .tooltip(theme::text_tooltip(hint))
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
@@ -9979,7 +10001,35 @@ mod tests {
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened.update(cx, verify_text_result_search).unwrap();
-                    reopened.update(cx, verify_file_preview_origin_survives_result_search).unwrap();
+                    reopened
+                        .update(cx, verify_file_preview_origin_survives_result_search)
+                        .unwrap();
+                    let remembered_preview = reopened
+                        .update(cx, |search, _, _| search.index.recent.last_input.borrow().clone())
+                        .unwrap();
+                    let restored = cx
+                        .update(|cx| {
+                            let index = SearchIndex::default();
+                            *index.recent.last_input.borrow_mut() = remembered_preview;
+                            open_test_search(index, cx)
+                        })
+                        .unwrap();
+                    restored
+                        .update(cx, |search, window, cx| {
+                            let event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("ctrl-shift-r").unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&event, window, cx);
+                            assert_eq!(search.input.read(cx).text_ref(), "文本: 原文 甲\r\n乙");
+                            assert_eq!(search.file_preview_path(), Some(r"C:\fixture\preview.txt"));
+                            assert_eq!(
+                                search.result_refill.as_ref().map(|refill| refill.original.as_str()),
+                                Some(r"文件: C:\fixture | preview.txt")
+                            );
+                            window.remove_window();
+                        })
+                        .unwrap();
                     reopened.update(cx, verify_expanded_preview_jump).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
