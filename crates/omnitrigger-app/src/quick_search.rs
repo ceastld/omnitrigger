@@ -376,6 +376,12 @@ pub(super) struct SearchIndex {
 }
 
 #[derive(Clone, Default)]
+struct RememberedSearchInput {
+    query: String,
+    selection: Option<MessageSelection>,
+}
+
+#[derive(Clone, Default)]
 pub(super) struct RecentSearch {
     pub(super) destinations: RecentDestinations,
     pub(super) launched_apps: RecentApplications,
@@ -385,7 +391,7 @@ pub(super) struct RecentSearch {
     examples: RecentExamples,
     bookmarks: QueryBookmarks,
     applications: ApplicationCache,
-    last_input: Rc<RefCell<String>>,
+    last_input: Rc<RefCell<RememberedSearchInput>>,
 }
 
 impl RecentSearch {
@@ -2024,7 +2030,7 @@ pub(super) struct QuickSearch {
     file_search_return: Option<FileSearchReturn>,
     result_save: ResultSaveState,
     input_file_load: InputFileLoadState,
-    previous_input: String,
+    previous_input: RememberedSearchInput,
     bookmark_limit_reached: bool,
     bookmark_save_error: Option<String>,
     bookmark_name_edit: Option<BookmarkNameEdit>,
@@ -2086,7 +2092,14 @@ impl QuickSearch {
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
             let input = input.read(cx);
             let revision = input.edit_revision();
+            let selection = input.selection_position();
             if this.input_revision == revision {
+                if !this.has_temporary_query() && this.bookmark_name_edit.is_none() {
+                    let mut last = this.index.recent.last_input.borrow_mut();
+                    if !last.query.is_empty() && last.query == input.text_ref() {
+                        last.selection = Some(selection);
+                    }
+                }
                 return;
             }
             this.input_revision = revision;
@@ -2119,7 +2132,10 @@ impl QuickSearch {
             }
             this.refresh_results(&query, window, cx);
             if !query.trim().is_empty() && !this.has_temporary_query() {
-                this.index.recent.last_input.borrow_mut().clone_from(&query);
+                *this.index.recent.last_input.borrow_mut() = RememberedSearchInput {
+                    query,
+                    selection: Some(selection),
+                };
             }
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -3323,8 +3339,12 @@ impl QuickSearch {
                 && keystroke.modifiers.shift
                 && keystroke.key == "r"
             {
-                if !event.is_held && !self.previous_input.is_empty() {
-                    self.fill_query(self.previous_input.clone(), window, cx);
+                if !event.is_held && !self.previous_input.query.is_empty() {
+                    self.fill_query(self.previous_input.query.clone(), window, cx);
+                    if let Some(selection) = self.previous_input.selection {
+                        self.input
+                            .update(cx, |input, cx| input.restore_selection(selection, cx));
+                    }
                 }
                 cx.stop_propagation();
             } else if modifiers == 2
@@ -7197,7 +7217,7 @@ mod tests {
             .run(move |cx| {
                 crate::message_input::init(cx);
                 let index = SearchIndex::default();
-                index.recent.last_input.borrow_mut().push_str("2**10");
+                index.recent.last_input.borrow_mut().query = "2**10".into();
                 let recent = index.recent.clone();
                 let window = open_test_search(index, cx);
                 cx.spawn(async move |cx| {
@@ -7249,6 +7269,11 @@ mod tests {
                             search.key_down(&bookmark, window, cx);
                         })
                         .unwrap();
+                    window
+                        .update(cx, |search, _, cx| {
+                            search.input.update(cx, |input, cx| input.select_range(1..3, cx));
+                        })
+                        .unwrap();
                     for (key, filter) in [
                         ("f4", Some("收藏: ")),
                         ("f1", Some("? 收藏:")),
@@ -7286,6 +7311,7 @@ mod tests {
                                 is_held: false,
                             };
                             search.key_down(&event, window, cx);
+                            assert_eq!(search.input.read(cx).selection(), 1..3);
                             [before, search.input.read(cx).text()]
                         })
                         .unwrap();

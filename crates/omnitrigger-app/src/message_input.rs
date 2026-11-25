@@ -152,6 +152,10 @@ impl MessageInput {
         self.content.to_string()
     }
 
+    pub(super) fn text_ref(&self) -> &str {
+        &self.content
+    }
+
     pub(super) fn edit_revision(&self) -> u64 {
         self.edit_revision
     }
