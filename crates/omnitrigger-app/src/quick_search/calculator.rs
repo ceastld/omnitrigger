@@ -917,6 +917,34 @@ mod tests {
     }
 
     #[test]
+    fn scales_binary_values_and_rounds_once_at_subnormal_boundaries() {
+        for (query, expected) in [
+            ("ldexp(0.5,8)", 128.0_f64),
+            ("ldexp(5e-324,1074)", 1.0),
+            ("ldexp(1,-1074)", f64::from_bits(1)),
+            ("ldexp(1,-1075)", 0.0),
+            ("ldexp(1.5,-1075)", f64::from_bits(1)),
+            ("ldexp(-1,-1075)", -0.0),
+            ("ldexp(-0,9007199254740991)", -0.0),
+            ("ldexp(1.9999999999999998,-1023)", f64::MIN_POSITIVE),
+        ] {
+            assert_eq!(
+                evaluate(query).unwrap().to_bits(),
+                expected.to_bits(),
+                "{query}"
+            );
+        }
+        assert_eq!(evaluate("ldexp(1,1024)"), Err(CalculationError::OutOfRange));
+        for query in ["ldexp(2,0.5)", "ldexp(2,9007199254740992)", "ldexp(2)"] {
+            assert_eq!(
+                evaluate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn computes_log_sum_exp_for_overflowing_exponents_and_tiny_corrections() {
         let ln_two = std::f64::consts::LN_2;
         for query in ["logsumexp(1000,1000)-1000", "logsumexp(-1000,-1000)+1000"] {

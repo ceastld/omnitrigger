@@ -4,6 +4,12 @@ use num_bigint::{BigInt, Sign};
 
 use super::{calculator::MAX_SAFE_INTEGER, fraction::common_divisor};
 
+const FRACTION_BITS: u32 = f64::MANTISSA_DIGITS - 1;
+const HIDDEN_BIT: u64 = 1 << FRACTION_BITS;
+const FRACTION_MASK: u64 = HIDDEN_BIT - 1;
+const EXPONENT_MASK: u64 = 0x7ff;
+const SIGN_BIT: u64 = 1 << 63;
+
 pub(super) enum NamedValue {
     Constant(f64),
     Function(fn(f64) -> f64),
@@ -25,6 +31,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "isclose" => return Some(NamedValue::Aggregate(is_close)),
         "remainder" => return Some(NamedValue::Aggregate(nearest_remainder)),
         "nextafter" => return Some(NamedValue::Aggregate(next_after)),
+        "ldexp" => return Some(NamedValue::Aggregate(scale_by_power_of_two)),
         "copysign" => {
             return Some(NamedValue::Aggregate(|values| match *values {
                 [value, sign] => value.copysign(sign),
@@ -519,12 +526,6 @@ fn log_sum_exp(values: &[f64]) -> f64 {
 }
 
 fn exact_float_sum(values: &[f64]) -> f64 {
-    const FRACTION_BITS: u32 = f64::MANTISSA_DIGITS - 1;
-    const HIDDEN_BIT: u64 = 1 << FRACTION_BITS;
-    const FRACTION_MASK: u64 = HIDDEN_BIT - 1;
-    const EXPONENT_MASK: u64 = 0x7ff;
-    const SIGN_BIT: u64 = 1 << 63;
-
     // 每个有限的二进制浮点数都是 2^-1074 的整数倍。
     let mut total = BigInt::default();
     for &value in values {
@@ -572,6 +573,48 @@ fn exact_float_sum(values: &[f64]) -> f64 {
         return f64::from_bits(sign | (EXPONENT_MASK << FRACTION_BITS));
     }
     f64::from_bits(sign | (exponent << FRACTION_BITS) | (mantissa & FRACTION_MASK))
+}
+
+fn scale_by_power_of_two(values: &[f64]) -> f64 {
+    let [value, power] = *values else {
+        return f64::NAN;
+    };
+    if power.fract() != 0. || power.abs() > MAX_SAFE_INTEGER as f64 {
+        return f64::NAN;
+    }
+    if value == 0. || !value.is_finite() {
+        return value;
+    }
+    let bits = value.to_bits();
+    let fraction = bits & FRACTION_MASK;
+    let biased = ((bits >> FRACTION_BITS) & EXPONENT_MASK) as i64;
+    // 先把次正规数的有效位移到与正规数相同的位置。
+    let (significand, biased) = if biased == 0 {
+        let shift = fraction.leading_zeros() - (u64::BITS - f64::MANTISSA_DIGITS);
+        (fraction << shift, 1 - i64::from(shift))
+    } else {
+        (fraction | HIDDEN_BIT, biased)
+    };
+    let scaled_exponent = biased + power as i64;
+    let sign = bits & SIGN_BIT;
+    if scaled_exponent >= EXPONENT_MASK as i64 {
+        return f64::from_bits(sign | (EXPONENT_MASK << FRACTION_BITS));
+    }
+    if scaled_exponent > 0 {
+        return f64::from_bits(
+            sign | ((scaled_exponent as u64) << FRACTION_BITS) | (significand & FRACTION_MASK),
+        );
+    }
+    let shift = 1 - scaled_exponent;
+    if shift > i64::from(f64::MANTISSA_DIGITS) {
+        return f64::from_bits(sign);
+    }
+    // 结果进入次正规范围时只舍入一次，中点取偶数。
+    let half = 1_u64 << (shift - 1);
+    let discarded = significand & ((half << 1) - 1);
+    let remaining = significand >> shift;
+    let round_up = discarded > half || (discarded == half && !remaining.is_multiple_of(2));
+    f64::from_bits(sign | (remaining + u64::from(round_up)))
 }
 
 fn next_after(values: &[f64]) -> f64 {

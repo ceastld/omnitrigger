@@ -3597,6 +3597,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用二的整数次幂缩放浮点数",
+        query: "ldexp(0.5,8)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留绝对值并取用另一个数的符号",
         query: "copysign(3,-0)",
     },
