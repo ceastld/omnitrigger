@@ -1058,6 +1058,17 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_softplus_and_log_sigmoid_at_extreme_inputs() {
+        assert_eq!(evaluate("softplus(1000)"), Ok(1000.));
+        assert_eq!(evaluate("logsigmoid(-1000)"), Ok(-1000.));
+        assert_eq!(evaluate("softplus(0)"), Ok(std::f64::consts::LN_2));
+        assert_eq!(evaluate("log_sigmoid(0)"), Ok(-std::f64::consts::LN_2));
+        assert_eq!(evaluate("logsigmoid(50)+softplus(-50)"), Ok(0.));
+        assert!(evaluate("softplus(-720)").unwrap() > 0.);
+        assert!(evaluate("logsigmoid(720)").unwrap() < 0.);
+    }
+
+    #[test]
     fn evaluates_hyperbolic_functions_and_rejects_invalid_inverse_arguments() {
         for (query, expected) in [
             ("sinh(ln(2))", 0.75),

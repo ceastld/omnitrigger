@@ -3707,6 +3707,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算 Softplus，支持很大的正输入",
+        query: "softplus(1000)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算 sigmoid 的自然对数",
+        query: "logsigmoid(-1000)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将乘法与加法合并后进行一次舍入",
         query: "fma(1e308,2,-1e308)",
     },

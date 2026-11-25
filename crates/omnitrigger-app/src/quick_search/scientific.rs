@@ -229,6 +229,8 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "expm1" => f64::exp_m1,
         "sigmoid" | "expit" => sigmoid,
         "logit" => logit,
+        "softplus" => softplus,
+        "logsigmoid" | "log_sigmoid" => |value| -softplus(-value),
         "radians" => f64::to_radians,
         "degrees" => f64::to_degrees,
         "percent" => |value| value / 100.,
@@ -571,6 +573,14 @@ fn sigmoid(value: f64) -> f64 {
         exponential / (1. + exponential)
     } else {
         1. / (1. + (-value).exp())
+    }
+}
+
+fn softplus(value: f64) -> f64 {
+    if value > 0. {
+        value + (-value).exp().ln_1p()
+    } else {
+        value.exp().ln_1p()
     }
 }
 
