@@ -50,6 +50,12 @@ pub(super) fn page_starts(text: &str, page_size: usize) -> Vec<usize> {
         .collect()
 }
 
+pub(super) fn page_text<'a>(text: &'a str, starts: &[usize], page: usize) -> Option<&'a str> {
+    let start = *starts.get(page)?;
+    let end = starts.get(page + 1).copied().unwrap_or(text.len());
+    text.get(start..end)
+}
+
 fn positioned_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut line_start = 0;
     let line_ends = logical_newline_pattern()
@@ -159,6 +165,22 @@ mod tests {
 
         let text = format!("{}\ta", "x".repeat(39));
         assert_eq!(lines(&text).collect::<Vec<_>>(), [&text[..40], "a"]);
+    }
+
+    #[test]
+    fn copies_each_page_with_its_original_byte_boundaries() {
+        let wide = "界".repeat(COLUMNS);
+        let first = format!(" 甲\t\r\n{wide}\u{2028}");
+        let text = format!("{first}\r尾\t ");
+        let starts = page_starts(&text, 3);
+        assert_eq!(page_text(&text, &starts, 0), Some(first.as_str()));
+        assert_eq!(page_text(&text, &starts, 1), Some("\r尾\t "));
+        assert_eq!(page_text(&text, &starts, 2), None);
+
+        let wrapped = page_starts(&wide, 1);
+        let first_half = "界".repeat(COLUMNS / 2);
+        assert_eq!(page_text(&wide, &wrapped, 0), Some(first_half.as_str()));
+        assert_eq!(page_text(&wide, &wrapped, 1), Some(first_half.as_str()));
     }
 
     #[test]

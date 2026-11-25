@@ -3113,6 +3113,36 @@ impl QuickSearch {
         true
     }
 
+    fn copy_expanded_value_page(
+        &self,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(pages) = self
+            .expanded_value_pages
+            .as_ref()
+            .filter(|pages| pages.len() > 1)
+        else {
+            return false;
+        };
+        let Results::Value(Ok(output)) = &self.results else {
+            return false;
+        };
+        let Some(text) = value_preview::page_text(&output.text, pages, self.selected) else {
+            return false;
+        };
+        if !is_held {
+            self.index
+                .recent
+                .queries
+                .record_exact(&self.input.read(cx).text(), "");
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+            window.remove_window();
+        }
+        true
+    }
+
     fn file_operation_in_progress(&self) -> bool {
         matches!(self.result_save, ResultSaveState::InProgress)
             || matches!(self.input_file_load, InputFileLoadState::InProgress)
@@ -4108,7 +4138,10 @@ impl QuickSearch {
                 && keystroke.modifiers.control
                 && keystroke.modifiers.shift
                 && match keystroke.key.as_str() {
-                    "c" => self.copy_table(TableCopy::CurrentPage, event.is_held, window, cx),
+                    "c" => {
+                        self.copy_table(TableCopy::CurrentPage, event.is_held, window, cx)
+                            || self.copy_expanded_value_page(event.is_held, window, cx)
+                    }
                     "t" => self.copy_table(TableCopy::Tsv, event.is_held, window, cx),
                     "enter" => {
                         self.copy_table(TableCopy::CurrentPageTsv, event.is_held, window, cx)
@@ -5299,6 +5332,27 @@ impl QuickSearch {
                                     footer
                                         .child("PgUp PgDn 翻页")
                                         .child(div().flex_1())
+                                        .child(
+                                            button(
+                                                "copy-expanded-value-page",
+                                                "复制本页",
+                                                Tone::Ghost,
+                                                true,
+                                            )
+                                            .h(px(23.))
+                                            .px(px(6.))
+                                            .tooltip(theme::text_tooltip(
+                                                "Ctrl+Shift+C 复制本页对应的原文".into(),
+                                            ))
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.copy_expanded_value_page(
+                                                        false, window, cx,
+                                                    );
+                                                }),
+                                            ),
+                                        )
                                         .child(self.page_controls(page_count, 1, cx))
                                 }),
                         )
