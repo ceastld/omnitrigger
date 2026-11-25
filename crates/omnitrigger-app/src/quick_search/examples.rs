@@ -4112,6 +4112,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从末尾数取每行最后两个字符",
+        query: "文本: 逐行截取 -2..-1 A👩‍💻茶\n北海\n山",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "依次清理、去重和自然排序文本行",
         query: "文本: 依次处理 [\"逐行去空白\",\"去空行\",\"按行去重\",\"自然排序\"] \" report10 \nreport2\n\nreport2\n\"",
     },

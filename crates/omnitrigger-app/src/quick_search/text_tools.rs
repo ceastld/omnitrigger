@@ -3,6 +3,7 @@ use std::{
     cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Write as _,
+    num::NonZeroUsize,
     sync::OnceLock,
 };
 
@@ -153,7 +154,7 @@ impl TextError {
             Self::InvalidLineStep => "填写起始行号和正整数步长，例如 文本: 间隔取行 2,3",
             Self::EmptyLineLimit => "填写每段空行最多保留的行数，例如 文本: 空行上限 2",
             Self::LineContextArguments => "填写关键词、前置行数和后置行数，例如 [\"错误\",1,2]",
-            Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
+            Self::InvalidGraphemeRange => "填写字素位置或区间，例如 2-4 或 -3..-1。负数从末尾计",
             Self::MissingLine => "指定行号超出了文本行数",
             Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
             Self::InvalidLineEnding => "填写 LF 或 CRLF，然后粘贴原文",
@@ -1309,35 +1310,82 @@ fn strip_line_decoration(input: &str, prefix: bool) -> Result<String, TextError>
     Ok(result)
 }
 
+#[derive(Clone, Copy)]
+enum GraphemePosition {
+    FromStart(NonZeroUsize),
+    FromEnd(NonZeroUsize),
+}
+
+impl GraphemePosition {
+    fn parse(input: &str) -> Result<Self, TextError> {
+        if let Some(digits) = input.strip_prefix('-') {
+            if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(TextError::InvalidGraphemeRange);
+            }
+            digits.parse().map(Self::FromEnd)
+        } else {
+            input.parse().map(Self::FromStart)
+        }
+        .map_err(|_| TextError::InvalidGraphemeRange)
+    }
+}
+
 pub(super) struct GraphemeRange {
-    start: usize,
-    end: usize,
+    start: GraphemePosition,
+    end: GraphemePosition,
 }
 
 impl GraphemeRange {
     pub(super) fn parse(input: &str) -> Result<Self, TextError> {
-        let (start, end) = input.split_once('-').unwrap_or((input, input));
-        let start = start
-            .parse::<usize>()
-            .map_err(|_| TextError::InvalidGraphemeRange)?;
-        let end = end
-            .parse::<usize>()
-            .map_err(|_| TextError::InvalidGraphemeRange)?;
-        if start == 0 || end < start {
+        use GraphemePosition::{FromEnd, FromStart};
+
+        let (start, end) = input
+            .split_once("..")
+            .or_else(|| {
+                input
+                    .split_once('-')
+                    .filter(|(start, end)| !start.is_empty() && !end.starts_with('-'))
+            })
+            .unwrap_or((input, input));
+        let start = GraphemePosition::parse(start)?;
+        let end = GraphemePosition::parse(end)?;
+        let reversed = match (start, end) {
+            (FromStart(start), FromStart(end)) => start > end,
+            (FromEnd(start), FromEnd(end)) => start < end,
+            _ => false,
+        };
+        if reversed {
             return Err(TextError::InvalidGraphemeRange);
         }
         Ok(Self { start, end })
     }
 
     pub(super) fn slice<'a>(&self, text: &'a str) -> &'a str {
+        use GraphemePosition::{FromEnd, FromStart};
+
+        let count = match (self.start, self.end) {
+            (FromStart(_), FromStart(_)) => 0,
+            _ => text.graphemes(true).count(),
+        };
+        let start = match self.start {
+            FromStart(position) => position.get() - 1,
+            FromEnd(position) => count.saturating_sub(position.get()),
+        };
+        let end = match self.end {
+            FromStart(position) => position.get(),
+            FromEnd(position) => count.saturating_sub(position.get() - 1),
+        };
+        if start >= end {
+            return "";
+        }
         let mut graphemes = text.grapheme_indices(true);
-        let Some((start, _)) = graphemes.nth(self.start - 1) else {
+        let Some((start_byte, _)) = graphemes.nth(start) else {
             return "";
         };
-        let end = graphemes
-            .nth(self.end - self.start)
+        let end_byte = graphemes
+            .nth(end - start - 1)
             .map_or(text.len(), |(offset, _)| offset);
-        &text[start..end]
+        &text[start_byte..end_byte]
     }
 }
 
@@ -2417,7 +2465,22 @@ mod tests {
             transform_text("slice-lines 2 ABC\nXYZ").as_deref(),
             Ok("B\nY")
         );
-        for range in ["0", "3-2", "1-2-3", "一"] {
+        assert_eq!(
+            transform_text("逐行截取 -2..-1 \"A👩‍💻e\u{301}\r\n北\r\n\r\n\"").as_deref(),
+            Ok("👩‍💻e\u{301}\r\n北\r\n\r\n")
+        );
+        assert_eq!(
+            transform_text("逐行截取 2..-2 A👩‍💻e\u{301}Z\n北").as_deref(),
+            Ok("👩‍💻e\u{301}\n")
+        );
+        assert_eq!(
+            transform_text("逐行截取 -1 A👩‍💻\n北").as_deref(),
+            Ok("👩‍💻\n北")
+        );
+        assert_eq!(transform_text("逐行截取 -3 A👩‍💻").as_deref(), Ok(""));
+        for range in [
+            "0", "3-2", "1-2-3", "一", "-0", "2...-1", "-1..-2", "-+1", "1--2",
+        ] {
             assert_eq!(
                 transform_text(&format!("逐行截取 {range} 文本")),
                 Err(TextError::InvalidGraphemeRange)

@@ -13706,6 +13706,11 @@ B,乙
             transform_csv("slice-column [\"摘要\",1,\"1\"] 文本\n👩‍💻Z").as_deref(),
             Ok("文本,摘要\r\n👩‍💻Z,👩‍💻")
         );
+        assert_eq!(
+            transform_csv("截取列 [\"尾两字\",1,\"-2..-1\"] 文本\nA👩‍💻e\u{301}\n北\n\"\"")
+                .as_deref(),
+            Ok("文本,尾两字\r\nA👩‍💻e\u{301},👩‍💻e\u{301}\r\n北,北\r\n\"\",\"\"")
+        );
         for range in ["0", "3-2", "2-"] {
             let query = format!("截取列 [\"摘要\",1,\"{range}\"] 文本");
             assert_eq!(
