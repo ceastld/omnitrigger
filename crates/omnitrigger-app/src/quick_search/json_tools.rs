@@ -16,6 +16,7 @@ use super::fraction::{ensure_exact_size, parse_fraction_literal};
 use super::operators::{FieldSortOrder, NumberComparison, MAX_SORT_FIELDS};
 use super::statistics::{median_sorted_values, MAX_VALUES};
 use super::text_tools::compare_natural;
+use super::InputValidationReport;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
@@ -283,6 +284,71 @@ fn split_json_operation(query: &str) -> Option<(&str, &str)> {
     Some((operation, source))
 }
 
+pub(super) fn is_json_validation_operation(operation: &str) -> bool {
+    operation == "校验" || operation.eq_ignore_ascii_case("validate")
+}
+
+pub(super) fn json_validation_report(
+    query: &str,
+) -> Option<Result<InputValidationReport, JsonError>> {
+    let (operation, source) = split_json_operation(query)?;
+    is_json_validation_operation(operation).then(|| {
+        validate_json(source).map(|report| report.offset_error_span(query.len() - source.len()))
+    })
+}
+
+fn validate_json(source: &str) -> Result<InputValidationReport, JsonError> {
+    if source
+        .bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    {
+        return Err(JsonError::Incomplete);
+    }
+    let error = match serde_json::from_str::<IgnoredAny>(source) {
+        Ok(_) => {
+            return Ok(InputValidationReport {
+                text: "JSON 有效".into(),
+                error_span: None,
+            });
+        }
+        Err(error) => error,
+    };
+    let mut start = if error.is_eof() {
+        source.len()
+    } else {
+        let line_start: usize = source
+            .split_inclusive('\n')
+            .take(error.line().saturating_sub(1))
+            .map(str::len)
+            .sum();
+        // serde_json 的列号按字节计算，遇到换行可报告下一行的第 0 列。
+        (line_start + error.column())
+            .saturating_sub(1)
+            .min(source.len())
+    };
+    while !source.is_char_boundary(start) {
+        start -= 1;
+    }
+    let end = source[start..]
+        .chars()
+        .next()
+        .map_or(start, |ch| start + ch.len_utf8());
+    let before = &source[..start];
+    let line = before.bytes().filter(|&byte| byte == b'\n').count() + 1;
+    let column = before
+        .rsplit('\n')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .count()
+        + 1;
+    let reason = json_line_error_reason(&error);
+    Ok(InputValidationReport {
+        text: format!("{reason} · 第 {line} 行 · 第 {column} 列"),
+        error_span: Some(start..end),
+    })
+}
+
 pub(super) enum JsonResultFormat {
     Json,
     JsonLines,
@@ -325,6 +391,9 @@ fn is_json_lines_output(operation: &str) -> bool {
 fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String, JsonError> {
     let (operation, raw_source) = split_json_operation(query).ok_or(JsonError::Incomplete)?;
     let operation = operation.to_ascii_lowercase();
+    if is_json_validation_operation(&operation) {
+        return validate_json(raw_source).map(|report| report.text);
+    }
     if let Some(operation) = JsonCsvOperation::from_name(&operation) {
         return operation.run(raw_source);
     }
@@ -3130,6 +3199,47 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_whole_json_and_maps_parser_positions_to_input_characters() {
+        for (query, expected, location) in [
+            (
+                "校验\r\n{\r\n  \"参数\": \"茶\"坏\r\n}",
+                "坏",
+                "第 2 行 · 第 12 列",
+            ),
+            ("VALIDATE [\"😀\",好]", "好", "第 1 行 · 第 6 列"),
+            ("校验 [1,\r\n  ", "", "第 2 行 · 第 3 列"),
+            ("校验 [1\n", "", "第 2 行 · 第 1 列"),
+            ("校验 1\u{a0}", "\u{a0}", "第 1 行 · 第 2 列"),
+        ] {
+            let report = json_validation_report(query).unwrap().unwrap();
+            let range = report.error_span.unwrap();
+            assert_eq!(&query[range.clone()], expected);
+            if expected.is_empty() {
+                assert_eq!(range, query.len()..query.len());
+                assert!(report.text.starts_with("JSON 尚未完整"));
+            }
+            assert!(report.text.contains(location), "{}", report.text);
+            assert_eq!(transform_json(query), Ok(report.text));
+        }
+        for input in [
+            "null",
+            "{}",
+            " [9007199254740993000000000000, 1e99999] \r\n",
+        ] {
+            let report = json_validation_report(&format!("校验 {input}"))
+                .unwrap()
+                .unwrap();
+            assert!(report.error_span.is_none());
+            assert_eq!(report.text, "JSON 有效");
+        }
+        assert!(matches!(
+            json_validation_report("校验 \r\n\t"),
+            Some(Err(JsonError::Incomplete))
+        ));
+        assert!(json_validation_report("校验行 {}").is_none());
+    }
 
     #[test]
     fn groups_json_numeric_medians_by_exact_scalar_keys_in_first_seen_order() {

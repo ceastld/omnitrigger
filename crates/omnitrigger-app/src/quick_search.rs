@@ -224,7 +224,31 @@ struct ResultValue {
     kind: ValueKind,
 }
 
+struct InputValidationReport {
+    text: String,
+    error_span: Option<Range<usize>>,
+}
+
+impl InputValidationReport {
+    fn offset_error_span(mut self, offset: usize) -> Self {
+        if let Some(range) = &mut self.error_span {
+            range.start += offset;
+            range.end += offset;
+        }
+        self
+    }
+}
+
 impl ResultValue {
+    fn from_validation(report: InputValidationReport, scope: Scope) -> Self {
+        Self {
+            text: report.text,
+            kind: report.error_span.map_or(ValueKind::Text, |range| {
+                ValueKind::InputValidationError { scope, range }
+            }),
+        }
+    }
+
     fn suggested_file_name(&self, query: &str) -> &'static str {
         use data_pipeline::DataPipelineMode;
         use json_tools::JsonResultFormat;
@@ -311,7 +335,10 @@ enum CalculationMode {
 #[derive(PartialEq, Eq)]
 enum ValueKind {
     Text,
-    CsvValidationError(Range<usize>),
+    InputValidationError {
+        scope: Scope,
+        range: Range<usize>,
+    },
     CalendarDate,
     ClockDuration,
     TimestampInstant,
@@ -1165,10 +1192,19 @@ impl Results {
                     Some(report) => Self::table_value(report.map_err(ValueError::Text)),
                     None => Self::text_value(transform_text(term).map_err(ValueError::Text)),
                 },
-                Scope::Json => match json_tools::json_csv_report(term) {
-                    Some(report) => Self::table_value(report.map_err(ValueError::Json)),
-                    None => Self::text_value(transform_json(term).map_err(ValueError::Json)),
-                },
+                Scope::Json => {
+                    if let Some(report) = json_tools::json_validation_report(term) {
+                        Self::Value(
+                            report
+                                .map(|report| ResultValue::from_validation(report, scope))
+                                .map_err(ValueError::Json),
+                        )
+                    } else if let Some(report) = json_tools::json_csv_report(term) {
+                        Self::table_value(report.map_err(ValueError::Json))
+                    } else {
+                        Self::text_value(transform_json(term).map_err(ValueError::Json))
+                    }
+                }
                 Scope::Toml => match toml_tools::toml_csv_report(term) {
                     Some(report) => Self::table_value(report.map_err(ValueError::Toml)),
                     None => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
@@ -1177,12 +1213,7 @@ impl Results {
                     if let Some(report) = csv_tools::csv_validation_report(term) {
                         Self::Value(
                             report
-                                .map(|report| ResultValue {
-                                    text: report.text,
-                                    kind: report
-                                        .error_span
-                                        .map_or(ValueKind::Text, ValueKind::CsvValidationError),
-                                })
+                                .map(|report| ResultValue::from_validation(report, scope))
                                 .map_err(ValueError::Csv),
                         )
                     } else if let Some(result) = csv_tools::csv_table_preview(term) {
@@ -1757,7 +1788,10 @@ impl Results {
                 }
                 let hints = usize::from(value.continuation_hint().is_some())
                     + usize::from(value.exact_decimal_preview().is_some())
-                    + usize::from(matches!(&value.kind, ValueKind::CsvValidationError(_)))
+                    + usize::from(matches!(
+                        &value.kind,
+                        ValueKind::InputValidationError { .. }
+                    ))
                     + usize::from(self.value_preview_expandable());
                 158. + value_extra_height(&value.text, value_line_limit) + hints as f32 * 24.
             }
@@ -3366,19 +3400,21 @@ impl QuickSearch {
         batch_line_range(input, line).map(|range| start + range.start..start + range.end)
     }
 
-    fn csv_error_range(&self, cx: &App) -> Option<Range<usize>> {
+    fn validation_error_range(&self, cx: &App) -> Option<Range<usize>> {
         let Results::Value(Ok(ResultValue {
-            kind: ValueKind::CsvValidationError(range),
+            kind: ValueKind::InputValidationError { scope, range },
             ..
         })) = &self.results
         else {
             return None;
         };
         let query = self.input.read(cx).text_ref();
-        let (Scope::Csv, term) = scoped_query(query.trim_start())? else {
+        let (query_scope, _) = scoped_query(query)?;
+        if query_scope != *scope {
             return None;
-        };
-        let offset = query.len() - term.len();
+        }
+        let (_, term) = query.split_once([':', '：'])?;
+        let offset = query.len() - term.trim_start().len();
         Some(offset + range.start..offset + range.end)
     }
 
@@ -3390,7 +3426,7 @@ impl QuickSearch {
     ) -> bool {
         let Some(range) = self
             .batch_error_range(cx)
-            .or_else(|| self.csv_error_range(cx))
+            .or_else(|| self.validation_error_range(cx))
         else {
             return false;
         };
@@ -4374,12 +4410,12 @@ impl QuickSearch {
                     .flex_col()
                     .child(row)
                     .when(
-                        matches!(&output.kind, ValueKind::CsvValidationError(_)),
+                        matches!(&output.kind, ValueKind::InputValidationError { .. }),
                         |result| {
                             result.child(
                                 Self::result_footer().child(
                                     button(
-                                        "locate-csv-error",
+                                        "locate-validation-error",
                                         "定位错误 Alt+Enter",
                                         Tone::Ghost,
                                         true,
@@ -6458,15 +6494,23 @@ mod tests {
     }
 
     #[test]
-    fn reserves_footer_space_for_csv_validation_repair() {
-        let query = "CSV: 校验 a,b\n1,\"未闭合";
-        let result = for_query(query, &[]);
-        let report = result.refillable_text().unwrap().to_owned();
-        assert!(report.contains("第 2 条记录 · 第 2 列"));
-        assert_eq!(
-            result.height(MAX_VALUE_LINES),
-            Results::text_value(Ok(report)).height(MAX_VALUE_LINES) + 24.
-        );
+    fn reserves_footer_space_for_input_validation_repair() {
+        for (query, location) in [
+            ("CSV: 校验 a,b\n1,\"未闭合", "第 2 条记录 · 第 2 列"),
+            ("JSON: 校验 [\n  1,\n]", "第 3 行 · 第 1 列"),
+        ] {
+            let result = for_query(query, &[]);
+            let report = result.refillable_text().unwrap().to_owned();
+            assert!(report.contains(location));
+            assert_eq!(
+                result.height(MAX_VALUE_LINES),
+                Results::text_value(Ok(report)).height(MAX_VALUE_LINES) + 24.
+            );
+        }
+        assert!(matches!(
+            for_query("JSON: 校验 []", &[]),
+            Results::Value(Ok(ResultValue { text, kind: ValueKind::Text })) if text == "JSON 有效"
+        ));
     }
 
     #[test]
@@ -7014,7 +7058,7 @@ mod tests {
         assert!(examples_for("JSON: 长")[0].starts_with("JSON: 长度 "));
         assert!(examples_for("JSON: 展")[0].starts_with("JSON: 展开数组 "));
         assert!(examples_for("JSON: 合")[0].starts_with("JSON: 合并行 "));
-        assert!(examples_for("JSON: 校验")[0].starts_with("JSON: 校验行 "));
+        assert!(examples_for("JSON: 校验")[0].starts_with("JSON: 校验\n"));
         assert!(examples_for("JSON: 合并对")[0].starts_with("JSON: 合并对象 "));
         assert!(examples_for("JSON: 合并子")[0].starts_with("JSON: 合并子数组 "));
         assert!(examples_for("JSON: 改")[0].starts_with("JSON: 改键 "));
@@ -7111,6 +7155,9 @@ mod tests {
             ),
             ("CSV: VALIDATE 编号,备注\n001,\"甲\"丁\n002,乙", "丁"),
             ("CSV: 校验 a,b\n001,带\"引号", "\""),
+            ("  JSON： 校验\r\n{\r\n  \"参数\": \"茶\"坏\r\n}   ", "坏"),
+            ("JSON: VALIDATE [\"😀\",好]", "好"),
+            ("JSON: 校验 [1,\r\n  ", ""),
             (
                 "CSV: 校验 a,b\r\n01,\"甲\n乙\",多余\r\n02",
                 "01,\"甲\n乙\",多余",

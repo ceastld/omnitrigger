@@ -4384,6 +4384,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "校验 JSON 并定位出错的字符",
+        query: "JSON: 校验\n{\n  \"项目\": \"茶\"坏\n}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "校验 JSON Lines 并指出每个无效行",
         query: "JSON: 校验行 {\"编号\":1}\n错误文本\n{\"编号\":\nnull",
     },

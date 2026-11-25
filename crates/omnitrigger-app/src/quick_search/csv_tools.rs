@@ -78,6 +78,7 @@ use super::{
     },
     url_encoding::url_parameter_values,
     vector::squared_euclidean_distance,
+    InputValidationReport,
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
@@ -9699,27 +9700,18 @@ fn pad_rows(mut rows: Vec<Vec<String>>) -> Result<String, CsvError> {
     Ok(write_rows(&rows, ','))
 }
 
-pub(super) struct CsvValidationReport {
-    pub(super) text: String,
-    pub(super) error_span: Option<Range<usize>>,
-}
-
-pub(super) fn csv_validation_report(query: &str) -> Option<Result<CsvValidationReport, CsvError>> {
+pub(super) fn csv_validation_report(
+    query: &str,
+) -> Option<Result<InputValidationReport, CsvError>> {
     let (operation, input) = split_argument(query)?;
     if operation != "校验" && !operation.eq_ignore_ascii_case("validate") {
         return None;
     }
     let offset = query.len() - input.len();
-    Some(validate_csv(input).map(|mut report| {
-        if let Some(range) = &mut report.error_span {
-            range.start += offset;
-            range.end += offset;
-        }
-        report
-    }))
+    Some(validate_csv(input).map(|report| report.offset_error_span(offset)))
 }
 
-fn validate_csv(input: &str) -> Result<CsvValidationReport, CsvError> {
+fn validate_csv(input: &str) -> Result<InputValidationReport, CsvError> {
     let data = input.strip_prefix('\u{feff}').unwrap_or(input);
     if data.is_empty() {
         return Err(CsvError::MissingInput);
@@ -9733,12 +9725,12 @@ fn validate_csv(input: &str) -> Result<CsvValidationReport, CsvError> {
                 let error_span = rows.iter().zip(record_spans).find_map(|(row, range)| {
                     (row.len() != width).then_some(offset + range.start..offset + range.end)
                 });
-                CsvValidationReport {
+                InputValidationReport {
                     text: report_csv_columns(&rows),
                     error_span,
                 }
             }
-            Err(error) => CsvValidationReport {
+            Err(error) => InputValidationReport {
                 text: format!(
                     "CSV 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
                     error.record,
