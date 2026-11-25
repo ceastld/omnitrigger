@@ -6535,6 +6535,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用精确算式计算均方值",
+        query: "分数: 计算 meansquare(1/3,2/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用精确算式计算均方根",
+        query: "分数: 计算 rms(-1/3,7/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在精确算式中计算加权平均值",
         query: "分数: 计算 wavg(1/3,2,1/6,1)",
     },

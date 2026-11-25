@@ -504,8 +504,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             gini_mean_difference(values, count).map(|value| value.to_string())
         }
         StatisticsOperation::RootMeanSquare => {
-            let squares = squared_deviation_sum(&values, &BigRational::default())?;
-            let mean_square = bounded(squares / BigInt::from(count))?;
+            let mean_square = variance_about(&values, &BigRational::default(), count)?;
             Ok(format_square_root(&mean_square))
         }
         StatisticsOperation::StandardError => {
@@ -1359,6 +1358,13 @@ pub(super) fn variance_unweighted(
     }
     let average = bounded(observation_sum(&values)? / BigInt::from(count))?;
     variance_about(&values, &average, divisor).map(Some)
+}
+
+pub(super) fn mean_square_unweighted(
+    values: Vec<BigRational>,
+) -> Result<BigRational, StatisticsError> {
+    let values = unweighted_observations(values)?;
+    variance_about(&values, &BigRational::default(), values.len() as u64)
 }
 
 fn observation_sum(values: &[(BigRational, u64)]) -> Result<BigRational, StatisticsError> {

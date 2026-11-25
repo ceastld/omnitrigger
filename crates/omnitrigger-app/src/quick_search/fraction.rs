@@ -10,9 +10,9 @@ use super::linear_fit::format_power_expression;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
 use super::statistics::{
-    absolute_deviation_unweighted, interpolate_ordered_quantile, median_sorted_values,
-    variance_unweighted, weighted_quantile_value, StatisticsError, WeightedDistribution,
-    WeightedMean,
+    absolute_deviation_unweighted, interpolate_ordered_quantile, mean_square_unweighted,
+    median_sorted_values, variance_unweighted, weighted_quantile_value, StatisticsError,
+    WeightedDistribution, WeightedMean,
 };
 
 const MAX_POWER_EXPONENT: u32 = 1024;
@@ -56,6 +56,7 @@ pub(super) enum FractionError {
     QuantileArguments,
     SampleVarianceCount,
     RationalStandardDeviation,
+    RationalRootMeanSquare,
     WeightedAverageArguments,
     WeightedQuantileArguments,
     PositiveMeanArguments,
@@ -119,6 +120,7 @@ impl FractionError {
             Self::WeightedAverageArguments => "wavg 须成对填写数值和非负权重，且至少一个权重大于零",
             Self::SampleVarianceCount => "样本方差和样本标准差至少需要两个数值",
             Self::RationalStandardDeviation => "这些数值的标准差无法表示为分数，可求方差或使用普通计算查看近似标准差",
+            Self::RationalRootMeanSquare => "这些数值的均方根无法表示为分数，可用 meansquare 求均方值",
             Self::WeightedQuantileArguments => {
                 "wquantile 须先填 0 至 1 的概率，wpercentile 须先填 0 至 100 的百分位。随后成对填写数值和非负权重，至少一个权重大于零"
             }
@@ -1786,6 +1788,16 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.variance_function(&name);
         }
+        if matches!(name.as_str(), "rms" | "meansquare") {
+            self.remaining = rest;
+            let values = self.list_function_arguments()?;
+            let square = mean_square_unweighted(values).map_err(|_| FractionError::ExactRange)?;
+            if name == "rms" {
+                return exact_rational_root(&square, 2)
+                    .map_err(|_| FractionError::RationalRootMeanSquare);
+            }
+            return Ok(square);
+        }
         if name == "wavg" {
             self.remaining = rest;
             return self.weighted_average_function();
@@ -2896,6 +2908,27 @@ mod tests {
         assert_eq!(
             calculate_fraction("stdev(1,2)"),
             Err(FractionError::RationalStandardDeviation)
+        );
+    }
+
+    #[test]
+    fn computes_exact_mean_square_and_rational_root_mean_square() {
+        for (query, expected) in [
+            ("meansquare(1/3,2/3)", "5/18"),
+            ("meansquare(3,4)", "25/2"),
+            ("rms(-1/3,7/3)", "5/3"),
+            ("RMS(1/3,1/3)*3", "1"),
+            ("rms(0,0)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_fraction("rms(3,4)"),
+            Err(FractionError::RationalRootMeanSquare)
         );
     }
 

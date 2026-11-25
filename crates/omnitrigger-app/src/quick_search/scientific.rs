@@ -26,6 +26,11 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "gmean" => return Some(NamedValue::Aggregate(geometric_mean)),
         "hmean" => return Some(NamedValue::Aggregate(harmonic_mean)),
         "rms" => return Some(NamedValue::Aggregate(root_mean_square)),
+        "meansquare" => {
+            return Some(NamedValue::Aggregate(|values| {
+                root_mean_square(values).powi(2)
+            }))
+        }
         "corr" => return Some(NamedValue::Aggregate(pearson_correlation)),
         "median" => return Some(NamedValue::Aggregate(median)),
         "quantile" => return Some(NamedValue::Aggregate(|values| quantile(values, 1.))),
