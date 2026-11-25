@@ -394,6 +394,11 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
         "按行倒序" | "reverse-lines" => Ok(text.lines().rev().collect::<Vec<_>>().join("\n")),
         "按行去重" | "unique-lines" => Ok(join_distinct_lines(text.lines())),
+        "按行去重留末" | "unique-lines-last" => {
+            let mut lines = distinct_lines(text.lines().rev()).collect::<Vec<_>>();
+            lines.reverse();
+            Ok(lines.join("\n"))
+        }
         "按行排序" | "sort-lines" => {
             let mut lines: Vec<_> = text.lines().collect();
             lines.sort_unstable();
@@ -1840,11 +1845,12 @@ fn compare_line_sets(input: &str, operation: LineSetOperation) -> Result<String,
 }
 
 fn join_distinct_lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    distinct_lines(lines).collect::<Vec<_>>().join("\n")
+}
+
+fn distinct_lines<'a>(lines: impl Iterator<Item = &'a str>) -> impl Iterator<Item = &'a str> {
     let mut seen = HashSet::new();
-    lines
-        .filter(|&line| seen.insert(line))
-        .collect::<Vec<_>>()
-        .join("\n")
+    lines.filter(move |&line| seen.insert(line))
 }
 
 fn edit_distance(input: &str) -> Result<String, TextError> {
@@ -3099,6 +3105,10 @@ mod tests {
     fn edits_pasted_lines_without_changing_text_on_each_line() {
         for (query, expected) in [
             ("按行去重 菠萝\r\n苹果\n菠萝\n苹果 ", "菠萝\n苹果"),
+            ("按行去重留末 茶\r\n咖啡\n茶\n水\n茶", "咖啡\n水\n茶"),
+            ("unique-lines-last \"A\nA \nA\nB\"", "A \nA\nB"),
+            ("unique-lines-last \"A\n\nB\n\nC\"", "A\nB\n\nC"),
+            ("依次处理 [\"按行去重留末\",\"大写\"] a\nb\na", "B\nA"),
             ("按行排序 B\r\nA\nb\nA", "A\nA\nB\nb"),
             ("按行倒序 \" 甲\r\n\r\n乙 \n丙\"", "丙\n乙 \n\n 甲"),
             ("reverse-lines \"\"", ""),

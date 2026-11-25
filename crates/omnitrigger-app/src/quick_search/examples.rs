@@ -3791,6 +3791,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行去重并保留每种原文最后一次出现的位置",
+        query: "文本: 按行去重留末 茶\n咖啡\n茶\n水\n茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把全角字母和数字转为半角",
         query: "文本: 转半角 ＡＢＣ１２３！",
     },
