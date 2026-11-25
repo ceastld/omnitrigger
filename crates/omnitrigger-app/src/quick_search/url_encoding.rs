@@ -37,6 +37,7 @@ pub(super) enum UrlEncodingError {
     RelativeUrlOrigin,
     RelativeUrlUnavailable,
     InvalidParameterPair,
+    InvalidParameterRename,
     InvalidParameterList,
     InvalidParameterUpdates,
     InvalidParameterNames,
@@ -70,6 +71,9 @@ impl UrlEncodingError {
             Self::RelativeUrlOrigin => "两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息",
             Self::RelativeUrlUnavailable => "无法用该基准网址生成可还原的相对链接",
             Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
+            Self::InvalidParameterRename => {
+                "填写两个非空参数名，例如 [\"tag\",\"topic\"]，再输入 URL"
+            }
             Self::InvalidParameterList => "用 JSON 数组填写多组名称和值，例如 [[\"tag\",\"茶\"]]",
             Self::InvalidParameterUpdates => {
                 "用 JSON 数组填写 1 至 16 组名称和值，再输入 URL。设置时名称须互不重复"
@@ -107,13 +111,12 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
     match operation.to_ascii_lowercase().as_str() {
         "编码" | "encode" => Ok(utf8_percent_encode(value, URL_COMPONENT).to_string()),
         "解码" | "decode" => decode_value(value),
-        "表单编码" | "form-encode" => Ok(utf8_percent_encode(value, FORM_VALUE)
-            .to_string()
-            .replace("%20", "+")),
+        "表单编码" | "form-encode" => Ok(encode_form_value(value)),
         "表单解码" | "form-decode" => decode_form_value(value),
         "参数" | "查询参数" | "params" => decode_parameters(value, false),
         "参数json" | "params-json" => decode_parameters(value, true),
         "取参数" | "get-param" => lookup_parameter_values(value),
+        "改参数名" | "rename-param" => rename_query_parameter(value),
         "参数差异" | "diff-params" => compare_url_queries(value),
         "生成查询串" | "build-query" => encode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
@@ -399,6 +402,12 @@ fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
     Ok(decoded.into_owned())
 }
 
+fn encode_form_value(value: &str) -> String {
+    utf8_percent_encode(value, FORM_VALUE)
+        .to_string()
+        .replace("%20", "+")
+}
+
 fn decode_form_value(value: &str) -> Result<String, UrlEncodingError> {
     decode_value(&value.replace('+', " "))
 }
@@ -424,6 +433,36 @@ fn filter_parameter_group(input: &str, keep_matching: bool) -> Result<String, Ur
     filter_query_parameters(address, |key| {
         key.is_some_and(|key| names.contains(key)) == keep_matching
     })
+}
+
+fn rename_query_parameter(input: &str) -> Result<String, UrlEncodingError> {
+    let invalid = UrlEncodingError::InvalidParameterRename;
+    let ([old, new], address) = parameter_argument::<[String; 2]>(input, invalid)?;
+    if [&old, &new]
+        .into_iter()
+        .any(|name| name.is_empty() || name.contains('\0'))
+    {
+        return Err(invalid);
+    }
+    let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let Some(query) = url.query().filter(|_| old != new) else {
+        return Ok(url.into());
+    };
+    let encoded_name = encode_form_value(&new);
+    let renamed = query
+        .split('&')
+        .map(|part| {
+            if parameter_name(part).as_deref() == Some(old.as_str()) {
+                let value_start = part.find('=').unwrap_or(part.len());
+                Cow::Owned(format!("{encoded_name}{}", &part[value_start..]))
+            } else {
+                Cow::Borrowed(part)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    url.set_query(Some(&renamed));
+    Ok(url.into())
 }
 
 fn filter_query_parameters(
@@ -1284,6 +1323,41 @@ mod tests {
             convert_url_component("排序参数 https://example.invalid/?%2G=1"),
             Err(UrlEncodingError::InvalidEscape)
         );
+    }
+
+    #[test]
+    fn renames_all_matching_query_keys_and_preserves_raw_values_and_flags() {
+        let address =
+            "https://example.invalid/doc?tag=a%20b&&source=x&%74ag=b+c&tag&Tag=&topic=现有#x";
+        assert_eq!(
+            convert_url_component(&format!(r#"改参数名 ["tag","topic"] {address}"#)).as_deref(),
+            Ok("https://example.invalid/doc?topic=a%20b&&source=x&topic=b+c&topic&Tag=&topic=%E7%8E%B0%E6%9C%89#x")
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"RENAME-PARAM ["a+b","主题 名"] https://example.invalid/?a%2Bb=%2b%2B#part"#
+            )
+            .as_deref(),
+            Ok("https://example.invalid/?%E4%B8%BB%E9%A2%98+%E5%90%8D=%2b%2B#part")
+        );
+        assert_eq!(
+            convert_url_component(r#"改参数名 ["tag","tag"] https://example.invalid/?%74ag=value"#)
+                .as_deref(),
+            Ok("https://example.invalid/?%74ag=value")
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"改参数名 ["missing","topic"] https://example.invalid/doc#part"#
+            )
+            .as_deref(),
+            Ok("https://example.invalid/doc#part")
+        );
+        for names in [r#"["tag"]"#, r#"["tag",""]"#, r#"["tag","\u0000"]"#] {
+            assert_eq!(
+                convert_url_component(&format!("改参数名 {names} {address}")),
+                Err(UrlEncodingError::InvalidParameterRename)
+            );
+        }
     }
 
     #[test]

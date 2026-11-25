@@ -6225,6 +6225,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "保留原值和顺序并修改 URL 参数名",
+        query: r#"URL: 改参数名 ["tag","topic"] https://example.invalid/doc?tag=a%20b&source=x&%74ag=b+c&tag#part"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "按顺序追加多个查询参数",
         query: r#"URL: 加参数组 [["tag","茶"],["tag","咖啡"]] https://example.invalid/doc?tag=first#part"#,
     },

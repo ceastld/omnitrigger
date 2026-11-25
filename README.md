@@ -648,6 +648,7 @@
 - 用 `URL: 同源 ["https://example.invalid:443/a","https://example.invalid/b"]` 可比较两个网址的规范化协议、主机与端口。示例得到 `同源 · https://example.invalid`，协议、主机或端口不同时会列出两个源。 [WHATWG 同源规则](https://html.spec.whatwg.org/multipage/browsers.html#same-origin)
 - 输入 `URL: 加参数 ["tag","茶"] https://example.invalid/doc?tag=first#part` 会在末尾追加一项。用 `URL: 设参数` 会替换第一个同名项并移除其余同名项。其他查询参数保留编码和顺序。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 设参数组 [["page","2"],["lang","zh"]] https://example.invalid/doc?page=1&q=a%20b&page=3#part` 可同时更新多个不同名称的参数，得到 `https://example.invalid/doc?page=2&q=a%20b&lang=zh#part`。新增项按填写顺序追加。用 `加参数组` 可追加包含同名项的一组参数。每次最多填写 16 项。
+- 用 `URL: 改参数名 ["tag","topic"]` 加上网址，可把解码后名称为 `tag` 的所有参数改名为 `topic`。原值的编码、重名项、无等号的参数和片段都会保留。新名称可含中文和空格。
 - 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `路径: 文件名 "C:\工作\发布 包.tar.gz"` 得到 `发布 包.tar.gz`。换用 `主名`、`扩展名` 或 `上一级`，可分别提取 `发布 包.tar`、`gz` 或 `C:\工作`。操作直接解析粘贴的路径文本。 [Rust 路径组件](https://doc.rust-lang.org/std/path/struct.Path.html)
 - 输入 `路径: 换扩展名 ["C:\\工作\\发布 包.tar.gz",".zip"]` 得到 `C:\工作\发布 包.tar.zip`。用空字符串可删除最后一个扩展名，结果是可复制的路径文本。 [Rust 路径扩展名替换](https://doc.rust-lang.org/std/path/struct.Path.html#method.with_extension)
