@@ -6352,6 +6352,8 @@ mod tests {
         for query in [
             r#"路径: 部件CSV ["docs/report,final.csv","README","."]"#,
             r#"处理: ["路径: 部件CSV"] ["docs/report,final.csv","README","."]"#,
+            "路径: 逐行部件CSV \"docs/report,final.csv\"\r\n\rREADME\u{2028}.",
+            "处理: [\"路径: 逐行部件CSV\"] \"docs/report,final.csv\"\nREADME\n.",
         ] {
             let result = for_query(query, &[]);
             assert_eq!(result.refillable_text(), Some(expected), "{query}");
@@ -6364,6 +6366,14 @@ mod tests {
         assert_eq!(
             path_component(r#"部件CSV ["a\tb"]"#),
             Err(PathError::InvalidPath)
+        );
+        assert_eq!(
+            path_component("逐行部件CSV \"a.txt\nREADME"),
+            Err(PathError::InvalidPath)
+        );
+        assert_eq!(
+            path_component(&format!("逐行部件CSV {}", "README\n".repeat(129))),
+            Err(PathError::LineReportArguments)
         );
     }
 

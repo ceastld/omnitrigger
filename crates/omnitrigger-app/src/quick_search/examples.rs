@@ -6360,6 +6360,13 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"路径: 部件CSV ["C:\\工作\\发布 包.tar.gz","README"]"#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把逐行粘贴的路径拆成部件表",
+        query: r#"路径: 逐行部件CSV "C:\工作\发布 包.tar.gz"
+"C:\工作\清单,终稿.csv"
+README"#,
+    },
+    Example {
         icon: Icon::Layers,
         title: "提取去掉扩展名的文件主名",
         query: r"路径: 主名 C:\工作\发布 包.tar.gz",
