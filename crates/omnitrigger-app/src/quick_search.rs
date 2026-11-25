@@ -3396,6 +3396,12 @@ impl QuickSearch {
                 if self.select_example_range(Example::argument_range, event.is_held, window, cx) {
                     cx.stop_propagation();
                 }
+            } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "l" {
+                if !event.is_held {
+                    self.input
+                        .update(cx, |input, cx| input.select_current_line(cx));
+                }
+                cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "f2" {
                 if let Some(mode) = self.next_calculation_mode(cx) {
                     if !event.is_held {
@@ -7968,6 +7974,8 @@ mod tests {
                         ("alt-shift-end", line_start..line_end),
                         ("alt-end", line_end..line_end),
                         ("alt-shift-home", line_start..line_end),
+                        ("alt-end", line_end..line_end),
+                        ("ctrl-l", line_start..line_end),
                         ("home", 0..0),
                         ("end", multiline.len()..multiline.len()),
                     ] {
@@ -8910,7 +8918,8 @@ mod tests {
             }))
         ));
         let text = results.refillable_text().unwrap();
-        assert!(text.contains("Ctrl+Shift+PageUp"));
+        assert!(text.contains("表格,Ctrl+Shift+PageUp,跳到第一组列"));
+        assert!(text.contains("表格,Ctrl+Shift+PageDown,跳到最后一组列"));
         assert!(text.contains("Ctrl+Shift+C"));
         assert!(!text.contains("Ctrl+Shift+R"));
         let shortcut = for_query("SEARCH SHORTCUTS: Ａｌｔ＋Ｆ２", &[]);

@@ -334,6 +334,10 @@ impl MessageInput {
         self.move_to(if end { line.end } else { line.start }, extend, cx);
     }
 
+    pub(super) fn select_current_line(&mut self, cx: &mut Context<Self>) {
+        self.select_range(logical_line_range(&self.content, self.head), cx);
+    }
+
     pub(super) fn move_cursor_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         if self.content.is_char_boundary(offset) {
             self.move_to(offset, false, cx);
