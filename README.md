@@ -691,6 +691,7 @@
 - 用 `路径: 校验文件名 报告集.txt` 可检查名称是否符合常用 Windows 命名规则，并显示长度。遇到保留设备名、保留字符、末尾空格或句点时，会显示相应原因。用引号包住文件名可保留首尾空格。 [Windows 文件命名规则](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions)
 - 输入 `路径: 转文件网址 C:\docs\report 2026.txt` 得到 `file:///C:/docs/report%202026.txt`。用 `路径: 从文件网址` 可转换回绝对路径。两种操作只转换文本，可处理盘符路径和 UNC 路径。 [Rust 文件网址转换规则](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `JSON: 格式化 {"名称":"北京","值":1}` 可添加两格缩进，输入 `JSON: 压缩` 加上 JSON 文本可移除结构空白。两种操作均检查语法，并保留原有键顺序、数字和字符串拼写。搜索框可输入最多 4096 个字符。
+- 用 `JSON: 缩进 4 {"商品":["茶","咖啡"],"金额":1.50}` 可将 JSON 格式化为每层四格缩进。可填 1 至 16 格，键的原有顺序、数字 `1.50` 等写法仍会保留。
 - 用 `TOML: 校验` 粘贴配置，可查看顶层键数量，语法有误时显示行和列。按 `Alt+Enter` 或点击「定位错误」可选中有误的内容，或把光标移到缺少字符的位置。用 `TOML: 转JSON` 可把配置转成 JSON，日期和时间输出为字符串，大整数保留数值。遇到 `inf` 或 `nan` 会提示转换错误。 [TOML 1.1 规范](https://toml.io/en/v1.1.0)
 - `处理: ["TOML: 转JSON","JSON: 取值 /port"] port = 8000` 可从 TOML 配置取出顶层端口值 `8000`。
 - 用 `TOML: 取值 /server/ports/1` 加上配置，可直接取出第二个端口并输出为 JSON。数组下标从 0 开始，含空格的路径可用双引号。采用与 JSON 工具一致的指针转义。其他字段的 `inf` 或 `nan` 可以保留在配置里。

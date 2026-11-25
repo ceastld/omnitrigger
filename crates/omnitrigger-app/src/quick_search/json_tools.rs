@@ -19,6 +19,8 @@ use super::text_tools::compare_natural;
 use super::{input_line_column, is_validation_operation, InputTableReport, InputValidationReport};
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
+const DEFAULT_INDENT_WIDTH: usize = 2;
+const MAX_INDENT_WIDTH: usize = 16;
 const MAX_PATCH_STEPS: usize = 32;
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
@@ -30,6 +32,7 @@ pub(super) enum JsonError {
     UnknownOperation,
     Invalid,
     LayoutTooLarge,
+    IndentArguments,
     InvalidPointer,
     InvalidPointerSegment,
     PointerSelection,
@@ -99,6 +102,7 @@ impl JsonError {
             Self::UnknownOperation => "输入 ? JSON 查看可用操作",
             Self::Invalid => "JSON 语法无效",
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
+            Self::IndentArguments => "先填写 1 至 16 的缩进空格数，再粘贴 JSON",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
             Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
@@ -412,12 +416,25 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         return operation.run(raw_source);
     }
     let source = raw_source.trim_start();
-    let pretty = match operation.as_str() {
+    let indent_width = match operation.as_str() {
         "依次处理" | "pipeline" if allow_pipeline => return transform_json_pipeline(source),
         "依次处理" | "pipeline" => return Err(JsonError::NestedPipeline),
-        "格式化" | "format" | "pretty" => true,
-        "压缩" | "compact" | "minify" => false,
-        "去注释" | "strip-comments" => return format_json(&strip_json_comments(source)?, true),
+        "格式化" | "format" | "pretty" => Some(DEFAULT_INDENT_WIDTH),
+        "压缩" | "compact" | "minify" => None,
+        "缩进" | "indent" => {
+            let (width, json) = source
+                .split_once(char::is_whitespace)
+                .unwrap_or((source, ""));
+            let width = width
+                .parse::<usize>()
+                .ok()
+                .filter(|width| (1..=MAX_INDENT_WIDTH).contains(width))
+                .ok_or(JsonError::IndentArguments)?;
+            return format_json(json.trim_start(), Some(width));
+        }
+        "去注释" | "strip-comments" => {
+            return format_json(&strip_json_comments(source)?, Some(DEFAULT_INDENT_WIDTH));
+        }
         "键排序" | "sort-keys" => return rewrite_object_keys(source, ObjectKeyMode::Sort),
         "取值" | "get" | "pointer" => return select_json_value(source),
         "类型" | "type" => return json_value_type(source),
@@ -507,7 +524,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "选键" | "pick-keys" => return pick_json_keys(source),
         _ => return Err(JsonError::UnknownOperation),
     };
-    format_json(source, pretty)
+    format_json(source, indent_width)
 }
 
 fn transform_json_pipeline(input: &str) -> Result<String, JsonError> {
@@ -548,13 +565,13 @@ fn transform_json_pipeline(input: &str) -> Result<String, JsonError> {
     Ok(current.into_owned())
 }
 
-fn format_json(source: &str, pretty: bool) -> Result<String, JsonError> {
+fn format_json(source: &str, indent_width: Option<usize>) -> Result<String, JsonError> {
     if source.is_empty() {
         return Err(JsonError::Incomplete);
     }
     // 通过解析验证语法，再调整原文空白，保留键顺序、数字和字符串拼写。
     serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
-    layout_json(source, pretty)
+    layout_json(source, indent_width)
 }
 
 fn strip_json_comments(source: &str) -> Result<String, JsonError> {
@@ -599,7 +616,7 @@ fn strip_json_comments(source: &str) -> Result<String, JsonError> {
     String::from_utf8(masked).map_err(|_| JsonError::Invalid)
 }
 
-fn layout_json(source: &str, pretty: bool) -> Result<String, JsonError> {
+fn layout_json(source: &str, indent_width: Option<usize>) -> Result<String, JsonError> {
     let mut result = String::with_capacity(source.len());
     let mut depth = 0;
     let mut previous = ' ';
@@ -620,7 +637,7 @@ fn layout_json(source: &str, pretty: bool) -> Result<String, JsonError> {
         if matches!(ch, ' ' | '\t' | '\n' | '\r') {
             continue;
         }
-        if pretty {
+        if let Some(indent_width) = indent_width {
             let line_break = if matches!(ch, '}' | ']') {
                 depth -= 1;
                 !matches!(previous, '{' | '[')
@@ -628,7 +645,7 @@ fn layout_json(source: &str, pretty: bool) -> Result<String, JsonError> {
                 matches!(previous, '{' | '[' | ',')
             };
             if line_break {
-                let indent = depth * 2;
+                let indent = depth * indent_width;
                 if result.len() + indent + 1 > MAX_PRETTY_BYTES {
                     return Err(JsonError::LayoutTooLarge);
                 }
@@ -1957,7 +1974,7 @@ fn slice_json_array(query: &str) -> Result<String, JsonError> {
 fn json_array_to_lines(source: &str) -> Result<String, JsonError> {
     let lines = read_json_array(source)?
         .into_iter()
-        .map(|value| layout_json(value.get(), false))
+        .map(|value| layout_json(value.get(), None))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(lines.join("\n"))
 }
@@ -1969,7 +1986,7 @@ fn json_lines_to_array(source: &str) -> Result<String, JsonError> {
     let values = json_lines(source)
         .map(|(_, line)| {
             let value = parse_json_line(line)?;
-            layout_json(value.get(), false)
+            layout_json(value.get(), None)
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("[{}]", values.join(",")))
@@ -2220,7 +2237,7 @@ fn write_object_entries<'a>(
         .into_iter()
         .map(|(key, value)| {
             let key = serde_json::to_string(&key).expect("JSON 键名可以序列化");
-            let value = layout_json(value.get(), false)?;
+            let value = layout_json(value.get(), None)?;
             Ok(format!("{key}:{value}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2591,7 +2608,7 @@ fn json_csv_text(value: &RawValue) -> Result<Cow<'_, str>, JsonError> {
     let raw = value.get();
     let text = match raw.as_bytes()[0] {
         b'"' => Cow::Owned(serde_json::from_str::<String>(raw).map_err(json_parse_error)?),
-        b'{' | b'[' => Cow::Owned(layout_json(raw, false)?),
+        b'{' | b'[' => Cow::Owned(layout_json(raw, None)?),
         b'n' => Cow::Borrowed(""),
         _ => Cow::Borrowed(raw),
     };
@@ -4715,6 +4732,29 @@ mod tests {
             transform_json("pretty -0.001200e+02").unwrap(),
             "-0.001200e+02"
         );
+    }
+
+    #[test]
+    fn formats_json_with_a_custom_indent_and_preserves_token_spelling() {
+        let query = r#"缩进 4 {"b":[1.20,"\u0042"],"a":{}}"#;
+        let expected =
+            "{\n    \"b\": [\n        1.20,\n        \"\\u0042\"\n    ],\n    \"a\": {}\n}";
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json("indent 1\r\n[1,2]").as_deref(),
+            Ok("[\n 1,\n 2\n]")
+        );
+        for query in ["缩进 0 {}", "缩进 17 {}", "indent 1.5 {}"] {
+            assert_eq!(
+                transform_json(query),
+                Err(JsonError::IndentArguments),
+                "{query}"
+            );
+        }
+        assert_eq!(transform_json("缩进 4"), Err(JsonError::Incomplete));
+        assert_eq!(transform_json("缩进 4 [1,]"), Err(JsonError::Invalid));
+        let nested = format!("缩进 16 {}0{}", "[".repeat(300), "]".repeat(300));
+        assert_eq!(transform_json(&nested), Err(JsonError::LayoutTooLarge));
     }
 
     #[test]

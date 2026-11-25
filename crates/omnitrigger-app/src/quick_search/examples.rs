@@ -4530,6 +4530,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "将 JSON 格式化为四格缩进",
+        query: r#"JSON: 缩进 4 {"商品":["茶","咖啡"],"金额":1.50}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "校验 TOML 配置并统计顶层键",
         query: "TOML: 校验 name = '茶'\nport = 8000",
     },
