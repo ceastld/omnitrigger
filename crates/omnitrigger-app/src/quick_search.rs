@@ -1825,6 +1825,12 @@ enum TableAxis {
     Columns,
 }
 
+#[derive(Clone, Copy)]
+enum TableCopy {
+    CurrentPage,
+    Tsv,
+}
+
 #[derive(Clone, Copy, Default)]
 struct TablePages {
     rows: usize,
@@ -2590,19 +2596,28 @@ impl QuickSearch {
         }
     }
 
-    fn copy_table_page(&self, is_held: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Results::Value(Ok(ResultValue {
-            kind: ValueKind::Table(table),
-            ..
-        })) = &self.results
-        else {
+    fn copy_table(
+        &self,
+        format: TableCopy,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(table) = self.results.table_preview() else {
             return false;
         };
-        if self.expanded_value_pages.is_some() || !table.spans_pages() {
+        if matches!(format, TableCopy::CurrentPage)
+            && (self.expanded_value_pages.is_some() || !table.spans_pages())
+        {
             return false;
         }
         if !is_held {
-            let text = table.page_csv(self.table_pages.rows, self.table_pages.columns);
+            let text = match format {
+                TableCopy::CurrentPage => {
+                    table.page_csv(self.table_pages.rows, self.table_pages.columns)
+                }
+                TableCopy::Tsv => table.tsv(),
+            };
             self.index
                 .recent
                 .queries
@@ -3381,8 +3396,11 @@ impl QuickSearch {
             } else if modifiers == 2
                 && keystroke.modifiers.control
                 && keystroke.modifiers.shift
-                && keystroke.key == "c"
-                && self.copy_table_page(event.is_held, window, cx)
+                && match keystroke.key.as_str() {
+                    "c" => self.copy_table(TableCopy::CurrentPage, event.is_held, window, cx),
+                    "t" => self.copy_table(TableCopy::Tsv, event.is_held, window, cx),
+                    _ => false,
+                }
             {
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "enter" {
@@ -4093,10 +4111,21 @@ impl QuickSearch {
                         .px(px(8.))
                         .tooltip(theme::text_tooltip("Ctrl+Shift+C 复制本页 CSV".into()))
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.copy_table_page(false, window, cx);
+                            this.copy_table(TableCopy::CurrentPage, false, window, cx);
                         })),
                 )
-            });
+            })
+            .child(
+                button("copy-table-tsv", "复制 TSV", Tone::Ghost, true)
+                    .h(px(TABLE_PAGER_HEIGHT))
+                    .px(px(8.))
+                    .tooltip(theme::text_tooltip(
+                        "Ctrl+Shift+T 复制完整表格为 TSV".into(),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.copy_table(TableCopy::Tsv, false, window, cx);
+                    })),
+            );
         let pagination = div()
             .flex()
             .items_center()

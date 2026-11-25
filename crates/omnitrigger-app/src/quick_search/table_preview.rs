@@ -85,6 +85,10 @@ impl TablePreview {
         write_rows(self.visible_rows(row_page, column_page), ',')
     }
 
+    pub(super) fn tsv(&self) -> String {
+        write_rows(&self.rows, '\t')
+    }
+
     pub(super) fn legend(&self) -> Div {
         div()
             .min_w_0()
@@ -243,6 +247,29 @@ mod tests {
             "name,note\r\n\"绿茶,冰\",\" 原样\n\"\"备注\"\" \"\r\n\"\",  "
         );
         assert_eq!(preview.page_csv(1, 0), "id,label\r\n7,末页\r\n8,末页");
+    }
+
+    #[test]
+    fn serializes_all_rows_and_columns_as_tsv_independently_of_paging() {
+        let rows = [
+            ["编号", "备注", "值"],
+            ["001", "甲,乙", "1/3"],
+            ["002", "含\t制表符", ""],
+            ["003", "带\n\"换行\"", "0.50"],
+            ["004", "", "4"],
+            ["005", "  原样  ", "5"],
+            ["006", "", "6"],
+            ["007", "末行", "7"],
+        ]
+        .into_iter()
+        .map(|row| row.map(str::to_owned).into())
+        .collect();
+        let preview = TablePreview::from_rows(rows).with_columns_per_page(2);
+        assert!(preview.spans_both_axes());
+        assert_eq!(
+            preview.tsv(),
+            "编号\t备注\t值\r\n001\t甲,乙\t1/3\r\n002\t\"含\t制表符\"\t\"\"\r\n003\t\"带\n\"\"换行\"\"\"\t0.50\r\n004\t\"\"\t4\r\n005\t  原样  \t5\r\n006\t\"\"\t6\r\n007\t末行\t7"
+        );
     }
 
     #[test]
