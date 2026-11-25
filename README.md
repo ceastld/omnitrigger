@@ -577,6 +577,7 @@
 - `sinpi(x)` 和 `cospi(x)` 直接计算 `sin(πx)` 和 `cos(πx)`。先按周期缩小参数再乘 π，例如 `sinpi(1000000000000.5)` 得到 `1`，`cospi(1000000000000.5)` 得到 `0`。`tanpi(x)` 计算 `tan(πx)`，半整数处会提示无定义。 [Julia 的 sinpi 定义](https://docs.julialang.org/en/v1/base/math/#Base.Math.sinpi) · [Julia 的 cospi 定义](https://docs.julialang.org/en/v1/base/math/#Base.Math.cospi) · [Julia 的 tanpi 定义](https://docs.julialang.org/en/v1/base/math/#Base.Math.tanpi)
 - `sinc(x)` 计算归一化的 `sin(πx)/(πx)`，例如 `sinc(0.5)` 得到约 `0.636619772367581`，非零整数处得 `0`。`sinc_rad(x)` 按弧度计算 `sin(x)/x`，两种函数在零处都取 `1`。 [SciPy 的 sinc 定义](https://docs.scipy.org/doc/scipy-1.15.3/reference/generated/scipy.special.sinc.html)
 - `asind(0.5)`、`acosd(0)` 和 `atand(1)` 直接返回角度 `30`、`90` 和 `45`。用 `atan2d(1,-1)` 可求方向角 `135` 度，参数按 `y, x` 输入。
+- `asinpi`、`acospi`、`atanpi` 和 `atan2pi` 把反三角结果表示为 π 的倍数。例如 `asinpi(-1)` 得到 `-0.5`，`atan2pi(1,-1)` 得到 `0.75`。 [GNU C Library 的反三角函数定义](https://sourceware.org/glibc/manual/latest/html_node/Inverse-Trig-Functions.html)
 - 用 `sinh`、`cosh` 和 `tanh` 计算双曲正弦、余弦和正切。例如 `sinh(ln(2))` 得到 `0.75`。反函数是 `asinh`、`acosh` 和 `atanh`，其中 `acosh` 的参数至少为 1，`atanh` 的参数须在 -1 与 1 之间。 [Python 双曲函数](https://docs.python.org/3/library/math.html#hyperbolic-functions)
 - `round(2.675, 2)` 按两位小数舍入得到 `2.67`，`round(1250, -2)` 按百位舍入得到 `1200`。第二个参数可用整数指定保留位数。`log1p(x)` 与 `expm1(x)` 分别计算 `ln(1+x)` 与 `exp(x)-1`，适用于接近零的输入。
 - 数字中的下划线可分隔数位，例如 `1_000 + 2_500` 和 `1_000ms to s`。

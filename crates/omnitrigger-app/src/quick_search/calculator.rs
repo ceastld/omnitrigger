@@ -836,6 +836,33 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_inverse_trigonometry_in_multiples_of_pi() {
+        for (query, expected) in [
+            ("asinpi(-1)", "-0.5"),
+            ("asinpi(0)", "0"),
+            ("acospi(-1)", "1"),
+            ("acospi(0)", "0.5"),
+            ("atanpi(1)", "0.25"),
+            ("atanpi(-1)", "-0.25"),
+            ("atan2pi(1,-1)", "0.75"),
+            ("atan2pi(-1,-1)", "-0.75"),
+            ("atan2pi(1e-309,-1e-309)", "0.75"),
+            ("cospi(acospi(-1))", "-1"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate("asinpi(2)"),
+            Err(CalculationError::FunctionDomain)
+        );
+        assert_eq!(
+            calculate("acospi(-2)"),
+            Err(CalculationError::FunctionDomain)
+        );
+        assert!(calculate("atan2pi(1)").is_err());
+    }
+
+    #[test]
     fn evaluates_degree_trigonometry_at_regular_angles_and_axes() {
         for (query, expected) in [
             ("sind(30)", "0.5"),

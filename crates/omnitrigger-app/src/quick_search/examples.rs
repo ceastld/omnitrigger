@@ -3772,6 +3772,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求反正弦并以 π 的倍数表示",
+        query: "asinpi(1)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求反余弦并以 π 的倍数表示",
+        query: "acospi(0)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求反正切并以 π 的倍数表示",
+        query: "atanpi(1)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求方向角并以 π 的倍数表示",
+        query: "atan2pi(1,-1)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "直接按度数求正弦",
         query: "sind(30)",
     },

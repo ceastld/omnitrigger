@@ -158,6 +158,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         }
         "atan2" => return Some(NamedValue::Aggregate(atan2)),
         "atan2d" => return Some(NamedValue::Aggregate(|values| atan2(values).to_degrees())),
+        "atan2pi" => return Some(NamedValue::Aggregate(|values| atan2(values) / PI)),
         "min" => {
             return Some(NamedValue::Aggregate(|values| {
                 values.iter().copied().fold(f64::INFINITY, f64::min)
@@ -214,6 +215,9 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "asin" => f64::asin,
         "acos" => f64::acos,
         "atan" => f64::atan,
+        "asinpi" => |value| value.asin() / PI,
+        "acospi" => |value| value.acos() / PI,
+        "atanpi" => |value| value.atan() / PI,
         "asind" => |value| value.asin().to_degrees(),
         "acosd" => |value| value.acos().to_degrees(),
         "atand" => |value| value.atan().to_degrees(),
