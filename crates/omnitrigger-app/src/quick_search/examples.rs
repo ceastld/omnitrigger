@@ -4272,6 +4272,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把行首空格换成等宽的制表符缩进",
+        query: "文本: 缩进转制表符 4\n    编号\n      子项\t备注",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按 Unicode 显示列宽对齐中文和表情",
         query: "文本: 按显示宽度展开制表符 8 名称\t数量\n绿茶\t3\n☕️\t1",
     },

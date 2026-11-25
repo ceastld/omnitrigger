@@ -253,6 +253,8 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
         || is_display_width_csv_operation(operation)
         || operation.eq_ignore_ascii_case("展开制表符")
         || operation.eq_ignore_ascii_case("expand-tabs")
+        || operation.eq_ignore_ascii_case("缩进转制表符")
+        || operation.eq_ignore_ascii_case("unexpand-indent")
         || operation.eq_ignore_ascii_case("按显示宽度展开制表符")
         || operation.eq_ignore_ascii_case("expand-display-tabs")
 }
@@ -327,6 +329,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "展开制表符" | "expand-tabs" => {
             return expand_text_tabs(text, |run| run.chars().count())
         }
+        "缩进转制表符" | "unexpand-indent" => return unexpand_line_indent(text),
         "按显示宽度展开制表符" | "expand-display-tabs" => {
             return expand_text_tabs(text, UnicodeWidthStr::width)
         }
@@ -909,6 +912,37 @@ fn expand_text_tabs(input: &str, measure: impl Fn(&str) -> usize) -> Result<Stri
             column = 0;
         }
         run_start = index + separator.len();
+    }
+    Ok(result)
+}
+
+fn unexpand_line_indent(input: &str) -> Result<String, TextError> {
+    let (width, text) = tab_width_and_text(input)?;
+    let mut result = String::with_capacity(text.len());
+    let mut start = 0;
+    let endings = logical_newline_pattern()
+        .find_iter(text)
+        .map(|ending| (ending.start(), ending.end()))
+        .chain(std::iter::once((text.len(), text.len())));
+    for (line_end, next) in endings {
+        let line = &text[start..line_end];
+        let content = line.trim_start_matches([' ', '\t']);
+        let indent = &line[..line.len() - content.len()];
+        let mut tabs = 0;
+        let mut spaces = 0;
+        for byte in indent.bytes() {
+            if byte == b'\t' || spaces + 1 == width {
+                tabs += 1;
+                spaces = 0;
+            } else {
+                spaces += 1;
+            }
+        }
+        result.extend(std::iter::repeat_n('\t', tabs));
+        result.extend(std::iter::repeat_n(' ', spaces));
+        result.push_str(content);
+        result.push_str(&text[line_end..next]);
+        start = next;
     }
     Ok(result)
 }
@@ -3240,6 +3274,26 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected));
         }
+    }
+
+    #[test]
+    fn compresses_leading_indentation_without_changing_its_display_columns() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 缩进转制表符 4\r\n \t  中\tX \r\n      y\t\n\t    \u{2029}    Z ",
+        )
+        .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok("\t  中\tX \r\n\t  y\t\n\t\t\u{2029}\tZ ")
+        );
+        assert_eq!(
+            transform_text(&format!("unexpand-indent {}   \t\t ", usize::MAX)).as_deref(),
+            Ok("\t\t ")
+        );
+        assert_eq!(
+            transform_text("unexpand-indent 4  \u{a0} A").as_deref(),
+            Ok(" \u{a0} A")
+        );
     }
 
     #[test]
