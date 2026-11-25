@@ -1510,6 +1510,42 @@ impl Results {
         Some(text)
     }
 
+    fn selectable_count(&self) -> usize {
+        match self {
+            Self::Destinations(items) => items.len(),
+            Self::Help(items) => items.len(),
+            Self::Calculations(items)
+            | Self::Conversions(items)
+            | Self::Queries(items)
+            | Self::ConversionTargets(items)
+            | Self::FileOptions(items)
+            | Self::FilterOptions(items)
+            | Self::Bookmarks(items) => items.len(),
+            Self::Value(_)
+            | Self::RefilledInput
+            | Self::ApplicationsLoading
+            | Self::ApplicationsUnavailable(_)
+            | Self::OpenWindowsLoading
+            | Self::OpenWindowsUnavailable(_)
+            | Self::LocalFilesPrompt
+            | Self::DirectoryInput(_)
+            | Self::LocalFilesLoading
+            | Self::LocalFilesUnavailable(_)
+            | Self::BookmarksUnavailable(_)
+            | Self::BookmarkNameInput(_) => 0,
+        }
+    }
+
+    fn table_preview(&self) -> Option<&table_preview::TablePreview> {
+        match self {
+            Self::Value(Ok(ResultValue {
+                kind: ValueKind::Table(table),
+                ..
+            })) => Some(table),
+            _ => None,
+        }
+    }
+
     fn suggested_input(&self, selected: usize) -> Option<&str> {
         match self {
             Self::Help(items) => Some(EXAMPLES[*items.get(selected)?].query),
@@ -1742,6 +1778,15 @@ struct TablePages {
     columns: usize,
 }
 
+impl TablePages {
+    fn clamped_to(self, table: &table_preview::TablePreview) -> Self {
+        Self {
+            rows: self.rows.min(table.row_pages().saturating_sub(1)),
+            columns: self.columns.min(table.column_pages().saturating_sub(1)),
+        }
+    }
+}
+
 struct TableSearchOrigin {
     query: String,
     pages: TablePages,
@@ -1750,6 +1795,9 @@ struct TableSearchOrigin {
 struct QueryDraft {
     text: String,
     selection: MessageSelection,
+    selected: usize,
+    suggestion: Option<String>,
+    table_pages: Option<TablePages>,
 }
 
 impl QueryDraft {
@@ -1919,6 +1967,7 @@ pub(super) struct QuickSearch {
     input_before_calculation_history: Option<QueryDraft>,
     input_before_query_history: Option<QueryDraft>,
     input_before_bookmarks: Option<QueryDraft>,
+    query_draft_return: Option<QueryDraft>,
     input_before_table_search: Option<TableSearchOrigin>,
     table_search_return: Option<TableSearchOrigin>,
     result_refill: Option<ResultRefill>,
@@ -2042,6 +2091,7 @@ impl QuickSearch {
             input_before_calculation_history: None,
             input_before_query_history: None,
             input_before_bookmarks: None,
+            query_draft_return: None,
             input_before_table_search: None,
             table_search_return: None,
             result_refill: None,
@@ -2175,20 +2225,10 @@ impl QuickSearch {
             .table_search_return
             .take()
             .filter(|origin| origin.query == query);
-        if let (
-            Some(origin),
-            Results::Value(Ok(ResultValue {
-                kind: ValueKind::Table(table),
-                ..
-            })),
-        ) = (return_to, &self.results)
-        {
-            self.table_pages.rows = origin.pages.rows.min(table.row_pages().saturating_sub(1));
-            self.table_pages.columns = origin
-                .pages
-                .columns
-                .min(table.column_pages().saturating_sub(1));
+        if let (Some(origin), Some(table)) = (return_to, self.results.table_preview()) {
+            self.table_pages = origin.pages.clamped_to(table);
         }
+        self.restore_query_result_position(query);
         if let Some(origin) = self
             .file_search_return
             .take()
@@ -2809,15 +2849,50 @@ impl QuickSearch {
         QueryDraft {
             text: input.text(),
             selection: input.selection_position(),
+            selected: self.selected,
+            suggestion: self
+                .results
+                .suggested_input(self.selected)
+                .map(str::to_owned),
+            table_pages: self.results.table_preview().map(|_| self.table_pages),
         }
     }
 
-    fn restore_query_draft(&self, draft: QueryDraft, window: &mut Window, cx: &mut Context<Self>) {
+    fn restore_query_draft(
+        &mut self,
+        draft: QueryDraft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = draft.text.clone();
+        let selection = draft.selection;
+        self.query_draft_return = Some(draft);
         self.input.update(cx, |input, cx| {
-            input.set_text(draft.text, cx);
-            input.restore_selection(draft.selection, cx);
+            input.set_text(text, cx);
+            input.restore_selection(selection, cx);
         });
         window.focus(&self.input.focus_handle(cx));
+    }
+
+    fn restore_query_result_position(&mut self, query: &str) {
+        let Some(draft) = self
+            .query_draft_return
+            .take()
+            .filter(|draft| draft.text == query)
+        else {
+            return;
+        };
+        let count = self.results.selectable_count();
+        self.selected = draft
+            .suggestion
+            .as_deref()
+            .and_then(|suggestion| {
+                (0..count).find(|&index| self.results.suggested_input(index) == Some(suggestion))
+            })
+            .unwrap_or_else(|| draft.selected.min(count.saturating_sub(1)));
+        if let (Some(pages), Some(table)) = (draft.table_pages, self.results.table_preview()) {
+            self.table_pages = pages.clamped_to(table);
+        }
     }
 
     fn toggle_calculation_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3326,29 +3401,7 @@ impl QuickSearch {
                 }
             }
             key @ ("up" | "down") => {
-                let count = match &self.results {
-                    Results::Destinations(items) => items.len(),
-                    Results::Help(items) => items.len(),
-                    Results::Calculations(items)
-                    | Results::Conversions(items)
-                    | Results::Queries(items)
-                    | Results::ConversionTargets(items)
-                    | Results::FileOptions(items)
-                    | Results::FilterOptions(items)
-                    | Results::Bookmarks(items) => items.len(),
-                    Results::Value(_)
-                    | Results::RefilledInput
-                    | Results::ApplicationsLoading
-                    | Results::ApplicationsUnavailable(_)
-                    | Results::OpenWindowsLoading
-                    | Results::OpenWindowsUnavailable(_)
-                    | Results::LocalFilesPrompt
-                    | Results::DirectoryInput(_)
-                    | Results::LocalFilesLoading
-                    | Results::LocalFilesUnavailable(_)
-                    | Results::BookmarksUnavailable(_)
-                    | Results::BookmarkNameInput(_) => 0,
-                };
+                let count = self.results.selectable_count();
                 if count == 0 {
                     return;
                 }
@@ -6502,6 +6555,16 @@ mod tests {
             (search.table_pages.rows, search.table_pages.columns),
             (1, 1)
         );
+        search.key_down(&event("f1", false), window, cx);
+        let help = search.input.read(cx).text();
+        search.refresh_results(&help, window, cx);
+        search.key_down(&event("f1", false), window, cx);
+        assert_eq!(search.input.read(cx).text(), query);
+        search.refresh_results(&query, window, cx);
+        assert_eq!(
+            (search.table_pages.rows, search.table_pages.columns),
+            (1, 1)
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -7236,6 +7299,21 @@ mod tests {
                                 search.toggle_help(window, cx);
                                 assert_eq!(search.input.read(cx).text(), filter);
                             }
+                            let older = r#"JSON: 取值 /a {"a":1}"#;
+                            let newer = r#"JSON: 取值 /b {"b":2}"#;
+                            search.index.recent.queries.record_exact(older, "1");
+                            search.index.recent.queries.record_exact(newer, "2");
+                            let filter = "查询历史: 取值";
+                            search.fill_query(filter, window, cx);
+                            search.refresh_results(filter, window, cx);
+                            search.selected = 1;
+                            assert_eq!(search.results.suggested_input(1), Some(older));
+                            search.toggle_help(window, cx);
+                            let help = search.input.read(cx).text();
+                            search.refresh_results(&help, window, cx);
+                            search.toggle_help(window, cx);
+                            search.refresh_results(filter, window, cx);
+                            assert_eq!(search.results.suggested_input(search.selected), Some(older));
                         })
                         .unwrap();
                     reopened
