@@ -2019,6 +2019,7 @@ struct QueryDraft {
     suggestion: Option<String>,
     table_pages: Option<TablePages>,
     expanded_value: bool,
+    preview_origin: Option<FileSearchReturn>,
 }
 
 impl QueryDraft {
@@ -3653,6 +3654,15 @@ impl QuickSearch {
 
     fn query_draft(&self, cx: &Context<Self>) -> QueryDraft {
         let input = self.input.read(cx);
+        let preview_origin = self.result_refill.as_ref().and_then(|refill| {
+            let RefillKind::File { path } = &refill.kind else {
+                return None;
+            };
+            (refill.inserted == input.text_ref()).then(|| FileSearchReturn {
+                query: refill.original.clone(),
+                path: path.clone(),
+            })
+        });
         QueryDraft {
             text: input.text(),
             selection: input.selection_position(),
@@ -3663,17 +3673,25 @@ impl QuickSearch {
                 .map(str::to_owned),
             table_pages: self.results.table_preview().map(|_| self.table_pages),
             expanded_value: self.expanded_value_pages.is_some(),
+            preview_origin,
         }
     }
 
     fn restore_query_draft(
         &mut self,
-        draft: QueryDraft,
+        mut draft: QueryDraft,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let text = draft.text.clone();
         let selection = draft.selection;
+        if let Some(origin) = draft.preview_origin.take() {
+            self.result_refill = Some(ResultRefill {
+                original: origin.query,
+                inserted: text.clone(),
+                kind: RefillKind::File { path: origin.path },
+            });
+        }
         self.query_draft_return = Some(draft);
         self.input.update(cx, |input, cx| {
             input.set_text(text, cx);
@@ -9072,6 +9090,42 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_file_preview_origin_survives_result_search(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        const PATH: &str = r"C:\fixture\preview.txt";
+        const SOURCE: &str = r"文件: C:\fixture | preview.txt";
+        const PREVIEW: &str = "文本: 原文 甲\r\n乙";
+        search.fill_query(PREVIEW, window, cx);
+        search.refresh_results(PREVIEW, window, cx);
+        search.result_refill = Some(ResultRefill {
+            original: SOURCE.to_owned(),
+            inserted: PREVIEW.to_owned(),
+            kind: RefillKind::File {
+                path: PATH.to_owned(),
+            },
+        });
+        search.toggle_result_search(window, cx);
+        let filtered = search.input.read(cx).text();
+        search.refresh_results(&filtered, window, cx);
+        assert!(filtered.starts_with(TEXT_SEARCH_COMMAND));
+        assert_eq!(search.file_preview_path(), None);
+        search.toggle_result_search(window, cx);
+        search.refresh_results(PREVIEW, window, cx);
+        assert_eq!(search.input.read(cx).text_ref(), PREVIEW);
+        assert_eq!(search.file_preview_path(), Some(PATH));
+        assert_eq!(
+            search
+                .result_refill
+                .as_ref()
+                .map(|refill| refill.original.as_str()),
+            Some(SOURCE)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_example_data_selection(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -9915,6 +9969,7 @@ mod tests {
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened.update(cx, verify_text_result_search).unwrap();
+                    reopened.update(cx, verify_file_preview_origin_survives_result_search).unwrap();
                     reopened.update(cx, verify_expanded_preview_jump).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
