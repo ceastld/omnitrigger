@@ -4,6 +4,7 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
     fmt::{Display, Write as _},
     hash::Hash,
+    ops::Range,
 };
 
 use chrono::{
@@ -856,7 +857,6 @@ enum UnitColumnArguments {
 }
 
 enum Operation {
-    Validate,
     PadRows,
     JsonRows,
     JsonObjects,
@@ -1342,7 +1342,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "曲线差积分" | "curve-difference-integral" => {
             return coordinate_curve_integral(input, false)
         }
-        "校验" | "validate" => Operation::Validate,
+        "校验" | "validate" => return validate_csv(input).map(|report| report.text),
         "补齐列" | "pad-columns" => Operation::PadRows,
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
         "内连接" | "inner-join" => return join_csv(input, JoinKind::Inner),
@@ -2736,27 +2736,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::ConvertDelimiter { from, .. } => from,
         _ => ',',
     };
-    let rows = if matches!(
-        kind,
-        Operation::Validate | Operation::PadRows | Operation::DropEmptyRecords
-    ) {
-        match read_delimited_rows(input, delimiter, false) {
-            Ok(rows) => rows,
-            Err(error) if matches!(kind, Operation::Validate) => {
-                return Ok(format!(
-                    "CSV 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
-                    error.record,
-                    error.column,
-                    error.kind.message()
-                ));
-            }
-            Err(error) => return Err(error.kind),
-        }
+    let rows = if matches!(kind, Operation::PadRows | Operation::DropEmptyRecords) {
+        read_delimited_rows(input, delimiter, false).map_err(|error| error.kind)?
     } else {
         read_rows(input, delimiter)?
     };
     match kind {
-        Operation::Validate => Ok(report_csv_columns(&rows)),
         Operation::PadRows => pad_rows(rows),
         Operation::JsonRows => serde_json::to_string(&rows).map_err(|_| CsvError::Serialization),
         Operation::JsonObjects => json_objects(&rows, None),
@@ -9714,6 +9699,51 @@ fn pad_rows(mut rows: Vec<Vec<String>>) -> Result<String, CsvError> {
     Ok(write_rows(&rows, ','))
 }
 
+pub(super) struct CsvValidationReport {
+    pub(super) text: String,
+    pub(super) error_span: Option<Range<usize>>,
+}
+
+pub(super) fn csv_validation_report(query: &str) -> Option<Result<CsvValidationReport, CsvError>> {
+    let (operation, input) = split_argument(query)?;
+    if operation != "校验" && !operation.eq_ignore_ascii_case("validate") {
+        return None;
+    }
+    let offset = query.len() - input.len();
+    Some(validate_csv(input).map(|mut report| {
+        if let Some(range) = &mut report.error_span {
+            range.start += offset;
+            range.end += offset;
+        }
+        report
+    }))
+}
+
+fn validate_csv(input: &str) -> Result<CsvValidationReport, CsvError> {
+    let data = input.strip_prefix('\u{feff}').unwrap_or(input);
+    if data.is_empty() {
+        return Err(CsvError::MissingInput);
+    }
+    Ok(match read_delimited_rows(data, ',', false) {
+        Ok(rows) => CsvValidationReport {
+            text: report_csv_columns(&rows),
+            error_span: None,
+        },
+        Err(error) => {
+            let offset = input.len() - data.len();
+            CsvValidationReport {
+                text: format!(
+                    "CSV 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
+                    error.record,
+                    error.column,
+                    error.kind.message()
+                ),
+                error_span: Some(offset + error.span.start..offset + error.span.end),
+            }
+        }
+    })
+}
+
 fn report_csv_columns(rows: &[Vec<String>]) -> String {
     let width = rows[0].len();
     let mismatches: Vec<_> = rows
@@ -9738,6 +9768,7 @@ struct CsvReadError {
     kind: CsvError,
     record: usize,
     column: usize,
+    span: Range<usize>,
 }
 
 fn auto_convert_delimiter(input: &str) -> Result<String, CsvError> {
@@ -9766,35 +9797,53 @@ fn read_delimited_rows(
     delimiter: char,
     require_uniform_width: bool,
 ) -> Result<Vec<Vec<String>>, CsvReadError> {
+    let source_length = input.len();
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut fields = Vec::new();
     loop {
         let record = rows.len() + 1;
         let column = fields.len() + 1;
-        let at_field = |kind| CsvReadError {
+        let at_field = |kind, span| CsvReadError {
             kind,
             record,
             column,
+            span,
         };
-        let (field, rest) = read_field(input, delimiter).map_err(at_field)?;
+        let field_start = source_length - input.len();
+        let (field, rest) = read_field(input, delimiter).map_err(|kind| {
+            let span = if kind == CsvError::UnclosedQuote {
+                field_start..source_length
+            } else {
+                let quote = field_start + input.find('"').unwrap_or_default();
+                quote..quote + 1
+            };
+            at_field(kind, span)
+        })?;
         fields.push(field);
         if let Some(next) = rest.strip_prefix(delimiter) {
             input = next;
             continue;
         }
+        let field_end = source_length - rest.len();
         input = if rest.is_empty() {
             rest
         } else {
             rest.strip_prefix("\r\n")
                 .or_else(|| rest.strip_prefix('\n'))
-                .ok_or_else(|| at_field(CsvError::InvalidSeparator))?
+                .ok_or_else(|| {
+                    let width = rest.chars().next().map_or(0, char::len_utf8);
+                    at_field(CsvError::InvalidSeparator, field_end..field_end + width)
+                })?
         };
         if require_uniform_width
             && rows
                 .first()
                 .is_some_and(|first| first.len() != fields.len())
         {
-            return Err(at_field(CsvError::DifferentColumnCount));
+            return Err(at_field(
+                CsvError::DifferentColumnCount,
+                field_start..field_end,
+            ));
         }
         rows.push(std::mem::take(&mut fields));
         if input.is_empty() {
@@ -11689,6 +11738,26 @@ mod tests {
             transform_csv("转JSON a,b\n1,\"缺引号"),
             Err(CsvError::UnclosedQuote)
         );
+    }
+
+    #[test]
+    fn reports_spans_for_csv_syntax_errors_without_changing_copyable_reports() {
+        for (query, invalid) in [
+            (
+                "校验\r\n\u{feff}编号,说明\r\n01,\"甲\n乙\"\r\n02,\" 未结束 ",
+                "\" 未结束 ",
+            ),
+            ("VALIDATE 编号,备注\r\n01,\"甲\"丁", "丁"),
+            ("校验 编号,备注\n01,带\"引号", "\""),
+            ("校验 a,b\n1,2\r3,4", "\r"),
+        ] {
+            let report = csv_validation_report(query).unwrap().unwrap();
+            assert_eq!(&query[report.error_span.unwrap()], invalid, "{query}");
+            assert_eq!(transform_csv(query).as_deref(), Ok(report.text.as_str()));
+        }
+        let mismatch = csv_validation_report("校验 a,b\n1").unwrap().unwrap();
+        assert!(mismatch.error_span.is_none());
+        assert!(mismatch.text.contains("列数不一致"));
     }
 
     #[test]

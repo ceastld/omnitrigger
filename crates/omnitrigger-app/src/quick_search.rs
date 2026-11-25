@@ -311,6 +311,7 @@ enum CalculationMode {
 #[derive(PartialEq, Eq)]
 enum ValueKind {
     Text,
+    CsvValidationError(Range<usize>),
     CalendarDate,
     ClockDuration,
     TimestampInstant,
@@ -1173,7 +1174,18 @@ impl Results {
                     None => Self::text_value(transform_toml(term).map_err(ValueError::Toml)),
                 },
                 Scope::Csv => {
-                    if let Some(result) = csv_tools::csv_table_preview(term) {
+                    if let Some(report) = csv_tools::csv_validation_report(term) {
+                        Self::Value(
+                            report
+                                .map(|report| ResultValue {
+                                    text: report.text,
+                                    kind: report
+                                        .error_span
+                                        .map_or(ValueKind::Text, ValueKind::CsvValidationError),
+                                })
+                                .map_err(ValueError::Csv),
+                        )
+                    } else if let Some(result) = csv_tools::csv_table_preview(term) {
                         Self::Value(
                             result
                                 .map(|(text, table)| ResultValue {
@@ -3334,13 +3346,32 @@ impl QuickSearch {
         batch_line_range(input, line).map(|range| start + range.start..start + range.end)
     }
 
-    fn select_batch_error_line(
+    fn csv_error_range(&self, cx: &App) -> Option<Range<usize>> {
+        let Results::Value(Ok(ResultValue {
+            kind: ValueKind::CsvValidationError(range),
+            ..
+        })) = &self.results
+        else {
+            return None;
+        };
+        let query = self.input.read(cx).text_ref();
+        let (Scope::Csv, term) = scoped_query(query.trim_start())? else {
+            return None;
+        };
+        let offset = query.len() - term.len();
+        Some(offset + range.start..offset + range.end)
+    }
+
+    fn select_input_error(
         &self,
         is_held: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(range) = self.batch_error_range(cx) else {
+        let Some(range) = self
+            .batch_error_range(cx)
+            .or_else(|| self.csv_error_range(cx))
+        else {
             return false;
         };
         if !is_held {
@@ -3510,7 +3541,7 @@ impl QuickSearch {
                     event.is_held,
                     window,
                     cx,
-                ) || self.select_batch_error_line(event.is_held, window, cx)
+                ) || self.select_input_error(event.is_held, window, cx)
                     || (!event.is_held && self.reveal_selected_file(window, cx))
                 {
                     cx.stop_propagation();
@@ -4285,6 +4316,15 @@ impl QuickSearch {
                             .bg(gpui::rgba(color))
                     }))
                     .child(value)
+                    .when(self.csv_error_range(cx).is_some(), |row| {
+                        row.child(
+                            button("locate-csv-error", "定位错误 Alt+Enter", Tone::Ghost, true)
+                                .flex_none()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.select_input_error(false, window, cx);
+                                })),
+                        )
+                    })
                     .child(
                         button("copy-calculation", "复制  Enter", Tone::Primary, true)
                             .flex_none()
@@ -4407,7 +4447,7 @@ impl QuickSearch {
                         )
                         .flex_none()
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.select_batch_error_line(false, window, cx);
+                            this.select_input_error(false, window, cx);
                         })),
                     )
                 })
@@ -6985,7 +7025,7 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
-    fn verify_batch_error_selection(
+    fn verify_input_error_selection(
         search: &mut QuickSearch,
         window: &mut Window,
         cx: &mut Context<QuickSearch>,
@@ -6993,6 +7033,12 @@ mod tests {
         for (query, invalid) in [
             ("批量计算: 1+2\r\n\r\n  1/0  \r\n4+5", "1/0"),
             ("批量计算： 分数对照 1/2\r\n  2//0  \r\n3/4", "2//0"),
+            (
+                " CSV：校验 \u{feff}编号,备注\r\n001,\"茶\n梨\"\r\n002,\"未闭合 ",
+                "\"未闭合 ",
+            ),
+            ("CSV: VALIDATE 编号,备注\n001,\"甲\"丁\n002,乙", "丁"),
+            ("CSV: 校验 a,b\n001,带\"引号", "\""),
         ] {
             search.fill_query(query, window, cx);
             search.refresh_results(query, window, cx);
@@ -7943,7 +7989,7 @@ mod tests {
                         })
                         .unwrap();
                     reopened.update(cx, verify_table_paging).unwrap();
-                    reopened.update(cx, verify_batch_error_selection).unwrap();
+                    reopened.update(cx, verify_input_error_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened
