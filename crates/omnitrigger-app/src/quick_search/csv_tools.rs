@@ -2737,7 +2737,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         _ => ',',
     };
     let rows = if matches!(kind, Operation::PadRows | Operation::DropEmptyRecords) {
-        read_delimited_rows(input, delimiter, false).map_err(|error| error.kind)?
+        read_delimited_rows(input, delimiter, false, None).map_err(|error| error.kind)?
     } else {
         read_rows(input, delimiter)?
     };
@@ -9724,14 +9724,21 @@ fn validate_csv(input: &str) -> Result<CsvValidationReport, CsvError> {
     if data.is_empty() {
         return Err(CsvError::MissingInput);
     }
-    Ok(match read_delimited_rows(data, ',', false) {
-        Ok(rows) => CsvValidationReport {
-            text: report_csv_columns(&rows),
-            error_span: None,
-        },
-        Err(error) => {
-            let offset = input.len() - data.len();
-            CsvValidationReport {
+    let offset = input.len() - data.len();
+    let mut record_spans = Vec::new();
+    Ok(
+        match read_delimited_rows(data, ',', false, Some(&mut record_spans)) {
+            Ok(rows) => {
+                let width = rows[0].len();
+                let error_span = rows.iter().zip(record_spans).find_map(|(row, range)| {
+                    (row.len() != width).then_some(offset + range.start..offset + range.end)
+                });
+                CsvValidationReport {
+                    text: report_csv_columns(&rows),
+                    error_span,
+                }
+            }
+            Err(error) => CsvValidationReport {
                 text: format!(
                     "CSV 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
                     error.record,
@@ -9739,9 +9746,9 @@ fn validate_csv(input: &str) -> Result<CsvValidationReport, CsvError> {
                     error.kind.message()
                 ),
                 error_span: Some(offset + error.span.start..offset + error.span.end),
-            }
-        }
-    })
+            },
+        },
+    )
 }
 
 fn report_csv_columns(rows: &[Vec<String>]) -> String {
@@ -9789,15 +9796,17 @@ fn auto_convert_delimiter(input: &str) -> Result<String, CsvError> {
 }
 
 fn read_rows(input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvError> {
-    read_delimited_rows(input, delimiter, true).map_err(|error| error.kind)
+    read_delimited_rows(input, delimiter, true, None).map_err(|error| error.kind)
 }
 
 fn read_delimited_rows(
     mut input: &str,
     delimiter: char,
     require_uniform_width: bool,
+    mut record_spans: Option<&mut Vec<Range<usize>>>,
 ) -> Result<Vec<Vec<String>>, CsvReadError> {
     let source_length = input.len();
+    let mut record_start = 0;
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut fields = Vec::new();
     loop {
@@ -9846,6 +9855,10 @@ fn read_delimited_rows(
             ));
         }
         rows.push(std::mem::take(&mut fields));
+        if let Some(spans) = record_spans.as_deref_mut() {
+            spans.push(record_start..field_end);
+            record_start = source_length - input.len();
+        }
         if input.is_empty() {
             return Ok(rows);
         }
@@ -11755,9 +11768,15 @@ mod tests {
             assert_eq!(&query[report.error_span.unwrap()], invalid, "{query}");
             assert_eq!(transform_csv(query).as_deref(), Ok(report.text.as_str()));
         }
-        let mismatch = csv_validation_report("校验 a,b\n1").unwrap().unwrap();
-        assert!(mismatch.error_span.is_none());
+        let query = "校验 \u{feff}a,b\r\n01,\"甲\n乙\",多余\r\n02";
+        let mismatch = csv_validation_report(query).unwrap().unwrap();
+        assert_eq!(&query[mismatch.error_span.unwrap()], "01,\"甲\n乙\",多余");
         assert!(mismatch.text.contains("列数不一致"));
+        assert!(csv_validation_report("校验 a,b\n1,2")
+            .unwrap()
+            .unwrap()
+            .error_span
+            .is_none());
     }
 
     #[test]

@@ -7111,6 +7111,10 @@ mod tests {
             ),
             ("CSV: VALIDATE 编号,备注\n001,\"甲\"丁\n002,乙", "丁"),
             ("CSV: 校验 a,b\n001,带\"引号", "\""),
+            (
+                "CSV: 校验 a,b\r\n01,\"甲\n乙\",多余\r\n02",
+                "01,\"甲\n乙\",多余",
+            ),
         ] {
             search.fill_query(query, window, cx);
             search.refresh_results(query, window, cx);
