@@ -119,6 +119,7 @@ pub(super) enum TextError {
     NullCharacter,
     InvalidBase64,
     InvalidBase32,
+    InvalidTabWidth,
     InvalidHexBytes,
     InvalidUtf8,
     InvalidHexUtf16Units,
@@ -189,6 +190,7 @@ impl TextError {
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
             Self::InvalidBase32 => "Base32 编码无效",
+            Self::InvalidTabWidth => "输入正整数制表位宽度，再粘贴原文，例如 文本: 展开制表符 4",
             Self::InvalidHexBytes => "输入成对的十六进制数字，例如 E5 8C 97",
             Self::InvalidUtf8 => "解码结果不是 UTF-8 文本",
             Self::InvalidHexUtf16Units => {
@@ -239,6 +241,8 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
     is_raw_text_operation(operation)
         || is_fixed_width_csv_operation(operation)
         || is_line_lengths_csv_operation(operation)
+        || operation.eq_ignore_ascii_case("展开制表符")
+        || operation.eq_ignore_ascii_case("expand-tabs")
 }
 
 pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> {
@@ -289,6 +293,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "按行分组csv" | "chunk-lines-csv" => return chunk_lines_as_csv(text),
         "拆分成行" | "split-lines" => return split_lines(text),
         "转换换行" | "convert-line-endings" => return convert_line_endings(text),
+        "展开制表符" | "expand-tabs" => return expand_text_tabs(text),
         "正则拆分成行" | "regex-split-lines" => {
             let (pattern, text) = regex_text_argument(text)?;
             return Ok(pattern.split(text).collect::<Vec<_>>().join("\n"));
@@ -760,6 +765,46 @@ fn convert_line_endings(input: &str) -> Result<String, TextError> {
     Ok(newline_pattern()
         .replace_all(text_payload(text)?, replacement)
         .into_owned())
+}
+
+fn expand_text_tabs(input: &str) -> Result<String, TextError> {
+    let input = input.trim_start();
+    let (width, _) = input
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::InvalidTabWidth)?;
+    let text = &input[width.len()..];
+    let text = text
+        .strip_prefix("\r\n")
+        .or_else(|| text.strip_prefix(char::is_whitespace))
+        .ok_or(TextError::MissingText)?;
+    let width = width
+        .parse::<usize>()
+        .ok()
+        .filter(|width| *width > 0)
+        .ok_or(TextError::InvalidTabWidth)?;
+    let mut result = String::with_capacity(text.len().min(MAX_EXPANDED_TEXT_BYTES));
+    let mut column = 0;
+    for ch in text.chars() {
+        if ch == '\t' {
+            let spaces = width - column % width;
+            if spaces > MAX_EXPANDED_TEXT_BYTES - result.len() {
+                return Err(TextError::ResultTooLarge);
+            }
+            result.extend(std::iter::repeat_n(' ', spaces));
+            column += spaces;
+        } else {
+            if result.len() + ch.len_utf8() > MAX_EXPANDED_TEXT_BYTES {
+                return Err(TextError::ResultTooLarge);
+            }
+            result.push(ch);
+            if matches!(ch, '\r' | '\n' | '\u{2028}' | '\u{2029}') {
+                column = 0;
+            } else {
+                column += 1;
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn common_line_affix(text: &str, suffix: bool) -> String {
@@ -2979,6 +3024,32 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected));
         }
+    }
+
+    #[test]
+    fn expands_tabs_to_the_next_codepoint_stop_without_rewriting_line_endings() {
+        assert_eq!(
+            transform_text("展开制表符 4 \ta\tb\r\n北\t站\rA😀\t后\u{2028}1234\t\r").as_deref(),
+            Ok("    a   b\r\n北   站\rA😀  后\u{2028}1234    \r")
+        );
+        assert_eq!(transform_text("expand-tabs 2\r\n\t ").as_deref(), Ok("   "));
+        let (_, query) = super::super::scope::scoped_query("文本: 展开制表符 4 \tA\t ").unwrap();
+        assert_eq!(transform_text(query).as_deref(), Ok("    A    "));
+        let now = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap();
+        let (output, _) = super::super::data_pipeline::transform_data_pipeline(
+            r#"["文本: JSON还原","文本: 展开制表符 4","文本: UTF8编码"] "a\tb""#,
+            now,
+        )
+        .unwrap();
+        assert_eq!(output, "61 20 20 20 62");
+        assert_eq!(
+            transform_text("expand-tabs 0 a\tb"),
+            Err(TextError::InvalidTabWidth)
+        );
+        assert_eq!(
+            transform_text(&format!("expand-tabs {} \t", usize::MAX)),
+            Err(TextError::ResultTooLarge)
+        );
     }
 
     #[test]

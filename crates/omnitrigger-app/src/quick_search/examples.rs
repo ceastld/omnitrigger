@@ -4202,6 +4202,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按固定制表位把制表符展开为空格",
+        query: "文本: 展开制表符 4 \t编号\t备注\n001\t茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "去掉多行共有的缩进",
         query: "文本: 去公共缩进 \"    任务\n      子任务\n    完成\"",
     },
