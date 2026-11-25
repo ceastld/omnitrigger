@@ -251,6 +251,7 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
         || is_fixed_width_csv_operation(operation)
         || is_line_lengths_csv_operation(operation)
         || is_display_width_csv_operation(operation)
+        || is_indent_width_csv_operation(operation)
         || operation.eq_ignore_ascii_case("展开制表符")
         || operation.eq_ignore_ascii_case("expand-tabs")
         || operation.eq_ignore_ascii_case("缩进转制表符")
@@ -278,6 +279,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     if is_display_width_csv_operation(operation) {
         return Some(display_width_csv(text));
+    }
+    if is_indent_width_csv_operation(operation) {
+        return Some(indent_width_csv(text));
     }
     match operation.to_ascii_lowercase().as_str() {
         "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
@@ -926,25 +930,34 @@ fn unexpand_line_indent(input: &str) -> Result<String, TextError> {
         .chain(std::iter::once((text.len(), text.len())));
     for (line_end, next) in endings {
         let line = &text[start..line_end];
-        let content = line.trim_start_matches([' ', '\t']);
-        let indent = &line[..line.len() - content.len()];
-        let mut tabs = 0;
-        let mut spaces = 0;
-        for byte in indent.bytes() {
-            if byte == b'\t' || spaces + 1 == width {
-                tabs += 1;
-                spaces = 0;
-            } else {
-                spaces += 1;
-            }
-        }
+        let indent = leading_ascii_indent(line);
+        let (tabs, spaces) = tab_stops_in_indent(indent, width);
         result.extend(std::iter::repeat_n('\t', tabs));
         result.extend(std::iter::repeat_n(' ', spaces));
-        result.push_str(content);
+        result.push_str(&line[indent.len()..]);
         result.push_str(&text[line_end..next]);
         start = next;
     }
     Ok(result)
+}
+
+fn leading_ascii_indent(line: &str) -> &str {
+    let content = line.trim_start_matches([' ', '\t']);
+    &line[..line.len() - content.len()]
+}
+
+fn tab_stops_in_indent(indent: &str, width: usize) -> (usize, usize) {
+    let mut tabs = 0;
+    let mut spaces = 0;
+    for byte in indent.bytes() {
+        if byte == b'\t' || spaces + 1 == width {
+            tabs += 1;
+            spaces = 0;
+        } else {
+            spaces += 1;
+        }
+    }
+    (tabs, spaces)
 }
 
 fn common_line_affix(text: &str, suffix: bool) -> String {
@@ -1305,6 +1318,35 @@ fn display_width_csv(input: &str) -> Result<String, TextError> {
                 .ok_or(TextError::ResultTooLarge)?;
         }
         let fields = [(index + 1).to_string(), columns.to_string()];
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn is_indent_width_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("缩进列宽CSV")
+        || operation.eq_ignore_ascii_case("indent-width-csv")
+}
+
+fn indent_width_csv(input: &str) -> Result<String, TextError> {
+    let (width, text) = tab_width_and_text(input)?;
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut csv = String::from("行号,缩进列宽,空格数,制表符数");
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        let indent = leading_ascii_indent(line);
+        let (stops, tail) = tab_stops_in_indent(indent, width);
+        let columns = stops
+            .checked_mul(width)
+            .and_then(|columns| columns.checked_add(tail))
+            .ok_or(TextError::ResultTooLarge)?;
+        let tabs = indent.bytes().filter(|byte| *byte == b'\t').count();
+        let fields = [index + 1, columns, indent.len() - tabs, tabs].map(|value| value.to_string());
         append_bounded_csv_row(
             &mut csv,
             fields.iter().map(String::as_str),
@@ -3318,6 +3360,21 @@ mod tests {
         );
         assert_eq!(
             transform_text(&format!("expand-tabs {} \t", usize::MAX)),
+            Err(TextError::ResultTooLarge)
+        );
+    }
+
+    #[test]
+    fn reports_original_indent_counts_and_resulting_display_columns() {
+        let (_, query) =
+            super::super::scope::scoped_query("文本: 缩进列宽CSV 4 \t  A \r\n  \r\n\tZ\u{2029}\t ")
+                .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok("行号,缩进列宽,空格数,制表符数\r\n1,6,2,1\r\n2,2,2,0\r\n3,4,0,1\r\n4,5,1,1")
+        );
+        assert_eq!(
+            transform_text(&format!("indent-width-csv {} \t\tX", usize::MAX)),
             Err(TextError::ResultTooLarge)
         );
     }

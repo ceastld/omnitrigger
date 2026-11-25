@@ -4277,6 +4277,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "对照缩进列宽与原来的空格和制表符",
+        query: "文本: 缩进列宽CSV 4\n  第一行\n\t第二行\n \t  第三行",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按 Unicode 显示列宽对齐中文和表情",
         query: "文本: 按显示宽度展开制表符 8 名称\t数量\n绿茶\t3\n☕️\t1",
     },
