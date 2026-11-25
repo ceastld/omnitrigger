@@ -50,6 +50,7 @@ pub(super) enum StatisticsError {
     WaitingQuantileUnbounded,
     NegativeBinomialQuantileLimit,
     PoissonArguments,
+    PoissonRangeArguments,
     PoissonRate,
     ProbabilityTableTooLarge,
     GeometricArguments,
@@ -113,6 +114,7 @@ impl StatisticsError {
             Self::WaitingQuantileUnbounded => "单次成功概率小于 1 时，有限次试验的累计概率达不到 100%",
             Self::NegativeBinomialQuantileLimit => "128 次试验内达不到给定累计概率",
             Self::PoissonArguments => "用逗号填写事件次数和平均发生次数，例如 2,1/2。事件次数为 0 至 128",
+            Self::PoissonRangeArguments => "填写事件次数区间和平均发生次数，例如 2..4,2。两端为 0 至 128",
             Self::PoissonRate => "平均发生次数须为非负数，例如 1/2",
             Self::ProbabilityTableTooLarge => "概率表超过 CSV 输出上限",
             Self::GeometricArguments => {
@@ -372,6 +374,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             return poisson_probability(values, DiscreteEvent::AtLeast)
         }
         "泊松摘要" | "poisson-summary" => return poisson_summary(values),
+        "泊松区间概率" | "poisson-range" => return poisson_range_probability(values),
         "泊松概率表" | "poisson-table" => return poisson_probability_csv(values),
         "超几何概率" | "hypergeometric" => {
             return hypergeometric_probability(values, DiscreteEvent::Exactly)
@@ -1908,18 +1911,44 @@ fn poisson_summary(input: &str) -> Result<String, StatisticsError> {
     summarize_probability_distribution(rate.clone(), rate)
 }
 
-fn poisson_arguments(input: &str) -> Result<(u32, BigRational), StatisticsError> {
-    let invalid = StatisticsError::PoissonArguments;
+fn poisson_input(input: &str, invalid: StatisticsError) -> Result<(&str, &str), StatisticsError> {
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(count), Some(rate), None) = (terms.next(), terms.next(), terms.next()) else {
         return Err(invalid);
     };
-    let count = count
+    Ok((count, rate))
+}
+
+fn poisson_count(count: &str, invalid: StatisticsError) -> Result<u32, StatisticsError> {
+    count
+        .trim()
         .parse::<u32>()
         .ok()
         .filter(|&count| count <= MAX_POISSON_COUNT)
-        .ok_or(invalid)?;
+        .ok_or(invalid)
+}
+
+fn poisson_arguments(input: &str) -> Result<(u32, BigRational), StatisticsError> {
+    let invalid = StatisticsError::PoissonArguments;
+    let (count, rate) = poisson_input(input, invalid)?;
+    let count = poisson_count(count, invalid)?;
     Ok((count, poisson_rate(rate)?))
+}
+
+fn poisson_range_probability(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::PoissonRangeArguments;
+    let (range, rate) = poisson_input(input, invalid)?;
+    let (first, last) = range.split_once("..").ok_or(invalid)?;
+    let (first, last) = (
+        poisson_count(first, invalid)?,
+        poisson_count(last, invalid)?,
+    );
+    if first > last {
+        return Err(invalid);
+    }
+    let rate = poisson_rate(rate)?;
+    let coefficient = poisson_coefficient(&rate, first..=last)?;
+    Ok(format_poisson_probability(&rate, &coefficient, false))
 }
 
 fn poisson_probability(input: &str, event: DiscreteEvent) -> Result<String, StatisticsError> {
@@ -1935,17 +1964,28 @@ fn poisson_probability(input: &str, event: DiscreteEvent) -> Result<String, Stat
         count
     };
 
-    let one = BigRational::from_integer(1.into());
-    let mut term = one.clone();
-    let mut sum = one.clone();
-    for index in 1..=last {
-        term = bounded(term * &rate / BigInt::from(index))?;
-        if cumulative {
+    let first = if cumulative { 0 } else { count };
+    let coefficient = poisson_coefficient(&rate, first..=last)?;
+    Ok(format_poisson_probability(&rate, &coefficient, complement))
+}
+
+fn poisson_coefficient(
+    rate: &BigRational,
+    counts: RangeInclusive<u32>,
+) -> Result<BigRational, StatisticsError> {
+    let mut term = BigRational::from_integer(1.into());
+    let mut sum = if counts.contains(&0) {
+        term.clone()
+    } else {
+        BigRational::default()
+    };
+    for index in 1..=*counts.end() {
+        term = bounded(term * rate / BigInt::from(index))?;
+        if counts.contains(&index) {
             sum = bounded(sum + &term)?;
         }
     }
-    let coefficient = if cumulative { sum } else { term };
-    Ok(format_poisson_probability(&rate, &coefficient, complement))
+    Ok(sum)
 }
 
 fn format_poisson_probability(
@@ -2591,6 +2631,34 @@ mod tests {
             ("泊松至少 0,-1", StatisticsError::PoissonRate),
         ] {
             assert_eq!(calculate_statistics(input), Err(error), "{input}");
+        }
+    }
+
+    #[test]
+    fn sums_exact_poisson_probabilities_over_inclusive_count_ranges() {
+        for (query, expected) in [
+            ("泊松区间概率 2..4,2", "4 * e^(-2)"),
+            ("泊松区间概率 2..2,2", "2 * e^(-2)"),
+            ("POISSON-RANGE 0..2,2", "5 * e^(-2)"),
+            ("泊松区间概率 0..2,0", "1"),
+            ("泊松区间概率 1..2,0", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "泊松区间概率 4..2,2",
+            "泊松区间概率 -1..3,2",
+            "泊松区间概率 0..129,2",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::PoissonRangeArguments),
+                "{query}"
+            );
         }
     }
 
