@@ -3328,8 +3328,15 @@ impl QuickSearch {
                                     if action == FilePreviewAction::Load || inserted != query =>
                                 {
                                     let selection = input.selection_position();
-                                    if action == FilePreviewAction::Load {
-                                        this.index.recent.file_previews.record(&selected_path);
+                                    match action {
+                                        FilePreviewAction::Load => {
+                                            this.index.recent.file_previews.record(&selected_path);
+                                        }
+                                        FilePreviewAction::Refresh => {
+                                            let mut draft = this.query_draft(cx);
+                                            draft.text.clone_from(&inserted);
+                                            this.query_draft_return = Some(draft);
+                                        }
                                     }
                                     this.result_refill = Some(ResultRefill {
                                         original,
