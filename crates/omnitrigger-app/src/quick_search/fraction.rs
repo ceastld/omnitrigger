@@ -48,6 +48,8 @@ pub(super) enum FractionError {
     InterpolationRange,
     AlignmentArguments,
     RationalSquareRoot,
+    RootDegree,
+    RationalRoot,
     IntegerSquareRoot,
     IntegerAggregate,
     PrimeFactorizationDomain,
@@ -97,6 +99,8 @@ impl FractionError {
             Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
+            Self::RootDegree => "root 的次数须为 1 至 1024 的整数",
+            Self::RationalRoot => "输入值须有可表示为分数的实数次方根",
             Self::IntegerSquareRoot => "isqrt 需要非负整数",
             Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
             Self::PrimeFactorizationDomain => "请填写非零整数",
@@ -1533,6 +1537,10 @@ impl FractionParser<'_> {
             return self.round_function();
         }
         let name = name.to_ascii_lowercase();
+        if name == "root" {
+            self.remaining = rest;
+            return self.root_function();
+        }
         if matches!(name.as_str(), "lerp" | "invlerp" | "remap") {
             self.remaining = rest;
             return self.interpolation_function(&name);
@@ -1592,6 +1600,41 @@ impl FractionParser<'_> {
             return Err(self.expected_token());
         }
         function.calculate(n, k)
+    }
+
+    fn root_function(&mut self) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let value = self.sum()?;
+        if !self.consume(',') {
+            return Err(self.expected_token());
+        }
+        let degree = self.sum()?;
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        if !degree.is_integer() {
+            return Err(FractionError::RootDegree);
+        }
+        let degree = u32::try_from(degree.numer())
+            .ok()
+            .filter(|degree| (1..=MAX_POWER_EXPONENT).contains(degree))
+            .ok_or(FractionError::RootDegree)?;
+        if value.numer().sign() == Sign::Minus && degree.is_multiple_of(2) {
+            return Err(FractionError::RationalRoot);
+        }
+        let exact_root = |part: &BigInt| {
+            let magnitude = part.magnitude();
+            let root = magnitude.nth_root(degree);
+            (root.pow(degree) == *magnitude)
+                .then(|| BigInt::from_biguint(part.sign(), root))
+                .ok_or(FractionError::RationalRoot)
+        };
+        Ok(BigRational::new(
+            exact_root(value.numer())?,
+            exact_root(value.denom())?,
+        ))
     }
 
     fn integer_aggregate(
@@ -2447,6 +2490,39 @@ mod tests {
             ("lcm(1,)", FractionError::Invalid),
         ] {
             assert_eq!(calculate_fraction(expression), Err(expected));
+        }
+    }
+
+    #[test]
+    fn calculates_exact_fraction_roots_without_rounding() {
+        for (expression, expected) in [
+            ("root(-125/343,3)", "-5/7"),
+            ("ROOT(1/81,2+2)", "1/3"),
+            ("root(2**1024,256)", "16"),
+            ("root(-1/2,1)", "-1/2"),
+            ("root(0,1024)", "0"),
+            ("root(256/81,4) + root(1/8,3)", "11/6"),
+        ] {
+            assert_eq!(
+                calculate_fraction(expression).unwrap().to_string(),
+                expected,
+                "{expression}"
+            );
+        }
+        for (expression, expected) in [
+            ("root(2,3)", FractionError::RationalRoot),
+            ("root(1/2,3)", FractionError::RationalRoot),
+            ("root(-16/81,4)", FractionError::RationalRoot),
+            ("root(4,0)", FractionError::RootDegree),
+            ("root(4,-1)", FractionError::RootDegree),
+            ("root(4,3/2)", FractionError::RootDegree),
+            ("root(4,1025)", FractionError::RootDegree),
+        ] {
+            assert_eq!(
+                calculate_fraction(expression),
+                Err(expected),
+                "{expression}"
+            );
         }
     }
 
