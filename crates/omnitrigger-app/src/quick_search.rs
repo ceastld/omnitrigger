@@ -1924,17 +1924,13 @@ impl TablePages {
     }
 }
 
-struct TableSearchOrigin {
-    query: String,
-    pages: TablePages,
-}
-
 struct QueryDraft {
     text: String,
     selection: MessageSelection,
     selected: usize,
     suggestion: Option<String>,
     table_pages: Option<TablePages>,
+    expanded_value: bool,
 }
 
 impl QueryDraft {
@@ -2106,8 +2102,7 @@ pub(super) struct QuickSearch {
     input_before_query_history: Option<QueryDraft>,
     input_before_bookmarks: Option<QueryDraft>,
     query_draft_return: Option<QueryDraft>,
-    input_before_table_search: Option<TableSearchOrigin>,
-    table_search_return: Option<TableSearchOrigin>,
+    input_before_table_search: Option<QueryDraft>,
     result_refill: Option<ResultRefill>,
     file_search_return: Option<FileSearchReturn>,
     result_save: ResultSaveState,
@@ -2251,7 +2246,6 @@ impl QuickSearch {
             input_before_bookmarks: None,
             query_draft_return: None,
             input_before_table_search: None,
-            table_search_return: None,
             result_refill: None,
             file_search_return: None,
             result_save: ResultSaveState::Ready,
@@ -2381,14 +2375,7 @@ impl QuickSearch {
                 window.resize(size(px(WIDTH), px(next_height)));
             }
         }
-        let return_to = self
-            .table_search_return
-            .take()
-            .filter(|origin| origin.query == query);
-        if let (Some(origin), Some(table)) = (return_to, self.results.table_preview()) {
-            self.table_pages = origin.pages.clamped_to(table);
-        }
-        self.restore_query_result_position(query);
+        self.restore_query_result_position(query, window, cx);
         if let Some(origin) = self
             .file_search_return
             .take()
@@ -3053,15 +3040,10 @@ impl QuickSearch {
             return;
         }
         if let Some(original) = self.input_before_table_search.take() {
-            let query = original.query.clone();
-            self.table_search_return = Some(original);
-            self.fill_query(query, window, cx);
+            self.restore_query_draft(original, window, cx);
         } else if let Some(text) = self.searchable_table_text() {
             let query = format!("{TABLE_SEARCH_COMMAND}\"\" {text}");
-            self.input_before_table_search = Some(TableSearchOrigin {
-                query: self.input.read(cx).text(),
-                pages: self.table_pages,
-            });
+            self.input_before_table_search = Some(self.query_draft(cx));
             self.fill_query(query, window, cx);
             self.input.update(cx, |input, cx| {
                 input.move_cursor_to(TABLE_SEARCH_COMMAND.len() + 1, cx)
@@ -3107,6 +3089,7 @@ impl QuickSearch {
                 .suggested_input(self.selected)
                 .map(str::to_owned),
             table_pages: self.results.table_preview().map(|_| self.table_pages),
+            expanded_value: self.expanded_value_pages.is_some(),
         }
     }
 
@@ -3126,7 +3109,12 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
-    fn restore_query_result_position(&mut self, query: &str) {
+    fn restore_query_result_position(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(draft) = self
             .query_draft_return
             .take()
@@ -3134,7 +3122,13 @@ impl QuickSearch {
         else {
             return;
         };
-        let count = self.results.selectable_count();
+        if draft.expanded_value != self.expanded_value_pages.is_some() {
+            self.toggle_value_preview(window, cx);
+        }
+        let count = self
+            .expanded_value_pages
+            .as_ref()
+            .map_or_else(|| self.results.selectable_count(), Vec::len);
         self.selected = draft
             .suggestion
             .as_deref()
@@ -7345,6 +7339,10 @@ mod tests {
         };
         search.fill_query(QUERY, window, cx);
         search.refresh_results(QUERY, window, cx);
+        let selection = QUERY.find("绿茶").unwrap()..QUERY.find(",1").unwrap();
+        search
+            .input
+            .update(cx, |input, cx| input.select_range(selection.clone(), cx));
         search.key_down(&event("ctrl-f", false), window, cx);
         let started = search.input.read(cx).text();
         assert_eq!(started, "CSV: 搜索行 \"\" 商品,数量\n绿茶,1\n米,2");
@@ -7367,6 +7365,7 @@ mod tests {
         assert_eq!(help, "? CSV: 搜索行");
         search.key_down(&event("ctrl-f", false), window, cx);
         assert_eq!(search.input.read(cx).text(), QUERY);
+        assert_eq!(search.input.read(cx).selection(), selection);
         assert!(search.input_before_table_search.is_none());
 
         let mut query = "CSV: 表格预览 A,B,C,D,E,F,G,H".to_owned();
@@ -7405,6 +7404,35 @@ mod tests {
             (search.table_pages.rows, search.table_pages.columns),
             (1, 1)
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn verify_expanded_result_restore(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        const QUERY: &str = "日期: 月末序列 2024-01,30";
+        let key = |name| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(name).unwrap(),
+            is_held: false,
+        };
+        search.fill_query(QUERY, window, cx);
+        search.refresh_results(QUERY, window, cx);
+        search.key_down(&key("f2"), window, cx);
+        search.key_down(&key("pagedown"), window, cx);
+        let pages = search.expanded_value_pages.clone().unwrap();
+        assert_eq!(pages.len(), 3);
+        assert_eq!(search.selected, 1);
+        search.key_down(&key("f1"), window, cx);
+        let help = search.input.read(cx).text();
+        search.refresh_results(&help, window, cx);
+        assert!(search.expanded_value_pages.is_none());
+        search.key_down(&key("f1"), window, cx);
+        assert_eq!(search.input.read(cx).text(), QUERY);
+        search.refresh_results(QUERY, window, cx);
+        assert_eq!(search.expanded_value_pages, Some(pages));
+        assert_eq!(search.selected, 1);
     }
 
     #[cfg(target_os = "windows")]
@@ -8218,6 +8246,7 @@ mod tests {
                     reopened.update(cx, verify_result_copy_in_place).unwrap();
                     reopened.update(cx, verify_input_error_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
+                    reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
