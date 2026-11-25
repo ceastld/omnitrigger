@@ -2041,7 +2041,16 @@ struct BookmarkNameEdit {
 #[derive(Clone, Copy)]
 enum LineJumpTarget {
     Input,
-    TableRows,
+    Table(TableAxis),
+}
+
+impl LineJumpTarget {
+    fn number_label(self) -> &'static str {
+        match self {
+            Self::Input | Self::Table(TableAxis::Rows) => "行号",
+            Self::Table(TableAxis::Columns) => "列号",
+        }
+    }
 }
 
 struct LineJump {
@@ -2433,11 +2442,13 @@ impl QuickSearch {
         }
         let position = match target {
             LineJumpTarget::Input => self.input.read(cx).line_position(),
-            LineJumpTarget::TableRows if self.expanded_value_pages.is_none() => self
-                .results
-                .table_preview()
-                .and_then(|table| table.page_row_position(self.table_pages.rows)),
-            LineJumpTarget::TableRows => None,
+            LineJumpTarget::Table(axis) if self.expanded_value_pages.is_none() => {
+                self.results.table_preview().and_then(|table| match axis {
+                    TableAxis::Rows => table.page_row_position(self.table_pages.rows),
+                    TableAxis::Columns => table.page_column_position(self.table_pages.columns),
+                })
+            }
+            LineJumpTarget::Table(_) => None,
         };
         let Some((number, total)) = position else {
             return;
@@ -2446,7 +2457,7 @@ impl QuickSearch {
             let mut input = MessageInput::new(cx).embedded().with_character_limit(8);
             let number = number.to_string();
             let len = number.len();
-            input.set_placeholder("行号");
+            input.set_placeholder(target.number_label());
             input.set_text(number, cx);
             input.select_range(0..len, cx);
             input
@@ -2479,15 +2490,17 @@ impl QuickSearch {
                         return;
                     }
                 }
-                LineJumpTarget::TableRows => {
-                    let Some(page) = self
-                        .results
-                        .table_preview()
-                        .and_then(|table| table.page_for_data_row(number))
-                    else {
+                LineJumpTarget::Table(axis) => {
+                    let Some(page) = self.results.table_preview().and_then(|table| match axis {
+                        TableAxis::Rows => table.page_for_data_row(number),
+                        TableAxis::Columns => table.page_for_column(number),
+                    }) else {
                         return;
                     };
-                    self.table_pages.rows = page;
+                    match axis {
+                        TableAxis::Rows => self.table_pages.rows = page,
+                        TableAxis::Columns => self.table_pages.columns = page,
+                    }
                 }
             }
         }
@@ -4095,12 +4108,15 @@ impl QuickSearch {
                 }
                 cx.stop_propagation();
             } else if keystroke.modifiers.control
-                && (modifiers == 1 || (modifiers == 2 && keystroke.modifiers.shift))
+                && (modifiers == 1
+                    || (modifiers == 2 && (keystroke.modifiers.shift || keystroke.modifiers.alt)))
                 && keystroke.key == "g"
             {
                 if !event.is_held {
                     let target = if keystroke.modifiers.shift {
-                        LineJumpTarget::TableRows
+                        LineJumpTarget::Table(TableAxis::Rows)
+                    } else if keystroke.modifiers.alt {
+                        LineJumpTarget::Table(TableAxis::Columns)
                     } else {
                         LineJumpTarget::Input
                     };
@@ -4790,19 +4806,9 @@ impl QuickSearch {
                 ),
             };
         let counter = format!("{dimension} {}/{count}", page + 1);
-        let counter = match axis {
-            TableAxis::Rows => div().child(
-                button("jump-table-row", counter, Tone::Ghost, true)
-                    .h(px(TABLE_PAGER_HEIGHT))
-                    .px(px(3.))
-                    .tooltip(theme::text_tooltip(
-                        "Ctrl+Shift+G 跳到包含指定数据行的页".into(),
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_line_jump(LineJumpTarget::TableRows, window, cx);
-                    })),
-            ),
-            TableAxis::Columns => div().child(counter),
+        let (jump_id, jump_hint) = match axis {
+            TableAxis::Rows => ("jump-table-row", "Ctrl+Shift+G 跳到包含指定数据行的页"),
+            TableAxis::Columns => ("jump-table-column", "Ctrl+Alt+G 跳到包含指定列的页"),
         };
         div()
             .flex()
@@ -4818,7 +4824,15 @@ impl QuickSearch {
                         this.change_table_page(axis, PageChange::Previous, cx);
                     })),
             )
-            .child(counter)
+            .child(
+                button(jump_id, counter, Tone::Ghost, true)
+                    .h(px(TABLE_PAGER_HEIGHT))
+                    .px(px(3.))
+                    .tooltip(theme::text_tooltip(jump_hint.into()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_line_jump(LineJumpTarget::Table(axis), window, cx);
+                    })),
+            )
             .child(
                 button(next_id, next_label, Tone::Ghost, page + 1 < count)
                     .h(px(TABLE_PAGER_HEIGHT))
@@ -5668,7 +5682,8 @@ impl QuickSearch {
         let valid = jump.number(cx).is_some();
         let title = match jump.target {
             LineJumpTarget::Input => "跳到输入行",
-            LineJumpTarget::TableRows => "跳到表格数据行所在页",
+            LineJumpTarget::Table(TableAxis::Rows) => "跳到表格数据行所在页",
+            LineJumpTarget::Table(TableAxis::Columns) => "跳到表格列所在页",
         };
         Self::frame(cx)
             .child(
@@ -5691,11 +5706,11 @@ impl QuickSearch {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_color(rgb(theme::TEXT_MUTED))
-                            .child(format!("输入 1 至 {} 的行号", jump.total)),
-                    )
+                    .child(div().text_color(rgb(theme::TEXT_MUTED)).child(format!(
+                        "输入 1 至 {} 的{}",
+                        jump.total,
+                        jump.target.number_label()
+                    )))
                     .child(
                         button("confirm-line-jump", "跳转  Enter", Tone::Primary, valid)
                             .h(px(28.))
@@ -8448,6 +8463,24 @@ mod tests {
         press(search, "escape", window, cx);
         assert!(search.line_jump.is_none());
         assert_eq!(pages(search), (2, 1));
+        press(search, "ctrl-alt-g", window, cx);
+        let jump = search.line_jump.as_ref().unwrap();
+        assert_eq!(jump.total, 13);
+        assert_eq!(jump.input.read(cx).text_ref(), "7");
+        let column = jump.input.clone();
+        column.update(cx, |input, cx| input.set_text("14", cx));
+        press(search, "enter", window, cx);
+        assert!(search.line_jump.is_some());
+        assert_eq!(pages(search), (2, 1));
+        column.update(cx, |input, cx| input.set_text("１", cx));
+        press(search, "enter", window, cx);
+        assert!(search.line_jump.is_none());
+        assert_eq!(pages(search), (2, 0));
+        press(search, "ctrl-alt-g", window, cx);
+        let column = search.line_jump.as_ref().unwrap().input.clone();
+        column.update(cx, |input, cx| input.set_text("8", cx));
+        press(search, "enter", window, cx);
+        assert_eq!(pages(search), (2, 1));
         press(search, "ctrl-shift-g", window, cx);
         let entry = search.line_jump.as_ref().unwrap().input.clone();
         entry.update(cx, |input, cx| input.set_text("７", cx));
@@ -8460,6 +8493,8 @@ mod tests {
         search.refresh_results("CSV: 表格预览 x,y\n1,2", window, cx);
         assert_eq!(pages(search), (0, 0));
         press(search, "ctrl-shift-g", window, cx);
+        assert!(search.line_jump.is_none());
+        press(search, "ctrl-alt-g", window, cx);
         assert!(search.line_jump.is_none());
     }
 

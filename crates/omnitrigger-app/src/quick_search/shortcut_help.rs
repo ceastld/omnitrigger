@@ -52,6 +52,7 @@ const SHORTCUTS: &[[&str; 3]] = &[
     ["表格", "Ctrl+Shift+G", "跳到包含指定数据行的页"],
     ["表格", "Shift+PageUp", "向左翻列页"],
     ["表格", "Shift+PageDown", "向右翻列页"],
+    ["表格", "Ctrl+Alt+G", "跳到包含指定列的页"],
     ["表格", "Ctrl+Shift+PageUp", "跳到第一组列"],
     ["表格", "Ctrl+Shift+PageDown", "跳到最后一组列"],
     ["表格与图形", "F2", "在预览与原文数据间切换"],

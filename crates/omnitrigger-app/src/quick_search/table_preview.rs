@@ -97,6 +97,17 @@ impl TablePreview {
             .then(|| (number - 1) / MAX_DATA_ROWS)
     }
 
+    pub(super) fn page_column_position(&self, page: usize) -> Option<(usize, usize)> {
+        let pages = self.column_pages();
+        (pages > 1 && page < pages).then(|| (self.visible_columns(page).start + 1, self.columns))
+    }
+
+    pub(super) fn page_for_column(&self, number: usize) -> Option<usize> {
+        (1..=self.columns)
+            .contains(&number)
+            .then(|| (number - 1) / self.columns_per_page)
+    }
+
     pub(super) fn page_first_data_cell(
         &self,
         row_page: usize,
