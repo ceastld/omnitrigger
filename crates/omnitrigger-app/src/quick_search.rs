@@ -2020,7 +2020,7 @@ enum ApplicationRefresh {
 }
 
 const SEARCH_PLACEHOLDER: &str = "搜索页面、触发器，或输入算式";
-const LINE_JUMP_HEIGHT: f32 = 148.;
+const INPUT_PROMPT_HEIGHT: f32 = 148.;
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
 
@@ -2057,6 +2057,36 @@ struct ResultRefill {
     original: String,
     inserted: String,
     kind: RefillKind,
+}
+
+struct InputFind {
+    input: Entity<MessageInput>,
+    _changes: Subscription,
+}
+
+fn find_input_range(
+    text: &str,
+    needle: &str,
+    selection: Range<usize>,
+    backwards: bool,
+) -> Option<Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let matches = || {
+        text.match_indices(needle)
+            .map(|(start, matched)| start..start + matched.len())
+    };
+    if backwards {
+        matches()
+            .take_while(|range| range.end <= selection.start)
+            .last()
+            .or_else(|| matches().last())
+    } else {
+        matches()
+            .find(|range| range.start >= selection.end)
+            .or_else(|| matches().next())
+    }
 }
 
 enum RefillKind {
@@ -2212,6 +2242,7 @@ pub(super) struct QuickSearch {
     bookmark_save_error: Option<String>,
     bookmark_name_edit: Option<BookmarkNameEdit>,
     line_jump: Option<LineJump>,
+    input_find: Option<InputFind>,
     _input_changes: Subscription,
     _activation: Subscription,
 }
@@ -2343,6 +2374,7 @@ impl QuickSearch {
             bookmark_save_error: None,
             bookmark_name_edit: None,
             line_jump: None,
+            input_find: None,
             _input_changes: input_changes,
             _activation: activation,
         }
@@ -2354,10 +2386,13 @@ impl QuickSearch {
     }
 
     fn activate_input(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self
-            .line_jump
-            .as_ref()
-            .map_or(&self.input, |jump| &jump.input);
+        let input = if let Some(find) = &self.input_find {
+            &find.input
+        } else {
+            self.line_jump
+                .as_ref()
+                .map_or(&self.input, |jump| &jump.input)
+        };
         window.focus(&input.focus_handle(cx));
         cx.notify();
     }
@@ -2369,6 +2404,7 @@ impl QuickSearch {
         cx: &mut Context<Self>,
     ) {
         if self.line_jump.is_some()
+            || self.input_find.is_some()
             || self.bookmark_name_edit.is_some()
             || self.file_operation_in_progress()
             || self.input.read(cx).is_composing()
@@ -2402,7 +2438,7 @@ impl QuickSearch {
             target,
             _changes: changes,
         });
-        window.resize(size(px(WIDTH), px(LINE_JUMP_HEIGHT)));
+        window.resize(size(px(WIDTH), px(INPUT_PROMPT_HEIGHT)));
         self.activate_input(window, cx);
     }
 
@@ -2436,6 +2472,71 @@ impl QuickSearch {
             }
         }
         self.line_jump = None;
+        window.resize(size(
+            px(WIDTH),
+            px(self.results.height(self.value_line_limit())),
+        ));
+        self.activate_input(window, cx);
+    }
+
+    fn open_input_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input_find.is_some()
+            || self.line_jump.is_some()
+            || self.bookmark_name_edit.is_some()
+            || self.file_operation_in_progress()
+        {
+            return;
+        }
+        let query = self.input.read(cx);
+        if query.text_ref().is_empty() || query.is_composing() {
+            return;
+        }
+        let selected = &query.text_ref()[query.selection()];
+        let initial = if selected.contains(['\r', '\n', '\u{2028}', '\u{2029}']) {
+            String::new()
+        } else {
+            selected.to_owned()
+        };
+        let input = cx.new(|cx| {
+            let mut input = MessageInput::new(cx)
+                .embedded()
+                .with_character_limit(INPUT_CHARACTER_LIMIT);
+            input.set_placeholder("输入要查找的文字");
+            let len = initial.len();
+            input.set_text(initial, cx);
+            input.select_range(0..len, cx);
+            input
+        });
+        let changes = cx.observe_in(&input, window, |_, _, _, cx| cx.notify());
+        self.input_find = Some(InputFind {
+            input,
+            _changes: changes,
+        });
+        window.resize(size(px(WIDTH), px(INPUT_PROMPT_HEIGHT)));
+        self.activate_input(window, cx);
+    }
+
+    fn finish_input_find(
+        &mut self,
+        backwards: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(find) = &self.input_find else {
+            return;
+        };
+        if let Some(backwards) = backwards {
+            let query = self.input.read(cx);
+            let needle = find.input.read(cx).text_ref();
+            let Some(range) =
+                find_input_range(query.text_ref(), needle, query.selection(), backwards)
+            else {
+                return;
+            };
+            self.input
+                .update(cx, |input, cx| input.select_range(range, cx));
+        }
+        self.input_find = None;
         window.resize(size(
             px(WIDTH),
             px(self.results.height(self.value_line_limit())),
@@ -2564,7 +2665,10 @@ impl QuickSearch {
                 self.table_pages.columns = table.first_match_column_page().unwrap_or_default();
             }
             self.selected = 0;
-            if previous_height != next_height {
+            if previous_height != next_height
+                && self.line_jump.is_none()
+                && self.input_find.is_none()
+            {
                 window.resize(size(px(WIDTH), px(next_height)));
             }
         }
@@ -3702,6 +3806,20 @@ impl QuickSearch {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(find) = &self.input_find {
+            let key = &event.keystroke;
+            let modifiers = key.modifiers.number_of_modifiers();
+            let cancels = key.key == "escape" && modifiers == 0;
+            let confirms =
+                key.key == "enter" && (modifiers == 0 || (modifiers == 1 && key.modifiers.shift));
+            if !find.input.read(cx).is_composing() && (cancels || confirms) {
+                if !event.is_held {
+                    self.finish_input_find(confirms.then_some(key.modifiers.shift), window, cx);
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
         if let Some(jump) = &self.line_jump {
             let key = &event.keystroke;
             if !jump.input.read(cx).is_composing()
@@ -3816,6 +3934,17 @@ impl QuickSearch {
                 && self.select_query_arguments(event.is_held, window, cx)
             {
                 cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "f"
+            {
+                if !event.is_held {
+                    self.open_input_find(window, cx);
+                }
+                if self.input_find.is_some() {
+                    cx.stop_propagation();
+                }
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "l" {
                 if !event.is_held {
                     self.input
@@ -5243,9 +5372,101 @@ impl QuickSearch {
             }))
     }
 
+    fn render_prompt_field(input: &Entity<MessageInput>, window: &Window, cx: &App) -> Div {
+        let focused = input.focus_handle(cx).is_focused(window);
+        div()
+            .h(px(44.))
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .bg(rgb(theme::ROW))
+            .border_1()
+            .border_color(rgb(if focused {
+                theme::ACCENT
+            } else {
+                theme::BORDER_HI
+            }))
+            .child(input.clone())
+    }
+
+    fn render_input_find(
+        &self,
+        find: &InputFind,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let needle = find.input.read(cx).text_ref();
+        let count = if needle.is_empty() {
+            0
+        } else {
+            self.input.read(cx).text_ref().matches(needle).count()
+        };
+        let status = if needle.is_empty() {
+            "输入关键词后查找".to_owned()
+        } else {
+            format!("{count} 处匹配")
+        };
+        Self::frame(cx)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("查找输入"))
+                    .child(
+                        button("cancel-input-find", "Esc 返回", Tone::Ghost, true)
+                            .h(px(24.))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.finish_input_find(None, window, cx);
+                            })),
+                    ),
+            )
+            .child(Self::render_prompt_field(&find.input, window, cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_color(rgb(theme::TEXT_MUTED)).child(status))
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(
+                                button(
+                                    "previous-input-match",
+                                    "上一个  Shift+Enter",
+                                    Tone::Ghost,
+                                    count > 0,
+                                )
+                                .h(px(28.))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.finish_input_find(Some(true), window, cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                button(
+                                    "next-input-match",
+                                    "下一个  Enter",
+                                    Tone::Primary,
+                                    count > 0,
+                                )
+                                .h(px(28.))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.finish_input_find(Some(false), window, cx);
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+    }
+
     fn render_line_jump(jump: &LineJump, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let valid = jump.number(cx).is_some();
-        let focused = jump.input.focus_handle(cx).is_focused(window);
         let title = match jump.target {
             LineJumpTarget::Input => "跳到输入行",
             LineJumpTarget::TableRows => "跳到表格数据行所在页",
@@ -5265,22 +5486,7 @@ impl QuickSearch {
                             })),
                     ),
             )
-            .child(
-                div()
-                    .h(px(44.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .bg(rgb(theme::ROW))
-                    .border_1()
-                    .border_color(rgb(if focused {
-                        theme::ACCENT
-                    } else {
-                        theme::BORDER_HI
-                    }))
-                    .child(jump.input.clone()),
-            )
+            .child(Self::render_prompt_field(&jump.input, window, cx))
             .child(
                 div()
                     .flex()
@@ -5305,6 +5511,9 @@ impl QuickSearch {
 impl Render for QuickSearch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply(self.theme_mode, window.appearance());
+        if let Some(find) = &self.input_find {
+            return self.render_input_find(find, window, cx);
+        }
         if let Some(jump) = &self.line_jump {
             return Self::render_line_jump(jump, window, cx);
         }
@@ -7820,6 +8029,50 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_input_find(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        let query = "文本: 原文 北区-A\r\n南区\n北区-B";
+        search.fill_query(query, window, cx);
+        let first = query.find("北区").unwrap();
+        let last = query.rfind("北区").unwrap();
+        let width = "北区".len();
+        search
+            .input
+            .update(cx, |input, cx| input.select_range(first..first + width, cx));
+        let key = |key, held| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+            is_held: held,
+        };
+        search.key_down(&key("ctrl-shift-f", true), window, cx);
+        assert!(search.input_find.is_none());
+        search.key_down(&key("ctrl-shift-f", false), window, cx);
+        let entry = search.input_find.as_ref().unwrap().input.clone();
+        assert_eq!(entry.read(cx).text(), "北区");
+        search.key_down(&key("enter", true), window, cx);
+        assert!(search.input_find.is_some());
+        search.key_down(&key("enter", false), window, cx);
+        assert_eq!(search.input.read(cx).selection(), last..last + width);
+        search.key_down(&key("ctrl-shift-f", false), window, cx);
+        search.key_down(&key("enter", false), window, cx);
+        assert_eq!(search.input.read(cx).selection(), first..first + width);
+        search.key_down(&key("ctrl-shift-f", false), window, cx);
+        search.key_down(&key("shift-enter", false), window, cx);
+        assert_eq!(search.input.read(cx).selection(), last..last + width);
+        search.key_down(&key("ctrl-shift-f", false), window, cx);
+        let entry = search.input_find.as_ref().unwrap().input.clone();
+        entry.update(cx, |input, cx| input.set_text("未找到", cx));
+        search.key_down(&key("enter", false), window, cx);
+        assert!(search.input_find.is_some());
+        search.key_down(&key("escape", false), window, cx);
+        assert!(search.input_find.is_none());
+        assert_eq!(search.input.read(cx).selection(), last..last + width);
+        assert_eq!(search.input.read(cx).text(), query);
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_result_copy_in_place(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -8944,6 +9197,7 @@ mod tests {
                     reopened.update(cx, verify_result_copy_in_place).unwrap();
                     reopened.update(cx, verify_input_error_selection).unwrap();
                     reopened.update(cx, verify_go_to_input_line).unwrap();
+                    reopened.update(cx, verify_input_find).unwrap();
                     reopened.update(cx, verify_query_argument_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
