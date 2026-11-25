@@ -319,7 +319,13 @@ fn simplify_fraction_using(
     if verb == "从带分数" || verb.eq_ignore_ascii_case("from-mixed") {
         return parse_mixed_fraction(expression.trim()).map(|value| value.to_string());
     }
-    if verb == "限分母" || verb.eq_ignore_ascii_case("limit-denominator") {
+    let approximation = match verb.to_ascii_lowercase().as_str() {
+        "限分母" | "limit-denominator" => Some(FractionApproximation::Nearest),
+        "限分母下界" | "limit-denominator-down" => Some(FractionApproximation::Lower),
+        "限分母上界" | "limit-denominator-up" => Some(FractionApproximation::Upper),
+        _ => None,
+    };
+    if let Some(direction) = approximation {
         let (value, limit) =
             split_conversion(expression.trim()).ok_or(FractionError::DenominatorLimit)?;
         let limit = limit
@@ -327,7 +333,7 @@ fn simplify_fraction_using(
             .ok()
             .filter(|limit| (1..=MAX_APPROXIMATION_DENOMINATOR).contains(limit))
             .ok_or(FractionError::DenominatorLimit)?;
-        let approximation = approximate_fraction(calculate(value)?, limit);
+        let approximation = approximate_fraction(calculate(value)?, limit, direction);
         ensure_exact_size(&approximation)?;
         return Ok(approximation.to_string());
     }
@@ -845,15 +851,24 @@ fn parse_mixed_fraction(input: &str) -> Result<BigRational, FractionError> {
     })
 }
 
-fn approximate_fraction(value: BigRational, max_denominator: u32) -> BigRational {
+#[derive(Clone, Copy)]
+enum FractionApproximation {
+    Nearest,
+    Lower,
+    Upper,
+}
+
+fn approximate_fraction(
+    value: BigRational,
+    max_denominator: u32,
+    direction: FractionApproximation,
+) -> BigRational {
     let limit = BigUint::from(max_denominator);
     if value.denom().magnitude() <= &limit {
         return value;
     }
-    let negative = value.numer().sign() == Sign::Minus;
-    let magnitude = if negative { -value } else { value };
-    let mut dividend = magnitude.numer().magnitude().clone();
-    let mut divisor = magnitude.denom().magnitude().clone();
+    let mut dividend = value.numer().magnitude().clone();
+    let mut divisor = value.denom().magnitude().clone();
     let mut preceding = (BigUint::from(0u8), BigUint::from(1u8));
     let mut closest = (BigUint::from(1u8), BigUint::from(0u8));
     let boundary = loop {
@@ -874,29 +889,29 @@ fn approximate_fraction(value: BigRational, max_denominator: u32) -> BigRational
         divisor = remainder;
     };
     let latest = BigRational::new(closest.0.into(), closest.1.into());
-    let distance = |candidate: &BigRational| {
-        let delta = &magnitude - candidate;
-        if delta.numer().sign() == Sign::Minus {
-            -delta
-        } else {
-            delta
-        }
-    };
-    let order = distance(&latest)
-        .cmp(&distance(&boundary))
-        .then_with(|| latest.denom().cmp(boundary.denom()))
-        .then_with(|| {
-            if negative {
-                boundary.cmp(&latest)
-            } else {
-                latest.cmp(&boundary)
-            }
-        });
-    let nearest = if order.is_gt() { boundary } else { latest };
-    if negative {
-        -nearest
+    let (first, second) = if value.numer().sign() == Sign::Minus {
+        (-latest, -boundary)
     } else {
-        nearest
+        (latest, boundary)
+    };
+    let (lower, upper) = if first < second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    match direction {
+        FractionApproximation::Lower => lower,
+        FractionApproximation::Upper => upper,
+        FractionApproximation::Nearest => {
+            let order = (&value - &lower)
+                .cmp(&(&upper - &value))
+                .then_with(|| lower.denom().cmp(upper.denom()));
+            if order.is_gt() {
+                upper
+            } else {
+                lower
+            }
+        }
     }
 }
 
@@ -2609,6 +2624,52 @@ mod tests {
             simplify_fraction("质因数分解 -1000000000001"),
             Err(FractionError::PrimeFactorizationRange)
         );
+    }
+
+    #[test]
+    fn finds_the_tightest_fraction_bounds_with_a_limited_denominator() {
+        for (input, expected) in [
+            ("限分母下界 355/113 to 100", "311/99"),
+            ("限分母上界 355/113 to 100", "22/7"),
+            ("limit-denominator-down -355/113 to 100", "-22/7"),
+            ("limit-denominator-up -355/113 to 100", "-311/99"),
+            ("限分母下界 1/4 to 2", "0"),
+            ("限分母上界 1/4 to 2", "1/2"),
+            ("限分母下界 -3/2 to 1", "-2"),
+            ("限分母上界 -3/2 to 1", "-1"),
+            ("限分母下界 (1/2+1/3) to 6", "5/6"),
+            ("限分母上界 (1/2+1/3) to 6", "5/6"),
+        ] {
+            assert_eq!(simplify_fraction(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            simplify_fraction("限分母上界 1/2 to 0"),
+            Err(FractionError::DenominatorLimit),
+        );
+        for numerator in -12_i64..=12 {
+            for denominator in 1_i64..=12 {
+                let value = BigRational::new(numerator.into(), denominator.into());
+                for limit in 1..=6 {
+                    let floor = |q: i64| {
+                        BigRational::new((numerator * q).div_euclid(denominator).into(), q.into())
+                    };
+                    let ceil = |q: i64| {
+                        BigRational::new(
+                            (-(-numerator * q).div_euclid(denominator)).into(),
+                            q.into(),
+                        )
+                    };
+                    assert_eq!(
+                        approximate_fraction(value.clone(), limit, FractionApproximation::Lower),
+                        (1..=i64::from(limit)).map(floor).max().unwrap(),
+                    );
+                    assert_eq!(
+                        approximate_fraction(value.clone(), limit, FractionApproximation::Upper),
+                        (1..=i64::from(limit)).map(ceil).min().unwrap(),
+                    );
+                }
+            }
+        }
     }
 
     #[test]

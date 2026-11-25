@@ -6796,6 +6796,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "限制分母并从下方逼近分数",
+        query: "分数: 限分母下界 355/113 to 100",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "限制分母并从上方逼近分数",
+        query: "分数: 限分母上界 355/113 to 100",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把整数分解为质因数的乘积",
         query: "分数: 质因数分解 360",
     },
@@ -7261,6 +7271,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "带分数",
                     "从带分数",
                     "限分母",
+                    "限分母下界",
+                    "限分母上界",
                     "质因数分解",
                     "因数统计",
                     "商和余数",
