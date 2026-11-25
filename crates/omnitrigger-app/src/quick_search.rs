@@ -163,6 +163,7 @@ const PAGE_ROW_HEIGHT: f32 = 38.;
 const DESTINATION_PAGE_SIZE: usize = 4;
 const CONVERSION_PAGE_SIZE: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
+const EXAMPLE_SHORTCUT_ROW_HEIGHT: f32 = 24.;
 const EXAMPLE_PAGE_SIZE: usize = 8;
 const MAX_VALUE_LINES: usize = 6;
 const EXPANDED_VALUE_LINES: usize = 12;
@@ -1716,6 +1717,7 @@ impl Results {
             }
             Self::Help(items) if !items.is_empty() => {
                 132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
+                    + EXAMPLE_SHORTCUT_ROW_HEIGHT
             }
             Self::DirectoryInput(_) => 132. + EXAMPLE_ROW_HEIGHT,
             Self::ConversionTargets(items) if !items.is_empty() => {
@@ -3620,6 +3622,18 @@ impl QuickSearch {
         let start = self.selected / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
         let input = self.input.read(cx).text();
         let tool_index = matches!(scoped_query(input.trim()), Some((Scope::ToolIndex, _)));
+        let shortcut = items.get(self.selected).map(|&index| {
+            let example = &EXAMPLES[index];
+            if tool_index {
+                "F1 用法 · Tab 填入"
+            } else if example.data_start().is_some() {
+                "Tab 填入 · Shift+Tab 改参数 · Alt+Enter 换数据"
+            } else if example.argument_range().is_some() {
+                "Tab 填入 · Shift+Tab 改参数"
+            } else {
+                "Tab 填入"
+            }
+        });
         div()
             .flex()
             .flex_col()
@@ -3634,7 +3648,14 @@ impl QuickSearch {
                         let query = example.query;
                         self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
                             .child(icon(example.icon, 16., theme::ACCENT))
-                            .child(div().w(px(130.)).truncate().child(example.title))
+                            .child(
+                                div()
+                                    .id(("quick-search-example-title", index))
+                                    .w(px(184.))
+                                    .truncate()
+                                    .child(example.title)
+                                    .tooltip(theme::text_tooltip(example.title.into())),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -3645,24 +3666,15 @@ impl QuickSearch {
                                     .text_color(rgb(theme::TEXT_MUTED))
                                     .child(input_preview(query.trim_end())),
                             )
-                            .when(index == self.selected, |row| {
-                                let hint = if tool_index {
-                                    "F1 用法 · Tab 填入"
-                                } else if example.data_start().is_some() {
-                                    "Shift+Tab 改参数 · Alt+Enter 换数据"
-                                } else if example.argument_range().is_some() {
-                                    "Tab 填入 · Shift+Tab 改参数"
-                                } else {
-                                    "Tab 填入"
-                                };
-                                row.child(div().text_color(rgb(theme::TEXT_MUTED)).child(hint))
-                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.index.recent.examples.record(example_index);
                                 this.fill_query(query, window, cx);
                             }))
                     }),
             )
+            .when_some(shortcut, |list, hint| {
+                list.child(Self::selection_hint(hint))
+            })
             .when(items.len() > EXAMPLE_PAGE_SIZE, |list| {
                 list.child(self.render_pagination(
                     items.len(),
@@ -7954,7 +7966,7 @@ mod tests {
             let results = for_query(query, &[]);
             assert_eq!(
                 results.height(MAX_VALUE_LINES),
-                132. + EXAMPLE_PAGE_SIZE as f32 * EXAMPLE_ROW_HEIGHT
+                132. + EXAMPLE_PAGE_SIZE as f32 * EXAMPLE_ROW_HEIGHT + EXAMPLE_SHORTCUT_ROW_HEIGHT
             );
             assert!(matches!(results, Results::Help(items) if items.len() == EXAMPLES.len()));
         }
