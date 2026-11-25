@@ -53,7 +53,8 @@ pub(super) enum FractionError {
     ClampBounds,
     QuantileArguments,
     WeightedAverageArguments,
-    HarmonicMeanArguments,
+    PositiveMeanArguments,
+    RationalGeometricMean,
     AlignmentArguments,
     RationalSquareRoot,
     RootDegree,
@@ -111,7 +112,8 @@ impl FractionError {
                 "quantile 的概率须为 0 至 1，percentile 须为 0 至 100，且至少填写一个数值"
             }
             Self::WeightedAverageArguments => "wavg 须成对填写数值和非负权重，且至少一个权重大于零",
-            Self::HarmonicMeanArguments => "hmean 的每个参数须为正数",
+            Self::PositiveMeanArguments => "gmean 和 hmean 的每个参数须为正数",
+            Self::RationalGeometricMean => "这些参数的几何平均值无法表示为分数",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::RootDegree => "root 的次数须为 1 至 1024 的整数",
@@ -1491,6 +1493,23 @@ fn exact_gcd(mut left: BigUint, mut right: BigUint) -> BigUint {
     left
 }
 
+fn exact_rational_root(value: &BigRational, degree: u32) -> Result<BigRational, FractionError> {
+    if value.numer().sign() == Sign::Minus && degree.is_multiple_of(2) {
+        return Err(FractionError::RationalRoot);
+    }
+    let exact_root = |part: &BigInt| {
+        let magnitude = part.magnitude();
+        let root = magnitude.nth_root(degree);
+        (root.pow(degree) == *magnitude)
+            .then(|| BigInt::from_biguint(part.sign(), root))
+            .ok_or(FractionError::RationalRoot)
+    };
+    Ok(BigRational::new(
+        exact_root(value.numer())?,
+        exact_root(value.denom())?,
+    ))
+}
+
 pub(super) fn rational_power(
     base: BigRational,
     exponent: BigRational,
@@ -1734,7 +1753,7 @@ impl FractionParser<'_> {
         }
         if matches!(
             name.as_str(),
-            "sum" | "prod" | "product" | "avg" | "mean" | "median" | "hmean"
+            "sum" | "prod" | "product" | "avg" | "mean" | "median" | "hmean" | "gmean"
         ) {
             self.remaining = rest;
             return self.aggregate_function(&name);
@@ -1841,20 +1860,7 @@ impl FractionParser<'_> {
             .ok()
             .filter(|degree| (1..=MAX_POWER_EXPONENT).contains(degree))
             .ok_or(FractionError::RootDegree)?;
-        if value.numer().sign() == Sign::Minus && degree.is_multiple_of(2) {
-            return Err(FractionError::RationalRoot);
-        }
-        let exact_root = |part: &BigInt| {
-            let magnitude = part.magnitude();
-            let root = magnitude.nth_root(degree);
-            (root.pow(degree) == *magnitude)
-                .then(|| BigInt::from_biguint(part.sign(), root))
-                .ok_or(FractionError::RationalRoot)
-        };
-        Ok(BigRational::new(
-            exact_root(value.numer())?,
-            exact_root(value.denom())?,
-        ))
+        exact_rational_root(&value, degree)
     }
 
     fn integer_aggregate(
@@ -2002,11 +2008,28 @@ impl FractionParser<'_> {
             values.sort_unstable();
             return median_sorted_values(&values);
         }
-        if matches!(name, "prod" | "product") {
+        if matches!(name, "prod" | "product" | "gmean") {
+            let geometric = name == "gmean";
+            if geometric {
+                if values
+                    .iter()
+                    .any(|value| value.numer().sign() != Sign::Plus)
+                {
+                    return Err(FractionError::PositiveMeanArguments);
+                }
+                if values.windows(2).all(|pair| pair[0] == pair[1]) {
+                    return Ok(values.swap_remove(0));
+                }
+            }
+            let count = values.len() as u32;
             let mut product = BigRational::from_integer(1.into());
             for value in values {
                 product *= value;
                 ensure_exact_size(&product)?;
+            }
+            if geometric {
+                return exact_rational_root(&product, count)
+                    .map_err(|_| FractionError::RationalGeometricMean);
             }
             return Ok(product);
         }
@@ -2015,7 +2038,7 @@ impl FractionParser<'_> {
         let mut total = BigRational::default();
         for value in values {
             if harmonic && value.numer().sign() != Sign::Plus {
-                return Err(FractionError::HarmonicMeanArguments);
+                return Err(FractionError::PositiveMeanArguments);
             }
             total += if harmonic { value.recip() } else { value };
             ensure_exact_size(&total)?;
@@ -2803,13 +2826,40 @@ mod tests {
         for query in ["hmean(1,0)", "hmean(-1/2,3)"] {
             assert_eq!(
                 calculate_fraction(query),
-                Err(FractionError::HarmonicMeanArguments)
+                Err(FractionError::PositiveMeanArguments)
             );
         }
         assert!(calculate_fraction("prod()").is_err());
         assert_eq!(
             calculate_fraction("prod(1e2000,1e2000)"),
             Err(FractionError::ExactRange),
+        );
+    }
+
+    #[test]
+    fn combines_exact_geometric_means_in_calculator_expressions() {
+        for (query, expected) in [
+            ("gmean(1/4,9/16)", "3/8"),
+            ("gmean(1/8,1/8,1)*4", "1"),
+            ("gmean(1e2000,1e2000)/1e2000", "1"),
+            ("GMEAN(1e2000,1e-2000)", "1"),
+            ("gmean(9007199254740993)", "9007199254740993"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        for query in ["gmean(81,0)", "gmean(-1,-1)"] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::PositiveMeanArguments)
+            );
+        }
+        assert_eq!(
+            calculate_fraction("gmean(1,2)"),
+            Err(FractionError::RationalGeometricMean),
         );
     }
 

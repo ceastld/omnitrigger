@@ -6470,6 +6470,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求多个正分数的精确几何平均值",
+        query: "分数: 计算 gmean(1/4,9/16)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求多个分数或小数的精确平均值",
         query: "分数: 计算 avg(1/3,1/6)",
     },
