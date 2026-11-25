@@ -10,8 +10,8 @@ use super::linear_fit::format_power_expression;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
 use super::statistics::{
-    interpolate_ordered_quantile, median_sorted_values, weighted_quantile_value, StatisticsError,
-    WeightedDistribution, WeightedMean,
+    absolute_deviation_unweighted, interpolate_ordered_quantile, median_sorted_values,
+    weighted_quantile_value, StatisticsError, WeightedDistribution, WeightedMean,
 };
 
 const MAX_POWER_EXPONENT: u32 = 1024;
@@ -1771,6 +1771,12 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.interquartile_range_function();
         }
+        if matches!(name.as_str(), "mad" | "aad") {
+            self.remaining = rest;
+            let values = self.list_function_arguments()?;
+            return absolute_deviation_unweighted(values, name == "mad")
+                .map_err(|_| FractionError::ExactRange);
+        }
         if name == "wavg" {
             self.remaining = rest;
             return self.weighted_average_function();
@@ -2820,6 +2826,28 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn computes_exact_absolute_deviations_inside_calculator_expressions() {
+        for (query, expected) in [
+            ("mad(0,1/2,1,10)", "1/2"),
+            ("aad(0,1/2,1,10)*16", "57"),
+            ("MAD(-3/2,0,3/2)", "3/2"),
+            ("aad(9007199254740993,9007199254740992)", "1/2"),
+            ("mad(2**80)+aad(1/3)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        let at_length_limit = format!("mad({}1)", "1,".repeat(125));
+        assert_eq!(
+            calculate_fraction(&at_length_limit).unwrap().to_string(),
+            "0"
+        );
     }
 
     #[test]

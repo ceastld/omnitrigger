@@ -1313,6 +1313,19 @@ pub(super) fn summarize_unweighted(
     summarize(values, count, sample)
 }
 
+pub(super) fn absolute_deviation_unweighted(
+    values: Vec<BigRational>,
+    median: bool,
+) -> Result<BigRational, StatisticsError> {
+    let values = unweighted_observations(values)?;
+    let count = values.len() as u64;
+    if median {
+        median_absolute_deviation(values, count)
+    } else {
+        mean_absolute_deviation(values, count)
+    }
+}
+
 pub(super) fn report_binned_unweighted(
     values: Vec<BigRational>,
     edges: &[BigRational],

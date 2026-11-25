@@ -6505,6 +6505,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用精确算式计算中位绝对偏差",
+        query: "分数: 计算 mad(0,1/2,1,10)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用精确算式计算平均绝对偏差",
+        query: "分数: 计算 aad(0,1/2,1,10)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在精确算式中计算加权平均值",
         query: "分数: 计算 wavg(1/3,2,1/6,1)",
     },
