@@ -6352,6 +6352,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "清除网址中的 UTM 来源和推广参数",
+        query: "URL: 去UTM https://example.invalid/doc?q=a%20b&utm_source=mail&utm_campaign=autumn#part",
+    },
+    Example {
+        icon: Icon::Browser,
         title: "同时移除多个 URL 参数",
         query: r#"URL: 去参数组 ["source","campaign"] https://example.invalid/doc?source=mail&q=a%20b&campaign=autumn#part"#,
     },

@@ -660,6 +660,7 @@
 - 用 `URL: 取锚点` 加上完整 URL，可把 `#` 后的片段解码为文字。用 `URL: 设锚点 "目录 #2" https://example.invalid/doc?q=a` 可设置并编码文字锚点。`URL: 去锚点` 可移除片段并保留查询参数。
 - 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 去参数组 ["source","campaign"]` 后加空格和网址，可同时移除指定名称的全部参数。列表填写解码后的名称，可直接写空格或加号。
+- 用 `URL: 去UTM https://example.invalid/doc?q=a%20b&utm_source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。按解码后名称的 `utm_` 前缀移除参数，忽略前缀大小写，保留其他参数的写法与顺序以及网址锚点。 [Google Analytics 的 UTM 参数说明](https://support.google.com/analytics/answer/10917952)
 - 输入 `URL: 保留参数 ["q","page"] https://example.invalid/doc?source=mail&q=a%20b&page=2&q=a+b#part` 得到 `https://example.invalid/doc?q=a%20b&page=2&q=a+b#part`。列表填写解码后的名称并区分大小写。匹配项保留原有顺序和编码，同名项可以重复。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 用 `URL: 排序参数` 加上网址，可按解码后的名称排列查询参数。名称按 UTF‑16 码元比较，同名项保留原有顺序。各参数的编码和网址片段照原样保留。 [WHATWG 参数排序规则](https://url.spec.whatwg.org/#dom-urlsearchparams-sort)
 - 用 `URL: 去重参数` 加上网址，可移除解码后名称和值都相同的重复项，保留首次出现的写法和顺序。`a+b` 与 `a%20b` 解码后相同，同名但值不同的参数会保留。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)

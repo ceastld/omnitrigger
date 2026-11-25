@@ -153,6 +153,12 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         }
         "去参数" | "strip-param" => remove_parameter(value),
         "去参数组" | "strip-params" => filter_parameter_group(value, false),
+        "去utm" | "strip-utm" => filter_query_parameters(value, |name| {
+            const PREFIX: &[u8] = b"utm_";
+            !name
+                .and_then(|name| name.as_bytes().get(..PREFIX.len()))
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+        }),
         "保留参数" | "keep-params" => filter_parameter_group(value, true),
         "排序参数" | "sort-params" => sort_query_parameters(value),
         "去重参数" | "unique-params" => deduplicate_query_parameters(value),
@@ -1044,6 +1050,30 @@ mod tests {
         assert_eq!(
             convert_url_component(&query),
             Err(UrlEncodingError::InvalidParameterUpdates)
+        );
+    }
+
+    #[test]
+    fn strips_decoded_utm_prefixes_and_keeps_the_other_query_entries() {
+        for (query, expected) in [
+            (
+                "去UTM https://example.invalid/doc?q=a%20b&utm_source=mail&%75TM_Medium=x&keep=utm_x&flag#part",
+                "https://example.invalid/doc?q=a%20b&keep=utm_x&flag#part",
+            ),
+            (
+                "strip-utm https://example.invalid/?utm_term=1&utm_term=2#top",
+                "https://example.invalid/#top",
+            ),
+            (
+                "去utm https://example.invalid/?source=1&xutm_source=1&%GG=raw#utm_medium",
+                "https://example.invalid/?source=1&xutm_source=1&%GG=raw#utm_medium",
+            ),
+        ] {
+            assert_eq!(convert_url_component(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_url_component("去UTM /relative?utm_source=mail"),
+            Err(UrlEncodingError::InvalidUrl)
         );
     }
 
