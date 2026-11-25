@@ -30,7 +30,6 @@ use super::{
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_WINDOWS_COMMAND_UNITS: usize = 32_766;
 pub(super) const MAX_PADDING_WIDTH: usize = 4096;
-const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const MAX_REGEX_FREQUENCY_INPUT_BYTES: usize = 16 * 1024;
 const MAX_DIFF_LINES: usize = 512;
 const MAX_COMPARISON_GRAPHEMES: usize = 512;
@@ -472,8 +471,14 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "base64解码" | "base64-decode" => decode_base64(text, &STANDARD, &STANDARD_NO_PAD),
         "base64url编码" | "base64url-encode" => Ok(URL_SAFE_NO_PAD.encode(text)),
         "base64url解码" | "base64url-decode" => decode_base64(text, &URL_SAFE, &URL_SAFE_NO_PAD),
-        "base32编码" | "base32-encode" => Ok(encode_base32(text.as_bytes())),
-        "base32解码" | "base32-decode" => decode_base32(text),
+        "base32编码" | "base32-encode" => {
+            Ok(encode_base32(text.as_bytes(), Base32Alphabet::Standard))
+        }
+        "base32解码" | "base32-decode" => decode_base32(text, Base32Alphabet::Standard),
+        "base32hex编码" | "base32hex-encode" => {
+            Ok(encode_base32(text.as_bytes(), Base32Alphabet::ExtendedHex))
+        }
+        "base32hex解码" | "base32hex-decode" => decode_base32(text, Base32Alphabet::ExtendedHex),
         "utf8编码" | "utf8-hex" => Ok(encode_hex_units(text.bytes(), 2)),
         "utf8解码" | "utf8-hex-decode" => decode_utf8_bytes(text),
         "utf16编码" | "utf16-hex" => Ok(encode_hex_units(text.encode_utf16(), 4)),
@@ -1322,7 +1327,33 @@ fn decode_base64(
     decoded_utf8(bytes)
 }
 
-fn encode_base32(bytes: &[u8]) -> String {
+#[derive(Clone, Copy)]
+enum Base32Alphabet {
+    Standard,
+    ExtendedHex,
+}
+
+impl Base32Alphabet {
+    fn symbols(self) -> &'static [u8; 32] {
+        match self {
+            Self::Standard => b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567",
+            Self::ExtendedHex => b"0123456789ABCDEFGHIJKLMNOPQRSTUV",
+        }
+    }
+
+    fn digit(self, symbol: u8) -> Result<u8, TextError> {
+        match (self, symbol.to_ascii_uppercase()) {
+            (Self::Standard, upper @ b'A'..=b'Z') => Ok(upper - b'A'),
+            (Self::Standard, digit @ b'2'..=b'7') => Ok(digit - b'2' + 26),
+            (Self::ExtendedHex, digit @ b'0'..=b'9') => Ok(digit - b'0'),
+            (Self::ExtendedHex, upper @ b'A'..=b'V') => Ok(upper - b'A' + 10),
+            _ => Err(TextError::InvalidBase32),
+        }
+    }
+}
+
+fn encode_base32(bytes: &[u8], alphabet: Base32Alphabet) -> String {
+    let letters = alphabet.symbols();
     let mut encoded = String::with_capacity(bytes.len().div_ceil(5) * 8);
     for block in bytes.chunks(5) {
         let bits = block.len() * 8;
@@ -1333,14 +1364,14 @@ fn encode_base32(bytes: &[u8]) -> String {
         let symbols = bits.div_ceil(5);
         for index in 0..symbols {
             let digit = ((word >> (35 - 5 * index)) & 31) as usize;
-            encoded.push(char::from(BASE32_ALPHABET[digit]));
+            encoded.push(char::from(letters[digit]));
         }
         encoded.extend(std::iter::repeat_n('=', 8 - symbols));
     }
     encoded
 }
 
-fn decode_base32(text: &str) -> Result<String, TextError> {
+fn decode_base32(text: &str, alphabet: Base32Alphabet) -> Result<String, TextError> {
     let encoded: Vec<_> = text
         .bytes()
         .filter(|byte| !byte.is_ascii_whitespace())
@@ -1367,11 +1398,7 @@ fn decode_base32(text: &str) -> Result<String, TextError> {
     for block in data.chunks(8) {
         let mut word = 0_u64;
         for &symbol in block {
-            let digit = match symbol.to_ascii_uppercase() {
-                upper @ b'A'..=b'Z' => upper - b'A',
-                b'2'..=b'7' => symbol - b'2' + 26,
-                _ => return Err(TextError::InvalidBase32),
-            };
+            let digit = alphabet.digit(symbol)?;
             word = (word << 5) | u64::from(digit);
         }
         let bits = block.len() * 5;
@@ -3597,6 +3624,7 @@ mod tests {
 
     #[test]
     fn encodes_and_decodes_rfc_base32_and_validates_padding_bits() {
+        let alphabet = Base32Alphabet::Standard;
         for (plain, encoded) in [
             ("", ""),
             ("f", "MY======"),
@@ -3606,14 +3634,14 @@ mod tests {
             ("fooba", "MZXW6YTB"),
             ("foobar", "MZXW6YTBOI======"),
         ] {
-            assert_eq!(encode_base32(plain.as_bytes()), encoded);
-            assert_eq!(decode_base32(encoded).as_deref(), Ok(plain));
+            assert_eq!(encode_base32(plain.as_bytes(), alphabet), encoded);
+            assert_eq!(decode_base32(encoded, alphabet).as_deref(), Ok(plain));
             let lowercase = encoded.trim_end_matches('=').to_ascii_lowercase();
-            assert_eq!(decode_base32(&lowercase).as_deref(), Ok(plain));
+            assert_eq!(decode_base32(&lowercase, alphabet).as_deref(), Ok(plain));
         }
         let text = " 北京🫖 ";
         assert_eq!(
-            decode_base32(&encode_base32(text.as_bytes())).as_deref(),
+            decode_base32(&encode_base32(text.as_bytes(), alphabet), alphabet).as_deref(),
             Ok(text)
         );
         assert_eq!(
@@ -3622,13 +3650,58 @@ mod tests {
         );
         for malformed in ["M", "MZ======", "MY===", "M=Y=====", "1A", "MY======A", "="] {
             assert_eq!(
-                decode_base32(malformed),
+                decode_base32(malformed, alphabet),
                 Err(TextError::InvalidBase32),
                 "{malformed}"
             );
         }
-        assert_eq!(decode_base32("74======"), Err(TextError::InvalidUtf8));
-        assert_eq!(decode_base32("AA======"), Err(TextError::NullCharacter));
+        assert_eq!(
+            decode_base32("74======", alphabet),
+            Err(TextError::InvalidUtf8)
+        );
+        assert_eq!(
+            decode_base32("AA======", alphabet),
+            Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn encodes_and_decodes_the_extended_hex_base32_alphabet() {
+        let alphabet = Base32Alphabet::ExtendedHex;
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "CO======"),
+            ("fo", "CPNG===="),
+            ("foo", "CPNMU==="),
+            ("foob", "CPNMUOG="),
+            ("fooba", "CPNMUOJ1"),
+            ("foobar", "CPNMUOJ1E8======"),
+        ] {
+            assert_eq!(encode_base32(plain.as_bytes(), alphabet), encoded);
+            assert_eq!(decode_base32(encoded, alphabet).as_deref(), Ok(plain));
+        }
+        assert_eq!(
+            transform_text("Base32Hex编码 foo").as_deref(),
+            Ok("CPNMU===")
+        );
+        assert_eq!(
+            transform_text("Base32Hex解码 \"cp\nnmu\"").as_deref(),
+            Ok("foo")
+        );
+        assert_eq!(
+            decode_base32("VS======", alphabet),
+            Err(TextError::InvalidUtf8)
+        );
+        assert_eq!(
+            decode_base32("00======", alphabet),
+            Err(TextError::NullCharacter)
+        );
+        for input in ["WO======", "CPNMV===", "CPNMU=", "C=O====="] {
+            assert_eq!(
+                decode_base32(input, alphabet),
+                Err(TextError::InvalidBase32)
+            );
+        }
     }
 
     #[test]

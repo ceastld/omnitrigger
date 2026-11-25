@@ -4585,6 +4585,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用扩展十六进制 Base32 字母表编码文本",
+        query: "文本: Base32Hex编码 foo",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把 Base32Hex 解码为 UTF-8 文本",
+        query: "文本: Base32Hex解码 CPNMU===",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看 Unicode 码位",
         query: "文本: 码位 北京",
     },
