@@ -883,6 +883,21 @@ mod tests {
     }
 
     #[test]
+    fn multiplies_and_adds_float_values_before_rounding() {
+        assert_eq!(calculate("fma(2,3,4)").as_deref(), Ok("10"));
+        assert_eq!(calculate("FMA(1e308,2,-1e308)").as_deref(), Ok("1e308"));
+        assert_eq!(
+            evaluate("fma(1+2**-27,1-2**-27,-1)"),
+            Ok(-2.0_f64.powi(-54))
+        );
+        assert_eq!(evaluate("fma(2,3)"), Err(CalculationError::FunctionDomain));
+        assert_eq!(
+            evaluate("fma(1e308,2,0)"),
+            Err(CalculationError::OutOfRange)
+        );
+    }
+
+    #[test]
     fn compares_decimal_results_without_forgetting_relative_or_absolute_tolerance() {
         for (query, expected) in [
             ("isclose(0.1+0.2,0.3)", "1"),

@@ -113,6 +113,12 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             }));
         }
         "lerp" => return Some(NamedValue::Aggregate(linear_interpolation)),
+        "fma" => {
+            return Some(NamedValue::Aggregate(|values| match values {
+                [left, right, addend] => left.mul_add(*right, *addend),
+                _ => f64::NAN,
+            }))
+        }
         "root" => return Some(NamedValue::Aggregate(nth_root)),
         "invlerp" => return Some(NamedValue::Aggregate(interpolation_progress)),
         "remap" => return Some(NamedValue::Aggregate(remap_range)),

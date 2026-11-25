@@ -1842,6 +1842,16 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.interpolation_function(&name);
         }
+        if name == "fma" {
+            self.remaining = rest;
+            let [left, right, addend]: [BigRational; 3] = self
+                .fixed_function_arguments(3)?
+                .try_into()
+                .expect("fma 有三个参数");
+            let value = left * right + addend;
+            ensure_exact_size(&value)?;
+            return Ok(value);
+        }
         if matches!(name.as_str(), "gcd" | "lcm") {
             self.remaining = rest;
             return self.integer_aggregate(name == "lcm");
@@ -3021,6 +3031,17 @@ mod tests {
         for (query, expected) in [("fsum(1/3,1/6)", "1/2"), ("FSUM(2**80,1/7,-2**80)*7", "1")] {
             assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
         }
+    }
+
+    #[test]
+    fn multiplies_and_adds_rational_values_in_one_expression() {
+        for (query, expected) in [
+            ("fma(1/3,3/5,-1/10)", "1/10"),
+            ("FMA(2**80,2,-2**81)*4", "0"),
+        ] {
+            assert_eq!(calculate_fraction(query).unwrap().to_string(), expected);
+        }
+        assert!(calculate_fraction("fma(2,3)").is_err());
     }
 
     #[test]

@@ -3467,6 +3467,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "将乘法与加法合并后进行一次舍入",
+        query: "fma(1e308,2,-1e308)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算皮尔逊相关系数",
         query: "corr(1,2,2,4,3,6)",
     },
