@@ -3137,6 +3137,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "计算多个日期区间合计覆盖的天数和工作日",
+        query: "日期: 覆盖天数 2024-02-28 至 2024-03-01; 2024-02-29 至 2024-03-03; 2024-03-05 至 2024-03-06",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按自然月拆分日期区间并计算各段天数",
         query: "日期: 按月拆分 2024-01-31 至 2024-03-02",
     },
@@ -7266,6 +7271,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "合并区间",
             "区间交集",
             "扣除区间",
+            "覆盖天数",
             "按月拆分",
             "按月拆分CSV",
             "按周拆分CSV",

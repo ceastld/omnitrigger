@@ -46,6 +46,7 @@ pub(super) enum DateError {
     InvalidDateList,
     DateSeriesArguments,
     InvalidDateRanges,
+    DateCoverageArguments,
     RangeSplitArguments,
     DateSpanArguments,
     WeekdayCountArguments,
@@ -101,6 +102,9 @@ impl DateError {
             Self::DateSeriesArguments => "用逗号填写起始日期和 1 至 366 个日期，例如 2024-01,3",
             Self::InvalidDateRanges => {
                 "填写 2 至 32 个日期区间。每段用“至”连接日期，用分号或换行分隔各段"
+            }
+            Self::DateCoverageArguments => {
+                "填写 1 至 32 个日期区间。每段用“至”连接日期，用分号或换行分隔各段"
             }
             Self::RangeSplitArguments => {
                 "用“至”连接开始日期和结束日期，例如 2024-01-31 至 2024-03-02"
@@ -942,6 +946,7 @@ enum DateRangeOperation {
     Merge,
     Intersect,
     Subtract,
+    Coverage,
 }
 
 fn combine_date_ranges(
@@ -949,16 +954,20 @@ fn combine_date_ranges(
     today: NaiveDate,
     operation: DateRangeOperation,
 ) -> Result<String, DateError> {
+    let (minimum, invalid) = if matches!(operation, DateRangeOperation::Coverage) {
+        (1, DateError::DateCoverageArguments)
+    } else {
+        (2, DateError::InvalidDateRanges)
+    };
     let terms = input.trim().split([';', '\n']);
-    if !(2..=MAX_DATE_RANGES).contains(&terms.clone().count()) {
-        return Err(DateError::InvalidDateRanges);
+    if !(minimum..=MAX_DATE_RANGES).contains(&terms.clone().count()) {
+        return Err(invalid);
     }
     let mut ranges = terms
         .map(|term| {
-            let (start, end, remaining) =
-                date_range_operands(term.trim(), today, DateError::InvalidDateRanges)?;
+            let (start, end, remaining) = date_range_operands(term.trim(), today, invalid)?;
             if !remaining.is_empty() {
-                return Err(DateError::InvalidDateRanges);
+                return Err(invalid);
             }
             if end < start {
                 return Err(DateError::ReversedDateRange);
@@ -982,7 +991,7 @@ fn combine_date_ranges(
             let (base, exclusions) = ranges.split_at_mut(1);
             return Ok(subtract_date_ranges(base[0], exclusions));
         }
-        DateRangeOperation::Merge => {}
+        DateRangeOperation::Merge | DateRangeOperation::Coverage => {}
     }
     ranges.sort_unstable();
     let mut merged = Vec::new();
@@ -991,12 +1000,25 @@ fn combine_date_ranges(
         if start.signed_duration_since(current.1).num_days() <= 1 {
             current.1 = current.1.max(end);
         } else {
-            merged.push(display_date_range(current));
+            merged.push(current);
             current = (start, end);
         }
     }
-    merged.push(display_date_range(current));
-    Ok(merged.join("\n"))
+    merged.push(current);
+    if matches!(operation, DateRangeOperation::Coverage) {
+        let mut days = 0;
+        let mut workdays = 0;
+        for (start, end) in merged {
+            days += end.signed_duration_since(start).num_days() + 1;
+            workdays += inclusive_workdays(start, end);
+        }
+        return Ok(format!("{days} 天 · {workdays} 工作日"));
+    }
+    Ok(merged
+        .into_iter()
+        .map(display_date_range)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn subtract_date_ranges(
@@ -1781,6 +1803,9 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "扣除区间" | "subtract-ranges" => {
             return combine_date_ranges(rest, today, DateRangeOperation::Subtract);
         }
+        "覆盖天数" | "coverage-days" => {
+            return combine_date_ranges(rest, today, DateRangeOperation::Coverage);
+        }
         "按月拆分" | "split-months" => {
             return split_date_range(rest, today, DateRangeSplit::Months)
         }
@@ -2388,6 +2413,48 @@ mod tests {
         assert_eq!(
             calculate_date("扣除区间 今天至明天", today),
             Err(DateError::InvalidDateRanges)
+        );
+    }
+
+    #[test]
+    fn counts_calendar_days_and_weekdays_once_across_overlapping_ranges() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (query, expected) in [
+            (
+                "覆盖天数 2024-03-05 至 2024-03-06；今天至2024-03-03；昨天至2024-03-01；今天至今天",
+                "7 天 · 5 工作日",
+            ),
+            (
+                "coverage-days 2024-03-03 to 2024-03-03\n2024-03-02 to 2024-03-02",
+                "2 天 · 0 工作日",
+            ),
+            ("覆盖天数 9999-12-31 至 9999-12-31", "1 天 · 1 工作日"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("覆盖天数 明天至昨天", today),
+            Err(DateError::ReversedDateRange)
+        );
+        assert_eq!(
+            calculate_date("覆盖天数", today),
+            Err(DateError::Incomplete)
+        );
+        assert_eq!(
+            calculate_date("覆盖天数 今天", today),
+            Err(DateError::DateCoverageArguments)
+        );
+        let excessive = format!(
+            "覆盖天数 {}今天至今天",
+            "今天至今天;".repeat(MAX_DATE_RANGES)
+        );
+        assert_eq!(
+            calculate_date(&excessive, today),
+            Err(DateError::DateCoverageArguments)
         );
     }
 
