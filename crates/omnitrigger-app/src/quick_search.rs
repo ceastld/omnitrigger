@@ -2050,6 +2050,7 @@ struct BookmarkNameEdit {
 enum LineJumpTarget {
     Input,
     Table(TableAxis),
+    ExpandedPreview,
 }
 
 impl LineJumpTarget {
@@ -2057,6 +2058,7 @@ impl LineJumpTarget {
         match self {
             Self::Input | Self::Table(TableAxis::Rows) => "行号",
             Self::Table(TableAxis::Columns) => "列号",
+            Self::ExpandedPreview => "页码",
         }
     }
 }
@@ -2463,6 +2465,11 @@ impl QuickSearch {
                 })
             }
             LineJumpTarget::Table(_) => None,
+            LineJumpTarget::ExpandedPreview => self
+                .expanded_value_pages
+                .as_ref()
+                .filter(|pages| pages.len() > 1)
+                .map(|pages| (self.selected + 1, pages.len())),
         };
         let Some((number, total)) = position else {
             return;
@@ -2515,6 +2522,16 @@ impl QuickSearch {
                         TableAxis::Rows => self.table_pages.rows = page,
                         TableAxis::Columns => self.table_pages.columns = page,
                     }
+                }
+                LineJumpTarget::ExpandedPreview => {
+                    if self
+                        .expanded_value_pages
+                        .as_ref()
+                        .is_none_or(|pages| number > pages.len())
+                    {
+                        return;
+                    }
+                    self.selected = number - 1;
                 }
             }
         }
@@ -4236,7 +4253,10 @@ impl QuickSearch {
                 && keystroke.key == "g"
             {
                 if !event.is_held {
-                    let target = if keystroke.modifiers.shift {
+                    let target = if keystroke.modifiers.shift && self.expanded_value_pages.is_some()
+                    {
+                        LineJumpTarget::ExpandedPreview
+                    } else if keystroke.modifiers.shift {
                         LineJumpTarget::Table(TableAxis::Rows)
                     } else if keystroke.modifiers.alt {
                         LineJumpTarget::Table(TableAxis::Columns)
@@ -4663,12 +4683,19 @@ impl QuickSearch {
             .items_center()
             .gap(px(6.))
             .child(div().flex_1())
-            .child(self.page_controls(count, page_size, cx))
+            .child(self.page_controls(count, page_size, false, cx))
     }
 
-    fn page_controls(&self, count: usize, page_size: usize, cx: &mut Context<Self>) -> Div {
+    fn page_controls(
+        &self,
+        count: usize,
+        page_size: usize,
+        jump_to_preview_page: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let page = self.selected / page_size;
         let page_count = count.div_ceil(page_size);
+        let counter = format!("{} / {page_count}", page + 1);
         div()
             .flex()
             .flex_none()
@@ -4684,7 +4711,18 @@ impl QuickSearch {
                         this.change_page(PageChange::Previous, cx);
                     })),
             )
-            .child(format!("{} / {page_count}", page + 1))
+            .child(if jump_to_preview_page {
+                button("jump-preview-page", counter, Tone::Ghost, true)
+                    .h(px(20.))
+                    .px(px(4.))
+                    .tooltip(theme::text_tooltip("Ctrl+Shift+G 跳到指定的原文页".into()))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_line_jump(LineJumpTarget::ExpandedPreview, window, cx);
+                    }))
+                    .into_any_element()
+            } else {
+                counter.into_any_element()
+            })
             .child(
                 button("result-next", "下一页", Tone::Ghost, page + 1 < page_count)
                     .h(px(20.))
@@ -5353,7 +5391,7 @@ impl QuickSearch {
                                                 }),
                                             ),
                                         )
-                                        .child(self.page_controls(page_count, 1, cx))
+                                        .child(self.page_controls(page_count, 1, true, cx))
                                 }),
                         )
                     })
@@ -5845,6 +5883,7 @@ impl QuickSearch {
             LineJumpTarget::Input => "跳到输入行",
             LineJumpTarget::Table(TableAxis::Rows) => "跳到表格数据行所在页",
             LineJumpTarget::Table(TableAxis::Columns) => "跳到表格列所在页",
+            LineJumpTarget::ExpandedPreview => "跳到原文页",
         };
         Self::frame(cx)
             .child(
@@ -8608,7 +8647,11 @@ mod tests {
         assert!(search.expanded_value_pages.is_some());
         assert!(!search.copy_table(TableCopy::CurrentPageTsv, true, window, cx));
         press(search, "ctrl-shift-g", window, cx);
-        assert!(search.line_jump.is_none());
+        assert!(matches!(
+            search.line_jump.as_ref().map(|jump| jump.target),
+            Some(LineJumpTarget::ExpandedPreview)
+        ));
+        press(search, "escape", window, cx);
         press(search, "pageup", window, cx);
         press(search, "ctrl-shift-pagedown", window, cx);
         assert_eq!(pages(search), (2, 1));
@@ -8894,6 +8937,51 @@ mod tests {
         assert_eq!(search.results.refillable_text(), Some("南区: OK"));
         search.key_down(&key("ctrl-f", false), window, cx);
         assert_eq!(search.input.read(cx).text(), UNICODE_QUERY);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn verify_expanded_preview_jump(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        let line_count = EXPANDED_VALUE_LINES * 2 + 3;
+        let query = format!(
+            "文本: 原文 {}",
+            (1..=line_count)
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\r\n")
+        );
+        search.fill_query(query.clone(), window, cx);
+        search.refresh_results(&query, window, cx);
+        let selection = search.input.read(cx).selection();
+        let key = |name, is_held| KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(name).unwrap(),
+            is_held,
+        };
+        search.key_down(&key("ctrl-shift-g", false), window, cx);
+        assert!(search.line_jump.is_none());
+        search.key_down(&key("f2", false), window, cx);
+        assert_eq!(search.expanded_value_pages.as_ref().map(Vec::len), Some(3));
+        search.key_down(&key("ctrl-shift-g", true), window, cx);
+        assert!(search.line_jump.is_none());
+        search.key_down(&key("ctrl-shift-g", false), window, cx);
+        let prompt = search.line_jump.as_ref().unwrap();
+        assert_eq!(prompt.number(cx), Some(1));
+        let entry = prompt.input.clone();
+        entry.update(cx, |input, cx| input.set_text("4", cx));
+        search.key_down(&key("enter", false), window, cx);
+        assert!(search.line_jump.is_some());
+        entry.update(cx, |input, cx| input.set_text("３", cx));
+        search.key_down(&key("enter", false), window, cx);
+        assert!(search.line_jump.is_none());
+        assert_eq!(search.selected, 2);
+        assert_eq!(search.input.read(cx).text_ref(), query);
+        assert_eq!(search.input.read(cx).selection(), selection);
+        search.key_down(&key("ctrl-shift-g", false), window, cx);
+        search.key_down(&key("escape", false), window, cx);
+        assert_eq!(search.selected, 2);
     }
 
     #[cfg(target_os = "windows")]
@@ -9740,6 +9828,7 @@ mod tests {
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened.update(cx, verify_text_result_search).unwrap();
+                    reopened.update(cx, verify_expanded_preview_jump).unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             search.fill_query("1 + 24 + 300", window, cx);
