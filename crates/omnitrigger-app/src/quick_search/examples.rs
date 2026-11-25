@@ -4327,6 +4327,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行查看包含中文和制表符的显示列宽",
+        query: "文本: 显示列宽CSV 4 中文\t1\nÁ\t2\n\n☕️\t3 ",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "为每行生成自定起点和步长的编号",
         query: "文本: 编号CSV [100,10]\n北区\n\n南区",
     },

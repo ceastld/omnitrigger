@@ -238,10 +238,16 @@ fn is_line_lengths_csv_operation(operation: &str) -> bool {
         || operation.eq_ignore_ascii_case("line-lengths-csv")
 }
 
+fn is_display_width_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("显示列宽CSV")
+        || operation.eq_ignore_ascii_case("display-width-csv")
+}
+
 pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
     is_raw_text_operation(operation)
         || is_fixed_width_csv_operation(operation)
         || is_line_lengths_csv_operation(operation)
+        || is_display_width_csv_operation(operation)
         || operation.eq_ignore_ascii_case("展开制表符")
         || operation.eq_ignore_ascii_case("expand-tabs")
         || operation.eq_ignore_ascii_case("按显示宽度展开制表符")
@@ -258,6 +264,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     if is_line_lengths_csv_operation(operation) {
         return Some(line_lengths_csv(text));
+    }
+    if is_display_width_csv_operation(operation) {
+        return Some(display_width_csv(text));
     }
     match operation.to_ascii_lowercase().as_str() {
         "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
@@ -793,7 +802,7 @@ fn convert_line_endings(input: &str) -> Result<String, TextError> {
         .into_owned())
 }
 
-fn expand_text_tabs(input: &str, measure: impl Fn(&str) -> usize) -> Result<String, TextError> {
+fn tab_width_and_text(input: &str) -> Result<(usize, &str), TextError> {
     let input = input.trim_start();
     let (width, _) = input
         .split_once(char::is_whitespace)
@@ -808,6 +817,11 @@ fn expand_text_tabs(input: &str, measure: impl Fn(&str) -> usize) -> Result<Stri
         .ok()
         .filter(|width| *width > 0)
         .ok_or(TextError::InvalidTabWidth)?;
+    Ok((width, text))
+}
+
+fn expand_text_tabs(input: &str, measure: impl Fn(&str) -> usize) -> Result<String, TextError> {
+    let (width, text) = tab_width_and_text(input)?;
     let mut result = String::with_capacity(text.len().min(MAX_EXPANDED_TEXT_BYTES));
     let mut column = 0;
     let mut run_start = 0;
@@ -1137,6 +1151,32 @@ fn line_lengths_csv(text: &str) -> Result<String, TextError> {
             line.len(),
         ]
         .map(|value| value.to_string());
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn display_width_csv(input: &str) -> Result<String, TextError> {
+    let (tab_width, text) = tab_width_and_text(input)?;
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut csv = String::from("行号,显示列宽");
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        let mut runs = line.split('\t');
+        let mut columns = runs.next().map_or(0, UnicodeWidthStr::width);
+        for run in runs {
+            let padding = tab_width - columns % tab_width;
+            columns = columns
+                .checked_add(padding)
+                .and_then(|columns| columns.checked_add(run.width()))
+                .ok_or(TextError::ResultTooLarge)?;
+        }
+        let fields = [(index + 1).to_string(), columns.to_string()];
         append_bounded_csv_row(
             &mut csv,
             fields.iter().map(String::as_str),
@@ -3077,6 +3117,24 @@ mod tests {
         );
         assert_eq!(
             transform_text(&format!("expand-tabs {} \t", usize::MAX)),
+            Err(TextError::ResultTooLarge)
+        );
+    }
+
+    #[test]
+    fn reports_display_columns_with_tab_stops_and_preserved_line_whitespace() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 显示列宽CSV 4 中\tX\r\n👩‍💻\t\r\n\re\u{301}\t \u{2028}茶 ",
+        )
+        .unwrap();
+        let result = text_csv_report(query).unwrap().unwrap();
+        assert_eq!(result, "行号,显示列宽\r\n1,5\r\n2,4\r\n3,0\r\n4,5\r\n5,3");
+        assert_eq!(
+            transform_text("display-width-csv 4\r\n１\t").as_deref(),
+            Ok("行号,显示列宽\r\n1,4")
+        );
+        assert_eq!(
+            transform_text(&format!("display-width-csv {} \tX", usize::MAX)),
             Err(TextError::ResultTooLarge)
         );
     }
