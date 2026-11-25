@@ -2971,6 +2971,23 @@ impl QuickSearch {
         }
     }
 
+    fn remove_selected_query_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Results::Queries(items) = &self.results else {
+            return;
+        };
+        let selected = self.selected;
+        let Some(item) = items.get(selected) else {
+            return;
+        };
+        self.index.recent.queries.remove_exact(&item.expression);
+        let query = self.input.read(cx).text();
+        self.refresh_results(&query, window, cx);
+        if let Results::Queries(items) = &self.results {
+            self.selected = selected.min(items.len().saturating_sub(1));
+        }
+        cx.notify();
+    }
+
     fn is_bookmark_query(query: &str) -> bool {
         matches!(scoped_query(query), Some((Scope::Bookmarks, _)))
     }
@@ -3279,6 +3296,15 @@ impl QuickSearch {
                 {
                     cx.stop_propagation();
                 }
+            } else if modifiers == 1
+                && keystroke.modifiers.alt
+                && keystroke.key == "delete"
+                && matches!(self.results, Results::Queries(_))
+            {
+                if !event.is_held {
+                    self.remove_selected_query_history(window, cx);
+                }
+                cx.stop_propagation();
             } else if modifiers == 1
                 && keystroke.modifiers.alt
                 && matches!(keystroke.key.as_str(), "up" | "down")
@@ -4565,6 +4591,29 @@ impl Render for QuickSearch {
                                 })),
                         )
                     })
+                    .when(
+                        matches!(&self.results, Results::Queries(items) if !items.is_empty()),
+                        |header| {
+                            header.child(
+                                button(
+                                    "remove-quick-search-query-history",
+                                    "移除记录",
+                                    Tone::Ghost,
+                                    true,
+                                )
+                                .h(px(24.))
+                                .px(px(10.))
+                                .tooltip(theme::text_tooltip(
+                                    "Alt+Delete 移除选中的查询记录".into(),
+                                ))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.remove_selected_query_history(window, cx);
+                                    },
+                                )),
+                            )
+                        },
+                    )
                     .when(matches!(&self.results, Results::Value(Ok(_))), |header| {
                         let (label, hint, enabled) = match &self.result_save {
                             ResultSaveState::Ready => ("保存 Ctrl+S", "选择结果文件".into(), true),
@@ -5356,6 +5405,14 @@ mod tests {
             Some(original)
         );
         assert_eq!(index.results("查询历史: 1024").suggested_input(0), None);
+        let trimmed = original.trim();
+        index.recent.queries.record_exact(trimmed, "");
+        index.recent.queries.remove_exact(original);
+        let list = index.results("查询历史:");
+        assert_eq!(list.suggested_input(0), Some(trimmed));
+        assert_eq!(list.suggested_input(1), Some("JSON: 紧凑 {\"字段\":2}"));
+        assert_eq!(list.suggested_input(2), None);
+        assert_eq!(index.results("算式历史:").suggested_input(0), Some("2**10"));
     }
 
     #[test]
@@ -7330,6 +7387,30 @@ mod tests {
                         })
                         .unwrap();
                     reopened.update(cx, verify_result_refill).unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            let filter = "查询历史: 移除验证";
+                            let first = "文本: 原文 移除验证甲";
+                            let second = "文本: 原文 移除验证乙";
+                            search.index.recent.queries.record_exact(second, "");
+                            search.index.recent.queries.record_exact(first, "");
+                            search.fill_query(filter, window, cx);
+                            search.refresh_results(filter, window, cx);
+                            search.selected = 1;
+                            let mut event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("alt-delete").unwrap(),
+                                is_held: true,
+                            };
+                            search.key_down(&event, window, cx);
+                            assert_eq!(search.results.suggested_input(search.selected), Some(second));
+                            event.is_held = false;
+                            search.key_down(&event, window, cx);
+                            assert_eq!(search.input.read(cx).text(), filter);
+                            assert_eq!(search.selected, 0);
+                            assert_eq!(search.results.suggested_input(0), Some(first));
+                            assert_eq!(search.results.suggested_input(1), None);
+                        })
+                        .unwrap();
                     reopened
                         .update(cx, |search, window, cx| {
                             let draft = "2**10\n7*6 ";

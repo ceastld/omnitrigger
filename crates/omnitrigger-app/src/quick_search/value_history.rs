@@ -30,6 +30,12 @@ impl RecentValues {
         items.truncate(HISTORY_LIMIT);
     }
 
+    pub(super) fn remove_exact(&self, expression: &str) {
+        self.0
+            .borrow_mut()
+            .retain(|item| item.expression != expression);
+    }
+
     pub(super) fn number_at(&self, index: usize) -> Option<f64> {
         self.numeric_value_at(index, |result| super::calculator::evaluate(result).ok())
     }
