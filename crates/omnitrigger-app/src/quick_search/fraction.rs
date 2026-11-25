@@ -47,6 +47,7 @@ pub(super) enum FractionError {
     RoundPlaces,
     InterpolationInterval,
     InterpolationRange,
+    ClampBounds,
     AlignmentArguments,
     RationalSquareRoot,
     RootDegree,
@@ -99,6 +100,7 @@ impl FractionError {
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
             Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
             Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
+            Self::ClampBounds => "clamp 的下界须小于或等于上界",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::RootDegree => "root 的次数须为 1 至 1024 的整数",
@@ -1627,6 +1629,14 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.root_function();
         }
+        if matches!(name.as_str(), "min" | "max") {
+            self.remaining = rest;
+            return self.extreme_value(name == "min");
+        }
+        if name == "clamp" {
+            self.remaining = rest;
+            return self.clamp_function();
+        }
         if matches!(name.as_str(), "lerp" | "invlerp" | "remap") {
             self.remaining = rest;
             return self.interpolation_function(&name);
@@ -1829,11 +1839,43 @@ impl FractionParser<'_> {
         }
     }
 
-    fn interpolation_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+    fn extreme_value(&mut self, minimum: bool) -> Result<BigRational, FractionError> {
         if !self.consume('(') {
             return Err(self.expected_token());
         }
-        let count = if name == "remap" { 5 } else { 3 };
+        let mut result = self.sum()?;
+        while self.consume(',') {
+            let value = self.sum()?;
+            result = if minimum {
+                result.min(value)
+            } else {
+                result.max(value)
+            };
+        }
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        Ok(result)
+    }
+
+    fn clamp_function(&mut self) -> Result<BigRational, FractionError> {
+        let [value, lower, upper]: [BigRational; 3] = self
+            .fixed_function_arguments(3)?
+            .try_into()
+            .expect("clamp 有三个参数");
+        if lower > upper {
+            return Err(FractionError::ClampBounds);
+        }
+        Ok(value.clamp(lower, upper))
+    }
+
+    fn fixed_function_arguments(
+        &mut self,
+        count: usize,
+    ) -> Result<Vec<BigRational>, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
         let mut values = Vec::with_capacity(count);
         values.push(self.sum()?);
         for _ in 1..count {
@@ -1845,6 +1887,12 @@ impl FractionParser<'_> {
         if !self.consume(')') {
             return Err(self.expected_token());
         }
+        Ok(values)
+    }
+
+    fn interpolation_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+        let count = if name == "remap" { 5 } else { 3 };
+        let values = self.fixed_function_arguments(count)?;
         match (name, values.as_slice()) {
             ("lerp", [start, end, progress]) => interpolate_fraction(start, end, progress),
             ("invlerp", [start, end, value]) => fraction_progress(start, end, value),
@@ -2413,6 +2461,31 @@ mod tests {
             parse_fraction_literal(&padded),
             Ok(BigRational::new(15.into(), 2.into()))
         );
+    }
+
+    #[test]
+    fn compares_exact_fractions_and_clamps_without_rounding() {
+        for (query, expected) in [
+            ("计算 min(1/3,0.3334,-1/7)", "-1/7"),
+            (
+                "计算 max(9007199254740992,9007199254740993)",
+                "9007199254740993",
+            ),
+            ("计算 max(-7/3)", "-7/3"),
+            ("计算 clamp(0.334,0,1/3)", "1/3"),
+            ("计算 clamp(-1,-1/3,1/3)", "-1/3"),
+            ("计算 clamp(1/7,0,min(2/7,1/3))", "1/7"),
+            ("计算 clamp(0,1/7,1/7)", "1/7"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_fraction("clamp(1,2,0)"),
+            Err(FractionError::ClampBounds)
+        );
+        for query in ["min()", "max(1,)", "clamp(0,1)", "clamp(0,1,2,3)"] {
+            assert!(calculate_fraction(query).is_err(), "{query}");
+        }
     }
 
     #[test]

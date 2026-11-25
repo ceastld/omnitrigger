@@ -6356,6 +6356,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "比较多个精确分数取最小值",
+        query: "分数: 计算 min(1/3,0.3334,-1/7)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "比较超出浮点精度的大整数取最大值",
+        query: "分数: 计算 max(9007199254740992,9007199254740993)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把精确数值限制在给定区间内",
+        query: "分数: 计算 clamp(0.334,0,1/3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求大整数的最大公约数",
         query: "分数: 计算 gcd(-3 * 2**80, 5 * 2**80)",
     },
