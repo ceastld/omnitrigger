@@ -1690,10 +1690,24 @@ pub(super) fn exact_data_converter(
 
 pub(super) fn quantity_number_converter(
     target: &str,
+    source_unit: Option<&str>,
 ) -> Result<impl Fn(&str) -> Result<String, ConversionError>, ConversionError> {
     let target = Unit::parse(normalize(target).trim())?;
+    let source_unit = source_unit
+        .map(|unit| Unit::parse(normalize(unit).trim()))
+        .transpose()?;
+    if source_unit
+        .as_ref()
+        .is_some_and(|unit| unit.dimension != target.dimension)
+    {
+        return Err(ConversionError::DifferentDimensions);
+    }
     Ok(move |source: &str| {
         let source = normalize(source).replace(char::is_whitespace, " ");
+        if let Some(unit) = &source_unit {
+            let amount = evaluate(source.trim()).map_err(|_| ConversionError::InvalidAmount)?;
+            return format_converted_amount(amount, unit, &target);
+        }
         let (amount, source) = parse_quantity(source.trim())?;
         format_converted_amount(amount, &source, &target)
     })

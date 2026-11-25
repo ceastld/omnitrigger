@@ -5115,6 +5115,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "为 CSV 中只有数字的长度列指定源单位",
+        query: "CSV: 单位换算列 [\"厘米\",\"长度\",\"m\",\"cm\"]\n编号,长度\n001,1.5\n002,1/4\n003,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "逐行把整数换算成指定进制",
         query: "CSV: 进制列 [\"十进制\",\"编号\",16,10] 项目,编号\n甲,ff\n乙,-a_b\n丙,20_0000_0000_0001\n丁,",
     },

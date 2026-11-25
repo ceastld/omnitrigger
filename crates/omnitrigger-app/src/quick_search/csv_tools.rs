@@ -840,6 +840,13 @@ enum NumberColumnFormat {
     Engineering,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum UnitColumnArguments {
+    CellUnits(String, ColumnReference, String),
+    FixedSource(String, ColumnReference, String, String),
+}
+
 enum Operation {
     Validate,
     PadRows,
@@ -927,6 +934,7 @@ enum Operation {
         name: String,
         source: ColumnReference,
         target: String,
+        source_unit: Option<String>,
         exact_data: bool,
     },
     RadixColumn {
@@ -2229,17 +2237,29 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         }
         kind @ ("数据换算列" | "convert-data-column" | "单位换算列" | "convert-unit-column") =>
         {
-            let ((name, source, target), data) =
-                json_argument_and_data::<(String, ColumnReference, String)>(
-                    input,
-                    CsvError::UnitConversionColumnArguments,
-                )?;
+            let exact_data = matches!(kind, "数据换算列" | "convert-data-column");
+            let (arguments, data) = json_argument_and_data::<UnitColumnArguments>(
+                input,
+                CsvError::UnitConversionColumnArguments,
+            )?;
+            let (name, source, target, source_unit) = match arguments {
+                UnitColumnArguments::CellUnits(name, source, target) => {
+                    (name, source, target, None)
+                }
+                UnitColumnArguments::FixedSource(name, source, unit, target) if !exact_data => {
+                    (name, source, target, Some(unit))
+                }
+                UnitColumnArguments::FixedSource(..) => {
+                    return Err(CsvError::UnitConversionColumnArguments)
+                }
+            };
             input = data;
             Operation::ConvertUnitColumn {
                 name,
                 source,
                 target,
-                exact_data: matches!(kind, "数据换算列" | "convert-data-column"),
+                source_unit,
+                exact_data,
             }
         }
         kind @ ("累计合计列"
@@ -2870,18 +2890,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             name,
             source,
             target,
+            source_unit,
             exact_data,
         } => {
             if exact_data {
                 append_converted_unit_column(&rows, &name, source, &target, exact_data_converter)
             } else {
-                append_converted_unit_column(
-                    &rows,
-                    &name,
-                    source,
-                    &target,
-                    quantity_number_converter,
-                )
+                append_converted_unit_column(&rows, &name, source, &target, |target| {
+                    quantity_number_converter(target, source_unit.as_deref())
+                })
             }
         }
         Operation::OutlierColumn(name, source) => flag_outlier_column(&rows, &name, source),
@@ -13998,6 +14015,37 @@ null"#
                 row: 2,
                 cause: ConversionError::DifferentDimensions.message(),
             }),
+        );
+    }
+
+    #[test]
+    fn converts_numeric_csv_cells_from_a_fixed_source_unit() {
+        let query =
+            "单位换算列 [\"厘米\",\"长度\",\"m\",\"cm\"]\n编号,长度\n001,1.5\n002,1/4\n003,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("编号,长度,厘米\r\n001,1.5,150\r\n002,1/4,25\r\n003,\"\",\"\""),
+        );
+        assert_eq!(
+            transform_csv("单位换算列 [\"摄氏\",1,\"°F\",\"°C\"] 温度\n32\n212").as_deref(),
+            Ok("温度,摄氏\r\n32,0\r\n212,100"),
+        );
+        assert_eq!(
+            transform_csv("单位换算列 [\"厘米\",1,\"kg\",\"cm\"] 长度"),
+            Err(CsvError::UnitConversionTarget(
+                ConversionError::DifferentDimensions
+            )),
+        );
+        assert_eq!(
+            transform_csv("单位换算列 [\"厘米\",1,\"m\",\"cm\"] 长度\n2\n1 m"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: ConversionError::InvalidAmount.message(),
+            }),
+        );
+        assert_eq!(
+            transform_csv("数据换算列 [\"二进制容量\",1,\"B\",\"KiB\"] 容量\n1024"),
+            Err(CsvError::UnitConversionColumnArguments),
         );
     }
 
