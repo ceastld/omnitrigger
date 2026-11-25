@@ -2030,6 +2030,7 @@ const SEARCH_PLACEHOLDER: &str = "搜索页面、触发器，或输入算式";
 const INPUT_PROMPT_HEIGHT: f32 = 148.;
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
+const TABLE_CELL_COMMAND: &str = "CSV: 取单元格 ";
 
 struct BookmarkNameEdit {
     expression: String,
@@ -3357,13 +3358,65 @@ impl QuickSearch {
             } else {
                 format!("{command}\"\" \"{text}\"")
             };
-            self.input_before_result_search = Some(ResultSearchDraft {
-                original: self.query_draft(cx),
-                command,
-            });
-            self.fill_query(query, window, cx);
-            self.input
-                .update(cx, |input, cx| input.move_cursor_to(command.len() + 1, cx));
+            let caret = command.len() + 1;
+            self.open_result_tool(command, query, caret..caret, window, cx);
+        }
+    }
+
+    fn open_result_tool(
+        &mut self,
+        command: &'static str,
+        query: String,
+        selection: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input_before_result_search = Some(ResultSearchDraft {
+            original: self.query_draft(cx),
+            command,
+        });
+        self.fill_query(query, window, cx);
+        self.input
+            .update(cx, |input, cx| input.select_range(selection, cx));
+    }
+
+    fn is_table_cell_lookup(&self) -> bool {
+        self.input_before_result_search
+            .as_ref()
+            .is_some_and(|draft| draft.command == TABLE_CELL_COMMAND)
+    }
+
+    fn table_cell_source(&self) -> Option<(&str, String)> {
+        if self.input_before_result_search.is_some() || self.expanded_value_pages.is_some() {
+            return None;
+        }
+        let Results::Value(Ok(ResultValue {
+            text,
+            kind: ValueKind::Table(table),
+        })) = &self.results
+        else {
+            return None;
+        };
+        let (row, column) =
+            table.page_first_data_cell(self.table_pages.rows, self.table_pages.columns)?;
+        let coordinates = format!("{row},{column}");
+        let available =
+            INPUT_CHARACTER_LIMIT - TABLE_CELL_COMMAND.chars().count() - coordinates.len() - 3;
+        (text.chars().take(available + 1).count() <= available)
+            .then_some((text.as_str(), coordinates))
+    }
+
+    fn toggle_table_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() || self.file_operation_in_progress() {
+            return;
+        }
+        if self.is_table_cell_lookup() {
+            self.toggle_result_search(window, cx);
+        } else if let Some((text, coordinates)) = self.table_cell_source() {
+            let query = format!("{TABLE_CELL_COMMAND}[{coordinates}] {text}");
+            let start = TABLE_CELL_COMMAND.len() + 1;
+            let selection = start..start + coordinates.len();
+            self.open_result_tool(TABLE_CELL_COMMAND, query, selection, window, cx);
         }
     }
 
@@ -4010,6 +4063,16 @@ impl QuickSearch {
             {
                 if !event.is_held {
                     self.toggle_result_search(window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "j"
+                && (self.is_table_cell_lookup() || self.table_cell_source().is_some())
+            {
+                if !event.is_held {
+                    self.toggle_table_cell(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "d" {
@@ -4709,6 +4772,19 @@ impl QuickSearch {
                     )
                 },
             )
+            .when(self.table_cell_source().is_some(), |footer| {
+                footer.child(
+                    button("get-table-cell", "取单元格", Tone::Ghost, true)
+                        .h(px(TABLE_PAGER_HEIGHT))
+                        .px(px(8.))
+                        .tooltip(theme::text_tooltip(
+                            "Ctrl+Shift+J 输入数据行号和列号".into(),
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_table_cell(window, cx);
+                        })),
+                )
+            })
             .when(!table.input_errors().is_empty(), |footer| {
                 footer.child(
                     button("locate-input-table-error", "定位错误", Tone::Ghost, true)
@@ -5667,6 +5743,17 @@ impl Render for QuickSearch {
                             )
                         },
                     )
+                    .when(!naming_bookmark && self.is_table_cell_lookup(), |header| {
+                        header.child(
+                            button("return-to-cell-table", "返回表格", Tone::Ghost, true)
+                                .h(px(24.))
+                                .px(px(10.))
+                                .tooltip(theme::text_tooltip("Ctrl+Shift+J 恢复表格查询".into()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_table_cell(window, cx);
+                                })),
+                        )
+                    })
                     .when_some(refill_action, |header, label| {
                         header.child(
                             button("refill-quick-search-result", label, Tone::Ghost, true)
@@ -8206,6 +8293,56 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_table_cell_lookup(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        let mut query = "CSV: 表格预览 A,B,C,D,E,F,G,H".to_owned();
+        for row in 1..=8 {
+            query.push_str(&format!("\n{row},b,c,d,e,f,00{row},末列{row}"));
+        }
+        search.fill_query(query.clone(), window, cx);
+        search.refresh_results(&query, window, cx);
+        search.table_pages = TablePages {
+            rows: 1,
+            columns: 1,
+        };
+        search
+            .input
+            .update(cx, |input, cx| input.select_range(0..3, cx));
+        let mut key = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("ctrl-shift-j").unwrap(),
+            is_held: true,
+        };
+        search.key_down(&key, window, cx);
+        assert_eq!(search.input.read(cx).text(), query);
+        key.is_held = false;
+        search.key_down(&key, window, cx);
+        let input = search.input.read(cx);
+        assert!(input.text_ref().starts_with("CSV: 取单元格 [7,7] "));
+        assert_eq!(&input.text_ref()[input.selection()], "7,7");
+        let opened = search.input.read(cx).text();
+        search.refresh_results(&opened, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("007"));
+        search.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "-1,8", window, cx);
+        });
+        let edited = search.input.read(cx).text();
+        search.refresh_results(&edited, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("末列8"));
+        search.key_down(&key, window, cx);
+        assert_eq!(search.input.read(cx).text(), query);
+        assert_eq!(search.input.read(cx).selection(), 0..3);
+        search.refresh_results(&query, window, cx);
+        assert_eq!(
+            (search.table_pages.rows, search.table_pages.columns),
+            (1, 1)
+        );
+        assert!(!search.is_table_cell_lookup());
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_current_table_search(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -9218,6 +9355,7 @@ mod tests {
                     reopened.update(cx, verify_input_find).unwrap();
                     reopened.update(cx, verify_query_argument_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
+                    reopened.update(cx, verify_table_cell_lookup).unwrap();
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened.update(cx, verify_text_result_search).unwrap();

@@ -97,6 +97,19 @@ impl TablePreview {
             .then(|| (number - 1) / MAX_DATA_ROWS)
     }
 
+    pub(super) fn page_first_data_cell(
+        &self,
+        row_page: usize,
+        column_page: usize,
+    ) -> Option<(usize, usize)> {
+        if row_page >= self.row_pages() || column_page >= self.column_pages() {
+            return None;
+        }
+        let row = 1 + row_page * MAX_DATA_ROWS;
+        let column = 1 + self.visible_columns(column_page).start;
+        Some((row, column))
+    }
+
     pub(super) fn spans_pages(&self) -> bool {
         self.row_pages() > 1 || self.column_pages() > 1
     }
