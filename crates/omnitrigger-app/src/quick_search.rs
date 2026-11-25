@@ -2065,9 +2065,6 @@ impl QuickSearch {
             }
             this.bookmark_limit_reached = false;
             this.bookmark_save_error = None;
-            if !query.trim().is_empty() {
-                this.index.recent.last_input.borrow_mut().clone_from(&query);
-            }
             if !this.has_refilled_input(&query)
                 && this.index.wheel_slots.is_none()
                 && matches!(scoped_query(query.trim()), Some((Scope::WheelSlots, term)) if !term.is_empty())
@@ -2082,6 +2079,9 @@ impl QuickSearch {
                 }));
             }
             this.refresh_results(&query, window, cx);
+            if !query.trim().is_empty() && !this.has_temporary_query() {
+                this.index.recent.last_input.borrow_mut().clone_from(&query);
+            }
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
@@ -2860,6 +2860,14 @@ impl QuickSearch {
             input.move_cursor_to_end(cx);
         });
         window.focus(&self.input.focus_handle(cx));
+    }
+
+    fn has_temporary_query(&self) -> bool {
+        self.input_before_help.is_some()
+            || self.input_before_calculation_history.is_some()
+            || self.input_before_query_history.is_some()
+            || self.input_before_bookmarks.is_some()
+            || self.input_before_table_search.is_some()
     }
 
     fn query_draft(&self, cx: &Context<Self>) -> QueryDraft {
@@ -6903,15 +6911,24 @@ mod tests {
                             search.key_down(&bookmark, window, cx);
                         })
                         .unwrap();
-                    window
-                        .update(cx, |search, window, cx| {
-                            let event = KeyDownEvent {
-                                keystroke: gpui::Keystroke::parse("escape").unwrap(),
-                                is_held: false,
-                            };
-                            search.key_down(&event, window, cx);
-                        })
-                        .unwrap();
+                    for (key, filter) in [
+                        ("f4", Some("收藏: ")),
+                        ("f1", Some("? 收藏:")),
+                        ("escape", None),
+                    ] {
+                        window
+                            .update(cx, |search, window, cx| {
+                                let event = KeyDownEvent {
+                                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                                    is_held: false,
+                                };
+                                search.key_down(&event, window, cx);
+                                if let Some(filter) = filter {
+                                    assert_eq!(search.input.read(cx).text(), filter);
+                                }
+                            })
+                            .unwrap();
+                    }
                     let reopened = cx
                         .update(|cx| {
                             open_test_search(
