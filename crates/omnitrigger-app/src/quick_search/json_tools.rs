@@ -22,6 +22,7 @@ const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const DEFAULT_INDENT_WIDTH: usize = 2;
 const MAX_INDENT_WIDTH: usize = 16;
 const MAX_PATCH_STEPS: usize = 32;
+const MAX_MERGE_PATCH_DEPTH: usize = 64;
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
 const MAX_UNIQUE_PATHS: usize = 8;
@@ -45,6 +46,9 @@ pub(super) enum JsonError {
     PatchOutputLimit,
     PatchTestFailed,
     PatchStep { index: usize, cause: &'static str },
+    MergePatchArguments,
+    MergePatchDepth,
+    MergePatchOutputLimit,
     PipelineArguments,
     NestedPipeline,
     PipelineOutputTooLarge,
@@ -119,6 +123,9 @@ impl JsonError {
             Self::PatchOutputLimit => "补丁中间结果超过 1 MiB",
             Self::PatchTestFailed => "指定路径上的 JSON 值与预期不同",
             Self::PatchStep { cause, .. } => cause,
+            Self::MergePatchArguments => "先填写 JSON 合并补丁，再粘贴原 JSON",
+            Self::MergePatchDepth => "合并补丁最多处理 64 层嵌套对象",
+            Self::MergePatchOutputLimit => "合并补丁结果超过 1 MiB",
             Self::PipelineArguments => "填写 1 至 8 条单行 JSON 命令，再粘贴要处理的数据",
             Self::NestedPipeline => "每一步填写一条 JSON 命令",
             Self::PipelineOutputTooLarge => "处理结果超过 1 MiB，请缩小数据范围",
@@ -513,6 +520,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "复制路径" | "copy-path" => return transfer_json_value(source, false),
         "移动路径" | "move-path" => return transfer_json_value(source, true),
         "应用补丁" | "apply-patch" => return apply_json_patch(source),
+        "合并补丁" | "merge-patch" => return apply_json_merge_patch(source),
         "对比" | "diff" => return compare_json_values(source, ComparisonOutput::Json),
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
@@ -916,6 +924,80 @@ fn apply_json_patch(source: &str) -> Result<String, JsonError> {
         }
     }
     Ok(document.into_owned())
+}
+
+enum MergePatchMember<'a> {
+    Original(&'a RawValue),
+    Change(Option<&'a RawValue>, &'a RawValue),
+}
+
+fn apply_json_merge_patch(source: &str) -> Result<String, JsonError> {
+    let (patch, source) = json_value_and_source(source, JsonError::MergePatchArguments)?;
+    let original = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut output = String::new();
+    write_merge_patch(Some(original), patch, MAX_MERGE_PATCH_DEPTH, &mut output)?;
+    Ok(output)
+}
+
+fn write_merge_patch(
+    target: Option<&RawValue>,
+    patch: &RawValue,
+    remaining_depth: usize,
+    output: &mut String,
+) -> Result<(), JsonError> {
+    if patch.get().starts_with('{') {
+        let depth = remaining_depth
+            .checked_sub(1)
+            .ok_or(JsonError::MergePatchDepth)?;
+        let changes = read_unique_object_entries(patch.get())?;
+        let mut by_name: HashMap<_, _> = changes
+            .iter()
+            .map(|(name, value)| (name.as_str(), *value))
+            .collect();
+        let original = target
+            .filter(|target| target.get().starts_with('{'))
+            .map(|target| read_unique_object_entries(target.get()))
+            .transpose()?
+            .unwrap_or_default();
+        let mut members = Vec::with_capacity(original.len() + changes.len());
+        for (name, value) in original {
+            let member = match by_name.remove(name.as_str()) {
+                Some(change) if change.get() == "null" => continue,
+                Some(change) => MergePatchMember::Change(Some(value), change),
+                None => MergePatchMember::Original(value),
+            };
+            members.push((name, member));
+        }
+        for (name, change) in &changes {
+            if by_name.contains_key(name.as_str()) && change.get() != "null" {
+                members.push((name.clone(), MergePatchMember::Change(None, change)));
+            }
+        }
+        output.push('{');
+        for (index, (key, member)) in members.into_iter().enumerate() {
+            if index > 0 {
+                output.push(',');
+            }
+            output.push_str(&serde_json::to_string(&key).expect("JSON 键名可以序列化"));
+            output.push(':');
+            match member {
+                MergePatchMember::Original(value) => output.push_str(value.get()),
+                MergePatchMember::Change(value, change) => {
+                    write_merge_patch(value, change, depth, output)?;
+                }
+            }
+            if output.len() > MAX_PRETTY_BYTES {
+                return Err(JsonError::MergePatchOutputLimit);
+            }
+        }
+        output.push('}');
+    } else {
+        output.push_str(patch.get());
+    }
+    if output.len() > MAX_PRETTY_BYTES {
+        return Err(JsonError::MergePatchOutputLimit);
+    }
+    Ok(())
 }
 
 fn apply_patch_step(source: &str, step: JsonPatchStep<'_>) -> Result<Option<String>, JsonError> {
@@ -5081,6 +5163,47 @@ mod tests {
         assert_eq!(
             transform_json(&format!("应用补丁 [{steps}] null")),
             Err(JsonError::PatchLimit)
+        );
+    }
+
+    #[test]
+    fn merge_patch_removes_members_and_replaces_or_recursively_merges_values() {
+        let query = r#"合并补丁 {"a":{"x":null,"m":2.00},"b":[ null, 3e2 ],"p":{"missing":null},"z":null} {"b":[1],"z":true,"a":{"x":3,"n":9007199254740993},"k":"\u8336"}"#;
+        assert_eq!(
+            transform_json(query).as_deref(),
+            Ok(r#"{"b":[ null, 3e2 ],"a":{"n":9007199254740993,"m":2.00},"k":"\u8336","p":{}}"#)
+        );
+        for (query, expected) in [
+            ("merge-patch null {}", "null"),
+            ("merge-patch [1e0,null] 3", "[1e0,null]"),
+            (r#"merge-patch {"x":{"a":null}} [1,2]"#, r#"{"x":{}}"#),
+            (r#"merge-patch {"x":{"a":null}} {"x":1}"#, r#"{"x":{}}"#),
+            (
+                r#"依次处理 ["合并补丁 {\"a\":1.50}","取值 /a"] {"a":1}"#,
+                "1.50",
+            ),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_json(r#"合并补丁 {"a":1,"\u0061":2} {}"#),
+            Err(JsonError::DuplicateKey)
+        );
+        assert_eq!(
+            transform_json(r#"合并补丁 {"a":{}} {"a":{"x":1,"x":2}}"#),
+            Err(JsonError::DuplicateKey)
+        );
+        let depth = MAX_MERGE_PATCH_DEPTH + 1;
+        let deep = format!(
+            r#"合并补丁 {}0{} {{}}"#,
+            r#"{"x":"#.repeat(depth),
+            "}".repeat(depth)
+        );
+        assert_eq!(transform_json(&deep), Err(JsonError::MergePatchDepth));
+        let large = format!(r#"合并补丁 "{}" {}"#, "x".repeat(MAX_PRETTY_BYTES), "{}");
+        assert_eq!(
+            transform_json(&large),
+            Err(JsonError::MergePatchOutputLimit)
         );
     }
 

@@ -740,6 +740,7 @@
 - 输入 `JSON: 复制路径 ["/订单/0","/归档/-"]` 后粘贴 JSON，可把订单的第一项追加到已有的归档数组，保留其中数值和字符串的写法。目标也可指向对象字段。 [JSON Patch 的复制规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.5)
 - 输入 `JSON: 移动路径 ["/订单/0","/归档/-"]` 后粘贴 JSON，可从订单移出第一项并追加到归档数组，保留原值的写法。目标下标以移出后的数组为准。 [JSON Patch 的移动规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.4)
 - 用 `JSON: 应用补丁` 输入补丁数组和原 JSON，可按顺序执行 `add`、`remove`、`replace`、`copy`、`move` 和 `test`。每一步都以当前文档为准，成功时输出完整结果，失败时显示步骤编号。最多 32 步，每步结果须为完整 JSON 且不超过 1 MiB。 [JSON Patch 操作规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4)
+- 用 `JSON: 合并补丁 {"服务":{"端口":8001,"调试":null}}` 后接原 JSON，可递归合并配置对象。补丁对象里的 `null` 删除同名字段，数组和其他值整体替换，保留输出值的数字和字符串写法。参与合并的对象须有唯一键名，最多处理 64 层嵌套对象，输出最多 1 MiB。 [JSON Merge Patch 规则](https://www.rfc-editor.org/rfc/rfc7396.html#section-2)
 - 用 `JSON: 依次处理 ["去空字段","选键 [\"编号\",\"金额\"]","转CSV"]` 加上对象数组，可依次清理字段、选列和导出 CSV。每步读取上一步的输出，最多 8 步，每步输出不超过 1 MiB。失败时显示步骤和原因。原始数字的写法沿用各命令的规则。
 - 输入 `JSON: 对比` 后粘贴两个用空白分隔的 JSON 值，可按指针列出差异。对象按键名比较，数组按位置比较，`1` 与 `1.00` 视为相等。输出保留变化值的写法，某侧缺少路径时省略该侧字段。 [JSON Patch 的值比较规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.6)
 - 用 `JSON: 对比CSV` 可在表格中查看差异指针、新增或移除或修改、两侧原值。某侧缺少路径时该单元格留空，原值 `null` 显示为 `null`。两侧相等时只显示表头。

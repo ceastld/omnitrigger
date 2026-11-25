@@ -4781,6 +4781,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "递归合并 JSON 配置补丁",
+        query: r#"JSON: 合并补丁 {"服务":{"端口":8001,"调试":null}} {"服务":{"地址":"localhost","端口":8000,"调试":true}}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "依次整理 JSON 字段并生成 CSV",
         query: r#"JSON: 依次处理 ["补字段 {\"币种\":\"CNY\"}","选键 [\"编号\",\"金额\",\"币种\"]","转CSV"] [{"编号":"001","金额":1.50},{"编号":"002","金额":2e0,"币种":"USD"}]"#,
     },
