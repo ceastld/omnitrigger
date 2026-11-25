@@ -113,6 +113,7 @@ pub(super) enum CsvError {
     InvalidRowRange,
     MissingDataRow,
     CellArguments,
+    TableRegionArguments,
     GroupRowArguments,
     GroupRowsTooLarge,
     MissingColumnName,
@@ -338,6 +339,9 @@ impl CsvError {
             Self::MissingDataRow => "指定行号超出了表头之后的数据行数",
             Self::CellArguments => {
                 "填写数据行号和列名或列号，例如 [2,\"备注\"]。首条数据行是 1，末条是 -1"
+            }
+            Self::TableRegionArguments => {
+                "填写数据行范围和一组不同的列，例如 [\"2-4\",[\"备注\",1]]"
             }
             Self::GroupRowArguments => {
                 "填写分组列和组内非零行号，例如 [[\"部门\"],-1]。组内首条是 1，末条是 -1"
@@ -3848,6 +3852,17 @@ fn select_data_rows(
     ranges: &str,
     keep_selected: bool,
 ) -> Result<String, CsvError> {
+    Ok(write_rows(
+        selected_rows_with_header(rows, ranges, keep_selected)?,
+        ',',
+    ))
+}
+
+fn selected_rows_with_header<'a>(
+    rows: &'a [Vec<String>],
+    ranges: &str,
+    keep_selected: bool,
+) -> Result<impl Iterator<Item = &'a Vec<String>>, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let selected = select_index_ranges(ranges, records.len()).map_err(|error| match error {
         IndexRangeError::Invalid => CsvError::InvalidRowRange,
@@ -3856,8 +3871,24 @@ fn select_data_rows(
     let picked = records
         .iter()
         .zip(selected)
-        .filter_map(|(row, selected)| (selected == keep_selected).then_some(row));
-    Ok(write_rows(std::iter::once(header).chain(picked), ','))
+        .filter_map(move |(row, selected)| (selected == keep_selected).then_some(row));
+    Ok(std::iter::once(header).chain(picked))
+}
+
+fn pick_table_region(input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+    let invalid = CsvError::TableRegionArguments;
+    let ((ranges, columns), data) =
+        json_argument_and_data::<(String, Vec<ColumnReference>)>(input, invalid)?;
+    if columns.is_empty() {
+        return Err(invalid);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let header = rows.first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, &columns, invalid)?;
+    let selected = selected_rows_with_header(&rows, &ranges, true)?;
+    Ok(selected
+        .map(|row| columns.iter().map(|&column| row[column].clone()).collect())
+        .collect())
 }
 
 fn drop_empty_csv_records(rows: &[Vec<String>]) -> Result<String, CsvError> {
@@ -8142,6 +8173,7 @@ fn csv_layout_preview(operation: &str, input: &str) -> Option<Result<CsvPreviewD
                 |(columns, data)| drop_columns(&read_table_for_preview(data, ',')?, &columns),
             )
         }
+        "取区域" | "pick-region" => pick_table_region(input),
         _ => return None,
     };
     Some(projected.map(|rows| (write_rows(&rows, ','), rows)))
@@ -12711,6 +12743,32 @@ B,乙
             assert_eq!(text, expected);
             assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
             assert_eq!(preview.column_pages(), 1);
+        }
+    }
+
+    #[test]
+    fn extracts_csv_regions_with_ordered_columns_and_multiline_records() {
+        let data = "编号,商品,备注\n001,茶,甲\n002,梨,\" 乙,丙\n丁 \"\n003,米,";
+        let query = format!("取区域 [\"3,2-3\",[\"备注\",1]] {data}");
+        let expected = "备注,编号\r\n\" 乙,丙\n丁 \",002\r\n\"\",003";
+        let (csv, _) = csv_table_preview(&query).unwrap().unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        let pipeline =
+            format!(r#"依次处理 ["pick-region [\"2-3\",[\"备注\",1]]","取单元格 [-1,2]"] {data}"#);
+        assert_eq!(transform_csv(&pipeline).as_deref(), Ok("003"));
+        for (parameters, error) in [
+            (r#"["0",[1]]"#, CsvError::InvalidRowRange),
+            (r#"["1-4",[1]]"#, CsvError::MissingDataRow),
+            (r#"["1",["编号",1]]"#, CsvError::TableRegionArguments),
+            (r#"["1",[]]"#, CsvError::TableRegionArguments),
+            (r#"["1",[4]]"#, CsvError::ColumnOutOfRange),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("取区域 {parameters} {data}")),
+                Err(error),
+                "{parameters}"
+            );
         }
     }
 

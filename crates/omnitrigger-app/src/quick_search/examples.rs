@@ -4799,6 +4799,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按行范围和列顺序提取 CSV 区域",
+        query: "CSV: 取区域 [\"2-3\",[\"备注\",1]] 编号,名称,备注\n001,茶,甲\n002,梨,\"乙,丙\"\n003,米,丁",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "取 CSV 中各组最后一条完整记录",
         query: "CSV: 分组取行 [[\"组\"],-1] 组,编号,备注\nA,001,甲\nB,002,乙\nA,003,\"跨\n行\"\nA,004,丁",
     },
