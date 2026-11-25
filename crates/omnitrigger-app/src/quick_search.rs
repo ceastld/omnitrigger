@@ -973,10 +973,19 @@ impl Results {
                                         ValueError::BatchCalculation(BatchError::Empty),
                                     )
                                 };
-                            Self::table_value(
+                            Self::Value(
                                 report
                                     .map_err(ValueError::Csv)
-                                    .and_then(|report| report.ok_or(missing_input)),
+                                    .and_then(|report| report.ok_or(missing_input))
+                                    .and_then(|report| {
+                                        let table = csv_tools::parse_table_preview(&report.csv)
+                                            .map_err(ValueError::Csv)?
+                                            .with_input_errors(report.input_errors);
+                                        Ok(ResultValue {
+                                            text: report.csv,
+                                            kind: ValueKind::Table(table),
+                                        })
+                                    }),
                             )
                         }
                     }
@@ -3470,6 +3479,25 @@ impl QuickSearch {
         batch_line_range(input, line).map(|range| start + range.start..start + range.end)
     }
 
+    fn batch_report_error_range(&self, cx: &App) -> Option<Range<usize>> {
+        let errors = self.results.table_preview()?.input_errors();
+        let first = errors.first()?;
+        let input = self.input.read(cx);
+        let query = input.text_ref();
+        let (Scope::BatchCalculation, term) = scoped_query(query)? else {
+            return None;
+        };
+        let (_, batch) = batch_calculation_input(term);
+        let offset = query.trim_end().len() - batch.len();
+        let selection = input.selection();
+        let next = errors
+            .iter()
+            .skip_while(|range| (offset + range.start..offset + range.end) != selection)
+            .nth(1)
+            .unwrap_or(first);
+        Some(offset + next.start..offset + next.end)
+    }
+
     fn validation_error_range(&self, cx: &App) -> Option<Range<usize>> {
         let Results::Value(Ok(ResultValue {
             kind: ValueKind::InputValidationError { scope, range },
@@ -3496,6 +3524,7 @@ impl QuickSearch {
     ) -> bool {
         let Some(range) = self
             .batch_error_range(cx)
+            .or_else(|| self.batch_report_error_range(cx))
             .or_else(|| self.validation_error_range(cx))
         else {
             return false;
@@ -4313,6 +4342,17 @@ impl QuickSearch {
                     )
                 },
             )
+            .when(!table.input_errors().is_empty(), |footer| {
+                footer.child(
+                    button("locate-batch-report-error", "定位错误", Tone::Ghost, true)
+                        .h(px(TABLE_PAGER_HEIGHT))
+                        .px(px(8.))
+                        .tooltip(theme::text_tooltip("Alt+Enter 定位下一处错误".into()))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.select_input_error(false, window, cx);
+                        })),
+                )
+            })
             .when(table.spans_pages(), |footer| {
                 footer.child(
                     button("copy-table-page", "复制本页", Tone::Ghost, true)
@@ -7312,6 +7352,26 @@ mod tests {
             }
             assert_eq!(&query[input.selection()], invalid);
             assert_eq!(input.text(), query);
+        }
+        for query in [
+            "  批量计算： 明细 2**8\r\n\r1/0\u{2028}avg(1,3)\nsqrt(-1)  ",
+            "batch calculation: exact-report 2**80\n1/0\r\n\r7/6\nsqrt(-1)",
+        ] {
+            search.fill_query(query, window, cx);
+            search.refresh_results(query, window, cx);
+            let mut event = KeyDownEvent {
+                keystroke: gpui::Keystroke::parse("alt-enter").unwrap(),
+                is_held: false,
+            };
+            for expected in ["1/0", "sqrt(-1)", "1/0"] {
+                search.key_down(&event, window, cx);
+                assert_eq!(&query[search.input.read(cx).selection()], expected);
+                event.is_held = true;
+                search.key_down(&event, window, cx);
+                assert_eq!(&query[search.input.read(cx).selection()], expected);
+                event.is_held = false;
+            }
+            assert_eq!(search.input.read(cx).text(), query);
         }
     }
 

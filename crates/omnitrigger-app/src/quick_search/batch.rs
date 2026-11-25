@@ -108,26 +108,35 @@ pub(super) fn map_batch_csv<E>(
     ))
 }
 
+pub(super) struct CalculationReport {
+    pub(super) csv: String,
+    pub(super) input_errors: Vec<Range<usize>>,
+}
+
 pub(super) fn batch_calculation_report(
     input: &str,
     mut calculate: impl FnMut(&str) -> Result<String, &'static str>,
-) -> Result<Option<String>, CsvError> {
+) -> Result<Option<CalculationReport>, CsvError> {
     const HEADER: &str = "行号,算式,结果,错误";
-    let mut output = HEADER.to_owned();
-    for (line, _, query) in nonempty_batch_lines(input) {
+    let mut csv = HEADER.to_owned();
+    let mut input_errors = Vec::new();
+    for (line, range, query) in nonempty_batch_lines(input) {
         let line = line.to_string();
         let result = calculate(query);
         let (result, error) = match &result {
             Ok(value) => (value.as_str(), ""),
-            Err(error) => ("", *error),
+            Err(error) => {
+                input_errors.push(range);
+                ("", *error)
+            }
         };
         append_bounded_csv_row(
-            &mut output,
+            &mut csv,
             [line.as_str(), query, result, error].into_iter(),
             CsvError::PipelineOutputTooLarge,
         )?;
     }
-    Ok((output.len() > HEADER.len()).then_some(output))
+    Ok((csv.len() > HEADER.len()).then_some(CalculationReport { csv, input_errors }))
 }
 
 fn nonempty_batch_lines(input: &str) -> impl Iterator<Item = (usize, Range<usize>, &str)> {
@@ -187,7 +196,10 @@ mod tests {
             assert!(batch_line_range(input, number).is_none());
         }
         assert_eq!(
-            batch_calculation_report(input, |line| Ok(line.to_owned())).unwrap().as_deref(),
+            batch_calculation_report(input, |line| Ok(line.to_owned()))
+                .unwrap()
+                .as_ref()
+                .map(|report| report.csv.as_str()),
             Some("行号,算式,结果,错误\r\n1,甲,甲,\"\"\r\n3,乙,乙,\"\"\r\n5,丙,丙,\"\"\r\n6,🍵,🍵,\"\""),
         );
     }

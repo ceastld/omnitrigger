@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use gpui::{div, prelude::*, px, relative, Div, FontWeight};
 
 use crate::theme::{self, rgb};
@@ -19,6 +21,7 @@ pub(super) struct TablePreview {
     columns_per_page: usize,
     column_width_units: Vec<usize>,
     highlighted_cells: Vec<(usize, usize)>,
+    input_errors: Vec<Range<usize>>,
 }
 
 impl TablePreview {
@@ -38,6 +41,7 @@ impl TablePreview {
             columns_per_page: MAX_VISIBLE_COLUMNS,
             column_width_units,
             highlighted_cells: Vec::new(),
+            input_errors: Vec::new(),
         }
     }
 
@@ -49,6 +53,15 @@ impl TablePreview {
     pub(super) fn with_highlighted_cells(mut self, cells: Vec<(usize, usize)>) -> Self {
         self.highlighted_cells = cells;
         self
+    }
+
+    pub(super) fn with_input_errors(mut self, errors: Vec<Range<usize>>) -> Self {
+        self.input_errors = errors;
+        self
+    }
+
+    pub(super) fn input_errors(&self) -> &[Range<usize>] {
+        &self.input_errors
     }
 
     pub(super) fn is_cell_highlighted(&self, row: usize, column: usize) -> bool {

@@ -1632,8 +1632,8 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
-        title: "识别批量算式的混合换行",
-        query: "批量计算: 明细 2**8\r\n\r1/0\u{2028}avg(1,3)",
+        title: "识别混合换行并逐项定位错误",
+        query: "批量计算: 明细 2**8\r\n\r1/0\u{2028}avg(1,3)\nsqrt(-1)",
     },
     Example {
         icon: Icon::Terminal,
