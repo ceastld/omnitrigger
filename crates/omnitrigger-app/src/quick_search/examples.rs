@@ -6425,6 +6425,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求多个分数或小数的精确合计",
+        query: "分数: 计算 sum(1e-3,1/4,3/4)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求多个分数或小数的精确平均值",
+        query: "分数: 计算 avg(1/3,1/6)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求多个分数或小数的精确中位数",
+        query: "分数: 计算 median(0.5,3,1/3,1/8)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求大整数的最大公约数",
         query: "分数: 计算 gcd(-3 * 2**80, 5 * 2**80)",
     },

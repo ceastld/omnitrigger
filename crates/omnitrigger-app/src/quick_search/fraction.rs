@@ -9,6 +9,7 @@ use super::csv_tools::append_bounded_csv_row;
 use super::linear_fit::format_power_expression;
 use super::operators::{split_top_level_commas, NumberComparison, Operator};
 use super::radix::{ungroup_digits, Base};
+use super::statistics::median_sorted_values;
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_MODULAR_POWER_BITS: u64 = 1024;
@@ -1678,6 +1679,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.extreme_value(name == "min");
         }
+        if matches!(name.as_str(), "sum" | "avg" | "mean" | "median") {
+            self.remaining = rest;
+            return self.aggregate_function(&name);
+        }
         if name == "clamp" {
             self.remaining = rest;
             return self.clamp_function();
@@ -1907,6 +1912,34 @@ impl FractionParser<'_> {
             return Err(self.expected_token());
         }
         Ok(result)
+    }
+
+    fn aggregate_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let mut values = vec![self.sum()?];
+        while self.consume(',') {
+            values.push(self.sum()?);
+        }
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        if name == "median" {
+            values.sort_unstable();
+            return median_sorted_values(&values);
+        }
+        let count = values.len();
+        let mut total = BigRational::default();
+        for value in values {
+            total += value;
+            ensure_exact_size(&total)?;
+        }
+        if name != "sum" {
+            total /= BigInt::from(count);
+            ensure_exact_size(&total)?;
+        }
+        Ok(total)
     }
 
     fn clamp_function(&mut self) -> Result<BigRational, FractionError> {
@@ -2530,6 +2563,34 @@ mod tests {
         ] {
             assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn combines_exact_sums_averages_and_medians_in_calculator_expressions() {
+        for (query, expected) in [
+            ("sum(1e-3,1/4,3/4)", "1001/1000"),
+            ("avg(1/3,1/6)*2", "1/2"),
+            ("MEAN(1/3,max(2,5/3))", "7/6"),
+            ("median(0.5,3,1/3,1/8)", "5/12"),
+            (
+                "median(9007199254740993,9007199254740992,9007199254740994)",
+                "9007199254740993",
+            ),
+            ("sum(-7/3)+avg(7/3)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(query).unwrap().to_string(),
+                expected,
+                "{query}"
+            );
+        }
+        for query in ["sum()", "avg(1,)", "median(1,,2)"] {
+            assert!(calculate_fraction(query).is_err(), "{query}");
+        }
+        assert_eq!(
+            calculate_fraction("sum(1e2000,1e-2000)"),
+            Err(FractionError::ExactRange)
+        );
     }
 
     #[test]
