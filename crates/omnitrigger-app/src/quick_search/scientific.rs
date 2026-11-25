@@ -147,6 +147,14 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             }));
         }
         "abs" => f64::abs,
+        "ulp" => |value| {
+            let magnitude = value.abs();
+            if magnitude == f64::MAX {
+                magnitude - magnitude.next_down()
+            } else {
+                magnitude.next_up() - magnitude
+            }
+        },
         "sqrt" => f64::sqrt,
         "cbrt" => f64::cbrt,
         "floor" => f64::floor,

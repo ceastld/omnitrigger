@@ -898,6 +898,25 @@ mod tests {
     }
 
     #[test]
+    fn measures_binary64_spacing_at_zero_powers_of_two_and_both_extremes() {
+        for (query, expected) in [
+            ("ulp(0)", f64::from_bits(1)),
+            ("ulp(-0)", f64::from_bits(1)),
+            ("ulp(5e-324)", f64::from_bits(1)),
+            ("ulp(2.2250738585072014e-308)", f64::from_bits(1)),
+            ("ulp(1)", f64::EPSILON),
+            ("ulp(-1)", f64::EPSILON),
+            ("ulp(0.5)", f64::EPSILON / 2.0),
+            ("ulp(1-2**-53)", f64::EPSILON / 2.0),
+            ("ulp(1.7976931348623157e308)", 2.0_f64.powi(971)),
+            ("ulp(-1.7976931348623157e308)", 2.0_f64.powi(971)),
+        ] {
+            assert_eq!(evaluate(query), Ok(expected), "{query}");
+        }
+        assert_eq!(evaluate("ulp(0)/5e-324"), Ok(1.0));
+    }
+
+    #[test]
     fn compares_decimal_results_without_forgetting_relative_or_absolute_tolerance() {
         for (query, expected) in [
             ("isclose(0.1+0.2,0.3)", "1"),

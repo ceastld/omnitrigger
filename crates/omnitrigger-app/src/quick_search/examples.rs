@@ -3497,6 +3497,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看浮点数最低有效位代表的量",
+        query: "ulp(1)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算皮尔逊相关系数",
         query: "corr(1,2,2,4,3,6)",
     },
