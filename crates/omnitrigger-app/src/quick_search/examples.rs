@@ -3557,6 +3557,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把对数几率转换成概率",
+        query: "sigmoid(ln(3))",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把概率转换成对数几率",
+        query: "logit(0.75)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将乘法与加法合并后进行一次舍入",
         query: "fma(1e308,2,-1e308)",
     },

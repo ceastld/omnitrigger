@@ -204,6 +204,8 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "log10" => f64::log10,
         "exp" => f64::exp,
         "expm1" => f64::exp_m1,
+        "sigmoid" | "expit" => sigmoid,
+        "logit" => logit,
         "radians" => f64::to_radians,
         "degrees" => f64::to_degrees,
         "percent" => |value| value / 100.,
@@ -475,6 +477,27 @@ fn permutations(values: &[f64]) -> f64 {
         }
     }
     result as f64
+}
+
+fn sigmoid(value: f64) -> f64 {
+    if value < 0. {
+        let exponential = value.exp();
+        exponential / (1. + exponential)
+    } else {
+        1. / (1. + (-value).exp())
+    }
+}
+
+fn logit(probability: f64) -> f64 {
+    if probability <= 0. || probability >= 1. {
+        return f64::NAN;
+    }
+    if (0.25..=0.75).contains(&probability) {
+        // 在 0.5 附近用一次 log1p，避免两个接近的对数相减。
+        ((2. * probability - 1.) / (1. - probability)).ln_1p()
+    } else {
+        probability.ln() - (-probability).ln_1p()
+    }
 }
 
 fn log_sum_exp(values: &[f64]) -> f64 {

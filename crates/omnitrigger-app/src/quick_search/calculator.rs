@@ -911,6 +911,25 @@ mod tests {
     }
 
     #[test]
+    fn converts_log_odds_and_probabilities_without_losing_small_values() {
+        assert_eq!(evaluate("sigmoid(0)"), Ok(0.5));
+        assert_eq!(evaluate("expit(ln(3))"), Ok(0.75));
+        assert_eq!(evaluate("logit(0.5)"), Ok(0.0));
+        assert!((evaluate("logit(0.75)").unwrap() - 3.0_f64.ln()).abs() <= f64::EPSILON);
+        assert!((evaluate("logit(sigmoid(-100))").unwrap() + 100.0).abs() < 1e-12);
+        assert!(evaluate("expit(-720)").unwrap() > 0.0);
+        let near_half = evaluate("logit(0.5+ulp(0.5))/ulp(0.5)").unwrap();
+        assert!((near_half - 4.0).abs() < 8.0 * f64::EPSILON);
+        for query in ["logit(0)", "logit(1)", "logit(-0.1)", "logit(1.1)"] {
+            assert_eq!(
+                evaluate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn evaluates_hyperbolic_functions_and_rejects_invalid_inverse_arguments() {
         for (query, expected) in [
             ("sinh(ln(2))", 0.75),
