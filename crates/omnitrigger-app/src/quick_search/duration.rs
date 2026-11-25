@@ -7,6 +7,7 @@ use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 use super::fraction::calculate_fraction;
 use super::ratio_allocation::{allocate_shares, split_allocation, RatioAllocationError};
+use super::statistics::{interpolate_ordered_quantile, parse_probability};
 
 pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
 pub(super) const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
@@ -14,6 +15,7 @@ const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
 // 去掉末尾的零后，精度由单位纳秒数中的因子 2 和 5 决定。一天含有 16 个因子 2。
 const MAX_FRACTION_DIGITS: usize = 16;
 const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
+const MAX_DURATION_QUANTILE_TERMS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DurationError {
@@ -29,6 +31,7 @@ pub(super) enum DurationError {
     Precision,
     DivisionByZero,
     InvalidFrequency,
+    InvalidQuantileArguments,
     InvalidScaleFactor,
     InvalidRoundingArguments,
     InvalidAllocation,
@@ -56,6 +59,9 @@ impl DurationError {
             Self::Precision => "时长最小可精确到 1 纳秒",
             Self::DivisionByZero => "时长不能除以零",
             Self::InvalidFrequency => "按 时长@次数 填写每组，次数须为正整数",
+            Self::InvalidQuantileArguments => {
+                "填写 0 至 1 的概率及 1 至 128 个时长，例如 75% 1s,2s,3s,4s"
+            }
             Self::InvalidScaleFactor => "用 @ 分隔时长和缩放系数，系数可写 2/3、50% 或精确算式",
             Self::InvalidRoundingArguments => "用 @ 分隔时长和正的舍入步长，例如 01:07:30 @ 15分钟",
             Self::InvalidAllocation => "用 @ 分隔总时长和配比，例如 01:30:00 @ 1:2",
@@ -106,6 +112,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         "扣除休息" | "subtract-break" => (elapsed_after_break(values)?, false),
         "重叠" | "overlap" => (clock_overlap(values)?, false),
         "中位数" | "median" => (median_duration_list(values, false)?, false),
+        "分位数" | "quantile" => (quantile_duration_list(values)?, false),
         "最短" | "min" => (duration_extremes(values)?.0, false),
         "最长" | "max" => (duration_extremes(values)?.1, false),
         "极差" | "range" => {
@@ -413,6 +420,31 @@ fn median_duration_list(input: &str, use_frequencies: bool) -> Result<i128, Dura
         return Ok(sum / 2);
     }
     Err(DurationError::Incomplete)
+}
+
+fn quantile_duration_list(input: &str) -> Result<i128, DurationError> {
+    let invalid = DurationError::InvalidQuantileArguments;
+    let (probability, durations) = input
+        .trim()
+        .split_once(char::is_whitespace)
+        .ok_or(invalid)?;
+    let probability = parse_probability(probability).map_err(|_| invalid)?;
+    let mut values = duration_list_values(durations)
+        .take(MAX_DURATION_QUANTILE_TERMS + 1)
+        .map(|value| value.map(|nanos| BigRational::from_integer(nanos.into())))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !(1..=MAX_DURATION_QUANTILE_TERMS).contains(&values.len()) {
+        return Err(invalid);
+    }
+    values.sort_unstable();
+    let value = interpolate_ordered_quantile(values.len() as u64, &probability, |rank| {
+        &values[rank as usize]
+    })
+    .map_err(|_| DurationError::OutOfRange)?;
+    if !value.is_integer() {
+        return Err(DurationError::Precision);
+    }
+    i128::try_from(value.to_integer()).map_err(|_| DurationError::OutOfRange)
 }
 
 pub(super) fn format_clock_duration(nanos: u128, sign: &str) -> String {
@@ -915,6 +947,35 @@ mod tests {
         assert_eq!(
             convert_duration("range -18446744073709551615s,18446744073709551615s"),
             Err(DurationError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn finds_duration_quantiles_with_exact_nanosecond_interpolation() {
+        for (query, expected) in [
+            ("分位数 75% 3s,1s,2s,4s", "00:00:03.25"),
+            ("quantile 3/4 3s,1s,2s,4s to ms", "3250 ms"),
+            ("分位数 0% 2ns,-1ns,9ns to ns", "-1 ns"),
+            ("分位数 100% 1ns\n2ns to ns", "2 ns"),
+            ("分位数 25% PT2M", "00:02:00"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_duration("分位数 1/2 1ns,2ns"),
+            Err(DurationError::Precision)
+        );
+        for query in ["分位数 101% 1s", "分位数 50%"] {
+            assert_eq!(
+                convert_duration(query),
+                Err(DurationError::InvalidQuantileArguments),
+                "{query}"
+            );
+        }
+        let too_many = vec!["1s"; MAX_DURATION_QUANTILE_TERMS + 1].join(",");
+        assert_eq!(
+            convert_duration(&format!("分位数 50% {too_many}")),
+            Err(DurationError::InvalidQuantileArguments)
         );
     }
 

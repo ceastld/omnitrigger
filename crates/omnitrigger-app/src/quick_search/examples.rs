@@ -2205,6 +2205,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "求一组时长的 75% 分位数",
+        query: "时长: 分位数 75% 3s,1s,2s,4s",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "从一组时长中找出最短值",
         query: "时长: 最短 01:25,02:40,00:55",
     },
@@ -6858,6 +6863,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "向下取整",
             "向上取整",
             "中位数",
+            "分位数",
             "最短",
             "最长",
             "极差",

@@ -368,6 +368,7 @@ fn convert_timestamp_with_local(
             | DurationError::InvalidUnit
             | DurationError::ExactUnitArguments
             | DurationError::InvalidFrequency
+            | DurationError::InvalidQuantileArguments
             | DurationError::InvalidScaleFactor
             | DurationError::InvalidRoundingArguments
             | DurationError::InvalidAllocation
