@@ -2,6 +2,8 @@ use std::borrow::Cow;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::text_tools::logical_newline_pattern;
+
 pub(super) const COLUMNS: usize = 40;
 const TAB_STOP: usize = 8;
 
@@ -49,11 +51,14 @@ pub(super) fn page_starts(text: &str, page_size: usize) -> Vec<usize> {
 }
 
 fn positioned_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut offset = 0;
-    text.split('\n').flat_map(move |line| {
-        let start = offset;
-        offset += line.len() + 1;
-        let mut pending = Some((start, line.strip_suffix('\r').unwrap_or(line)));
+    let mut line_start = 0;
+    let line_ends = logical_newline_pattern()
+        .find_iter(text)
+        .map(|newline| (newline.start(), newline.end()))
+        .chain(std::iter::once((text.len(), text.len())));
+    line_ends.flat_map(move |(end, next_start)| {
+        let mut pending = Some((line_start, &text[line_start..end]));
+        line_start = next_start;
         std::iter::from_fn(move || {
             let (start, line) = pending.take()?;
             if let Some(index) = wrap_point(line) {
@@ -103,6 +108,18 @@ mod tests {
         let prefix = "x".repeat(39);
         let mixed = format!("{prefix}👩‍💻a");
         assert_eq!(lines(&mixed).collect::<Vec<_>>(), [prefix.as_str(), "👩‍💻a"]);
+    }
+
+    #[test]
+    fn splits_all_logical_line_breaks_without_losing_preview_page_offsets() {
+        let text = "甲\r\n乙\r\u{2028}丙\u{2029}";
+        let expected = ["甲", "乙", "", "丙", ""];
+        assert_eq!(lines(text).collect::<Vec<_>>(), expected);
+        let starts = page_starts(text, 1);
+        assert_eq!(starts, [0, 5, 9, 12, 18]);
+        for (offset, line) in starts.into_iter().zip(expected) {
+            assert_eq!(lines(&text[offset..]).next(), Some(line));
+        }
     }
 
     #[test]

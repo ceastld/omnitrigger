@@ -1640,7 +1640,7 @@ fn search_text_lines(input: &str) -> Result<String, TextError> {
     if words.is_empty() {
         return Ok(text.to_owned());
     }
-    Ok(newline_pattern()
+    Ok(logical_newline_pattern()
         .split(text)
         .filter(|line| {
             let key = search_key(line);
@@ -3985,6 +3985,7 @@ mod tests {
                 "A:key\nkey A",
             ),
             ("搜索行 \"　 \" \"甲\r\n\r乙\n\"", "甲\r\n\r乙\n"),
+            ("搜索行 \"北\" 甲\u{2028}北站\u{2029}丙", "北站"),
             ("搜索行 \"未匹配\" A\nB", ""),
         ] {
             assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");

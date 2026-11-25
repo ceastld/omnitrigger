@@ -3221,7 +3221,9 @@ impl QuickSearch {
         };
         let (command, extra) = match kind {
             ValueKind::Table(_) => (TABLE_SEARCH_COMMAND, 3),
-            ValueKind::Text if text.contains(['\r', '\n']) => (TEXT_SEARCH_COMMAND, 5),
+            ValueKind::Text if text_tools::logical_newline_pattern().is_match(text) => {
+                (TEXT_SEARCH_COMMAND, 5)
+            }
             _ => return None,
         };
         let available = INPUT_CHARACTER_LIMIT - command.chars().count() - extra;
@@ -4687,7 +4689,7 @@ impl QuickSearch {
                     1 => 20,
                     _ => 17,
                 };
-                let compact = result.contains('\n')
+                let compact = text_tools::logical_newline_pattern().is_match(result)
                     || value_preview::columns(result.graphemes(true).take(large_text_columns + 1))
                         > large_text_columns;
                 let value = if result.is_empty() {
@@ -8017,6 +8019,23 @@ mod tests {
         assert_eq!(search.input.read(cx).text(), QUERY);
         assert_eq!(search.input.read(cx).selection(), selection);
         assert!(search.input_before_result_search.is_none());
+        const UNICODE_QUERY: &str = "文本: 原文 北区: OK\u{2028}南区: OK\u{2029}北站待定";
+        search.fill_query(UNICODE_QUERY, window, cx);
+        search.refresh_results(UNICODE_QUERY, window, cx);
+        search.key_down(&key("ctrl-f", false), window, cx);
+        let started = search.input.read(cx).text();
+        assert_eq!(
+            started,
+            "文本: 搜索行 \"\" \"北区: OK\u{2028}南区: OK\u{2029}北站待定\""
+        );
+        search.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "南区", window, cx);
+        });
+        let filtered = search.input.read(cx).text();
+        search.refresh_results(&filtered, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("南区: OK"));
+        search.key_down(&key("ctrl-f", false), window, cx);
+        assert_eq!(search.input.read(cx).text(), UNICODE_QUERY);
     }
 
     #[cfg(target_os = "windows")]
