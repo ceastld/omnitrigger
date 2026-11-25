@@ -1626,6 +1626,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "同时查看多行算式的结果和错误",
+        query: "批量计算: 明细 2**8\n1/0\navg(1,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "同时查看各行的精确分数结果和错误",
+        query: "批量计算: 分数明细 1/3+1/6\n2/0\n2**80",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "跨工具清理文本、转换 CSV 并取出 JSON 字段",
         query: "处理: [\"文本: 去空行\",\"CSV: 数值对象 [2]\",\"JSON: 取值 /1/金额\"] 编号,金额\n001,1.50\n\n002,2e0",
     },
@@ -7254,8 +7264,18 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchCalculation
-            if matches!(term, "分" | "分数" | "分数对" | "分数对照" | "对" | "对照") =>
-            {}
+            if matches!(
+                term,
+                "分" | "分数"
+                    | "分数对"
+                    | "分数对照"
+                    | "对"
+                    | "对照"
+                    | "明"
+                    | "明细"
+                    | "分数明"
+                    | "分数明细"
+            ) => {}
         Scope::Fraction
             if !term.is_empty()
                 && [

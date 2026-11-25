@@ -86,8 +86,9 @@ use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex, RecentApplications};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use batch::{
-    batch_arguments, batch_calculation_input, batch_line_range, map_batch_csv, map_batch_lines,
-    map_tool_batch, BatchCalculationKind, BatchError, BatchToolOutput,
+    batch_arguments, batch_calculation_input, batch_calculation_report, batch_line_range,
+    map_batch_csv, map_batch_lines, map_tool_batch, BatchCalculationKind, BatchError,
+    BatchToolOutput,
 };
 use calculator::{calculate, calculate_with_answers, looks_like_calculation, CalculationError};
 use calendar::{
@@ -952,6 +953,30 @@ impl Results {
                         BatchCalculationKind::ExactCsv => Self::table_value(
                             map_batch_csv(input, "算式", exact).map_err(ValueError::BatchFraction),
                         ),
+                        kind @ (BatchCalculationKind::StandardReport
+                        | BatchCalculationKind::ExactReport) => {
+                            let (report, missing_input) =
+                                if matches!(kind, BatchCalculationKind::ExactReport) {
+                                    (
+                                        batch_calculation_report(input, |line| {
+                                            exact(line).map_err(FractionError::message)
+                                        }),
+                                        ValueError::BatchFraction(BatchError::Empty),
+                                    )
+                                } else {
+                                    (
+                                        batch_calculation_report(input, |line| {
+                                            calculate(line).map_err(CalculationError::message)
+                                        }),
+                                        ValueError::BatchCalculation(BatchError::Empty),
+                                    )
+                                };
+                            Self::table_value(
+                                report
+                                    .map_err(ValueError::Csv)
+                                    .and_then(|report| report.ok_or(missing_input)),
+                            )
+                        }
                     }
                 }
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
@@ -5192,6 +5217,24 @@ mod tests {
             ..SearchIndex::default()
         }
         .results(query)
+    }
+
+    #[test]
+    fn shows_every_batch_calculation_result_and_error_with_the_original_line_number() {
+        for (query, expected) in [
+            (
+                "批量计算: 明细 2**8\r\n\r\n1/0\r\navg(1,3)",
+                "行号,算式,结果,错误\r\n1,2**8,256,\"\"\r\n3,1/0,\"\",不能除以零\r\n4,\"avg(1,3)\",2,\"\"",
+            ),
+            (
+                "batch calculation: exact-report 1/3+1/6\n2/0\n9007199254740993",
+                "行号,算式,结果,错误\r\n1,1/3+1/6,1/2,\"\"\r\n2,2/0,\"\",分母或除数不能为零\r\n3,9007199254740993,9007199254740993,\"\"",
+            ),
+        ] {
+            assert!(matches!(for_query(query, &[]),
+                Results::Value(Ok(ResultValue { text, kind: ValueKind::Table(_) })) if text == expected),
+                "{query}");
+        }
     }
 
     #[test]

@@ -1,8 +1,12 @@
 use std::ops::Range;
 
 use super::{
-    cidr::calculate_cidr, conversion::convert_wave, csv_tools::csv_cell, decibel::convert_decibels,
-    solid::calculate_solid, tempo::calculate_tempo,
+    cidr::calculate_cidr,
+    conversion::convert_wave,
+    csv_tools::{append_bounded_csv_row, csv_cell, CsvError},
+    decibel::convert_decibels,
+    solid::calculate_solid,
+    tempo::calculate_tempo,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,8 +23,10 @@ pub(super) fn batch_arguments<'a>(query: &'a str, name: &str, alias: &str) -> Op
 pub(super) enum BatchCalculationKind {
     Standard,
     StandardCsv,
+    StandardReport,
     Exact,
     ExactCsv,
+    ExactReport,
 }
 
 pub(super) fn batch_calculation_input(input: &str) -> (BatchCalculationKind, &str) {
@@ -28,6 +34,12 @@ pub(super) fn batch_calculation_input(input: &str) -> (BatchCalculationKind, &st
         ("分数", "exact", BatchCalculationKind::Exact),
         ("分数对照", "exact-csv", BatchCalculationKind::ExactCsv),
         ("对照", "csv", BatchCalculationKind::StandardCsv),
+        ("明细", "report", BatchCalculationKind::StandardReport),
+        (
+            "分数明细",
+            "exact-report",
+            BatchCalculationKind::ExactReport,
+        ),
     ] {
         if let Some(arguments) = batch_arguments(input, name, alias) {
             return (kind, arguments);
@@ -101,20 +113,42 @@ pub(super) fn map_batch_csv<E>(
     ))
 }
 
+pub(super) fn batch_calculation_report(
+    input: &str,
+    mut calculate: impl FnMut(&str) -> Result<String, &'static str>,
+) -> Result<Option<String>, CsvError> {
+    const HEADER: &str = "行号,算式,结果,错误";
+    let mut output = HEADER.to_owned();
+    for (line, query) in nonempty_batch_lines(input) {
+        let line = line.to_string();
+        let result = calculate(query);
+        let (result, error) = match &result {
+            Ok(value) => (value.as_str(), ""),
+            Err(error) => ("", *error),
+        };
+        append_bounded_csv_row(
+            &mut output,
+            [line.as_str(), query, result, error].into_iter(),
+            CsvError::PipelineOutputTooLarge,
+        )?;
+    }
+    Ok((output.len() > HEADER.len()).then_some(output))
+}
+
+fn nonempty_batch_lines(input: &str) -> impl Iterator<Item = (usize, &str)> {
+    input.lines().enumerate().filter_map(|(index, line)| {
+        let query = line.trim();
+        (!query.is_empty()).then_some((index + 1, query))
+    })
+}
+
 fn batch_results<E>(
     input: &str,
     mut operation: impl FnMut(&str) -> Result<String, E>,
 ) -> Result<Vec<String>, BatchError<E>> {
     let mut values = Vec::new();
-    for (index, line) in input.lines().enumerate() {
-        let query = line.trim();
-        if query.is_empty() {
-            continue;
-        }
-        let value = operation(query).map_err(|cause| BatchError::Row {
-            line: index + 1,
-            cause,
-        })?;
+    for (line, query) in nonempty_batch_lines(input) {
+        let value = operation(query).map_err(|cause| BatchError::Row { line, cause })?;
         values.push(value);
     }
     if values.is_empty() {
