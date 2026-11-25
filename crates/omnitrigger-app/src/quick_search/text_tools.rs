@@ -15,7 +15,7 @@ use base64::{
 };
 use regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256, Sha512};
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::{char::canonical_combining_class, UnicodeNormalization};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
@@ -388,6 +388,7 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
                 _ => ch,
             })
             .collect()),
+        "拉丁去重音" | "strip-latin-accents" => Ok(strip_latin_accents(text)),
         "合并空白" | "collapse" => Ok(text.split_whitespace().collect::<Vec<_>>().join(" ")),
         "正则转义" | "regex-escape" => Ok(regex::escape(text)),
         "逐行去空白" | "trim-lines" => {
@@ -884,6 +885,24 @@ fn normalize_unicode(input: &str) -> Result<String, TextError> {
         return Err(TextError::ResultTooLarge);
     }
     Ok(normalized)
+}
+
+fn strip_latin_accents(text: &str) -> String {
+    if text.is_ascii() {
+        return text.to_owned();
+    }
+    static LATIN_RUN: OnceLock<Regex> = OnceLock::new();
+    LATIN_RUN
+        .get_or_init(|| {
+            Regex::new(r"(?:[\p{Script=Latin}&&\p{L}]\p{M}*)+").expect("拉丁字母正则有效")
+        })
+        .replace_all(text, |matched: &regex::Captures<'_>| {
+            matched[0]
+                .nfd()
+                .filter(|character| canonical_combining_class(*character) == 0)
+                .collect::<String>()
+        })
+        .into_owned()
 }
 
 fn line_lengths_csv(text: &str) -> Result<String, TextError> {
@@ -3493,6 +3512,23 @@ mod tests {
             transform_text("码位解码 U+0061 U+0000"),
             Err(TextError::NullCharacter)
         );
+    }
+
+    #[test]
+    fn removes_latin_accents_without_changing_other_scripts_or_presentation_selectors() {
+        for (query, expected) in [
+            ("拉丁去重音 Café déjà vu İstanbul", "Cafe deja vu Istanbul"),
+            ("拉丁去重音 Cafe\u{301}, Viê\u{323}t Nam", "Cafe, Viet Nam"),
+            ("拉丁去重音 Γειά مُ 한 北京 👩‍💻 ✈️", "Γειά مُ 한 北京 👩‍💻 ✈️"),
+            (
+                "strip-latin-accents A\u{fe0e} café Łódź Æ Ａ",
+                "A\u{fe0e} cafe Łodz Æ Ａ",
+            ),
+            ("拉丁去重音 \"  Café\r\nNîmes  \"", "  Cafe\r\nNimes  "),
+            ("拉丁去重音 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).unwrap(), expected, "{query}");
+        }
     }
 
     #[test]

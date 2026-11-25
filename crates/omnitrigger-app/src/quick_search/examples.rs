@@ -3873,6 +3873,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "移除拉丁字母重音以便匹配姓名和地名",
+        query: "文本: 拉丁去重音 Café İstanbul 北京",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除终端日志中的 ANSI 颜色和样式",
         query: "文本: 去ANSI样式 \x1b[31m错误\x1b[0m \x1b[1m完成\x1b[m",
     },
