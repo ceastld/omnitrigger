@@ -1688,6 +1688,17 @@ pub(super) fn exact_data_converter(
     })
 }
 
+pub(super) fn quantity_number_converter(
+    target: &str,
+) -> Result<impl Fn(&str) -> Result<String, ConversionError>, ConversionError> {
+    let target = Unit::parse(normalize(target).trim())?;
+    Ok(move |source: &str| {
+        let source = normalize(source).replace(char::is_whitespace, " ");
+        let (amount, source) = parse_quantity(source.trim())?;
+        format_converted_amount(amount, &source, &target)
+    })
+}
+
 fn exact_data_unit(input: &str) -> Result<Unit, ConversionError> {
     let unit = Unit::parse(input)?;
     if !matches!(unit.dimension, Dimension::Data | Dimension::DataRate) {
@@ -2084,6 +2095,15 @@ fn checked_scale_factor(factor: f64) -> Result<f64, ConversionError> {
 }
 
 fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String, ConversionError> {
+    let value = format_converted_amount(amount, source, target)?;
+    Ok(format_with_unit(value, target))
+}
+
+fn format_converted_amount(
+    amount: f64,
+    source: &Unit,
+    target: &Unit,
+) -> Result<String, ConversionError> {
     if source.dimension != target.dimension {
         return Err(ConversionError::DifferentDimensions);
     }
@@ -2095,8 +2115,7 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
     } else {
         amount * (source.scale / target.scale)
     };
-    let value = format_result(converted).map_err(|_| ConversionError::OutOfRange)?;
-    Ok(format_with_unit(value, target))
+    format_result(converted).map_err(|_| ConversionError::OutOfRange)
 }
 
 fn format_with_unit(value: impl std::fmt::Display, target: &Unit) -> String {

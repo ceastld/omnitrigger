@@ -5110,6 +5110,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 CSV 温度列逐行换算为摄氏度",
+        query: "CSV: 单位换算列 [\"摄氏\",\"温度\",\"°C\"]\n编号,温度\n001,32 °F\n002,212 °F\n003,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "逐行把整数换算成指定进制",
         query: "CSV: 进制列 [\"十进制\",\"编号\",16,10] 项目,编号\n甲,ff\n乙,-a_b\n丙,20_0000_0000_0001\n丁,",
     },

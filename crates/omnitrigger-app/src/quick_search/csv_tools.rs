@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
-    fmt::Write as _,
+    fmt::{Display, Write as _},
     hash::Hash,
 };
 
@@ -39,7 +39,7 @@ use super::{
         workday_exceptions_from_dates, SpreadsheetDateSystem,
     },
     cidr::{CidrError, LongestPrefixLookup},
-    conversion::{exact_data_converter, ConversionError},
+    conversion::{exact_data_converter, quantity_number_converter, ConversionError},
     correlation_plot::{CorrelationCell, CorrelationPlot},
     duration::{
         duration_nanoseconds, elapsed_clock_interval, exact_duration_converter,
@@ -145,7 +145,7 @@ pub(super) enum CsvError {
     RegexCaptureColumnsArguments,
     RegexCaptureColumnsInputTooLarge,
     SplitColumnArguments,
-    DataConversionColumnArguments,
+    UnitConversionColumnArguments,
     RadixColumnArguments,
     NumericComparisonColumnArguments,
     OutlierColumnArguments,
@@ -181,7 +181,7 @@ pub(super) enum CsvError {
     JsonWildcardColumnArguments,
     JsonPointerColumn(JsonError),
     UrlParameterColumnArguments,
-    DataConversionTarget(ConversionError),
+    UnitConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
     ShiftedColumnArguments,
@@ -392,8 +392,8 @@ impl CsvError {
                 "填写来源列、至少两个不同的新列名和非空分隔符，例如 [\"地址\",[\"省\",\"市\"],\"/\"]"
             }
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
-            Self::DataConversionColumnArguments => {
-                "填写新列名、来源列和目标单位，例如 [\"速率(MiB/s)\",\"速率\",\"MiB/s\"]"
+            Self::UnitConversionColumnArguments => {
+                "填写新列名、来源列和一个与源数值同类型的目标单位"
             }
             Self::RadixColumnArguments => {
                 "填写新列名、来源列及 2 至 36 的两个进制，例如 [\"十进制\",\"编号\",16,10]"
@@ -484,7 +484,7 @@ impl CsvError {
             Self::UrlParameterColumnArguments => {
                 "填写新列名、网址或查询串的来源列和参数名，例如 [\"标签\",\"网址\",\"tag\"]"
             }
-            Self::DataConversionTarget(cause) => cause.message(),
+            Self::UnitConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
             }
@@ -923,7 +923,12 @@ enum Operation {
         right: Option<ColumnReference>,
         expression: String,
     },
-    ConvertDataColumn(String, ColumnReference, String),
+    ConvertUnitColumn {
+        name: String,
+        source: ColumnReference,
+        target: String,
+        exact_data: bool,
+    },
     RadixColumn {
         name: String,
         source: ColumnReference,
@@ -2222,14 +2227,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 fractional: matches!(kind, "进制小数列" | "radix-fraction-column"),
             }
         }
-        "数据换算列" | "convert-data-column" => {
+        kind @ ("数据换算列" | "convert-data-column" | "单位换算列" | "convert-unit-column") =>
+        {
             let ((name, source, target), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
                     input,
-                    CsvError::DataConversionColumnArguments,
+                    CsvError::UnitConversionColumnArguments,
                 )?;
             input = data;
-            Operation::ConvertDataColumn(name, source, target)
+            Operation::ConvertUnitColumn {
+                name,
+                source,
+                target,
+                exact_data: matches!(kind, "数据换算列" | "convert-data-column"),
+            }
         }
         kind @ ("累计合计列"
         | "running-sum-column"
@@ -2855,8 +2866,23 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 None => append_from_one_column(&rows, &name, left, |x| sample(x, None)),
             }
         }
-        Operation::ConvertDataColumn(name, source, target) => {
-            convert_data_column(&rows, &name, source, &target)
+        Operation::ConvertUnitColumn {
+            name,
+            source,
+            target,
+            exact_data,
+        } => {
+            if exact_data {
+                append_converted_unit_column(&rows, &name, source, &target, exact_data_converter)
+            } else {
+                append_converted_unit_column(
+                    &rows,
+                    &name,
+                    source,
+                    &target,
+                    quantity_number_converter,
+                )
+            }
         }
         Operation::OutlierColumn(name, source) => flag_outlier_column(&rows, &name, source),
         Operation::NumericComparisonColumn(name, left, right, comparison) => {
@@ -5246,19 +5272,24 @@ fn append_from_two_columns(
     })
 }
 
-fn convert_data_column(
+fn append_converted_unit_column<F, T>(
     rows: &[Vec<String>],
     name: &str,
     source: ColumnReference,
     target: &str,
-) -> Result<String, CsvError> {
+    converter: impl FnOnce(&str) -> Result<F, ConversionError>,
+) -> Result<String, CsvError>
+where
+    F: Fn(&str) -> Result<T, ConversionError>,
+    T: Display,
+{
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
-        return Err(CsvError::DataConversionColumnArguments);
+        return Err(CsvError::UnitConversionColumnArguments);
     }
     let source = source.resolve(header)?;
     validate_column_width(&[source], header.len())?;
-    let convert = exact_data_converter(target).map_err(CsvError::DataConversionTarget)?;
+    let convert = converter(target).map_err(CsvError::UnitConversionTarget)?;
     let mut row_number = 0;
     write_appended_column(header, records, name, |row| {
         row_number += 1;
@@ -7953,6 +7984,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "group-duration-sum"
             | "分组取行"
             | "pick-group-row"
+            | "单位换算列"
+            | "convert-unit-column"
             | "时长数值列"
             | "duration-number-column"
             | "表格时刻序号列"
@@ -13948,6 +13981,27 @@ null"#
     }
 
     #[test]
+    fn appends_a_unit_conversion_column_with_affine_and_linear_units() {
+        let query = "单位换算列 [\"摄氏\",\"温度\",\"°C\"]\n编号,温度\n001,32 °F\n002,212 °F\n003,";
+        let expected = "编号,温度,摄氏\r\n001,32 °F,0\r\n002,212 °F,100\r\n003,\"\",\"\"";
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (text, preview) = csv_table_preview(query).unwrap().unwrap();
+        assert_eq!(text, expected);
+        assert_eq!(preview.page_csv(0, 0), expected);
+        assert_eq!(
+            transform_csv("convert-unit-column [\"cm\",1,\"cm\"] 长度\n1 in\n0.5 m").as_deref(),
+            Ok("长度,cm\r\n1 in,2.54\r\n0.5 m,50"),
+        );
+        assert_eq!(
+            transform_csv("单位换算列 [\"cm\",1,\"cm\"] 长度\n1 m\n1 kg"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: ConversionError::DifferentDimensions.message(),
+            }),
+        );
+    }
+
+    #[test]
     fn appends_an_exact_data_conversion_column_with_mixed_units_and_blanks() {
         let capacities = "数据换算列 [\"KiB\",\"容量\",\"KiB\"]\n编号,容量\n001,9007199254740993 B\n002,1/3 KiB\n003,";
         assert_eq!(
@@ -13969,7 +14023,7 @@ null"#
             ),
             (
                 "数据换算列 [\"长度\",1,\"m\"]\n容量\n1 KiB",
-                CsvError::DataConversionTarget(ConversionError::ExactDataUnit),
+                CsvError::UnitConversionTarget(ConversionError::ExactDataUnit),
             ),
             (
                 "数据换算列 [\"容量\",1,\"KiB\"]\n容量\n1 KiB",
