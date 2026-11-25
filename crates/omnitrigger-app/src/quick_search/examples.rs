@@ -1869,6 +1869,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "进制: 读格雷码 0b1111",
     },
     Example {
+        icon: Icon::Layers,
+        title: "预览连续整数、格雷码和变动位",
+        query: "进制: 格雷码表 3,2,4",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "统计两个整数相差的二进制位数",
         query: "进制: 汉明距离 0b1010,0b1100",
@@ -6473,6 +6478,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "字节倒序",
             "格雷码",
             "读格雷码",
+            "格雷码表",
             "汉明距离",
             "位比对",
             "位比对CSV",

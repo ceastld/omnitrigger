@@ -5,9 +5,11 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::conversion::ConversionError;
+use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{repeating_radix, MAX_REPEATING_DECIMAL_PLACES};
 
 const MAX_INTEGER_BITS: u64 = 8192;
+const MAX_GRAY_TABLE_ROWS: u16 = 256;
 const MAX_SHEET_COLUMN: u32 = 16_384;
 const MAX_ROMAN_VALUE: u16 = 3999;
 const ROMAN_DIGITS: [(u16, &str); 13] = [
@@ -49,6 +51,8 @@ pub(super) enum RadixError {
     ReverseWidthExceeded,
     GrayCodeArguments,
     GrayCodeWidthExceeded,
+    GrayTableArguments,
+    GrayTableTooLarge,
     BitComparisonArguments,
     SheetColumnArguments,
     RomanArguments,
@@ -82,6 +86,10 @@ impl RadixError {
             Self::GrayCodeArguments => {
                 "填写非负整数，可加位宽，例如 格雷码 8 @ 10 或 读格雷码 0b1111"
             }
+            Self::GrayTableArguments => {
+                "填写位宽、起点和行数，例如 格雷码表 3,2,4。行数为 1 至 256"
+            }
+            Self::GrayTableTooLarge => "格雷码表超过 1 MiB，请减少行数或位宽",
             Self::BitComparisonArguments => "用逗号分隔两个非负整数，例如 0xA5,0xAD",
             Self::WriteBitsArguments => {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
@@ -223,8 +231,8 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "位比对" || operation.eq_ignore_ascii_case("compare-bits") {
         return compare_bits(arguments, true);
     }
-    if is_bit_comparison_csv(operation) {
-        return bit_comparison_csv(arguments);
+    if let Some(transform) = radix_report_operation(operation) {
+        return transform(arguments);
     }
     if operation == "表格列号" || operation.eq_ignore_ascii_case("sheet-column") {
         return convert_sheet_column(arguments);
@@ -498,18 +506,70 @@ fn convert_gray_code(input: &str, decode: bool) -> Result<String, RadixError> {
         }
         return Ok(value.to_string());
     }
-    let gray = &value ^ (&value >> 1u8);
+    let gray = reflected_gray_code(&value);
     Ok(format!("0b{gray:0>width$b}", width = width as usize))
 }
 
-fn is_bit_comparison_csv(operation: &str) -> bool {
-    operation.eq_ignore_ascii_case("位比对CSV")
+fn reflected_gray_code(value: &BigUint) -> BigUint {
+    value ^ (value >> 1u8)
+}
+
+fn radix_report_operation(operation: &str) -> Option<fn(&str) -> Result<String, RadixError>> {
+    if operation.eq_ignore_ascii_case("位比对CSV")
         || operation.eq_ignore_ascii_case("compare-bits-csv")
+    {
+        Some(bit_comparison_csv)
+    } else if operation == "格雷码表" || operation.eq_ignore_ascii_case("gray-code-table") {
+        Some(gray_code_table)
+    } else {
+        None
+    }
 }
 
 pub(super) fn radix_csv_report(query: &str) -> Option<Result<String, RadixError>> {
     let (operation, arguments) = query.trim().split_once(char::is_whitespace)?;
-    is_bit_comparison_csv(&normalize(operation)).then(|| bit_comparison_csv(&normalize(arguments)))
+    let transform = radix_report_operation(&normalize(operation))?;
+    Some(transform(&normalize(arguments)))
+}
+
+fn gray_code_table(input: &str) -> Result<String, RadixError> {
+    let invalid = RadixError::GrayTableArguments;
+    let arguments = input.split(',').map(str::trim).take(4).collect::<Vec<_>>();
+    let [width, start, count] = arguments.as_slice() else {
+        return Err(invalid);
+    };
+    let width = bit_width(width, invalid)?;
+    let start = unsigned_bit_value(start, invalid)?;
+    let count = count
+        .parse::<u16>()
+        .ok()
+        .filter(|count| (1..=MAX_GRAY_TABLE_ROWS).contains(count))
+        .ok_or(invalid)?;
+    if (&start + (count - 1)).bits() > width {
+        return Err(RadixError::GrayCodeWidthExceeded);
+    }
+    let width = width as usize;
+    let mut csv = String::from("序号,二进制,格雷码,变动位");
+    for offset in 0..count {
+        let value = &start + offset;
+        let gray = reflected_gray_code(&value);
+        // 相邻格雷码的异或只保留当前序号最低的置位。
+        let changed = value
+            .trailing_zeros()
+            .map_or_else(String::new, |bit| bit.to_string());
+        let row = [
+            value.to_string(),
+            format!("0b{value:0>width$b}"),
+            format!("0b{gray:0>width$b}"),
+            changed,
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            row.iter().map(String::as_str),
+            RadixError::GrayTableTooLarge,
+        )?;
+    }
+    Ok(csv)
 }
 
 fn read_bit_pair(input: &str) -> Result<(BigUint, BigUint), RadixError> {
@@ -761,6 +821,39 @@ mod tests {
         assert_eq!(encoded, format!("0b1{}", "0".repeat(8191)));
         let decoded = convert_arbitrary_radix(&format!("读格雷码 {encoded}")).unwrap();
         assert_eq!(decoded, bit_mask(8192).to_string());
+    }
+
+    #[test]
+    fn builds_gray_code_tables_with_the_preceding_bit_change_and_bounded_output() {
+        assert_eq!(
+            convert_arbitrary_radix("格雷码表 3,0b10,4"),
+            Ok(concat!(
+                "序号,二进制,格雷码,变动位",
+                "\r\n2,0b010,0b011,1",
+                "\r\n3,0b011,0b010,0",
+                "\r\n4,0b100,0b110,2",
+                "\r\n5,0b101,0b111,0"
+            )
+            .into())
+        );
+        assert_eq!(
+            radix_csv_report("gray-code-table １，０，２"),
+            Some(Ok(
+                "序号,二进制,格雷码,变动位\r\n0,0b0,0b0,\"\"\r\n1,0b1,0b1,0".into()
+            ))
+        );
+        assert_eq!(
+            convert_arbitrary_radix("格雷码表 3,7,2"),
+            Err(RadixError::GrayCodeWidthExceeded)
+        );
+        assert_eq!(
+            convert_arbitrary_radix("格雷码表 64,0,257"),
+            Err(RadixError::GrayTableArguments)
+        );
+        assert_eq!(
+            convert_arbitrary_radix("格雷码表 8192,0,256"),
+            Err(RadixError::GrayTableTooLarge)
+        );
     }
 
     #[test]
