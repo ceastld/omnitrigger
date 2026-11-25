@@ -775,7 +775,11 @@ pub(super) fn format_absolute_elapsed(
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<String, TimestampError> {
-    format_timestamp_delta(unix_nanos(end) - unix_nanos(start), None)
+    format_timestamp_delta(absolute_elapsed_nanoseconds(start, end), None)
+}
+
+pub(super) fn absolute_elapsed_nanoseconds(start: DateTime<Utc>, end: DateTime<Utc>) -> i128 {
+    unix_nanos(end) - unix_nanos(start)
 }
 
 pub(super) fn absolute_timestamp(source: &str) -> Result<DateTime<Utc>, TimestampError> {

@@ -71,8 +71,8 @@ use super::{
         GraphemeRange, TextError, TextLengthUnit, UnicodeForm, MAX_TEXT_COMPARISON_WORK,
     },
     timestamp::{
-        absolute_timestamp, format_absolute_elapsed, timestamp_clock_difference,
-        timestamp_zone_converter,
+        absolute_elapsed_nanoseconds, absolute_timestamp, format_absolute_elapsed,
+        timestamp_clock_difference, timestamp_zone_converter,
     },
     url_encoding::url_parameter_values,
     vector::squared_euclidean_distance,
@@ -147,6 +147,7 @@ pub(super) enum CsvError {
     ClockDifferenceColumnArguments,
     TimestampDifferenceColumnArguments,
     GroupTimestampDifferenceColumnArguments,
+    GroupTimestampSessionArguments,
     GroupTimestampSummaryArguments,
     TimestampZoneColumnArguments,
     DurationNumberColumnArguments,
@@ -391,6 +392,9 @@ impl CsvError {
             }
             Self::GroupTimestampDifferenceColumnArguments => {
                 "填写新列名、时间戳列和分组列，例如 [\"间隔\",\"时刻\",[\"设备\"]]"
+            }
+            Self::GroupTimestampSessionArguments => {
+                "填写新列名、时间戳列、分组列和非负间隔，例如 [\"会话\",\"时刻\",[\"设备\"],\"30分钟\"]"
             }
             Self::GroupTimestampSummaryArguments => {
                 "填写分组列和时间戳列，例如 [[\"设备\"],\"时刻\"]"
@@ -2017,6 +2021,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "组内时间戳偏移列" | "group-timestamp-offset-column" => {
             return append_group_timestamp_offsets(input, GroupTimestampReference::First)
         }
+        "会话编号列" | "timestamp-session-column" => return append_timestamp_sessions(input),
         "时刻差列" | "clock-difference-column" => {
             let ((name, start, end), data) =
                 json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
@@ -4683,6 +4688,45 @@ fn append_group_timestamp_offsets(
             GroupTimestampReference::First => *timestamps.entry(key).or_insert(current),
         };
         format_absolute_elapsed(origin, current).map_err(|error| at_row(error.message()))
+    })
+}
+
+fn append_timestamp_sessions(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::GroupTimestampSessionArguments;
+    let ((name, source, groups, gap), data) =
+        json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>, String)>(
+            input, invalid,
+        )?;
+    let max_gap = duration_nanoseconds(&normalize(&gap)).map_err(|_| invalid)?;
+    if name.trim().is_empty() || name.contains('\0') || max_gap < 0 {
+        return Err(invalid);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, &groups, CsvError::GroupingColumns)?;
+    let mut sessions = HashMap::new();
+    let mut row_number = 0;
+    write_appended_column(header, records, &name, |row| {
+        row_number += 1;
+        let cell = row[source].trim();
+        if cell.is_empty() {
+            return Ok(String::new());
+        }
+        let current = absolute_timestamp(cell).map_err(|error| CsvError::DataRowValue {
+            row: row_number,
+            cause: error.message(),
+        })?;
+        let (previous, session) = sessions
+            .entry(column_key(row, &groups))
+            .or_insert((current, 1usize));
+        let elapsed = absolute_elapsed_nanoseconds(*previous, current);
+        if elapsed < 0 || elapsed > max_gap {
+            *session += 1;
+        }
+        *previous = current;
+        Ok(session.to_string())
     })
 }
 
@@ -7361,6 +7405,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "group-timestamp-difference-column"
             | "组内时间戳偏移列"
             | "group-timestamp-offset-column"
+            | "会话编号列"
+            | "timestamp-session-column"
             | "段内计数列"
             | "run-length-column"
             | "网段归属列"
@@ -12988,6 +13034,30 @@ null"#
             transform_csv("组内时间戳差列 [\"间隔\",2,[1]] 设备,时刻\nA,1s\nB,\nA,2026-11-01 01:30 America/New_York"),
             Err(CsvError::DataRowValue { row: 3, .. }),
         ));
+    }
+
+    #[test]
+    fn numbers_timestamp_sessions_by_each_groups_actual_gap_and_row_order() {
+        let query = "会话编号列 [\"会话\",\"时刻\",[\"设备\"],\"1ns\"] 设备,时刻\nA,1ns\nB,2ns\nA,2ns\nA,4ns\nA,\nA,3ns\nB,3ns";
+        let expected = concat!(
+            "设备,时刻,会话\r\n",
+            "A,1ns,1\r\n",
+            "B,2ns,1\r\n",
+            "A,2ns,1\r\n",
+            "A,4ns,2\r\n",
+            "A,\"\",\"\"\r\n",
+            "A,3ns,3\r\n",
+            "B,3ns,1",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, _) = csv_table_preview(query)
+            .expect("会话编号列应可预览")
+            .unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(
+            transform_csv("会话编号列 [\"会话\",1,[],\"-1ns\"] 时刻\n1ns"),
+            Err(CsvError::GroupTimestampSessionArguments),
+        );
     }
 
     #[test]
