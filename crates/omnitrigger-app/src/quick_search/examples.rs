@@ -1962,6 +1962,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "查看算式实际得到的双精度数值与位模式",
+        query: "进制: 算式浮点位 0.1+0.2",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "读取 64 位浮点位模式并查看浮点类别",
         query: "进制: 读浮点位 64 @ 0x8000000000000000",
     },
@@ -7190,6 +7195,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "读格雷码",
             "格雷码表",
             "浮点位",
+            "算式浮点位",
             "读浮点位",
             "浮点分数",
             "读浮点分数",

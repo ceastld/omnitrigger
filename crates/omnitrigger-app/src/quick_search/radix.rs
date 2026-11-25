@@ -6,7 +6,7 @@ use std::{
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
 
-use super::calculator::normalize;
+use super::calculator::{evaluate, normalize, CalculationError};
 use super::conversion::ConversionError;
 use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{repeating_radix, MAX_REPEATING_DECIMAL_PLACES};
@@ -59,6 +59,7 @@ pub(super) enum RadixError {
     GrayTableTooLarge,
     BitComparisonArguments,
     FloatBitsArguments,
+    FloatCalculation(CalculationError),
     ReadFloatBitsArguments,
     FloatBitsWidthExceeded,
     FloatFractionNonfinite,
@@ -103,6 +104,7 @@ impl RadixError {
             Self::GrayTableTooLarge => "格雷码表超过 1 MiB，请减少行数或位宽",
             Self::BitComparisonArguments => "用逗号分隔两个非负整数，例如 0xA5,0xAD",
             Self::FloatBitsArguments => "填写 32 或 64 位宽和浮点数，例如 32 @ 0.1",
+            Self::FloatCalculation(error) => error.message(),
             Self::ReadFloatBitsArguments => "填写 32 或 64 位宽和非负位模式，例如 32 @ 0x3DCCCCCD",
             Self::FloatFractionNonfinite => "无穷和 NaN 没有对应的有限分数",
             Self::FloatAdjacentNan => "请填写可排序的浮点数，NaN 没有相邻数值",
@@ -588,6 +590,7 @@ fn radix_report_operation(operation: &str) -> Option<RadixReport> {
         "位比对csv" | "compare-bits-csv" => Some(bit_comparison_csv),
         "格雷码表" | "gray-code-table" => Some(gray_code_table),
         "浮点位" | "float-bits" => Some(|input| float_bits_csv(input, false)),
+        "算式浮点位" | "expression-float-bits" => Some(expression_float_bits_csv),
         "读浮点位" | "read-float-bits" => Some(|input| float_bits_csv(input, true)),
         "浮点相邻" | "float-neighbors" => Some(|input| float_adjacent_csv(input, false)),
         "读浮点相邻" | "read-float-neighbors" => Some(|input| float_adjacent_csv(input, true)),
@@ -650,10 +653,17 @@ fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
             8,
             23,
         ),
-        ParsedFloat::Double(value, bits) => {
-            format_float_bits(bits, &format_float_value(value), value.classify(), 11, 52)
-        }
+        ParsedFloat::Double(value, bits) => format_double_bits(value, bits),
     })
+}
+
+fn expression_float_bits_csv(expression: &str) -> Result<String, RadixError> {
+    let value = evaluate(expression).map_err(RadixError::FloatCalculation)?;
+    Ok(format_double_bits(value, value.to_bits()))
+}
+
+fn format_double_bits(value: f64, bits: u64) -> String {
+    format_float_bits(bits, &format_float_value(value), value.classify(), 11, 52)
 }
 
 fn float_adjacent_csv(input: &str, decode: bool) -> Result<String, RadixError> {
@@ -1112,6 +1122,23 @@ mod tests {
         assert_eq!(
             convert_arbitrary_radix("浮点分数 64 @ NaN"),
             Err(RadixError::FloatFractionNonfinite)
+        );
+    }
+
+    #[test]
+    fn shows_the_unrounded_binary64_value_and_bits_of_a_calculation() {
+        let report = radix_csv_report("算式浮点位 0.1+0.2").unwrap().unwrap();
+        assert!(report.contains("数值,0.30000000000000004\r\n"));
+        assert!(report.contains("十六进制,0x3FD3333333333334\r\n"));
+        assert_eq!(
+            convert_arbitrary_radix("expression-float-bits －０"),
+            convert_arbitrary_radix("读浮点位 64 @ 0x8000000000000000"),
+        );
+        assert_eq!(
+            radix_csv_report("算式浮点位 1/0"),
+            Some(Err(RadixError::FloatCalculation(
+                CalculationError::DivisionByZero
+            ))),
         );
     }
 
