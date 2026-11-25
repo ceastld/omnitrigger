@@ -27,6 +27,7 @@ use super::{
 };
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_PADDING_WIDTH: usize = 4096;
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const MAX_REGEX_FREQUENCY_INPUT_BYTES: usize = 16 * 1024;
 const MAX_DIFF_LINES: usize = 512;
@@ -97,6 +98,7 @@ pub(super) enum TextError {
     InvalidLineStep,
     EmptyLineLimit,
     InvalidGraphemeRange,
+    LinePaddingArguments,
     MissingLine,
     InvalidNumberLine,
     InvalidLineNumbering,
@@ -164,6 +166,9 @@ impl TextError {
             Self::EmptyLineLimit => "填写每段空行最多保留的行数，例如 文本: 空行上限 2",
             Self::LineContextArguments => "填写关键词、前置行数和后置行数，例如 [\"错误\",1,2]",
             Self::InvalidGraphemeRange => "填写字素位置或区间，例如 2-4 或 -3..-1。负数从末尾计",
+            Self::LinePaddingArguments => {
+                "用 JSON 填写宽度和一个非换行字符，例如 [4,\"0\"]。宽度为 0 至 4096"
+            }
             Self::MissingLine => "指定行号超出了文本行数",
             Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
             Self::InvalidLineEnding => "填写 LF 或 CRLF，然后粘贴原文",
@@ -282,6 +287,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行去前缀" | "strip-line-prefix" => return strip_line_decoration(text, true),
         "逐行去后缀" | "strip-line-suffix" => return strip_line_decoration(text, false),
         "逐行截取" | "slice-lines" => return slice_line_graphemes(text),
+        "左填充" | "left-pad-lines" => return pad_text_lines(text, true),
+        "右填充" | "right-pad-lines" => return pad_text_lines(text, false),
         "unicode规范化" | "unicode-normalize" => return normalize_unicode(text),
         "取列" | "column" => return select_text_column(text),
         "取行" | "pick-lines" => return select_text_line_ranges(text, true),
@@ -1571,6 +1578,52 @@ fn slice_line_graphemes(input: &str) -> Result<String, TextError> {
     Ok(result)
 }
 
+pub(super) fn append_padded_text(
+    result: &mut String,
+    text: &str,
+    fill: char,
+    missing: usize,
+    left: bool,
+) {
+    let padding = std::iter::repeat_n(fill, missing);
+    if left {
+        result.extend(padding);
+        result.push_str(text);
+    } else {
+        result.push_str(text);
+        result.extend(padding);
+    }
+}
+
+fn pad_text_lines(input: &str, left: bool) -> Result<String, TextError> {
+    let ((width, fill), text) =
+        json_argument_and_tail::<(usize, char)>(input).ok_or(TextError::LinePaddingArguments)?;
+    if width > MAX_PADDING_WIDTH || matches!(fill, '\0' | '\r' | '\n' | '\u{2028}' | '\u{2029}') {
+        return Err(TextError::LinePaddingArguments);
+    }
+    let text = text_payload(text)?;
+    let mut result = String::with_capacity(text.len().min(MAX_EXPANDED_TEXT_BYTES));
+    let mut start = 0;
+    let line_ends = logical_newline_pattern()
+        .find_iter(text)
+        .map(|newline| (newline.start(), newline.end()))
+        .chain(std::iter::once((text.len(), text.len())));
+    for (content_end, end) in line_ends {
+        if start == end {
+            break;
+        }
+        let line = &text[start..content_end];
+        let missing = width.saturating_sub(TextLengthUnit::CodePoints.count(line));
+        if result.len() + (end - start) + missing * fill.len_utf8() > MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::ResultTooLarge);
+        }
+        append_padded_text(&mut result, line, fill, missing, left);
+        result.push_str(&text[content_end..end]);
+        start = end;
+    }
+    Ok(result)
+}
+
 fn split_lines(input: &str) -> Result<String, TextError> {
     let (delimiter, text) = quoted_text_argument(input)?;
     if delimiter.is_empty() {
@@ -2667,6 +2720,28 @@ mod tests {
                 Err(TextError::InvalidGraphemeRange)
             );
         }
+    }
+
+    #[test]
+    fn pads_each_text_line_by_code_points_without_changing_its_ending() {
+        for (query, expected) in [
+            (
+                "左填充 [4,\"0\"] \"7\r\n42\u{2028}\r甲乙丙丁戊\u{2029}\"",
+                "0007\r\n0042\u{2028}0000\r甲乙丙丁戊\u{2029}",
+            ),
+            ("right-pad-lines [3,\"·\"] e\u{301}\n😀", "e\u{301}·\n😀··"),
+            ("左填充 [0,\"0\"] 原文", "原文"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for parameters in [r#"[4097,"0"]"#, r#"[-1,"0"]"#, r#"[2,"00"]"#, r#"[2,"\n"]"#] {
+            assert_eq!(
+                transform_text(&format!("左填充 {parameters} 文本")),
+                Err(TextError::LinePaddingArguments)
+            );
+        }
+        let long = format!("右填充 [4096,\"😀\"] \"{}\"", "x\n".repeat(80));
+        assert_eq!(transform_text(&long), Err(TextError::ResultTooLarge));
     }
 
     #[test]

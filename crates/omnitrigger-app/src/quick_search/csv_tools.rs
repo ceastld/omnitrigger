@@ -68,9 +68,10 @@ use super::{
     },
     table_preview::TablePreview,
     text_tools::{
-        compare_natural, compile_regex, grapheme_common_substring, grapheme_edit_distance,
-        newline_pattern, regex_group_index, replace_literal_matches, replace_regex_matches,
-        GraphemeRange, TextError, TextLengthUnit, UnicodeForm, MAX_TEXT_COMPARISON_WORK,
+        append_padded_text, compare_natural, compile_regex, grapheme_common_substring,
+        grapheme_edit_distance, newline_pattern, regex_group_index, replace_literal_matches,
+        replace_regex_matches, GraphemeRange, TextError, TextLengthUnit, UnicodeForm,
+        MAX_PADDING_WIDTH, MAX_TEXT_COMPARISON_WORK,
     },
     timestamp::{
         absolute_elapsed_nanoseconds, absolute_timestamp, format_absolute_elapsed,
@@ -88,7 +89,6 @@ const MAX_VALUE_MAPPINGS: usize = 32;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_FUNCTION_RECORDS: usize = 128;
 const MAX_ADDED_CELLS: usize = 16_384;
-const MAX_CELL_PADDING_WIDTH: usize = 4096;
 const MAX_REGEX_COLUMN_INPUT_BYTES: usize = 16 * 1024;
 const MAX_REGEX_CAPTURE_COLUMNS: usize = 16;
 const MAX_PIPELINE_STEPS: usize = 8;
@@ -1949,7 +1949,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 )?;
             if name.trim().is_empty()
                 || name.contains('\0')
-                || width > MAX_CELL_PADDING_WIDTH
+                || width > MAX_PADDING_WIDTH
                 || fill == '\0'
             {
                 return Err(CsvError::TextPadColumnArguments);
@@ -3127,16 +3127,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                         if missing == 0 {
                             Cow::Borrowed(cell.as_str())
                         } else {
-                            let padding = std::iter::repeat_n(*fill, missing);
                             let mut padded =
                                 String::with_capacity(cell.len() + missing * fill.len_utf8());
-                            if *left {
-                                padded.extend(padding);
-                                padded.push_str(cell);
-                            } else {
-                                padded.push_str(cell);
-                                padded.extend(padding);
-                            }
+                            append_padded_text(&mut padded, cell, *fill, missing, *left);
                             Cow::Owned(padded)
                         }
                     }

@@ -4257,6 +4257,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "给各行编号左侧补零到四位",
+        query: "文本: 左填充 [4,\"0\"]\n7\n42\n2026",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在每行末尾填充字符",
+        query: "文本: 右填充 [3,\"·\"]\n北\n南区",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "依次清理、去重和自然排序文本行",
         query: "文本: 依次处理 [\"逐行去空白\",\"去空行\",\"按行去重\",\"自然排序\"] \" report10 \nreport2\n\nreport2\n\"",
     },
