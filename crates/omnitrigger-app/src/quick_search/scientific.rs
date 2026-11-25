@@ -586,15 +586,7 @@ fn scale_by_power_of_two(values: &[f64]) -> f64 {
         return value;
     }
     let bits = value.to_bits();
-    let fraction = bits & FRACTION_MASK;
-    let biased = ((bits >> FRACTION_BITS) & EXPONENT_MASK) as i64;
-    // 先把次正规数的有效位移到与正规数相同的位置。
-    let (significand, biased) = if biased == 0 {
-        let shift = fraction.leading_zeros() - (u64::BITS - f64::MANTISSA_DIGITS);
-        (fraction << shift, 1 - i64::from(shift))
-    } else {
-        (fraction | HIDDEN_BIT, biased)
-    };
+    let (significand, biased) = normalized_float_components(bits);
     let scaled_exponent = biased + power as i64;
     let sign = bits & SIGN_BIT;
     if scaled_exponent >= EXPONENT_MASK as i64 {
@@ -615,6 +607,32 @@ fn scale_by_power_of_two(values: &[f64]) -> f64 {
     let remaining = significand >> shift;
     let round_up = discarded > half || (discarded == half && !remaining.is_multiple_of(2));
     f64::from_bits(sign | (remaining + u64::from(round_up)))
+}
+
+pub(super) fn decompose_float(value: f64) -> (f64, i64) {
+    if value == 0. || !value.is_finite() {
+        return (value, 0);
+    }
+    // 有偏指数 1022 对应绝对值在 [0.5, 1) 的尾数。
+    const MANTISSA_EXPONENT: u64 = 1022;
+    let bits = value.to_bits();
+    let (significand, biased) = normalized_float_components(bits);
+    let mantissa = f64::from_bits(
+        (bits & SIGN_BIT) | (MANTISSA_EXPONENT << FRACTION_BITS) | (significand & FRACTION_MASK),
+    );
+    (mantissa, biased - MANTISSA_EXPONENT as i64)
+}
+
+fn normalized_float_components(bits: u64) -> (u64, i64) {
+    let fraction = bits & FRACTION_MASK;
+    let biased = ((bits >> FRACTION_BITS) & EXPONENT_MASK) as i64;
+    // 先把次正规数的有效位移到与正规数相同的位置。
+    if biased == 0 {
+        let shift = fraction.leading_zeros() - (u64::BITS - f64::MANTISSA_DIGITS);
+        (fraction << shift, 1 - i64::from(shift))
+    } else {
+        (fraction | HIDDEN_BIT, biased)
+    }
 }
 
 fn next_after(values: &[f64]) -> f64 {

@@ -10,6 +10,7 @@ use super::calculator::{evaluate, normalize, CalculationError};
 use super::conversion::ConversionError;
 use super::csv_tools::append_bounded_csv_row;
 use super::fraction::{repeating_radix, MAX_REPEATING_DECIMAL_PLACES};
+use super::scientific::decompose_float;
 
 const MAX_INTEGER_BITS: u64 = 8192;
 const MAX_GRAY_TABLE_ROWS: u16 = 256;
@@ -254,6 +255,11 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     }
     if operation == "位比对" || operation.eq_ignore_ascii_case("compare-bits") {
         return compare_bits(arguments, true);
+    }
+    if operation == "浮点分解" || operation.eq_ignore_ascii_case("frexp") {
+        let value = evaluate(arguments).map_err(RadixError::FloatCalculation)?;
+        let (mantissa, power) = decompose_float(value);
+        return Ok(format!("ldexp({},{power})", format_float_value(mantissa)));
     }
     if let Some(transform) = radix_report_operation(operation) {
         return transform(arguments);
@@ -1282,6 +1288,36 @@ mod tests {
         assert_eq!(
             convert_arbitrary_radix("浮点分数 64 @ NaN"),
             Err(RadixError::FloatFractionNonfinite)
+        );
+    }
+
+    #[test]
+    fn decomposes_calculator_values_into_reusable_exact_binary_expressions() {
+        assert_eq!(
+            convert_arbitrary_radix("浮点分解 0.375").as_deref(),
+            Ok("ldexp(0.75,-1)")
+        );
+        assert_eq!(
+            convert_arbitrary_radix("frexp 5e-324").as_deref(),
+            Ok("ldexp(0.5,-1073)")
+        );
+        assert_eq!(
+            convert_arbitrary_radix("frexp -0").as_deref(),
+            Ok("ldexp(-0,0)")
+        );
+        for input in ["0.1+0.2", "5e-324", "-3/8", "1.7976931348623157e308", "-0"] {
+            let decomposed = convert_arbitrary_radix(&format!("浮点分解 {input}")).unwrap();
+            assert_eq!(
+                evaluate(&decomposed).unwrap().to_bits(),
+                evaluate(input).unwrap().to_bits(),
+                "{input} -> {decomposed}"
+            );
+        }
+        assert_eq!(
+            convert_arbitrary_radix("浮点分解 1/0"),
+            Err(RadixError::FloatCalculation(
+                CalculationError::DivisionByZero
+            ))
         );
     }
 

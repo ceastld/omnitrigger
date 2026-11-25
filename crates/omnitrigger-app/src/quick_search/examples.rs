@@ -1981,6 +1981,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把算式结果拆为尾数与二进制指数",
+        query: "进制: 浮点分解 0.375",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "读取 64 位浮点位模式并查看浮点类别",
         query: "进制: 读浮点位 64 @ 0x8000000000000000",
     },
@@ -7362,6 +7367,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "格雷码表",
             "浮点位",
             "算式浮点位",
+            "浮点分解",
             "读浮点位",
             "浮点分数",
             "读浮点分数",
