@@ -670,6 +670,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "在同一张表中查看多个精确分位数",
+        query: "统计: 分位表 [25%,50%,75%] 4,1,3,2",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "求四分位数和四分位距",
         query: "统计: 四分位 4,1,3,2",
     },
@@ -6925,6 +6930,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
         Scope::Statistics => &[
             "频数CSV",
+            "分位表",
             "加权平均",
             "加权分位数",
             "加权分位表",

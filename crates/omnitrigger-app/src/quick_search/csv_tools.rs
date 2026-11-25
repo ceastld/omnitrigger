@@ -25,7 +25,7 @@ use super::statistics::{
     interpolate_ordered_quantile, parse_bin_edges, parse_probability, parse_statistical_weight,
     parse_weighted_pair, plot_binned_float_values, plot_binned_unweighted,
     report_binned_unweighted, unweighted_box_fences, WeightedDistribution, WeightedMean,
-    MAX_WEIGHTED_QUANTILES,
+    MAX_QUANTILE_PROBABILITIES,
 };
 use super::{
     bin_plot::BinPlot,
@@ -8622,8 +8622,8 @@ fn csv_quantile_probabilities(
     probabilities: &[Box<RawValue>],
     invalid: CsvError,
 ) -> Result<Vec<BigRational>, CsvError> {
-    if !(1..=MAX_WEIGHTED_QUANTILES).contains(&probabilities.len()) {
-        return Err(CsvError::Statistics(StatisticsError::WeightedQuantileList));
+    if !(1..=MAX_QUANTILE_PROBABILITIES).contains(&probabilities.len()) {
+        return Err(CsvError::Statistics(StatisticsError::QuantileList));
     }
     probabilities
         .iter()
@@ -12758,7 +12758,7 @@ B,乙
         );
         assert_eq!(
             transform_csv("分组分位表 [[1],2,[]] 地区,金额\n南,1"),
-            Err(CsvError::Statistics(StatisticsError::WeightedQuantileList)),
+            Err(CsvError::Statistics(StatisticsError::QuantileList)),
         );
     }
 

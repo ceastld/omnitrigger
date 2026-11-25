@@ -6,7 +6,7 @@ use num_rational::BigRational;
 use super::bin_plot::BinPlot;
 use super::box_plot::BoxPlot;
 use super::calculator::{evaluate, format_round_trip, normalize};
-use super::csv_tools::append_bounded_csv_row;
+use super::csv_tools::{append_bounded_csv_row, write_rows};
 use super::fraction::{
     calculate_fraction, combination_count, ensure_exact_size, format_signed_square_root,
     format_square_root, rational_power, FractionError, MAX_COMBINATORIAL_ARGUMENT,
@@ -21,7 +21,7 @@ use super::scatter_plot::ScatterPlot;
 
 pub(super) const MAX_VALUES: usize = 128;
 const MAX_BIN_EDGES: usize = 16;
-pub(super) const MAX_WEIGHTED_QUANTILES: usize = 16;
+pub(super) const MAX_QUANTILE_PROBABILITIES: usize = 16;
 const MAX_BINOMIAL_TRIALS: u32 = 128;
 const MAX_GEOMETRIC_TRIALS: u32 = 1024;
 const MAX_POISSON_COUNT: u32 = 128;
@@ -36,7 +36,7 @@ pub(super) enum StatisticsError {
     InvalidWeight,
     ZeroTotalWeight,
     WeightedReportTooLarge,
-    WeightedQuantileList,
+    QuantileList,
     InvalidProbability,
     InvalidTrimShare,
     InvalidBinEdges,
@@ -94,7 +94,7 @@ impl StatisticsError {
             Self::InvalidWeight => "填写 数值@非负权重，或粘贴数值和权重两列",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::WeightedReportTooLarge => "加权分布结果超过 1 MiB，请缩短数值或减少数据",
-            Self::WeightedQuantileList => "用方括号填写 1 至 16 个概率，例如 [25%,50%,75%]",
+            Self::QuantileList => "用方括号填写 1 至 16 个概率，例如 [25%,50%,75%]",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidTrimShare => "每端处理的比例须为 0 到小于 50%，例如 10%",
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
@@ -438,6 +438,13 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
                     probability,
                 )?)),
                 values.trim(),
+            )
+        }
+        "分位表" | "quantiles-csv" => {
+            let (probabilities, values) = parse_quantile_list(values.trim())?;
+            (
+                StatisticsOperation::Quantiles(QuantileReport::List(probabilities)),
+                values,
             )
         }
         operation @ ("截尾平均" | "trimmed-mean" | "缩尾平均" | "winsorized-mean") => {
@@ -836,25 +843,30 @@ fn weighted_quantile_value(
 }
 
 fn weighted_quantiles_csv(input: &str) -> Result<String, StatisticsError> {
+    let (probabilities, values) = parse_quantile_list(input)?;
+    let distribution = read_weighted_distribution(values)?;
+    distribution.quantiles_csv(probabilities)
+}
+
+fn parse_quantile_list(input: &str) -> Result<(Vec<BigRational>, &str), StatisticsError> {
     let (probabilities, values) = input
         .strip_prefix('[')
         .and_then(|input| input.split_once(']'))
-        .ok_or(StatisticsError::WeightedQuantileList)?;
+        .ok_or(StatisticsError::QuantileList)?;
     let probabilities: Vec<_> = split_top_level_commas(probabilities)
-        .take(MAX_WEIGHTED_QUANTILES + 1)
+        .take(MAX_QUANTILE_PROBABILITIES + 1)
         .collect();
     if probabilities.is_empty()
-        || probabilities.len() > MAX_WEIGHTED_QUANTILES
+        || probabilities.len() > MAX_QUANTILE_PROBABILITIES
         || probabilities.iter().any(|value| value.trim().is_empty())
     {
-        return Err(StatisticsError::WeightedQuantileList);
+        return Err(StatisticsError::QuantileList);
     }
     let probabilities = probabilities
         .into_iter()
         .map(|value| parse_probability(value.trim()))
         .collect::<Result<Vec<_>, _>>()?;
-    let distribution = read_weighted_distribution(values.trim_start())?;
-    distribution.quantiles_csv(probabilities)
+    Ok((probabilities, values.trim_start()))
 }
 
 #[derive(Default)]
@@ -964,6 +976,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
             operation.as_str(),
             "频数csv"
                 | "frequency-csv"
+                | "分位表"
+                | "quantiles-csv"
                 | "加权分位表"
                 | "weighted-quantiles-csv"
                 | "二项概率表"
@@ -2406,6 +2420,7 @@ pub(super) fn parse_probability(input: &str) -> Result<BigRational, StatisticsEr
 
 enum QuantileReport {
     Single(BigRational),
+    List(Vec<BigRational>),
     Quartiles,
     BoxSummary,
 }
@@ -2419,6 +2434,13 @@ fn report_quantiles(
     let quantile = |probability: &BigRational| interpolate_quantile(&values, count, probability);
     if let QuantileReport::Single(probability) = &report {
         return quantile(probability).map(|value| value.to_string());
+    }
+    if let QuantileReport::List(probabilities) = &report {
+        let mut rows = vec![["概率".to_owned(), "分位数".to_owned()]];
+        for probability in probabilities {
+            rows.push([probability.to_string(), quantile(probability)?.to_string()]);
+        }
+        return Ok(write_rows(&rows, ','));
     }
     let (lower, upper) = quartile_bounds(&values, count)?;
     let middle = quantile(&BigRational::new(1.into(), 2.into()))?;

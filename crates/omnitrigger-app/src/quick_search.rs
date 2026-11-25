@@ -5639,6 +5639,16 @@ mod tests {
                 "值,次数,频率\r\n1,2,2/3\r\n3,1,1/3",
             ),
             (
+                "分位表 [25%,50%,75%]",
+                "4,1,3,2",
+                "概率,分位数\r\n1/4,7/4\r\n1/2,5/2\r\n3/4,13/4",
+            ),
+            (
+                "QUANTILES-CSV [75%,50%,25%,50%]",
+                "频数 1@2,5@2",
+                "概率,分位数\r\n3/4,5\r\n1/2,3\r\n1/4,1\r\n1/2,3",
+            ),
+            (
                 "累计分布",
                 "1,1,3",
                 "值,累计次数,累计频率\r\n1,2,2/3\r\n3,3,1",
@@ -5667,6 +5677,24 @@ mod tests {
                 assert_eq!(results.refillable_text(), Some(expected), "{query}");
             }
         }
+    }
+
+    #[test]
+    fn rejects_invalid_statistics_quantile_tables() {
+        for query in [
+            "分位表 [] 1,2",
+            "分位表 [50%,] 1,2",
+            "分位表 [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0] 1,2",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::QuantileList)
+            );
+        }
+        assert_eq!(
+            calculate_statistics("分位表 [101%] 1,2"),
+            Err(StatisticsError::InvalidProbability)
+        );
     }
 
     #[test]
@@ -5829,7 +5857,7 @@ mod tests {
         }
         assert_eq!(
             calculate_statistics("加权分位表 [] 1@1"),
-            Err(StatisticsError::WeightedQuantileList)
+            Err(StatisticsError::QuantileList)
         );
         assert_eq!(
             calculate_statistics("加权分位表 [110%] 1@1"),
