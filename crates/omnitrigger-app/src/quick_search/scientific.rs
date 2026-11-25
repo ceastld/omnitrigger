@@ -189,6 +189,8 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             |n| nonnegative_integer(n).map_or(f64::NAN, |value| f64::from(value.count_ones()))
         }
         "sin" => f64::sin,
+        "sinc" => normalized_sinc,
+        "sinc_rad" => sinc_radians,
         "cos" => f64::cos,
         "tan" => f64::tan,
         "sinh" => f64::sinh,
@@ -247,6 +249,32 @@ fn atan2(values: &[f64]) -> f64 {
     match values {
         [y, x] => y.atan2(*x),
         _ => f64::NAN,
+    }
+}
+
+fn normalized_sinc(value: f64) -> f64 {
+    if value == 0. {
+        return 1.;
+    }
+    let integer = value.round();
+    let offset = value - integer;
+    if offset == 0. {
+        return 0.;
+    }
+    // 先减去最近的整数，再乘 π，保留接近整数时的微小差值。
+    let reduced = (PI * offset).sin() / (PI * value);
+    if integer.rem_euclid(2.) == 0. {
+        reduced
+    } else {
+        -reduced
+    }
+}
+
+fn sinc_radians(angle: f64) -> f64 {
+    if angle == 0. {
+        1.
+    } else {
+        angle.sin() / angle
     }
 }
 

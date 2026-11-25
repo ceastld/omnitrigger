@@ -783,6 +783,30 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_sinc_at_zero_integer_and_fractional_arguments() {
+        for (query, expected) in [
+            ("sinc(0)", "1"),
+            ("sinc(-0)", "1"),
+            ("sinc(5e-324)", "1"),
+            ("sinc(1e308)", "0"),
+            ("sinc(-3)", "0"),
+            ("sinc(0.5)", "0.636619772367581"),
+            ("sinc(-0.5)", "0.636619772367581"),
+            ("sinc_rad(0)", "1"),
+            ("sinc_rad(5e-324)", "1"),
+            ("sinc_rad(pi/2)", "0.636619772367581"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        let even = evaluate("sinc(1000000000000.0001220703125)").unwrap();
+        let odd = evaluate("sinc(1000000000001.0001220703125)").unwrap();
+        assert!((even - 1.220703095078824e-16).abs() < 1e-30);
+        assert!((odd + even).abs() < 1e-27);
+        assert!(calculate("sinc()").is_err());
+        assert!(calculate("sinc_rad(0,1)").is_err());
+    }
+
+    #[test]
     fn evaluates_degree_trigonometry_at_regular_angles_and_axes() {
         for (query, expected) in [
             ("sind(30)", "0.5"),

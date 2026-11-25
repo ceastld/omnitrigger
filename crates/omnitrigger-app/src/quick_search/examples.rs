@@ -256,6 +256,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算归一化 sinc 函数",
+        query: "sinc(0.5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按弧度计算 sin(x)/x",
+        query: "sinc_rad(pi/2)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按 a、b、c 解二次方程",
         query: "方程: 1, -3, 2",
     },

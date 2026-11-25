@@ -572,6 +572,7 @@
 - 输入 `quantile(0.25,4,1,3,2)` 或 `percentile(25,4,1,3,2)` 得到下四分位数 `1.75`，`iqr(4,1,3,2)` 得到四分位距 `1.5`。分位数使用排序后相邻样本间的线性插值。[R 的 Type 7 定义](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/quantile.html#types)
 - `degrees(asin(0.5))` 得到 `30`。用 `round(2.5)` 取最近整数时，恰好在中点会取偶数，结果为 `2`。`trunc(-1.8)` 向零取整得到 `-1`。
 - 用 `sind(30)`、`cosd(60)` 或 `tand(45)` 可直接按度数计算，分别得到 `0.5`、`0.5` 和 `1`。
+- `sinc(x)` 计算归一化的 `sin(πx)/(πx)`，例如 `sinc(0.5)` 得到约 `0.636619772367581`，非零整数处得 `0`。`sinc_rad(x)` 按弧度计算 `sin(x)/x`，两种函数在零处都取 `1`。 [SciPy 的 sinc 定义](https://docs.scipy.org/doc/scipy-1.15.3/reference/generated/scipy.special.sinc.html)
 - `asind(0.5)`、`acosd(0)` 和 `atand(1)` 直接返回角度 `30`、`90` 和 `45`。用 `atan2d(1,-1)` 可求方向角 `135` 度，参数按 `y, x` 输入。
 - 用 `sinh`、`cosh` 和 `tanh` 计算双曲正弦、余弦和正切。例如 `sinh(ln(2))` 得到 `0.75`。反函数是 `asinh`、`acosh` 和 `atanh`，其中 `acosh` 的参数至少为 1，`atanh` 的参数须在 -1 与 1 之间。 [Python 双曲函数](https://docs.python.org/3/library/math.html#hyperbolic-functions)
 - `round(2.675, 2)` 按两位小数舍入得到 `2.67`，`round(1250, -2)` 按百位舍入得到 `1200`。第二个参数可用整数指定保留位数。`log1p(x)` 与 `expm1(x)` 分别计算 `ln(1+x)` 与 `exp(x)-1`，适用于接近零的输入。
