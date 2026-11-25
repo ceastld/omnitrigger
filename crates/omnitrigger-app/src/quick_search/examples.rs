@@ -1920,6 +1920,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看相邻的两个可表示浮点数",
+        query: "进制: 浮点相邻 32 @ 0.1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "从位模式查看上下相邻的浮点数",
+        query: "进制: 读浮点相邻 64 @ 0x8000000000000000",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计两个整数相差的二进制位数",
         query: "进制: 汉明距离 0b1010,0b1100",
     },
@@ -6678,6 +6688,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "读浮点位",
             "浮点分数",
             "读浮点分数",
+            "浮点相邻",
+            "读浮点相邻",
             "汉明距离",
             "位比对",
             "位比对CSV",

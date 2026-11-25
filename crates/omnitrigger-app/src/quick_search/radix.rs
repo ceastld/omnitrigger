@@ -61,6 +61,7 @@ pub(super) enum RadixError {
     ReadFloatBitsArguments,
     FloatBitsWidthExceeded,
     FloatFractionNonfinite,
+    FloatAdjacentNan,
     SheetColumnArguments,
     RomanArguments,
     RomanRange,
@@ -102,6 +103,7 @@ impl RadixError {
             Self::FloatBitsArguments => "填写 32 或 64 位宽和浮点数，例如 32 @ 0.1",
             Self::ReadFloatBitsArguments => "填写 32 或 64 位宽和非负位模式，例如 32 @ 0x3DCCCCCD",
             Self::FloatFractionNonfinite => "无穷和 NaN 没有对应的有限分数",
+            Self::FloatAdjacentNan => "请填写可排序的浮点数，NaN 没有相邻数值",
             Self::WriteBitsArguments => {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
             }
@@ -539,6 +541,8 @@ fn radix_report_operation(operation: &str) -> Option<RadixReport> {
         "格雷码表" | "gray-code-table" => Some(gray_code_table),
         "浮点位" | "float-bits" => Some(|input| float_bits_csv(input, false)),
         "读浮点位" | "read-float-bits" => Some(|input| float_bits_csv(input, true)),
+        "浮点相邻" | "float-neighbors" => Some(|input| float_adjacent_csv(input, false)),
+        "读浮点相邻" | "read-float-neighbors" => Some(|input| float_adjacent_csv(input, true)),
         _ => None,
     }
 }
@@ -602,6 +606,47 @@ fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
             format_float_bits(bits, &format_float_value(value), value.classify(), 11, 52)
         }
     })
+}
+
+fn float_adjacent_csv(input: &str, decode: bool) -> Result<String, RadixError> {
+    let report = match parse_float(input, decode)? {
+        ParsedFloat::Single(value, _) if !value.is_nan() => {
+            format_float_adjacent([value.next_down(), value, value.next_up()], 8, |number| {
+                u64::from(number.to_bits())
+            })
+        }
+        ParsedFloat::Double(value, _) if !value.is_nan() => format_float_adjacent(
+            [value.next_down(), value, value.next_up()],
+            16,
+            f64::to_bits,
+        ),
+        _ => return Err(RadixError::FloatAdjacentNan),
+    };
+    Ok(report)
+}
+
+fn format_float_adjacent<T: Copy + Display + LowerExp + PartialEq>(
+    [lower, current, upper]: [T; 3],
+    hex_width: usize,
+    to_bits: impl Fn(T) -> u64,
+) -> String {
+    let mut report = String::from("字段,值");
+    for (label, value) in [
+        ("较小", (lower != current).then_some(lower)),
+        ("当前", Some(current)),
+        ("较大", (upper != current).then_some(upper)),
+    ] {
+        let (number, bits) = match value {
+            Some(value) => (
+                format_float_value(value),
+                format!("0x{:0hex_width$X}", to_bits(value)),
+            ),
+            None => ("\"\"".into(), "\"\"".into()),
+        };
+        write!(report, "\r\n{label}数值,{number}\r\n{label}位模式,{bits}")
+            .expect("写入 String 不会出错");
+    }
+    report
 }
 
 fn format_float_value(value: impl Display + LowerExp) -> String {
@@ -948,6 +993,30 @@ mod tests {
         assert_eq!(encoded, format!("0b1{}", "0".repeat(8191)));
         let decoded = convert_arbitrary_radix(&format!("读格雷码 {encoded}")).unwrap();
         assert_eq!(decoded, bit_mask(8192).to_string());
+    }
+
+    #[test]
+    fn lists_adjacent_floats_including_signed_zero_and_infinite_boundaries() {
+        let query = "浮点相邻 32 @ 0.1";
+        let expected = concat!(
+            "字段,值\r\n较小数值,0.099999994\r\n较小位模式,0x3DCCCCCC\r\n",
+            "当前数值,0.1\r\n当前位模式,0x3DCCCCCD\r\n",
+            "较大数值,0.10000001\r\n较大位模式,0x3DCCCCCE",
+        );
+        assert_eq!(convert_arbitrary_radix(query).as_deref(), Ok(expected));
+        assert_eq!(radix_csv_report(query).unwrap().as_deref(), Ok(expected));
+        let zero = convert_arbitrary_radix("读浮点相邻 64 @ 0x8000000000000000").unwrap();
+        assert!(zero.contains("较小数值,-5e-324\r\n较小位模式,0x8000000000000001"));
+        assert!(zero.contains("当前数值,-0\r\n当前位模式,0x8000000000000000"));
+        assert!(zero.ends_with("较大数值,5e-324\r\n较大位模式,0x0000000000000001"));
+        let infinity =
+            convert_arbitrary_radix("read-float-neighbors 64 @ 0x7FF0000000000000").unwrap();
+        assert!(infinity.contains("较小位模式,0x7FEFFFFFFFFFFFFF"));
+        assert!(infinity.ends_with("较大数值,\"\"\r\n较大位模式,\"\""));
+        assert_eq!(
+            convert_arbitrary_radix("读浮点相邻 32 @ 0x7FC00001"),
+            Err(RadixError::FloatAdjacentNan)
+        );
     }
 
     #[test]
