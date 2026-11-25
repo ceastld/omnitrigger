@@ -9177,6 +9177,17 @@ mod tests {
         assert!(
             matches!(resumed.results("bookmarks"), Results::Bookmarks(items) if items.len() == 1)
         );
+        resumed
+            .recent
+            .bookmarks
+            .rename(query, "月结: 原始")
+            .unwrap();
+        for filter in ["@", "@ＣＳＶ", " ＠ 月结: 原始 ", "@月结： 原始"] {
+            let list = resumed.results(filter);
+            assert!(matches!(&list, Results::Bookmarks(items) if items.len() == 1));
+            assert_eq!(list.suggested_input(0), Some(query), "{filter}");
+        }
+        assert!(matches!(resumed.results("@未知"), Results::Bookmarks(items) if items.is_empty()));
     }
 
     #[test]

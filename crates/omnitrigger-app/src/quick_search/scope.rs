@@ -86,6 +86,9 @@ pub(super) enum Scope {
 }
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
+    if let Some(term) = query.trim_start().strip_prefix(['@', '＠']) {
+        return Some((Scope::Bookmarks, term.trim()));
+    }
     if let Some((prefix, term)) = query.split_once([':', '：']) {
         let scope = parse_scope(prefix)?;
         let term = term.trim_start();
