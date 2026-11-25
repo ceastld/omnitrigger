@@ -960,6 +960,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算二项试验成功次数落在指定区间的概率",
+        query: "统计: 二项区间概率 4,1..2,50%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算不放回抽取的精确概率",
         query: "统计: 超几何概率 10,4,3,2",
     },
@@ -6802,6 +6807,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "负二项分位点",
                     "二项累计",
                     "二项至少",
+                    "二项区间概率",
                     "几何概率",
                     "几何累计",
                     "几何至少",

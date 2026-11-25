@@ -42,6 +42,7 @@ pub(super) enum StatisticsError {
     InvalidBinEdges,
     CumulativeThreshold,
     BinomialArguments,
+    BinomialRangeArguments,
     BinomialDistributionArguments,
     BinomialQuantileArguments,
     NegativeBinomialArguments,
@@ -96,6 +97,9 @@ impl StatisticsError {
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
             Self::CumulativeThreshold => "用 @ 隔开阈值和观测值，例如 2 @ 1,2,2,3",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
+            Self::BinomialRangeArguments => {
+                "填写试验次数、成功次数区间和单次成功概率，例如 4,1..2,50%。区间从 0 到试验总次数"
+            }
             Self::BinomialDistributionArguments => {
                 "用逗号填写试验次数和单次成功概率，例如 3,1/3，最多 128 次试验"
             }
@@ -340,6 +344,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "二项至少" | "binomial-at-least" => {
             return binomial_probability(values, DiscreteEvent::AtLeast)
         }
+        "二项区间概率" | "binomial-range" => return binomial_range_probability(values),
         "负二项概率" | "negative-binomial" => {
             return negative_binomial_probability(values, DiscreteEvent::Exactly)
         }
@@ -1513,21 +1518,63 @@ enum DiscreteEvent {
 }
 
 fn binomial_probability(input: &str, event: DiscreteEvent) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::BinomialArguments;
+    let (trials, successes, probability) = binomial_event_arguments(input, invalid)?;
+    let successes = binomial_success_count(successes, trials, invalid)?;
+    let probability = parse_probability(probability)?;
+    binomial_event_probability(trials, successes, probability, event)
+        .map(|result| result.to_string())
+}
+
+fn binomial_event_arguments(
+    input: &str,
+    invalid: StatisticsError,
+) -> Result<(u32, &str, &str), StatisticsError> {
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(trials), Some(successes), Some(probability), None) =
         (terms.next(), terms.next(), terms.next(), terms.next())
     else {
-        return Err(StatisticsError::BinomialArguments);
+        return Err(invalid);
     };
-    let trials = binomial_trial_count(trials, StatisticsError::BinomialArguments)?;
-    let successes = successes
+    Ok((
+        binomial_trial_count(trials, invalid)?,
+        successes,
+        probability,
+    ))
+}
+
+fn binomial_success_count(
+    count: &str,
+    trials: u32,
+    invalid: StatisticsError,
+) -> Result<u32, StatisticsError> {
+    count
+        .trim()
         .parse::<u32>()
         .ok()
         .filter(|&successes| successes <= trials)
-        .ok_or(StatisticsError::BinomialArguments)?;
+        .ok_or(invalid)
+}
+
+fn binomial_range_probability(input: &str) -> Result<String, StatisticsError> {
+    let invalid = StatisticsError::BinomialRangeArguments;
+    let (trials, range, probability) = binomial_event_arguments(input, invalid)?;
+    let (first, last) = range.split_once("..").ok_or(invalid)?;
+    let first = binomial_success_count(first, trials, invalid)?;
+    let last = binomial_success_count(last, trials, invalid)?;
+    if first > last {
+        return Err(invalid);
+    }
     let probability = parse_probability(probability)?;
-    binomial_event_probability(trials, successes, probability, event)
-        .map(|result| result.to_string())
+    if first == 0 && last == trials {
+        return Ok("1".to_owned());
+    }
+    let (denominator, masses) = binomial_masses(trials, &probability)?;
+    let numerator = masses
+        .skip(first as usize)
+        .take((last - first + 1) as usize)
+        .sum();
+    Ok(BigRational::new(numerator, denominator).to_string())
 }
 
 fn binomial_event_probability(
@@ -2829,6 +2876,42 @@ mod tests {
                 Err(StatisticsError::NegativeBinomialArguments)
             );
         }
+    }
+
+    #[test]
+    fn computes_inclusive_binomial_intervals_with_exact_fractions() {
+        for (query, expected) in [
+            ("二项区间概率 4,1..2,50%", "5/8"),
+            ("binomial-range 4,2..2,50%", "3/8"),
+            ("二项区间概率 ３，１ .. ２，１/３", "2/3"),
+            ("二项区间概率 3,0..3,1/3", "1"),
+            ("二项区间概率 0,0..0,1/3", "1"),
+            ("二项区间概率 4,0..2,0", "1"),
+            ("二项区间概率 4,1..2,0", "0"),
+            ("二项区间概率 4,1..2,1", "0"),
+            ("二项区间概率 4,2..4,1", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "二项区间概率 4,2..1,50%",
+            "二项区间概率 4,0..5,50%",
+            "二项区间概率 4,0...1,50%",
+            "二项区间概率 129,0..4,50%",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::BinomialRangeArguments)
+            );
+        }
+        assert_eq!(
+            calculate_statistics("二项区间概率 4,0..4,101%"),
+            Err(StatisticsError::InvalidProbability)
+        );
     }
 
     #[test]
