@@ -6028,6 +6028,14 @@ impl Render for QuickSearch {
         let query = self.input.read(cx).text();
         let naming_bookmark = self.bookmark_name_edit.is_some();
         let selected_text_file = self.results.selected_text_file(self.selected).is_some();
+        let preview_path = self.file_preview_path();
+        let title = if naming_bookmark {
+            "命名收藏"
+        } else {
+            preview_path
+                .and_then(|path| Path::new(path).file_name()?.to_str())
+                .unwrap_or("快速搜索")
+        };
         let refill_action = if naming_bookmark {
             None
         } else if let Some(refill) = &self.result_refill {
@@ -6086,14 +6094,16 @@ impl Render for QuickSearch {
                     .items_center()
                     .child(
                         div()
+                            .id("quick-search-title")
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(if naming_bookmark {
-                                "命名收藏"
-                            } else {
-                                "快速搜索"
+                            .child(title.to_owned())
+                            .when_some(preview_path, |title, path| {
+                                title.tooltip(theme::text_tooltip(path.to_owned().into()))
                             }),
                     )
-                    .child(div().flex_1())
                     .when(!naming_bookmark && query.trim().is_empty(), |header| {
                         header.child(
                             button("open-quick-search-tools", "工具", Tone::Ghost, true)
