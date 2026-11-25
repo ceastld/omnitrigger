@@ -1889,6 +1889,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "进制: 格雷码表 3,2,4",
     },
     Example {
+        icon: Icon::Layers,
+        title: "查看单精度浮点数的符号、指数和尾数字段",
+        query: "进制: 浮点位 32 @ 0.1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "读取 64 位浮点位模式并查看浮点类别",
+        query: "进制: 读浮点位 64 @ 0x8000000000000000",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "统计两个整数相差的二进制位数",
         query: "进制: 汉明距离 0b1010,0b1100",
@@ -6609,6 +6619,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "格雷码",
             "读格雷码",
             "格雷码表",
+            "浮点位",
+            "读浮点位",
             "汉明距离",
             "位比对",
             "位比对CSV",

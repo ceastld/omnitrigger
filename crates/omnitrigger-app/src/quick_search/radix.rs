@@ -1,4 +1,7 @@
-use std::{fmt::Write as _, num::IntErrorKind};
+use std::{
+    fmt::Write as _,
+    num::{FpCategory, IntErrorKind},
+};
 
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
@@ -54,6 +57,9 @@ pub(super) enum RadixError {
     GrayTableArguments,
     GrayTableTooLarge,
     BitComparisonArguments,
+    FloatBitsArguments,
+    ReadFloatBitsArguments,
+    FloatBitsWidthExceeded,
     SheetColumnArguments,
     RomanArguments,
     RomanRange,
@@ -75,6 +81,7 @@ impl RadixError {
             Self::ByteOrderWidthExceeded
             | Self::RotateBitsWidthExceeded
             | Self::ReverseWidthExceeded
+            | Self::FloatBitsWidthExceeded
             | Self::GrayCodeWidthExceeded => "整数超出所填位宽",
             Self::SignedByteOrderInteger => "填写有符号整数，可用十进制或 0x、0b、0o 前缀",
             Self::SignedByteOrderWidthExceeded => "有符号整数超出所填位宽",
@@ -91,6 +98,8 @@ impl RadixError {
             }
             Self::GrayTableTooLarge => "格雷码表超过 1 MiB，请减少行数或位宽",
             Self::BitComparisonArguments => "用逗号分隔两个非负整数，例如 0xA5,0xAD",
+            Self::FloatBitsArguments => "填写 32 或 64 位宽和浮点数，例如 32 @ 0.1",
+            Self::ReadFloatBitsArguments => "填写 32 或 64 位宽和非负位模式，例如 32 @ 0x3DCCCCCD",
             Self::WriteBitsArguments => {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
             }
@@ -517,14 +526,12 @@ fn reflected_gray_code(value: &BigUint) -> BigUint {
 type RadixReport = fn(&str) -> Result<String, RadixError>;
 
 fn radix_report_operation(operation: &str) -> Option<RadixReport> {
-    if operation.eq_ignore_ascii_case("位比对CSV")
-        || operation.eq_ignore_ascii_case("compare-bits-csv")
-    {
-        Some(bit_comparison_csv)
-    } else if operation == "格雷码表" || operation.eq_ignore_ascii_case("gray-code-table") {
-        Some(gray_code_table)
-    } else {
-        None
+    match operation.to_ascii_lowercase().as_str() {
+        "位比对csv" | "compare-bits-csv" => Some(bit_comparison_csv),
+        "格雷码表" | "gray-code-table" => Some(gray_code_table),
+        "浮点位" | "float-bits" => Some(|input| float_bits_csv(input, false)),
+        "读浮点位" | "read-float-bits" => Some(|input| float_bits_csv(input, true)),
+        _ => None,
     }
 }
 
@@ -532,6 +539,76 @@ pub(super) fn radix_csv_report(query: &str) -> Option<Result<String, RadixError>
     let (operation, arguments) = query.trim().split_once(char::is_whitespace)?;
     let transform = radix_report_operation(&normalize(operation))?;
     Some(transform(&normalize(arguments)))
+}
+
+fn float_bits_csv(input: &str, decode: bool) -> Result<String, RadixError> {
+    let invalid = if decode {
+        RadixError::ReadFloatBitsArguments
+    } else {
+        RadixError::FloatBitsArguments
+    };
+    let (width, input) = input.split_once('@').ok_or(invalid)?;
+    let input = input.trim();
+    match width.trim() {
+        "32" => {
+            let (value, bits) = if decode {
+                let bits = unsigned_bit_value(input, invalid)?;
+                let bits = u32::try_from(bits).map_err(|_| RadixError::FloatBitsWidthExceeded)?;
+                (f32::from_bits(bits), bits)
+            } else {
+                let value = input.parse::<f32>().map_err(|_| invalid)?;
+                (value, value.to_bits())
+            };
+            Ok(format_float_bits(
+                u64::from(bits),
+                &value.to_string(),
+                value.classify(),
+                8,
+                23,
+            ))
+        }
+        "64" => {
+            let (value, bits) = if decode {
+                let bits = unsigned_bit_value(input, invalid)?;
+                let bits = u64::try_from(bits).map_err(|_| RadixError::FloatBitsWidthExceeded)?;
+                (f64::from_bits(bits), bits)
+            } else {
+                let value = input.parse::<f64>().map_err(|_| invalid)?;
+                (value, value.to_bits())
+            };
+            Ok(format_float_bits(
+                bits,
+                &value.to_string(),
+                value.classify(),
+                11,
+                52,
+            ))
+        }
+        _ => Err(invalid),
+    }
+}
+
+fn format_float_bits(
+    bits: u64,
+    value: &str,
+    category: FpCategory,
+    exponent_width: usize,
+    fraction_width: usize,
+) -> String {
+    let sign = bits >> (exponent_width + fraction_width);
+    let exponent = (bits >> fraction_width) & ((1u64 << exponent_width) - 1);
+    let fraction = bits & ((1u64 << fraction_width) - 1);
+    let hex_width = (1 + exponent_width + fraction_width) / 4;
+    let category = match category {
+        FpCategory::Nan => "NaN",
+        FpCategory::Infinite => "无穷",
+        FpCategory::Zero => "零",
+        FpCategory::Subnormal => "次正规数",
+        FpCategory::Normal => "正规数",
+    };
+    format!(
+        "数值,类别,十六进制,符号位,指数位,尾数位\r\n{value},{category},0x{bits:0hex_width$X},{sign},{exponent:0exponent_width$b},{fraction:0fraction_width$b}"
+    )
 }
 
 fn gray_code_table(input: &str) -> Result<String, RadixError> {
@@ -823,6 +900,30 @@ mod tests {
         assert_eq!(encoded, format!("0b1{}", "0".repeat(8191)));
         let decoded = convert_arbitrary_radix(&format!("读格雷码 {encoded}")).unwrap();
         assert_eq!(decoded, bit_mask(8192).to_string());
+    }
+
+    #[test]
+    fn inspects_single_and_double_precision_bits_including_special_values() {
+        let single = "浮点位 32 @ 0.1";
+        let expected = "数值,类别,十六进制,符号位,指数位,尾数位\r\n0.1,正规数,0x3DCCCCCD,0,01111011,10011001100110011001101";
+        assert_eq!(convert_arbitrary_radix(single).as_deref(), Ok(expected));
+        assert_eq!(radix_csv_report(single).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            convert_arbitrary_radix("READ-FLOAT-BITS 32 @ 0x7FC00001").as_deref(),
+            Ok("数值,类别,十六进制,符号位,指数位,尾数位\r\nNaN,NaN,0x7FC00001,0,11111111,10000000000000000000001")
+        );
+        let negative_zero = convert_arbitrary_radix("读浮点位 64 @ 0x8000000000000000").unwrap();
+        assert!(negative_zero.contains("\r\n-0,零,0x8000000000000000,1,00000000000,"));
+        let subnormal = convert_arbitrary_radix("读浮点位 32 @ 0b1").unwrap();
+        assert!(subnormal.ends_with(",次正规数,0x00000001,0,00000000,00000000000000000000001"));
+        assert_eq!(
+            convert_arbitrary_radix("读浮点位 32 @ 0x100000000"),
+            Err(RadixError::FloatBitsWidthExceeded)
+        );
+        assert_eq!(
+            convert_arbitrary_radix("浮点位 16 @ 1"),
+            Err(RadixError::FloatBitsArguments)
+        );
     }
 
     #[test]
