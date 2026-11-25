@@ -6878,6 +6878,7 @@ mod tests {
         gpui::Application::new()
             .with_assets(crate::Assets)
             .run(move |cx| {
+                crate::message_input::init(cx);
                 let index = SearchIndex::default();
                 index.recent.last_input.borrow_mut().push_str("2**10");
                 let recent = index.recent.clone();
@@ -7494,6 +7495,38 @@ mod tests {
                     reopened.update(cx, verify_table_paging).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
+                    reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query("1 + 24 + 300", window, cx);
+                        })
+                        .unwrap();
+                    let window_handle = gpui::AnyWindowHandle::from(reopened);
+                    window_handle
+                        .update(cx, |_, window, cx| window.draw(cx).clear())
+                        .unwrap();
+                    for (key, text, selection) in [
+                        ("ctrl-left", "1 + 24 + 300", 9..9),
+                        ("ctrl-shift-left", "1 + 24 + 300", 4..9),
+                        ("ctrl-delete", "1 + 300", 4..4),
+                        ("ctrl-left", "1 + 300", 0..0),
+                        ("ctrl-shift-right", "1 + 300", 0..4),
+                        ("ctrl-backspace", "300", 0..0),
+                        ("ctrl-right", "300", 3..3),
+                        ("ctrl-backspace", "", 0..0),
+                    ] {
+                        window_handle
+                            .update(cx, |_, window, cx| {
+                                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+                            })
+                            .unwrap();
+                        reopened
+                            .update(cx, |search, _, cx| {
+                                let input = search.input.read(cx);
+                                assert_eq!(input.text(), text, "{key}");
+                                assert_eq!(input.selection(), selection, "{key}");
+                            })
+                            .unwrap();
+                    }
                     let query = "分数: 计算 ans+1";
                     reopened
                         .update(cx, |search, window, cx| {

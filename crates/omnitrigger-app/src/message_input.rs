@@ -25,6 +25,12 @@ actions!(
         Right,
         SelectLeft,
         SelectRight,
+        PreviousWord,
+        NextWord,
+        SelectPreviousWord,
+        SelectNextWord,
+        DeletePreviousWord,
+        DeleteNextWord,
         Home,
         End,
         SelectHome,
@@ -44,6 +50,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("right", Right, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-left", PreviousWord, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-right", NextWord, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-left", SelectPreviousWord, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-right", SelectNextWord, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-backspace", DeletePreviousWord, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-delete", DeleteNextWord, Some(KEY_CONTEXT)),
         KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
         KeyBinding::new("end", End, Some(KEY_CONTEXT)),
         KeyBinding::new("shift-home", SelectHome, Some(KEY_CONTEXT)),
@@ -274,6 +286,27 @@ impl MessageInput {
         self.move_to(self.next(), true, cx);
     }
 
+    fn previous_word(&mut self, _: &PreviousWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(word_start_before(&self.content, self.head), false, cx);
+    }
+
+    fn next_word(&mut self, _: &NextWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(word_start_after(&self.content, self.head), false, cx);
+    }
+
+    fn select_previous_word(
+        &mut self,
+        _: &SelectPreviousWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_to(word_start_before(&self.content, self.head), true, cx);
+    }
+
+    fn select_next_word(&mut self, _: &SelectNextWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(word_start_after(&self.content, self.head), true, cx);
+    }
+
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, false, cx);
     }
@@ -305,6 +338,30 @@ impl MessageInput {
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selection().is_empty() {
             self.anchor = self.next();
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_previous_word(
+        &mut self,
+        _: &DeletePreviousWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection().is_empty() {
+            self.anchor = word_start_before(&self.content, self.head);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+
+    fn delete_next_word(
+        &mut self,
+        _: &DeleteNextWord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection().is_empty() {
+            self.anchor = word_start_after(&self.content, self.head);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -539,6 +596,12 @@ impl Render for MessageInput {
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::previous_word))
+            .on_action(cx.listener(Self::next_word))
+            .on_action(cx.listener(Self::select_previous_word))
+            .on_action(cx.listener(Self::select_next_word))
+            .on_action(cx.listener(Self::delete_previous_word))
+            .on_action(cx.listener(Self::delete_next_word))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::select_home))
@@ -829,6 +892,19 @@ pub(super) fn input_preview(text: impl Into<SharedString>) -> SharedString {
     visible_input(&text.into()).0
 }
 
+fn word_start_before(text: &str, offset: usize) -> usize {
+    text.unicode_word_indices()
+        .take_while(|&(start, _)| start < offset)
+        .last()
+        .map_or(0, |(start, _)| start)
+}
+
+fn word_start_after(text: &str, offset: usize) -> usize {
+    text.unicode_word_indices()
+        .find(|&(start, _)| start > offset)
+        .map_or(text.len(), |(start, _)| start)
+}
+
 fn json_line_separators(text: &str) -> String {
     text.replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
@@ -926,6 +1002,21 @@ fn to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_word_starts_across_operators_whitespace_and_combining_characters() {
+        let text = "e\u{301}lan + 2**80\r\nnext";
+        let base = text.find('2').unwrap();
+        let exponent = text.find("80").unwrap();
+        let next = text.find("next").unwrap();
+        assert_eq!(word_start_before(text, "e\u{301}".len()), 0);
+        assert_eq!(word_start_before(text, next), exponent);
+        assert_eq!(word_start_before(text, exponent), base);
+        assert_eq!(word_start_after(text, 0), base);
+        assert_eq!(word_start_after(text, base), exponent);
+        assert_eq!(word_start_after(text, exponent), next);
+        assert_eq!(word_start_after(text, next), text.len());
+    }
 
     #[test]
     fn json_parameters_preserve_unicode_separators_when_loaded_or_pasted() {
