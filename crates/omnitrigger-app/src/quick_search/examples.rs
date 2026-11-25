@@ -2022,6 +2022,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在 A1 与 R1C1 格式间转换单元格范围",
+        query: "进制: 单元格范围 $B$3:D8",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算单元格范围的行数、列数与总个数",
+        query: "进制: 范围大小 D8:B3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把十进制整数转换为罗马数字",
         query: "进制: 罗马数字 2026",
     },
@@ -7256,6 +7266,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "位比对CSV",
             "表格列号",
             "单元格地址",
+            "单元格范围",
+            "范围大小",
             "罗马数字",
             "小数",
         ],

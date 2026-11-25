@@ -66,6 +66,7 @@ pub(super) enum RadixError {
     FloatAdjacentNan,
     SheetColumnArguments,
     SheetCellArguments,
+    SheetRangeArguments,
     RomanArguments,
     RomanRange,
     FractionalArguments,
@@ -119,6 +120,7 @@ impl RadixError {
             }
             Self::SheetColumnArguments => "填写 A 至 XFD 的列字母，或 1 至 16384 的整数列号",
             Self::SheetCellArguments => "填写单个单元格，例如 B3 或 R3C2，范围为 A1 至 XFD1048576",
+            Self::SheetRangeArguments => "用冒号分隔两个同格式地址，例如 B3:D8 或 R3C2:R8C4",
             Self::RomanArguments => "填写常用写法的罗马数字，例如 IV、CDXCIX 或 MMXXVI",
             Self::RomanRange => "填写 1 至 3999 的十进制整数，例如 2026",
             Self::FractionalArguments => "填写小数、原进制和目标进制，例如 10.625 从 10 到 2",
@@ -262,7 +264,15 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
         return convert_sheet_column(arguments);
     }
     if operation == "单元格地址" || operation.eq_ignore_ascii_case("cell-address") {
-        return convert_sheet_cell(arguments).ok_or(RadixError::SheetCellArguments);
+        return parse_sheet_cell(arguments)
+            .map(SheetCell::converted_address)
+            .ok_or(RadixError::SheetCellArguments);
+    }
+    if operation == "单元格范围" || operation.eq_ignore_ascii_case("cell-range") {
+        return convert_sheet_range(arguments, false);
+    }
+    if operation == "范围大小" || operation.eq_ignore_ascii_case("cell-range-size") {
+        return convert_sheet_range(arguments, true);
     }
     if operation == "罗马数字" || operation.eq_ignore_ascii_case("roman") {
         return convert_roman(arguments);
@@ -423,7 +433,33 @@ fn sheet_column_letters(mut column: u32) -> String {
     letters.into_iter().rev().collect()
 }
 
-fn convert_sheet_cell(input: &str) -> Option<String> {
+#[derive(PartialEq, Eq)]
+enum SheetNotation {
+    A1,
+    R1C1,
+}
+
+struct SheetCell {
+    row: u32,
+    column: u32,
+    notation: SheetNotation,
+}
+
+impl SheetCell {
+    fn converted_address(self) -> String {
+        let Self {
+            row,
+            column,
+            notation,
+        } = self;
+        match notation {
+            SheetNotation::A1 => format!("R{row}C{column}"),
+            SheetNotation::R1C1 => format!("${}${row}", sheet_column_letters(column)),
+        }
+    }
+}
+
+fn parse_sheet_cell(input: &str) -> Option<SheetCell> {
     let input = input.trim();
     if let Some((row, column)) = input
         .strip_prefix(['R', 'r'])
@@ -435,14 +471,42 @@ fn convert_sheet_cell(input: &str) -> Option<String> {
             ))
         })
     {
-        return Some(format!("${}${row}", sheet_column_letters(column)));
+        return Some(SheetCell {
+            row,
+            column,
+            notation: SheetNotation::R1C1,
+        });
     }
 
     let cell = input.strip_prefix('$').unwrap_or(input);
     let (column, row) = cell.split_at(cell.find(|ch: char| !ch.is_ascii_alphabetic())?);
     let column = sheet_column_number(column)?;
     let row = sheet_coordinate(row.strip_prefix('$').unwrap_or(row), MAX_SHEET_ROW)?;
-    Some(format!("R{row}C{column}"))
+    Some(SheetCell {
+        row,
+        column,
+        notation: SheetNotation::A1,
+    })
+}
+
+fn convert_sheet_range(input: &str, dimensions: bool) -> Result<String, RadixError> {
+    let (first, last) = input
+        .split_once(':')
+        .and_then(|(first, last)| Some((parse_sheet_cell(first)?, parse_sheet_cell(last)?)))
+        .filter(|(first, last)| first.notation == last.notation)
+        .ok_or(RadixError::SheetRangeArguments)?;
+    if dimensions {
+        let rows = first.row.abs_diff(last.row) + 1;
+        let columns = first.column.abs_diff(last.column) + 1;
+        let cells = u64::from(rows) * u64::from(columns);
+        Ok(format!("{rows} 行 × {columns} 列（{cells} 个单元格）"))
+    } else {
+        Ok(format!(
+            "{}:{}",
+            first.converted_address(),
+            last.converted_address()
+        ))
+    }
 }
 
 fn sheet_coordinate(value: &str, maximum: u32) -> Option<u32> {
@@ -1468,6 +1532,40 @@ mod tests {
             assert_eq!(
                 convert_arbitrary_radix(&format!("表格列号 {input}")),
                 Err(RadixError::SheetColumnArguments),
+            );
+        }
+    }
+
+    #[test]
+    fn converts_a1_and_r1c1_ranges_and_counts_their_inclusive_dimensions() {
+        for (query, expected) in [
+            ("单元格范围 $B$3:D8", "R3C2:R8C4"),
+            ("cell-range r3c2:r8c4", "$B$3:$D$8"),
+            ("单元格范围 ＄Ｂ３：Ｄ＄８", "R3C2:R8C4"),
+            ("单元格范围 D8:$B$3", "R8C4:R3C2"),
+            ("范围大小 D8:B3", "6 行 × 3 列（18 个单元格）"),
+            ("cell-range-size R3C2:R3C2", "1 行 × 1 列（1 个单元格）"),
+            (
+                "范围大小 A1:XFD1048576",
+                "1048576 行 × 16384 列（17179869184 个单元格）",
+            ),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "单元格范围 B3:R8C4",
+            "单元格范围 A1:XFE1",
+            "单元格范围 B3",
+            "范围大小 B3:D8:E9",
+            "范围大小 R[1]C2:R3C2",
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query),
+                Err(RadixError::SheetRangeArguments)
             );
         }
     }
