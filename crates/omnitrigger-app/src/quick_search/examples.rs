@@ -2465,6 +2465,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "找出异常偏长或偏短的耗时",
+        query: "时长: 离群值CSV 80ms,85ms,87ms,90ms,400ms to ms",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "在表格中比较多个时长分位数",
         query: r#"时长: 分位表 ["25%",0.5,"3/4"] 3s,1s,2s,4s"#,
     },

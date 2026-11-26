@@ -10,7 +10,9 @@ use super::csv_tools::write_rows;
 use super::fraction::{calculate_fraction, format_square_root};
 use super::operators::json_argument_and_tail;
 use super::ratio_allocation::{allocate_shares, split_allocation, RatioAllocationError};
-use super::statistics::{interpolate_ordered_quantile, parse_probability, variance_unweighted};
+use super::statistics::{
+    interpolate_ordered_quantile, parse_probability, unweighted_box_fences, variance_unweighted,
+};
 
 pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
 pub(super) const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
@@ -127,6 +129,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
     if matches!(operation, "摘要csv" | "summary-csv") {
         return duration_summary_csv(values, output.unwrap_or("s"));
+    }
+    if matches!(operation, "离群值csv" | "outliers-csv") {
+        return duration_outliers_csv(values, output.unwrap_or("s"));
     }
     let dispersion = match operation {
         "方差" | "样本方差" | "sample-variance" => Some((true, false)),
@@ -524,11 +529,42 @@ fn duration_summary_csv(input: &str, unit: &str) -> Result<String, DurationError
     Ok(write_rows(&rows, ','))
 }
 
+fn duration_outliers_csv(input: &str, unit: &str) -> Result<String, DurationError> {
+    let (symbol, divisor, _) =
+        numeric_duration_unit(unit).ok_or(DurationError::ExactUnitArguments)?;
+    let divisor = BigInt::from(divisor);
+    let values = duration_stat_values(input, DurationError::InvalidDispersionArguments)?;
+    let (lower, upper) =
+        unweighted_box_fences(values.clone()).map_err(|_| DurationError::OutOfRange)?;
+    let lower_display = (&lower / &divisor).to_string();
+    let upper_display = (&upper / &divisor).to_string();
+    let mut rows = vec![["原序号", "耗时", "下界", "上界", "单位"].map(str::to_owned)];
+    for (index, nanos) in values.into_iter().enumerate() {
+        if nanos < lower || nanos > upper {
+            rows.push([
+                (index + 1).to_string(),
+                (nanos / &divisor).to_string(),
+                lower_display.clone(),
+                upper_display.clone(),
+                symbol.to_owned(),
+            ]);
+        }
+    }
+    Ok(write_rows(&rows, ','))
+}
+
 pub(super) fn is_duration_report(query: &str) -> bool {
     query.split_whitespace().next().is_some_and(|operation| {
         matches!(
             normalize(operation).to_ascii_lowercase().as_str(),
-            "分位表" | "quantiles-csv" | "单位表" | "units-csv" | "摘要csv" | "summary-csv"
+            "分位表"
+                | "quantiles-csv"
+                | "单位表"
+                | "units-csv"
+                | "摘要csv"
+                | "summary-csv"
+                | "离群值csv"
+                | "outliers-csv"
         )
     })
 }
@@ -548,14 +584,22 @@ fn ordered_duration_values(
     durations: &str,
     invalid: DurationError,
 ) -> Result<Vec<BigRational>, DurationError> {
-    let mut values = duration_list_values(durations)
+    let mut values = duration_stat_values(durations, invalid)?;
+    values.sort_unstable();
+    Ok(values)
+}
+
+fn duration_stat_values(
+    durations: &str,
+    invalid: DurationError,
+) -> Result<Vec<BigRational>, DurationError> {
+    let values = duration_list_values(durations)
         .take(MAX_DURATION_STAT_TERMS + 1)
         .map(|value| value.map(|nanos| BigRational::from_integer(nanos.into())))
         .collect::<Result<Vec<_>, _>>()?;
     if !(1..=MAX_DURATION_STAT_TERMS).contains(&values.len()) {
         return Err(invalid);
     }
-    values.sort_unstable();
     Ok(values)
 }
 
@@ -1181,6 +1225,19 @@ mod tests {
             convert_duration("分位表 [0.5] 1ns,2ns"),
             Err(DurationError::Precision)
         );
+    }
+
+    #[test]
+    fn reports_only_duration_outliers_in_their_original_positions() {
+        assert_eq!(
+            convert_duration("离群值CSV 1s,-20s,2s,25s,3s,4s").as_deref(),
+            Ok("原序号,耗时,下界,上界,单位\r\n2,-20,-5/2,15/2,s\r\n4,25,-5/2,15/2,s")
+        );
+        assert_eq!(
+            convert_duration("outliers-csv 2ms,2ms,2ms to ms").as_deref(),
+            Ok("原序号,耗时,下界,上界,单位")
+        );
+        assert!(is_duration_report("离群值CSV 1s"));
     }
 
     #[test]
