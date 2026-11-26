@@ -2211,22 +2211,36 @@ fn supports_text_file_preview(path: &Path) -> bool {
     )
 }
 
-fn direct_file_preview_path(query: &str) -> Option<&str> {
-    local_files::local_disk_path(query)
-        .filter(|source| supports_text_file_preview(Path::new(source)))
+fn preview_file_url_input(query: &str) -> Option<&str> {
+    const PREFIX: &str = "file:///";
+    let source = path_tools::strip_path_quotes(query.trim());
+    source
+        .get(..PREFIX.len())?
+        .eq_ignore_ascii_case(PREFIX)
+        .then_some(source)
+}
+
+fn direct_file_preview_destination(query: &str) -> Option<Destination> {
+    let source = match local_files::local_disk_path(query) {
+        Some(path) => path.to_owned(),
+        None => path_tools::path_from_file_url(preview_file_url_input(query)?)
+            .ok()
+            .filter(|path| local_files::local_disk_path(path) == Some(path.as_str()))?,
+    };
+    let path = Path::new(&source);
+    if source.ends_with(['\\', '/']) || !supports_text_file_preview(path) {
+        return None;
+    }
+    Some(Destination::LocalFile {
+        name: path.file_name()?.to_str()?.to_owned(),
+        path: source,
+        is_directory: false,
+        size_bytes: None,
+    })
 }
 
 fn direct_file_preview_results(query: &str) -> Results {
-    let destination = direct_file_preview_path(query).and_then(|source| {
-        let path = Path::new(source);
-        Some(Destination::LocalFile {
-            name: path.file_name()?.to_str()?.to_owned(),
-            path: source.to_owned(),
-            is_directory: false,
-            size_bytes: None,
-        })
-    });
-    Results::Destinations(destination.into_iter().collect())
+    Results::Destinations(direct_file_preview_destination(query).into_iter().collect())
 }
 
 fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String> {
@@ -11160,6 +11174,43 @@ mod tests {
                     .results(&format!("预览文件: {path}"))
                     .selectable_count(),
                 0
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn previews_local_file_urls_with_encoded_names() {
+        let index = SearchIndex::default();
+        for query in [
+            "file:///C:/Reports/%E8%8C%B6%20%23.YAML",
+            "FILE:///C:/Reports/%E8%8C%B6%20%23.YAML",
+            r#""file:///C:/Reports/%E8%8C%B6%20%23.YAML""#,
+            "预览文件: file:///C:/Reports/%E8%8C%B6%20%23.YAML",
+        ] {
+            assert_eq!(
+                index.results(query).selected_text_file(0),
+                Some(r"C:\Reports\茶 #.YAML"),
+                "{query}",
+            );
+        }
+        for query in [
+            "file://server/share/report.yaml",
+            "file:////server/share/report.yaml",
+            "file:///C:/report.yaml?download=1",
+            "file:///C:/report.yaml#part",
+            "file:///C:/report.yaml%3Astream",
+            "file:///C:/report.exe",
+            "file:///C:/Reports/drafts.yaml/",
+            "https://example.invalid/report.yaml",
+        ] {
+            assert_eq!(index.results(query).selected_text_file(0), None, "{query}");
+            assert_eq!(
+                index
+                    .results(&format!("预览文件: {query}"))
+                    .selected_text_file(0),
+                None,
+                "{query}",
             );
         }
     }

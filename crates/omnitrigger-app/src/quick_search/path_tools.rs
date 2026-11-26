@@ -252,7 +252,7 @@ pub(super) fn file_url(path: &Path, is_directory: bool) -> Result<String, PathEr
         .map_err(|_| PathError::AbsolutePathRequired)
 }
 
-fn path_from_file_url(input: &str) -> Result<String, PathError> {
+pub(super) fn path_from_file_url(input: &str) -> Result<String, PathError> {
     let url = Url::parse(input).map_err(|_| PathError::InvalidFileUrl)?;
     if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
         return Err(PathError::InvalidFileUrl);
