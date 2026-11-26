@@ -1431,6 +1431,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算矩阵左零空间的维数和基",
+        query: "矩阵: 左零空间 1,2; 2,4; 3,6",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算矩阵行空间的维数和基",
         query: "矩阵: 行空间 1,2,3; 2,4,6; 0,1,1",
     },

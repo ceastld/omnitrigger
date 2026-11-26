@@ -37,7 +37,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -75,7 +75,11 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "行最简形" | "行最简" | "rref" => {
             reduced_row_echelon(parse_matrix(input)?).map(|(matrix, _)| format_matrix(matrix))
         }
-        "零空间" | "核空间" | "nullspace" => nullspace(parse_matrix(input)?),
+        "零空间" | "核空间" | "nullspace" => {
+            nullspace_basis(parse_matrix(input)?).map(|basis| format_basis("零空间", basis))
+        }
+        "左零空间" | "left-nullspace" => nullspace_basis(transpose(parse_matrix(input)?))
+            .map(|basis| format_basis("左零空间", basis)),
         "行空间" | "row-space" => {
             let (mut rows, pivots) = reduced_row_echelon(parse_matrix(input)?)?;
             rows.truncate(pivots.len());
@@ -360,10 +364,10 @@ fn reduced_row_echelon(mut matrix: Matrix) -> Result<(Matrix, Vec<usize>), Matri
     Ok((matrix, pivot_columns))
 }
 
-fn nullspace(matrix: Matrix) -> Result<String, MatrixError> {
+fn nullspace_basis(matrix: Matrix) -> Result<Matrix, MatrixError> {
     let (matrix, pivot_columns) = reduced_row_echelon(matrix)?;
     let width = matrix[0].len();
-    let basis = (0..width)
+    Ok((0..width)
         .filter(|column| !pivot_columns.contains(column))
         .map(|free| {
             let mut vector = vec![BigRational::default(); width];
@@ -373,8 +377,7 @@ fn nullspace(matrix: Matrix) -> Result<String, MatrixError> {
             }
             vector
         })
-        .collect::<Matrix>();
-    Ok(format_basis("零空间", basis))
+        .collect())
 }
 
 fn format_basis(space: &str, basis: Matrix) -> String {
@@ -697,6 +700,12 @@ mod tests {
             ("nullspace 1,2,-1; 0,0,1", "零空间维数 1\n-2, 1, 0"),
             ("核空间 0,0; 0,0", "零空间维数 2\n1, 0\n0, 1"),
             ("零空间 1,2; 3,4; 5,6", "零空间维数 0"),
+            (
+                "left-nullspace 1,2; 2,4; 3,6",
+                "左零空间维数 2\n-2, 1, 0\n-3, 0, 1",
+            ),
+            ("左零空间 1/2,1; 2,4", "左零空间维数 1\n-4, 1"),
+            ("左零空间 1,0,0; 0,1,0", "左零空间维数 0"),
         ] {
             assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
         }
