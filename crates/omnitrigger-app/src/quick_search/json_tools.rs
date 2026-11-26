@@ -213,6 +213,8 @@ enum JsonCsvOperation {
     LineGroupSummaries,
     LineGroupMedians,
     LineDuplicates,
+    LineFilter,
+    LineAnyFilter,
     ValidateLines,
     Differences,
     DuplicateKeys,
@@ -238,6 +240,8 @@ impl JsonCsvOperation {
             "行分组统计csv" | "jsonl-group-statistics-csv" => Some(Self::LineGroupSummaries),
             "行分组中位数csv" | "jsonl-group-median-csv" => Some(Self::LineGroupMedians),
             "行重复位置csv" | "jsonl-duplicate-positions-csv" => Some(Self::LineDuplicates),
+            "行筛选csv" | "filter-jsonl-csv" => Some(Self::LineFilter),
+            "行任一筛选csv" | "filter-any-jsonl-csv" => Some(Self::LineAnyFilter),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "对比csv" | "diff-csv" => Some(Self::Differences),
             "重复键csv" | "duplicate-keys-csv" => Some(Self::DuplicateKeys),
@@ -266,6 +270,8 @@ impl JsonCsvOperation {
             | Self::LineGroupSummaries
             | Self::LineGroupMedians
             | Self::LineDuplicates
+            | Self::LineFilter
+            | Self::LineAnyFilter
             | Self::ValidateLines
             | Self::Differences
             | Self::DuplicateKeys
@@ -295,6 +301,10 @@ impl JsonCsvOperation {
             Self::LineGroupSummaries => summarize_json_line_groups_csv(source),
             Self::LineGroupMedians => median_json_line_groups_csv(source),
             Self::LineDuplicates => duplicate_json_line_positions(source),
+            Self::LineFilter => filter_json_conditions(source, true, ConditionRecords::LineReport),
+            Self::LineAnyFilter => {
+                filter_json_conditions(source, false, ConditionRecords::LineReport)
+            }
             Self::ValidateLines => validate_json_lines_csv(source).map(|report| report.csv),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
             Self::DuplicateKeys => report_duplicate_json_keys(source, true),
@@ -1407,6 +1417,7 @@ impl JsonCondition {
 enum ConditionRecords {
     Array,
     Lines,
+    LineReport,
 }
 
 fn filter_json_conditions(
@@ -1441,15 +1452,33 @@ fn filter_json_conditions(
     };
     match records {
         ConditionRecords::Array => retain_json_items(read_json_array(source)?, keep),
-        ConditionRecords::Lines => {
-            let mut matched = Vec::new();
-            for (_, line) in json_lines(source) {
+        ConditionRecords::Lines | ConditionRecords::LineReport => {
+            let report = matches!(records, ConditionRecords::LineReport);
+            let mut output = if report {
+                String::from("原行号,原文")
+            } else {
+                String::new()
+            };
+            for (number, line) in json_lines(source) {
                 let item = parse_json_line(line)?;
-                if keep(item)? {
-                    matched.push(item.get());
+                if !keep(item)? {
+                    continue;
+                }
+                if report {
+                    let number = number.to_string();
+                    append_bounded_csv_row(
+                        &mut output,
+                        [number.as_str(), item.get()].into_iter(),
+                        JsonError::CsvOutputTooLarge,
+                    )?;
+                } else {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(item.get());
                 }
             }
-            Ok(matched.join("\n"))
+            Ok(output)
         }
     }
 }
@@ -4614,6 +4643,28 @@ mod tests {
             transform_json(&format!("{query}\n{{\"金额\":[]}}")),
             Err(JsonError::ExpectedScalar)
         );
+    }
+
+    #[test]
+    fn locates_filtered_json_lines_with_original_numbers_and_exact_values() {
+        let source = "{\"状态\":\"WARN 重试\",\"金额\":1.50}\r\n\r\n{\"状态\":\"INFO\",\"金额\":2e2}\n{\"状态\":\"WARN\",\"金额\":0.5}";
+        let conditions = r#"[["/状态","正则","^WARN"],["/金额",">=",1]]"#;
+        let all = format!("行筛选CSV {conditions}\n{source}");
+        let any = format!("行任一筛选CSV {conditions}\n{source}");
+        let expected_all =
+            "原行号,原文\r\n1,\"{\"\"状态\"\":\"\"WARN 重试\"\",\"\"金额\"\":1.50}\"";
+        assert_eq!(transform_json(&all).as_deref(), Ok(expected_all));
+        assert_eq!(json_csv_report(&all).unwrap().as_deref(), Ok(expected_all));
+        assert_eq!(
+            transform_json(&any).as_deref(),
+            Ok(concat!(
+                "原行号,原文\r\n1,\"{\"\"状态\"\":\"\"WARN 重试\"\",\"\"金额\"\":1.50}\"",
+                "\r\n3,\"{\"\"状态\"\":\"\"INFO\"\",\"\"金额\"\":2e2}\"",
+                "\r\n4,\"{\"\"状态\"\":\"\"WARN\"\",\"\"金额\"\":0.5}\"",
+            ))
+        );
+        let no_match = r#"行筛选CSV [["/金额",">",1]] {"金额":0}"#;
+        assert_eq!(transform_json(no_match).as_deref(), Ok("原行号,原文"));
     }
 
     #[test]
