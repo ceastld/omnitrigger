@@ -2525,6 +2525,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "对照多种速率的下载耗时",
+        query: r#"下载: 耗时对照CSV 1 GiB 按 ["4 MiB/s","8 MiB/s","32 MiB/s"]"#,
+    },
+    Example {
+        icon: Icon::Clock,
         title: "计算限时完成下载所需的平均速率",
         query: "下载: 所需速率 1 GiB 已传 25% 限时 24秒 to MiB/s",
     },

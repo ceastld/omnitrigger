@@ -11,7 +11,7 @@ use super::{
     complex::calculate_complex,
     conversion::{
         calculate_circuit, convert_exact_data, convert_wave, estimate_transfer,
-        exact_data_csv_report,
+        exact_data_csv_report, transfer_csv_report,
     },
     correlation_plot::CorrelationPlot,
     csv_tools::{
@@ -530,7 +530,9 @@ fn run_pipeline_steps(
                 }
                 Scope::Cidr => calculate_cidr(&query).map_err(|cause| cause.message()),
                 Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
-                Scope::TransferTime => estimate_transfer(&query).map_err(|cause| cause.message()),
+                Scope::TransferTime => transfer_csv_report(&query)
+                    .unwrap_or_else(|| estimate_transfer(&query))
+                    .map_err(|cause| cause.message()),
                 Scope::ExactData => exact_data_csv_report(&query)
                     .unwrap_or_else(|| convert_exact_data(&query))
                     .map_err(|cause| cause.message()),
@@ -618,6 +620,9 @@ fn prepare_pipeline_preview(
             let report = convert_duration(query).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))
         }
+        Scope::TransferTime => transfer_csv_report(query).map(|report| {
+            report_preview(report.map_err(|cause| cause.message()), error, csv_error)
+        }),
         Scope::ExactData => exact_data_csv_report(query).map(|report| {
             report_preview(report.map_err(|cause| cause.message()), error, csv_error)
         }),

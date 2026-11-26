@@ -33,6 +33,7 @@ pub(super) enum ConversionError {
     DifferentDimensions,
     InvalidTransfer,
     InvalidTransferTimeUnit,
+    InvalidTransferRates,
     InvalidTransferDuration,
     InvalidTransferProgress,
     InvalidTransferEstimate,
@@ -88,6 +89,7 @@ impl ConversionError {
             Self::DifferentDimensions => "两个单位不属于同一类型",
             Self::InvalidTransfer => "输入非负的数据量和大于零的数据速率",
             Self::InvalidTransferTimeUnit => "精确耗时单位可用 ns、µs、ms、s、min、h 或 d",
+            Self::InvalidTransferRates => "用数组填写 1 至 16 个数据速率，每个速率用双引号括起",
             Self::InvalidTransferDuration => {
                 "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
@@ -730,6 +732,15 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
     convert_duration(&format!("{seconds:.3}s")).map_err(|_| ConversionError::OutOfRange)
 }
 
+pub(super) fn transfer_csv_report(query: &str) -> Option<Result<String, ConversionError>> {
+    let arguments = batch_arguments(query.trim_start(), "耗时对照CSV", "time-comparison-csv")?;
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Some(Err(ConversionError::TooLong));
+    }
+    let input = normalize(arguments).replace(char::is_whitespace, " ");
+    Some(transfer_time_comparison_csv(&input))
+}
+
 fn transfer_rate_arguments(input: &str) -> Result<(&str, &str), ConversionError> {
     let (data, rate) = input
         .split_once('按')
@@ -809,6 +820,45 @@ fn exact_transfer_time(input: &str, use_progress: bool) -> Result<String, Conver
     format_exact_transfer_time(&(bits / bits_per_second), targets)
 }
 
+fn transfer_time_comparison_csv(input: &str) -> Result<String, ConversionError> {
+    const MAX_RATES: usize = 16;
+    let (input, target) = split_conversion(input).unwrap_or((input, "s"));
+    let (data, rates) = transfer_rate_arguments(input)?;
+    let rates: Vec<String> =
+        serde_json::from_str(rates).map_err(|_| ConversionError::InvalidTransferRates)?;
+    if !(1..=MAX_RATES).contains(&rates.len()) || rates.iter().any(|rate| rate.trim().is_empty()) {
+        return Err(ConversionError::InvalidTransferRates);
+    }
+    let progress = transfer_progress_arguments(data)?;
+    let (total, completed) =
+        progress.map_or((data, None), |(total, completed)| (total, Some(completed)));
+    let (bits, dimension) = exact_data_source(total)?;
+    if dimension != Dimension::Data || bits.numer().sign() == Sign::Minus {
+        return Err(ConversionError::InvalidTransfer);
+    }
+    let bits = if let Some(completed) = completed {
+        let transferred = exact_transferred_bits(&bits, completed)?;
+        bits - transferred
+    } else {
+        bits
+    };
+    let mut rows = vec![vec![
+        "输入速率".to_owned(),
+        "耗时".to_owned(),
+        "单位".to_owned(),
+    ]];
+    for rate in rates {
+        let rate = rate.trim();
+        let (bits_per_second, dimension) = exact_data_source(rate)?;
+        if dimension != Dimension::DataRate || bits_per_second.numer().sign() != Sign::Plus {
+            return Err(ConversionError::InvalidTransfer);
+        }
+        let (amount, symbol) = exact_transfer_time_amount(&(&bits / bits_per_second), target)?;
+        rows.push(vec![rate.to_owned(), amount.to_string(), symbol.to_owned()]);
+    }
+    Ok(write_rows(&rows, ','))
+}
+
 fn required_transfer_rate(input: &str) -> Result<String, ConversionError> {
     let (input, targets) = split_conversion(input).unwrap_or((input, "b/s"));
     let (progress, deadline) = input
@@ -858,12 +908,20 @@ fn format_exact_transfer_time(
     targets: &str,
 ) -> Result<String, ConversionError> {
     format_targets(targets, |target| {
-        let (symbol, divisor, _) = numeric_duration_unit(&target.to_ascii_lowercase())
-            .ok_or(ConversionError::InvalidTransferTimeUnit)?;
-        let amount = seconds * BigRational::new(NANOS_PER_SECOND.into(), divisor.into());
-        ensure_exact_size(&amount).map_err(|_| ConversionError::OutOfRange)?;
+        let (amount, symbol) = exact_transfer_time_amount(seconds, target)?;
         Ok(format!("{amount} {symbol}"))
     })
+}
+
+fn exact_transfer_time_amount(
+    seconds: &BigRational,
+    target: &str,
+) -> Result<(BigRational, &'static str), ConversionError> {
+    let (symbol, divisor, _) = numeric_duration_unit(&target.to_ascii_lowercase())
+        .ok_or(ConversionError::InvalidTransferTimeUnit)?;
+    let amount = seconds * BigRational::new(NANOS_PER_SECOND.into(), divisor.into());
+    ensure_exact_size(&amount).map_err(|_| ConversionError::OutOfRange)?;
+    Ok((amount, symbol))
 }
 
 fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, ConversionError> {
@@ -3182,6 +3240,30 @@ mod tests {
         assert_eq!(
             estimate_transfer("所需速率 1 GiB 已传 25% 限时"),
             Err(ConversionError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn compares_exact_transfer_times_at_several_rates() {
+        assert_eq!(
+            transfer_csv_report(r#"耗时对照CSV 1 GiB 已传 25% 按 ["32 MiB/s","4 MiB/s"] to min"#)
+                .unwrap()
+                .as_deref(),
+            Ok("输入速率,耗时,单位\r\n32 MiB/s,2/5,min\r\n4 MiB/s,16/5,min")
+        );
+        assert_eq!(
+            transfer_csv_report(r#"time-comparison-csv 3 b at ["1 Gb/s"] to ns"#)
+                .unwrap()
+                .as_deref(),
+            Ok("输入速率,耗时,单位\r\n1 Gb/s,3,ns")
+        );
+        assert_eq!(
+            transfer_csv_report(r#"耗时对照CSV 1 GB 按 []"#),
+            Some(Err(ConversionError::InvalidTransferRates))
+        );
+        assert_eq!(
+            transfer_csv_report(r#"耗时对照CSV 1 GB 按 ["0 Mb/s"]"#),
+            Some(Err(ConversionError::InvalidTransfer))
         );
     }
 

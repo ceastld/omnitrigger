@@ -105,7 +105,7 @@ use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
     calculate_unit_price, conversion_target_input, convert, convert_batch, convert_batch_csv,
     convert_exact_data, convert_map_scale, convert_period, convert_wave, estimate_transfer,
-    exact_data_csv_report, suggested_targets, ConversionError,
+    exact_data_csv_report, suggested_targets, transfer_csv_report, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError, CsvKeywordMatch};
 use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelinePreview};
@@ -1158,7 +1158,10 @@ impl Results {
                 Scope::Timecode => {
                     Self::text_value(convert_timecode(term).map_err(ValueError::Timecode))
                 }
-                Scope::TransferTime => Self::conversion_value(estimate_transfer(term), None),
+                Scope::TransferTime => transfer_csv_report(term).map_or_else(
+                    || Self::conversion_value(estimate_transfer(term), None),
+                    |report| Self::table_value(report.map_err(ValueError::Conversion)),
+                ),
                 Scope::ExactData => exact_data_csv_report(term).map_or_else(
                     || Self::conversion_value(convert_exact_data(term), None),
                     |report| Self::table_value(report.map_err(ValueError::Conversion)),
@@ -8246,6 +8249,22 @@ mod tests {
     }
 
     #[test]
+    fn previews_transfer_time_comparisons_directly_and_in_pipelines() {
+        for query in [
+            r#"下载: 耗时对照CSV 12 MB 按 ["3 MB/s","8 MB/s"]"#,
+            r#"处理: [{"模板":"下载: 耗时对照CSV {结果} 按 [\"3 MB/s\",\"8 MB/s\"]"}] 12 MB"#,
+        ] {
+            let result = for_query(query, &[]);
+            assert!(result.table_preview().is_some(), "{query}");
+            assert_eq!(
+                result.refillable_text(),
+                Some("输入速率,耗时,单位\r\n3 MB/s,4,s\r\n8 MB/s,3/2,s"),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn previews_exact_data_units_directly_and_in_pipelines() {
         assert!(matches!(
             for_query("数据换算: 单位", &[]),
@@ -12648,6 +12667,7 @@ mod tests {
                     "下载: 精确速率 1 GiB 用时 60秒 to MiB/s",
                     "下载: 精确速率 1 GiB 已传 25% 用时 8秒 to MiB/s",
                     "数据换算: 1 MiB/s to MB/s",
+                    r#"下载: 耗时对照CSV 1 GiB 按 ["4 MiB/s","8 MiB/s","32 MiB/s"]"#,
                     "下载: 精确传输量 1/3 MiB/s 用时 3秒 to KiB",
                     "下载: 600 MB 用时 2分钟",
                     "8Mbps to MB/s",
