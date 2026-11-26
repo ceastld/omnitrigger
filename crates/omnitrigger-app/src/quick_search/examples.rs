@@ -5994,6 +5994,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行反查舍入前的原值区间",
+        query: "CSV: 舍入区间列 [\"原值范围\",\"显示值\",2]\n编号,显示值\n001,1.24\n002,1.23\n003,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 数值列按指定有效数字写成科学记数法",
         query: "CSV: 有效数字列 [[2,\"比率\"],3] 编号,金额,比率\n001,9.995,1/3\n002,-1.245,0.0012345\n003,0,",
     },

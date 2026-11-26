@@ -1420,7 +1420,10 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places)
 }
 
-fn decimal_rounding_interval(value: BigRational, places: u32) -> Result<String, FractionError> {
+pub(super) fn decimal_rounding_interval(
+    value: BigRational,
+    places: u32,
+) -> Result<String, FractionError> {
     let scale = BigInt::from(10u8).pow(places);
     let tick = &value * &scale;
     if !tick.is_integer() {

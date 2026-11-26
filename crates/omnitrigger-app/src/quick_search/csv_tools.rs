@@ -47,11 +47,11 @@ use super::{
         format_clock_duration, DurationError,
     },
     fraction::{
-        calculate_fraction, calculate_fraction_with_variables, ensure_exact_size,
-        exact_tolerance_limit, format_engineering_notation, format_significant_digits,
-        format_square_root, format_square_root_sum, fraction_alignment_converter,
-        interpolate_fraction, parse_fraction_literal, rounded_decimal, valid_exact_tolerances,
-        FractionError, MAX_DECIMAL_PLACES,
+        calculate_fraction, calculate_fraction_with_variables, decimal_rounding_interval,
+        ensure_exact_size, exact_tolerance_limit, format_engineering_notation,
+        format_significant_digits, format_square_root, format_square_root_sum,
+        fraction_alignment_converter, interpolate_fraction, parse_fraction_literal,
+        rounded_decimal, valid_exact_tolerances, FractionError, MAX_DECIMAL_PLACES,
     },
     json_tools::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
@@ -254,6 +254,7 @@ pub(super) enum CsvError {
     ValidationRulesTooLarge,
     AllowedValuesCheckArguments,
     DecimalColumnsArguments,
+    RoundingIntervalColumnArguments,
     DecimalColumnsTooLarge,
     SignificantColumnsArguments,
     SignificantColumnsTooLarge,
@@ -616,6 +617,7 @@ impl CsvError {
             Self::ValidationRulesTooLarge => "规则检查结果超过 1 MiB，请缩小表格范围",
             Self::AllowedValuesCheckArguments => "填写列列表和非空的允许值列表，每个允许值只写一次",
             Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
+            Self::RoundingIntervalColumnArguments => "填写新列名、来源列和 0 至 100 位小数，例如 [\"原值范围\",\"显示值\",2]",
             Self::DecimalColumnsTooLarge => "小数列结果超过 1 MiB，请缩小表格范围",
             Self::SignificantColumnsArguments => "填写不同的列和 1 至 100 位有效数字，例如 [[\"金额\",3],3]",
             Self::SignificantColumnsTooLarge => "有效数字列结果超过 1 MiB，请缩小表格范围",
@@ -1401,6 +1403,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return report_csv_column_pair_tolerance(input)
         }
         "容差标记列" | "tolerance-marker-column" => return append_csv_tolerance_marker(input),
+        "舍入区间列" | "rounding-interval-column" => {
+            return append_csv_rounding_intervals(input)
+        }
         "两列偏差摘要" | "column-pair-error-summary" => {
             return summarize_csv_column_pair_errors(input)
         }
@@ -3848,6 +3853,20 @@ fn csv_tolerance_values(
         return Err(invalid);
     }
     Ok((relative, absolute))
+}
+
+fn append_csv_rounding_intervals(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::RoundingIntervalColumnArguments;
+    let ((name, source, places), data) =
+        json_argument_and_data::<(String, ColumnReference, u32)>(input, invalid)?;
+    if name.trim().is_empty() || name.contains('\0') || places > MAX_DECIMAL_PLACES {
+        return Err(invalid);
+    }
+    let rows = read_rows(data.strip_prefix('\u{feff}').unwrap_or(data), ',')?;
+    append_from_one_column(&rows, &name, source, |text| {
+        let value = parse_fraction_literal(text.trim()).map_err(FractionError::message)?;
+        decimal_rounding_interval(value, places).map_err(FractionError::message)
+    })
 }
 
 fn append_csv_tolerance_marker(input: &str) -> Result<String, CsvError> {
@@ -8646,6 +8665,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "out-of-tolerance-columns"
             | "容差标记列"
             | "tolerance-marker-column"
+            | "舍入区间列"
+            | "rounding-interval-column"
             | "两列偏差摘要"
             | "column-pair-error-summary"
             | "数值对比列"
@@ -11620,6 +11641,39 @@ mod tests {
                 "{field}",
             );
         }
+    }
+
+    #[test]
+    fn appends_rounding_intervals_preserving_csv_source_values_and_empty_cells() {
+        assert_eq!(
+            transform_csv(concat!(
+                "舍入区间列 [\"原值范围\",\"显示值\",2] 编号,显示值\n",
+                "001,1.24\n002,1.23\n003,\n004,-1.24",
+            ))
+            .as_deref(),
+            Ok(concat!(
+                "编号,显示值,原值范围\r\n",
+                "001,1.24,\"[1.235, 1.245]\"\r\n",
+                "002,1.23,\"(1.225, 1.235)\"\r\n",
+                "003,\"\",\"\"\r\n",
+                "004,-1.24,\"[-1.245, -1.235]\"",
+            ))
+        );
+        assert_eq!(
+            transform_csv("rounding-interval-column [\"区间\",1,0] 值\n3"),
+            Ok("值,区间\r\n3,\"(2.5, 3.5)\"".into())
+        );
+        assert_eq!(
+            transform_csv("舍入区间列 [\"范围\",2,2] 编号,值\n001,\n002,1.234"),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: FractionError::RoundingIntervalValue.message(),
+            })
+        );
+        assert_eq!(
+            transform_csv("舍入区间列 [\"范围\",1,101] 值\n0"),
+            Err(CsvError::RoundingIntervalColumnArguments)
+        );
     }
 
     #[test]
