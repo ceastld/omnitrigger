@@ -2410,6 +2410,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查看一天内尚未占用的时刻区间",
+        query: "时长: 空档时段CSV 22:00 到 02:00; 06:00 至 09:00; 08:30 到 10:00 to min",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "计算一天内未被任何时段覆盖的时长",
+        query: "时长: 空档时长 22:00 到 02:00; 06:00 至 09:00; 08:30 到 10:00",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按精确分数缩放时长",
         query: "时长: 缩放 01:30:00 @ 2/3",
     },
@@ -8193,6 +8203,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "重叠",
             "合并时段CSV",
             "时段覆盖",
+            "空档时段CSV",
+            "空档时长",
             "比率",
             "缩放",
             "分摊",

@@ -138,7 +138,10 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         return duration_outliers_csv(values, output.unwrap_or("s"));
     }
     if matches!(operation, "合并时段csv" | "clock-union-csv") {
-        return clock_union_csv(values, output);
+        return clock_spans_csv(merged_clock_spans(values)?, output);
+    }
+    if matches!(operation, "空档时段csv" | "clock-gaps-csv") {
+        return clock_spans_csv(clock_span_gaps(merged_clock_spans(values)?), output);
     }
     let dispersion = match operation {
         "方差" | "样本方差" | "sample-variance" => Some((true, false)),
@@ -161,12 +164,17 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         "频数中位数" | "frequency-median" => (median_duration_list(values, true)?, false),
         "扣除休息" | "subtract-break" => (elapsed_after_break(values)?, false),
         "重叠" | "overlap" => (clock_overlap(values)?, false),
-        "时段覆盖" | "clock-coverage" => {
+        "时段覆盖" | "clock-coverage" | "空档时长" | "clock-free-time" => {
             let covered: u128 = merged_clock_spans(values)?
                 .into_iter()
                 .map(|(start, end)| end - start)
                 .sum();
-            (covered as i128, false)
+            let total = if matches!(operation, "空档时长" | "clock-free-time") {
+                NANOS_PER_DAY - covered
+            } else {
+                covered
+            };
+            (total as i128, false)
         }
         "中位数" | "median" => (median_duration_list(values, false)?, false),
         "分位数" | "quantile" => (quantile_duration_list(values)?, false),
@@ -287,7 +295,22 @@ fn merged_clock_spans(input: &str) -> Result<Vec<(u128, u128)>, DurationError> {
     Ok(merged)
 }
 
-fn clock_union_csv(input: &str, unit: Option<&str>) -> Result<String, DurationError> {
+fn clock_span_gaps(spans: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
+    let mut gaps = Vec::new();
+    let mut previous_end = 0;
+    for (start, end) in spans {
+        if previous_end < start {
+            gaps.push((previous_end, start));
+        }
+        previous_end = end;
+    }
+    if previous_end < NANOS_PER_DAY {
+        gaps.push((previous_end, NANOS_PER_DAY));
+    }
+    gaps
+}
+
+fn clock_spans_csv(spans: Vec<(u128, u128)>, unit: Option<&str>) -> Result<String, DurationError> {
     let target = unit
         .map(|unit| numeric_duration_unit(unit).ok_or(DurationError::ExactUnitArguments))
         .transpose()?;
@@ -296,7 +319,7 @@ fn clock_union_csv(input: &str, unit: Option<&str>) -> Result<String, DurationEr
         |(symbol, _, _)| format!("时长 ({symbol})"),
     );
     let mut rows = vec![["起始时刻".to_owned(), "截止时刻".to_owned(), header]];
-    for (start, end) in merged_clock_spans(input)? {
+    for (start, end) in spans {
         let elapsed = end - start;
         let duration = match target {
             Some((_, divisor, _)) => exact_duration_number(elapsed as i128, divisor).to_string(),
@@ -638,6 +661,8 @@ pub(super) fn is_duration_report(query: &str) -> bool {
                 | "outliers-csv"
                 | "合并时段csv"
                 | "clock-union-csv"
+                | "空档时段csv"
+                | "clock-gaps-csv"
         )
     })
 }
@@ -1224,6 +1249,32 @@ mod tests {
         assert_eq!(
             convert_duration("时段覆盖 08:00 到 09:00; 10:00"),
             Err(DurationError::InvalidClockSpans)
+        );
+    }
+
+    #[test]
+    fn finds_free_clock_spans_before_between_and_after_occupied_clock_ranges() {
+        let ranges = "22:00 到 02:00; 06:00 至 09:00; 08:30 到 10:00; 12:00 到 12:00";
+        let report = format!("空档时段CSV {ranges} to min");
+        assert_eq!(
+            convert_duration(&report).as_deref(),
+            Ok("起始时刻,截止时刻,时长 (min)\r\n02:00:00,06:00:00,240\r\n10:00:00,22:00:00,720")
+        );
+        assert!(is_duration_report(&report));
+        assert_eq!(
+            convert_duration(&format!("空档时长 {ranges}")).as_deref(),
+            Ok("16:00:00")
+        );
+        assert_eq!(
+            convert_duration("clock-gaps-csv 08:00到09:00").as_deref(),
+            Ok(concat!(
+                "起始时刻,截止时刻,时长",
+                "\r\n00:00:00,08:00:00,08:00:00\r\n09:00:00,24:00:00,15:00:00",
+            ))
+        );
+        assert_eq!(
+            convert_duration("clock-gaps-csv 00:00到12:00; 12:00到00:00").as_deref(),
+            Ok("起始时刻,截止时刻,时长")
         );
     }
 
