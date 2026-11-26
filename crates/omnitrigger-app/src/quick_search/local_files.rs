@@ -60,6 +60,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("大小合计", "汇总文件数和字节数"),
     ("后缀统计", "按扩展名汇总数量"),
     ("后缀大小", "按扩展名汇总字节数"),
+    ("同主名CSV", "列出主名相同的文件及其路径"),
     ("修改月份统计", "按本地修改月份计数"),
     ("创建月份统计", "按本地创建月份计数"),
     ("修改周统计", "按本地修改日期的 ISO 周计数"),
@@ -409,6 +410,10 @@ impl LocalFilesIndex {
             );
             return Results::table_value_with_columns(Ok(csv), 2);
         }
+        if query.output == FileOutput::SharedStemCsv {
+            let csv = shared_stem_csv(matches.into_iter().map(|(_, entry)| entry));
+            return Results::table_value_with_columns(Ok(csv), 3);
+        }
         if let FileOutput::DateCounts(field, grouping) = query.output {
             return Results::table_value(Ok(file_date_counts(
                 matches.into_iter().map(|(_, entry)| entry),
@@ -459,6 +464,35 @@ impl LocalFilesIndex {
                 .collect(),
         )
     }
+}
+
+fn shared_stem_csv<'a>(entries: impl Iterator<Item = &'a LocalDirectoryEntry>) -> String {
+    let files = entries
+        .filter(|entry| entry.kind == "file")
+        .filter_map(|file| {
+            let stem = Path::new(&file.name).file_stem()?.to_str()?;
+            Some((stem, stem.to_lowercase(), file))
+        })
+        .collect::<Vec<_>>();
+    let mut counts = HashMap::new();
+    for (_, key, _) in &files {
+        *counts.entry(key.as_str()).or_insert(0usize) += 1;
+    }
+    let mut csv = String::from("主名,组内文件数,文件名,路径");
+    for (stem, key, file) in &files {
+        let count = counts[key.as_str()];
+        if count > 1 {
+            write!(
+                csv,
+                "\r\n{},{count},{},{}",
+                csv_cell(stem),
+                csv_cell(&file.name),
+                csv_cell(&file.path),
+            )
+            .expect("写入字符串不会失败");
+        }
+    }
+    csv
 }
 
 fn extension_summary<'a>(
@@ -833,6 +867,7 @@ enum FileOutput {
     Urls,
     TimeCsv,
     InventoryCsv,
+    SharedStemCsv,
     DateCounts(FileDateField, FileDateGrouping),
     ExtensionCounts,
     ExtensionSizes,
@@ -931,6 +966,9 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             "后缀大小" | "extension-sizes" if output == FileOutput::Entries => {
                 output = FileOutput::ExtensionSizes
             }
+            "同主名csv" | "shared-stem-csv" if output == FileOutput::Entries => {
+                output = FileOutput::SharedStemCsv
+            }
             "大小合计" | "size-total" if output == FileOutput::Entries => {
                 output = FileOutput::SizeTotal
             }
@@ -981,6 +1019,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
         output,
         FileOutput::ExtensionCounts
             | FileOutput::ExtensionSizes
+            | FileOutput::SharedStemCsv
             | FileOutput::DateCounts(..)
             | FileOutput::SizeTotal
     ) || extensions.is_some()
@@ -2012,6 +2051,48 @@ mod tests {
         ));
         assert!(split_query(r"C:\Work | | 后缀统计 仅文件夹").is_none());
         assert!(split_query(r"C:\Work | | 后缀统计 路径列表").is_none());
+    }
+
+    #[test]
+    fn reports_files_with_shared_stems_using_the_filtered_file_order() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | | 同主名CSV";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("报告,1.PDF", "file"),
+                entry("readme", "file"),
+                entry("报告,1.docx", "file"),
+                entry("README.md", "file"),
+                entry("报告,1.txt", "directory"),
+                entry("单独.xlsx", "file"),
+            ]),
+        ));
+        assert_eq!(
+            index.results(query).refillable_text(),
+            Some(concat!(
+                "主名,组内文件数,文件名,路径",
+                "\r\n\"报告,1\",2,\"报告,1.PDF\",\"C:\\Work\\报告,1.PDF\"",
+                "\r\nreadme,2,readme,C:\\Work\\readme",
+                "\r\n\"报告,1\",2,\"报告,1.docx\",\"C:\\Work\\报告,1.docx\"",
+                "\r\nREADME,2,README.md,C:\\Work\\README.md",
+            )),
+        );
+        assert_eq!(
+            index
+                .results(r"C:\Work | 报告 | 同主名CSV 后缀=docx")
+                .refillable_text(),
+            Some("主名,组内文件数,文件名,路径"),
+        );
+        assert_eq!(
+            index
+                .results(r"C:\Work | | shared-stem-csv 前=2")
+                .refillable_text(),
+            Some("主名,组内文件数,文件名,路径"),
+        );
+        assert!(split_query(r"C:\Work | | 同主名CSV 仅文件夹").is_none());
     }
 
     #[test]
