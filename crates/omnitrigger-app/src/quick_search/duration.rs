@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use num_bigint::BigInt;
 use num_rational::BigRational;
@@ -145,6 +145,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
     if matches!(operation, "时段冲突csv" | "clock-overlaps-csv") {
         return clock_overlaps_csv(values, output);
+    }
+    if matches!(operation, "时段层数csv" | "clock-layers-csv") {
+        return clock_layers_csv(values, output);
     }
     let dispersion = match operation {
         "方差" | "样本方差" | "sample-variance" => Some((true, false)),
@@ -374,6 +377,36 @@ fn clock_overlaps_csv(input: &str, unit: Option<&str>) -> Result<String, Duratio
                 ]);
             }
         }
+    }
+    Ok(write_rows(&rows, ','))
+}
+
+fn clock_layers_csv(input: &str, unit: Option<&str>) -> Result<String, DurationError> {
+    let mut events = BTreeMap::<u128, i32>::new();
+    for (start, end) in clock_span_inputs(input)?.into_iter().flatten() {
+        *events.entry(start).or_default() += 1;
+        *events.entry(end).or_default() -= 1;
+    }
+    let (header, format_duration) = clock_report_duration_column("时长", unit)?;
+    let mut rows = vec![[
+        "起始时刻".to_owned(),
+        "截止时刻".to_owned(),
+        "覆盖段数".to_owned(),
+        header,
+    ]];
+    let mut start = 0;
+    let mut coverage = 0;
+    for (end, change) in events.into_iter().filter(|(_, change)| *change != 0) {
+        if coverage > 0 {
+            rows.push([
+                format_clock_duration(start, ""),
+                format_clock_duration(end, ""),
+                coverage.to_string(),
+                format_duration(end - start),
+            ]);
+        }
+        start = end;
+        coverage += change;
     }
     Ok(write_rows(&rows, ','))
 }
@@ -709,6 +742,8 @@ pub(super) fn is_duration_report(query: &str) -> bool {
                 | "clock-gaps-csv"
                 | "时段冲突csv"
                 | "clock-overlaps-csv"
+                | "时段层数csv"
+                | "clock-layers-csv"
         )
     })
 }
@@ -1343,6 +1378,28 @@ mod tests {
             )
             .as_deref(),
             Ok("第一段,第二段,重叠时长 (ns)\r\n1,2,1")
+        );
+    }
+
+    #[test]
+    fn groups_continuous_clock_ranges_by_coverage_count_across_midnight() {
+        let query = "时段层数CSV 23:00到01:00;00:30到02:00;00:45到01:15 to min";
+        assert_eq!(
+            convert_duration(query).as_deref(),
+            Ok(concat!(
+                "起始时刻,截止时刻,覆盖段数,时长 (min)",
+                "\r\n00:00:00,00:30:00,1,30",
+                "\r\n00:30:00,00:45:00,2,15",
+                "\r\n00:45:00,01:00:00,3,15",
+                "\r\n01:00:00,01:15:00,2,15",
+                "\r\n01:15:00,02:00:00,1,45",
+                "\r\n23:00:00,24:00:00,1,60",
+            ))
+        );
+        assert!(is_duration_report(query));
+        assert_eq!(
+            convert_duration("clock-layers-csv 08:00到09:00;09:00到10:00;12:00到12:00").as_deref(),
+            Ok("起始时刻,截止时刻,覆盖段数,时长\r\n08:00:00,10:00:00,1,02:00:00")
         );
     }
 
