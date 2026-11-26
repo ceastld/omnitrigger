@@ -4756,6 +4756,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查找含任一关键词的原文行",
+        query: "文本: 搜索任一CSV \"warn 错误\" ok\nＷＡＲＮ 网关\n恢复\n错误,重试",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按正则提取匹配行及前后的文本",
         query: "文本: 正则上下文 [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
     },

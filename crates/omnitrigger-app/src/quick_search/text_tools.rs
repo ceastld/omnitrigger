@@ -311,7 +311,12 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     match operation.to_ascii_lowercase().as_str() {
         "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
-        "搜索行csv" | "search-lines-csv" => Some(search_text_lines_csv(text)),
+        "搜索行csv" | "search-lines-csv" => {
+            Some(search_text_lines_csv(text, TextWordMatch::All))
+        }
+        "搜索任一csv" | "search-any-lines-csv" => {
+            Some(search_text_lines_csv(text, TextWordMatch::Any))
+        }
         "连续计数csv" | "count-consecutive-lines-csv" => {
             Some(count_consecutive_lines_csv(text))
         }
@@ -391,7 +396,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             return Ok(limit_empty_lines(text_payload(text)?, limit));
         }
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
-        "搜索行" | "search-lines" => return search_text_lines(text),
+        "搜索行" | "search-lines" => return search_text_lines(text, TextWordMatch::All),
+        "搜索任一" | "search-any-lines" => return search_text_lines(text, TextWordMatch::Any),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "匹配上下文" | "context-lines" => {
@@ -2208,19 +2214,39 @@ fn split_lines(input: &str) -> Result<String, TextError> {
     Ok(text.replace(&delimiter, "\n"))
 }
 
-fn search_text_lines(input: &str) -> Result<String, TextError> {
+#[derive(Clone, Copy)]
+enum TextWordMatch {
+    All,
+    Any,
+}
+
+impl TextWordMatch {
+    fn matches(self, line: &str, words: &[&str]) -> bool {
+        if words.is_empty() {
+            return true;
+        }
+        let key = search_key(line);
+        let contains = |&word: &&str| key.contains(word);
+        match self {
+            Self::All => words.iter().all(contains),
+            Self::Any => words.iter().any(contains),
+        }
+    }
+}
+
+fn search_text_lines(input: &str, mode: TextWordMatch) -> Result<String, TextError> {
     let (query, text) = quoted_text_argument(input)?;
-    Ok(filter_result_lines(&query, text))
+    Ok(filter_result_lines(&query, text, mode))
 }
 
 pub(super) fn search_result_text(arguments: &str, text: &str) -> Result<String, TextError> {
     let query = result_search_words(arguments)?;
-    Ok(filter_result_lines(&query, text))
+    Ok(filter_result_lines(&query, text, TextWordMatch::All))
 }
 
 pub(super) fn search_result_text_csv(arguments: &str, text: &str) -> Result<String, TextError> {
     let query = result_search_words(arguments)?;
-    filter_result_lines_csv(&query, text)
+    filter_result_lines_csv(&query, text, TextWordMatch::All)
 }
 
 fn result_search_words(arguments: &str) -> Result<String, TextError> {
@@ -2234,7 +2260,7 @@ fn result_search_words(arguments: &str) -> Result<String, TextError> {
     Ok(query)
 }
 
-fn filter_result_lines(query: &str, text: &str) -> String {
+fn filter_result_lines(query: &str, text: &str, mode: TextWordMatch) -> String {
     let query = search_key(query);
     let words: Vec<_> = query.split_whitespace().collect();
     if words.is_empty() {
@@ -2242,22 +2268,26 @@ fn filter_result_lines(query: &str, text: &str) -> String {
     }
     logical_newline_pattern()
         .split(text)
-        .filter(|line| contains_all_search_words(line, &words))
+        .filter(|line| mode.matches(line, &words))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn search_text_lines_csv(input: &str) -> Result<String, TextError> {
+fn search_text_lines_csv(input: &str, mode: TextWordMatch) -> Result<String, TextError> {
     let (query, text) = quoted_text_argument(input)?;
-    filter_result_lines_csv(&query, text)
+    filter_result_lines_csv(&query, text, mode)
 }
 
-fn filter_result_lines_csv(query: &str, text: &str) -> Result<String, TextError> {
+fn filter_result_lines_csv(
+    query: &str,
+    text: &str,
+    mode: TextWordMatch,
+) -> Result<String, TextError> {
     let query = search_key(query);
     let words: Vec<_> = query.split_whitespace().collect();
     let mut csv = String::from("原行号,原文");
     for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
-        if !contains_all_search_words(line, &words) {
+        if !mode.matches(line, &words) {
             continue;
         }
         let number = (index + 1).to_string();
@@ -2268,14 +2298,6 @@ fn filter_result_lines_csv(query: &str, text: &str) -> Result<String, TextError>
         )?;
     }
     Ok(csv)
-}
-
-fn contains_all_search_words(line: &str, words: &[&str]) -> bool {
-    if words.is_empty() {
-        return true;
-    }
-    let key = search_key(line);
-    words.iter().all(|word| key.contains(word))
 }
 
 fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
@@ -5049,6 +5071,23 @@ mod tests {
         assert_eq!(
             pick_original_result_lines("6", source),
             Err(TextError::MissingLine)
+        );
+    }
+
+    #[test]
+    fn searches_for_any_text_keyword_with_the_same_original_line_numbering() {
+        let input = "\"warn 错误\" ok\r\nＷＡＲＮ 网关\r恢复\u{2028}错误,重试";
+        assert_eq!(
+            transform_text(&format!("搜索任一 {input}")).as_deref(),
+            Ok("ＷＡＲＮ 网关\n错误,重试")
+        );
+        assert_eq!(
+            transform_text(&format!("搜索任一CSV {input}")).as_deref(),
+            Ok("原行号,原文\r\n2,ＷＡＲＮ 网关\r\n4,\"错误,重试\"")
+        );
+        assert_eq!(
+            transform_text("search-any-lines \"\" 甲\r\n乙").as_deref(),
+            Ok("甲\r\n乙")
         );
     }
 
