@@ -2530,6 +2530,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "根据已完成百分比计算平均传输速率",
+        query: "下载: 精确速率 1 GiB 已传 25% 用时 8秒 to MiB/s",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用精确速率和耗时求传输量",
         query: "下载: 精确传输量 1/3 MiB/s 用时 3秒 to KiB",
     },

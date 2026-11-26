@@ -736,22 +736,48 @@ fn transfer_rate_arguments(input: &str) -> Result<(&str, &str), ConversionError>
     Ok((data, rate))
 }
 
+fn transfer_progress_arguments(data: &str) -> Result<Option<(&str, &str)>, ConversionError> {
+    data.split_once("已传")
+        .or_else(|| {
+            const SEPARATOR: &str = " completed ";
+            let index = data.to_ascii_lowercase().find(SEPARATOR)?;
+            Some((&data[..index], &data[index + SEPARATOR.len()..]))
+        })
+        .map(|(total, completed)| {
+            let (total, completed) = (total.trim(), completed.trim());
+            if total.is_empty() || completed.is_empty() {
+                return Err(ConversionError::Incomplete);
+            }
+            Ok((total, completed))
+        })
+        .transpose()
+}
+
+fn exact_transferred_bits(
+    total: &BigRational,
+    completed: &str,
+) -> Result<BigRational, ConversionError> {
+    if completed.ends_with('%') {
+        let proportion =
+            parse_probability(completed).map_err(|_| ConversionError::InvalidTransferProgress)?;
+        return Ok(total * proportion);
+    }
+    let (transferred, dimension) = exact_data_source(completed)?;
+    if dimension != Dimension::Data
+        || transferred.numer().sign() == Sign::Minus
+        || &transferred > total
+    {
+        return Err(ConversionError::InvalidTransferProgress);
+    }
+    Ok(transferred)
+}
+
 fn exact_transfer_time(input: &str, use_progress: bool) -> Result<String, ConversionError> {
     let (input, targets) = split_conversion(input).unwrap_or((input, "s"));
     let (data, rate) = transfer_rate_arguments(input)?;
     let (data, completed) = if use_progress {
-        let (total, completed) = data
-            .split_once("已传")
-            .or_else(|| {
-                const SEPARATOR: &str = " completed ";
-                let index = data.to_ascii_lowercase().find(SEPARATOR)?;
-                Some((&data[..index], &data[index + SEPARATOR.len()..]))
-            })
-            .ok_or(ConversionError::Incomplete)?;
-        let (total, completed) = (total.trim(), completed.trim());
-        if total.is_empty() || completed.is_empty() {
-            return Err(ConversionError::Incomplete);
-        }
+        let (total, completed) =
+            transfer_progress_arguments(data)?.ok_or(ConversionError::Incomplete)?;
         (total, Some(completed))
     } else {
         (data, None)
@@ -766,20 +792,7 @@ fn exact_transfer_time(input: &str, use_progress: bool) -> Result<String, Conver
         return Err(ConversionError::InvalidTransfer);
     }
     let bits = if let Some(completed) = completed {
-        let transferred = if completed.ends_with('%') {
-            &bits
-                * parse_probability(completed)
-                    .map_err(|_| ConversionError::InvalidTransferProgress)?
-        } else {
-            let (transferred, dimension) = exact_data_source(completed)?;
-            if dimension != Dimension::Data
-                || transferred.numer().sign() == Sign::Minus
-                || transferred > bits
-            {
-                return Err(ConversionError::InvalidTransferProgress);
-            }
-            transferred
-        };
+        let transferred = exact_transferred_bits(&bits, completed)?;
         bits - transferred
     } else {
         bits
@@ -800,7 +813,21 @@ fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, C
     let (quantity, elapsed) = input
         .split_once("用时")
         .ok_or(ConversionError::Incomplete)?;
-    let (value, dimension) = exact_data_source(quantity.trim())?;
+    let quantity = quantity.trim();
+    let progress = if report_rate {
+        transfer_progress_arguments(quantity)?
+    } else {
+        None
+    };
+    let (value, dimension) = if let Some((total, completed)) = progress {
+        let (total, dimension) = exact_data_source(total)?;
+        if dimension != Dimension::Data || total.numer().sign() == Sign::Minus {
+            return Err(ConversionError::InvalidTransferProgress);
+        }
+        (exact_transferred_bits(&total, completed)?, dimension)
+    } else {
+        exact_data_source(quantity)?
+    };
     let seconds = exact_transfer_elapsed_seconds(elapsed.trim())?;
     if value.numer().sign() == Sign::Minus || seconds.numer().sign() == Sign::Minus {
         return Err(ConversionError::InvalidTransferDuration);
@@ -3033,6 +3060,26 @@ mod tests {
         assert_eq!(
             estimate_transfer("剩余耗时 1 B 已传 按 2 b/s"),
             Err(ConversionError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn computes_exact_transfer_rate_from_progress_and_elapsed_time() {
+        for (input, expected) in [
+            ("精确速率 1 GiB 已传 25% 用时 8秒 to MiB/s", "32 MiB/s"),
+            ("精确速率 1 GiB 已传 256 MiB 用时 8秒 to MiB/s", "32 MiB/s"),
+            ("精确速率 1 b 已传 25% 用时 1/2秒", "1/2 b/s"),
+            ("exact-rate 1 B completed 0% 用时 1秒", "0 b/s"),
+        ] {
+            assert_eq!(estimate_transfer(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            estimate_transfer("精确速率 1 B 已传 9 b 用时 1秒"),
+            Err(ConversionError::InvalidTransferProgress)
+        );
+        assert_eq!(
+            estimate_transfer("精确速率 1 B 已传 50% 用时 0秒"),
+            Err(ConversionError::InvalidTransferDuration)
         );
     }
 
