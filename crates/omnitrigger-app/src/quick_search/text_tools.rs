@@ -315,6 +315,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "重复位置csv" | "duplicate-line-positions-csv" => {
             Some(duplicate_line_positions_csv(text))
         }
+        "行频数csv" | "line-frequency-csv" => Some(line_frequencies_csv(text)),
         "搜索行csv" | "search-lines-csv" => {
             Some(search_text_lines_csv(text, TextWordMatch::All))
         }
@@ -1286,20 +1287,32 @@ fn number_lines_csv(input: &str) -> Result<String, TextError> {
     Ok(csv)
 }
 
-fn duplicate_line_positions_csv(input: &str) -> Result<String, TextError> {
-    let text = text_payload(input)?;
-    let newlines = logical_newline_pattern();
+struct TextLineCount {
+    first_line: usize,
+    count: usize,
+}
+
+fn count_text_lines(text: &str) -> Result<HashMap<&str, TextLineCount>, TextError> {
     let mut counts = HashMap::new();
-    for (_, line) in numbered_text_lines(text, newlines) {
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
         if line.contains('\0') {
             return Err(TextError::NullCharacter);
         }
-        *counts.entry(line).or_insert(0usize) += 1;
+        let group = counts.entry(line).or_insert(TextLineCount {
+            first_line: index + 1,
+            count: 0,
+        });
+        group.count += 1;
     }
+    Ok(counts)
+}
 
+fn duplicate_line_positions_csv(input: &str) -> Result<String, TextError> {
+    let text = text_payload(input)?;
+    let counts = count_text_lines(text)?;
     let mut csv = String::from("原行号,次数,原文");
-    for (index, line) in numbered_text_lines(text, newlines) {
-        let count = counts[line];
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        let count = counts[line].count;
         if count > 1 {
             let number = (index + 1).to_string();
             let count = count.to_string();
@@ -1309,6 +1322,24 @@ fn duplicate_line_positions_csv(input: &str) -> Result<String, TextError> {
                 TextError::ResultTooLarge,
             )?;
         }
+    }
+    Ok(csv)
+}
+
+fn line_frequencies_csv(input: &str) -> Result<String, TextError> {
+    let text = text_payload(input)?;
+    let mut groups: Vec<_> = count_text_lines(text)?.into_iter().collect();
+    groups.sort_unstable_by_key(|(_, group)| (Reverse(group.count), group.first_line));
+
+    let mut csv = String::from("次数,首行号,原文");
+    for (line, group) in groups {
+        let count = group.count.to_string();
+        let first_line = group.first_line.to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [count.as_str(), first_line.as_str(), line].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
     }
     Ok(csv)
 }
@@ -5406,6 +5437,18 @@ mod tests {
         assert_eq!(
             transform_text("重复位置CSV a\n\nb\n\nc").as_deref(),
             Ok("原行号,次数,原文\r\n2,2,\"\"\r\n4,2,\"\"")
+        );
+    }
+
+    #[test]
+    fn reports_global_line_frequencies_and_first_occurrences() {
+        let input = "行频数CSV 确认\r\n恢复,完成\u{2028}警告\n恢复,完成\r复查\r\n警告";
+        let expected = "次数,首行号,原文\r\n2,2,\"恢复,完成\"\r\n2,3,警告\r\n1,1,确认\r\n1,5,复查";
+        assert_eq!(text_csv_report(input).unwrap().as_deref(), Ok(expected));
+        assert_eq!(transform_text(input).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("行频数CSV \"A\n\nA\n\nB\n\"").as_deref(),
+            Ok("次数,首行号,原文\r\n2,1,A\r\n2,2,\"\"\r\n1,5,B")
         );
     }
 

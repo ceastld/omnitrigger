@@ -4771,6 +4771,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "汇总相同行的出现次数和首行号",
+        query: "文本: 行频数CSV 确认\n恢复,完成\n警告\n恢复,完成\n复查\n警告",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "导出正则命中行及其原行号",
         query: "文本: 正则保留行CSV \"^WARN\" ok\nWARN,网关\nwarn\nWARN 重试",
     },
