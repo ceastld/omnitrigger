@@ -5634,6 +5634,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按编号对比两份 JSON 记录",
+        query: r#"JSON: 按键对比CSV /id [{"id":1,"数量":2},{"id":2}] [{"id":2},{"id":1,"数量":3},{"id":3}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定 JSON 路径上的值计数",
         query: r#"JSON: 分组计数 /状态 [{"状态":"完成"},{"状态":"待办"},{"状态":"完成"}]"#,
     },

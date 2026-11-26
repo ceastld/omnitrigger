@@ -57,6 +57,7 @@ pub(super) enum JsonError {
     PipelineOutputTooLarge,
     PipelineStep { index: usize, cause: &'static str },
     ComparisonTooLarge,
+    DuplicateComparisonKey,
     PointerListTooLarge,
     KeySearchArguments,
     SearchPatternArguments,
@@ -139,6 +140,7 @@ impl JsonError {
             Self::PipelineOutputTooLarge => "处理结果超过 1 MiB，请缩小数据范围",
             Self::PipelineStep { cause, .. } => cause,
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
+            Self::DuplicateComparisonKey => "每份 JSON 数组内用于对比的键值须唯一",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::KeySearchArguments => {
                 "先输入带双引号的键名，再输入 JSON，例如 \"编号\" {\"编号\":1}"
@@ -223,6 +225,7 @@ enum JsonCsvOperation {
     LineAnyFilter,
     ValidateLines,
     Differences,
+    KeyedDifferences,
     DuplicateKeys,
     Leaves,
     Keys,
@@ -259,6 +262,7 @@ impl JsonCsvOperation {
             "行任一筛选csv" | "filter-any-jsonl-csv" => Some(Self::LineAnyFilter),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "对比csv" | "diff-csv" => Some(Self::Differences),
+            "按键对比csv" | "keyed-diff-csv" => Some(Self::KeyedDifferences),
             "重复键csv" | "duplicate-keys-csv" => Some(Self::DuplicateKeys),
             "叶子csv" | "leaves-csv" => Some(Self::Leaves),
             "找键csv" | "find-key-csv" => Some(Self::Keys),
@@ -300,6 +304,7 @@ impl JsonCsvOperation {
             | Self::LineAnyFilter
             | Self::ValidateLines
             | Self::Differences
+            | Self::KeyedDifferences
             | Self::DuplicateKeys
             | Self::Leaves
             | Self::Keys
@@ -342,6 +347,7 @@ impl JsonCsvOperation {
             }
             Self::ValidateLines => validate_json_lines_csv(source).map(|report| report.csv),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
+            Self::KeyedDifferences => compare_json_records_by_key(source),
             Self::DuplicateKeys => report_duplicate_json_keys(source, true),
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
@@ -3467,6 +3473,116 @@ fn compare_json_values(source: &str, format: ComparisonOutput) -> Result<String,
     Ok(output)
 }
 
+struct KeyedJsonRecord<'a> {
+    key: JsonScalar,
+    raw_key: &'a RawValue,
+    value: &'a RawValue,
+    position: usize,
+}
+
+fn keyed_json_records<'a>(
+    array: &'a RawValue,
+    path: &[String],
+) -> Result<Vec<KeyedJsonRecord<'a>>, JsonError> {
+    let records = read_json_array(array.get())?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let raw_key = select_pointer_keys(value, path)?;
+            let key = json_scalar(raw_key)?.ok_or(JsonError::ExpectedScalar)?;
+            Ok(KeyedJsonRecord {
+                key,
+                raw_key,
+                value,
+                position: index + 1,
+            })
+        })
+        .collect::<Result<Vec<_>, JsonError>>()?;
+    let mut unique = HashSet::with_capacity(records.len());
+    if records.iter().any(|record| !unique.insert(&record.key)) {
+        return Err(JsonError::DuplicateComparisonKey);
+    }
+    Ok(records)
+}
+
+fn compare_json_records_by_key(source: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(source)?;
+    let path = json_pointer_tokens(&pointer)?;
+    let (left, right) = json_value_and_source(source, JsonError::Invalid)?;
+    let right = serde_json::from_str::<&RawValue>(right).map_err(json_parse_error)?;
+    let left = keyed_json_records(left, &path)?;
+    let right = keyed_json_records(right, &path)?;
+    let mut remaining = right
+        .iter()
+        .map(|record| (&record.key, record))
+        .collect::<HashMap<_, _>>();
+    let mut output = String::from("键,变化,左序号,右序号,左记录,右记录");
+    for record in &left {
+        let other = remaining.remove(&record.key);
+        let change = if let Some(other) = other {
+            let mut changed = false;
+            compare_json_trees(record.value, other.value, |_| {
+                changed = true;
+                Ok(true)
+            })?;
+            if !changed {
+                continue;
+            }
+            "修改"
+        } else {
+            "移除"
+        };
+        append_keyed_json_difference(
+            &mut output,
+            record.raw_key.get(),
+            change,
+            Some(record),
+            other,
+        )?;
+    }
+    for record in right
+        .iter()
+        .filter(|record| remaining.contains_key(&record.key))
+    {
+        append_keyed_json_difference(
+            &mut output,
+            record.raw_key.get(),
+            "新增",
+            None,
+            Some(record),
+        )?;
+    }
+    Ok(output)
+}
+
+fn append_keyed_json_difference(
+    output: &mut String,
+    key: &str,
+    change: &str,
+    left: Option<&KeyedJsonRecord<'_>>,
+    right: Option<&KeyedJsonRecord<'_>>,
+) -> Result<(), JsonError> {
+    let left_position = left
+        .map(|record| record.position.to_string())
+        .unwrap_or_default();
+    let right_position = right
+        .map(|record| record.position.to_string())
+        .unwrap_or_default();
+    append_bounded_csv_row(
+        output,
+        [
+            key,
+            change,
+            &left_position,
+            &right_position,
+            left.map_or("", |record| record.value.get()),
+            right.map_or("", |record| record.value.get()),
+        ]
+        .into_iter(),
+        JsonError::ComparisonTooLarge,
+    )
+}
+
 fn compare_json_trees(
     left: &RawValue,
     right: &RawValue,
@@ -5643,6 +5759,45 @@ mod tests {
         let raw = "{\n  \"a\":1.50\n}";
         let range = json_pointer_report_source_range(query, "", raw).unwrap();
         assert_eq!(&query[range], raw);
+    }
+
+    #[test]
+    fn compares_json_array_records_by_unique_exact_key_and_keeps_raw_values() {
+        let query = concat!(
+            r#"按键对比CSV /id [{"id":1.00,"qty":2},{"id":"1","qty":4},{"id":2}]"#,
+            r#" [{"id":1e0,"qty":2.0},{"id":3},{"id":"1","qty":5}]"#,
+        );
+        let output = transform_json(query).unwrap();
+        let table = super::super::csv_tools::parse_table_preview(&output).unwrap();
+        for (row, expected) in [
+            (
+                1,
+                [
+                    r#""1""#,
+                    "修改",
+                    "2",
+                    "3",
+                    r#"{"id":"1","qty":4}"#,
+                    r#"{"id":"1","qty":5}"#,
+                ],
+            ),
+            (2, ["2", "移除", "3", "", r#"{"id":2}"#, ""]),
+            (3, ["3", "新增", "", "2", "", r#"{"id":3}"#]),
+        ] {
+            for (column, value) in expected.into_iter().enumerate() {
+                assert_eq!(table.data_cell(row, column + 1), Some(value));
+            }
+        }
+        assert!(table.data_cell(4, 1).is_none());
+        assert_eq!(
+            transform_json(r#"keyed-diff-csv /id [{"id":1},{"id":2}] [{"id":2},{"id":1.0}]"#)
+                .as_deref(),
+            Ok("键,变化,左序号,右序号,左记录,右记录")
+        );
+        assert_eq!(
+            transform_json(r#"按键对比CSV /id [] [{"id":1},{"id":1e0}]"#),
+            Err(JsonError::DuplicateComparisonKey)
+        );
     }
 
     #[test]

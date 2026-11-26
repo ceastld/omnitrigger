@@ -10004,6 +10004,7 @@ mod tests {
         assert!(examples_for("JSON: 筛")[0].starts_with("JSON: 筛选 "));
         assert!(examples_for("JSON: 排")[0].starts_with("JSON: 排除 "));
         assert!(examples_for("JSON: 按")[0].starts_with("JSON: 按值去重 "));
+        assert!(examples_for("JSON: 按键")[0].starts_with("JSON: 按键对比CSV "));
         assert!(examples_for("JSON: 分组")[0].starts_with("JSON: 分组计数 "));
         assert!(examples_for("JSON: 分组明")[0].starts_with("JSON: 分组明细 "));
         assert!(examples_for("JSON: 分组统")[0].starts_with("JSON: 分组统计 "));
