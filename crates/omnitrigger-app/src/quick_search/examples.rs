@@ -7527,6 +7527,11 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "反查有效数字舍入前的原值区间",
+        query: "分数: 有效数字区间 1.00e1 to 3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按有效数字输出工程计数法",
         query: "分数: 工程计数法 0.000012345 to 4",
     },

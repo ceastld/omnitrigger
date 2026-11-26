@@ -52,6 +52,7 @@ pub(super) enum FractionError {
     DecimalPlaces,
     RoundingIntervalValue,
     SignificantDigits,
+    SignificantIntervalValue,
     RoundPlaces,
     InterpolationInterval,
     InterpolationRange,
@@ -121,6 +122,7 @@ impl FractionError {
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::RoundingIntervalValue => "先填写已按指定小数位舍入的值，例如 1.24 to 2",
             Self::SignificantDigits => "输入 1 至 100 的有效数字位数，例如 分数: 有效数字 1/3 to 4",
+            Self::SignificantIntervalValue => "先填写已按指定有效数字舍入的值，例如 1.00e1 to 3",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
             Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
             Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
@@ -406,7 +408,12 @@ fn simplify_fraction_using(
         });
     }
     let engineering = verb == "工程计数法" || verb.eq_ignore_ascii_case("engineering-notation");
-    if engineering || verb == "有效数字" || verb.eq_ignore_ascii_case("significant-digits") {
+    let interval = verb == "有效数字区间" || verb.eq_ignore_ascii_case("significant-interval");
+    if engineering
+        || interval
+        || verb == "有效数字"
+        || verb.eq_ignore_ascii_case("significant-digits")
+    {
         let (source, digits) =
             split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
         let digits = digits.trim();
@@ -416,12 +423,16 @@ fn simplify_fraction_using(
             .ok()
             .filter(|digits| (1..=MAX_DECIMAL_PLACES).contains(digits))
             .ok_or(FractionError::SignificantDigits)?;
+        let value = calculate(source)?;
+        if interval {
+            return significant_rounding_interval(value, digits);
+        }
         let format: fn(BigRational, u32) -> String = if engineering {
             format_engineering_notation
         } else {
             format_significant_digits
         };
-        return calculate(source).map(|value| format(value, digits));
+        return Ok(format(value, digits));
     }
     if input.contains('(') {
         return from_repeating_decimal(input).map(|value| value.to_string());
@@ -1497,13 +1508,7 @@ pub(super) fn format_engineering_notation(value: BigRational, digits: u32) -> St
     format_significant_notation(value, digits, 3)
 }
 
-fn format_significant_notation(value: BigRational, digits: u32, exponent_step: i32) -> String {
-    let numerator = value.numer().magnitude();
-    let denominator = value.denom().magnitude();
-    let places = digits - 1;
-    if numerator.bits() == 0 {
-        return format!("{}e0", rounded_decimal(value, places));
-    }
+fn decimal_order(numerator: &BigUint, denominator: &BigUint) -> i32 {
     // 十进制位数差给出相邻两个候选指数，用整数比较确定边界。
     let difference =
         numerator.to_str_radix(10).len() as i32 - denominator.to_str_radix(10).len() as i32;
@@ -1513,7 +1518,17 @@ fn format_significant_notation(value: BigRational, digits: u32, exponent_step: i
     } else {
         *numerator < denominator * scale
     };
-    let mut exponent = difference - i32::from(below_estimate);
+    difference - i32::from(below_estimate)
+}
+
+fn format_significant_notation(value: BigRational, digits: u32, exponent_step: i32) -> String {
+    let numerator = value.numer().magnitude();
+    let denominator = value.denom().magnitude();
+    let places = digits - 1;
+    if numerator.bits() == 0 {
+        return format!("{}e0", rounded_decimal(value, places));
+    }
+    let mut exponent = decimal_order(numerator, denominator);
     let shift = places as i32 - exponent;
     let scale = BigUint::from(10u8).pow(shift.unsigned_abs());
     let mut rounded = if shift < 0 {
@@ -1536,6 +1551,76 @@ fn format_significant_notation(value: BigRational, digits: u32, exponent_step: i
         places.saturating_sub(coefficient_shift),
     );
     format!("{coefficient}e{exponent}")
+}
+
+fn decimal_power(exponent: i32) -> BigRational {
+    let scale = BigInt::from(10u8).pow(exponent.unsigned_abs());
+    if exponent < 0 {
+        BigRational::new(1.into(), scale)
+    } else {
+        BigRational::from_integer(scale)
+    }
+}
+
+fn significant_rounding_interval(value: BigRational, digits: u32) -> Result<String, FractionError> {
+    let negative = match value.numer().sign() {
+        Sign::NoSign => return Ok("[0, 0]".into()),
+        Sign::Minus => true,
+        Sign::Plus => false,
+    };
+    let magnitude = if negative { -value } else { value };
+    let exponent = decimal_order(magnitude.numer().magnitude(), magnitude.denom().magnitude());
+    let grid = exponent - (digits as i32 - 1);
+    let tick = magnitude / decimal_power(grid);
+    if !tick.is_integer() {
+        return Err(FractionError::SignificantIntervalValue);
+    }
+    // 跨过十的幂时，靠近零的一侧仍使用上一数量级更细的刻度。
+    let at_carry = *tick.numer().magnitude() == BigUint::from(10u8).pow(digits - 1);
+    let even = !tick.numer().magnitude().bit(0);
+    let inner_inclusive = at_carry || even;
+    let display_exponent = if exponent.unsigned_abs() > 12 {
+        exponent
+    } else {
+        0
+    };
+    let display_grid = grid - display_exponent;
+    let unit = decimal_power(display_grid);
+    let center = tick * &unit;
+    let inner = &center - &unit / BigInt::from(if at_carry { 20 } else { 2 });
+    let outer = center + unit / BigInt::from(2);
+    let (lower, upper, lower_extra, upper_extra, include_lower, include_upper) = if negative {
+        (
+            -outer,
+            -inner,
+            1,
+            1 + i32::from(at_carry),
+            even,
+            inner_inclusive,
+        )
+    } else {
+        (
+            inner,
+            outer,
+            1 + i32::from(at_carry),
+            1,
+            inner_inclusive,
+            even,
+        )
+    };
+    let format_bound = |bound, extra: i32| {
+        let fixed = rounded_decimal(bound, (extra - display_grid).max(0) as u32);
+        if display_exponent == 0 {
+            fixed
+        } else {
+            format!("{fixed}e{display_exponent}")
+        }
+    };
+    let lower = format_bound(lower, lower_extra);
+    let upper = format_bound(upper, upper_extra);
+    let open = if include_lower { '[' } else { '(' };
+    let close = if include_upper { ']' } else { ')' };
+    Ok(format!("{open}{lower}, {upper}{close}"))
 }
 
 fn format_scaled_decimal(rounded: BigUint, negative: bool, places: u32) -> String {
@@ -4221,6 +4306,26 @@ mod tests {
         assert_eq!(
             simplify_fraction("工程计数法 1 to 101"),
             Err(FractionError::SignificantDigits),
+        );
+    }
+
+    #[test]
+    fn inverts_significant_digit_rounding_across_adjacent_powers_of_ten() {
+        for (query, expected) in [
+            ("有效数字区间 1.00e1 to 3", "[9.995, 10.05]"),
+            ("significant-interval 10 to 1", "[9.5, 15)"),
+            ("有效数字区间 -10 to 1", "(-15, -9.5]"),
+            ("有效数字区间 0.01 转 1位", "[0.0095, 0.015)"),
+            ("有效数字区间 9.99 to 3", "(9.985, 9.995)"),
+            ("有效数字区间 12 to 2", "[11.5, 12.5]"),
+            ("有效数字区间 0 to 3", "[0, 0]"),
+            ("有效数字区间 10**1000 to 2", "[0.995e1000, 1.05e1000]"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("有效数字区间 12.3 to 2"),
+            Err(FractionError::SignificantIntervalValue)
         );
     }
 
