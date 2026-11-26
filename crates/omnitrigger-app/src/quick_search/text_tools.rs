@@ -245,7 +245,7 @@ fn is_display_width_csv_operation(operation: &str) -> bool {
 
 pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
     is_raw_text_operation(operation)
-        || is_trim_line_ends_operation(operation)
+        || line_whitespace_trimmer(operation).is_some()
         || is_line_end_whitespace_csv_operation(operation)
         || is_unusual_whitespace_csv_operation(operation)
         || is_line_break_positions_csv_operation(operation)
@@ -320,15 +320,11 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     if is_raw_text_operation(operation) {
         return Ok(text.to_owned());
     }
-    if is_trim_line_ends_operation(operation) {
+    if let Some(trim) = line_whitespace_trimmer(operation) {
         let text = input[operation.len()..]
             .strip_prefix("\r\n")
             .unwrap_or(text);
-        return Ok(transform_line_slices(
-            text,
-            logical_newline_pattern(),
-            str::trim_end,
-        ));
+        return Ok(transform_line_slices(text, logical_newline_pattern(), trim));
     }
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
@@ -436,6 +432,9 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
 }
 
 fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextError> {
+    if let Some(trim) = line_whitespace_trimmer(operation) {
+        return Ok(transform_line_slices(text, logical_newline_pattern(), trim));
+    }
     match operation {
         "大写" | "upper" | "uppercase" => Ok(text.to_uppercase()),
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
@@ -475,11 +474,6 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "逐行去空白" | "trim-lines" => {
             Ok(text.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
         }
-        operation if is_trim_line_ends_operation(operation) => Ok(transform_line_slices(
-            text,
-            logical_newline_pattern(),
-            str::trim_end,
-        )),
         "去公共缩进" | "dedent" => Ok(remove_common_indent(text)),
         "公共前缀" | "common-prefix" => Ok(common_line_affix(text, false)),
         "公共后缀" | "common-suffix" => Ok(common_line_affix(text, true)),
@@ -2084,9 +2078,22 @@ impl GraphemeRange {
     }
 }
 
-fn is_trim_line_ends_operation(operation: &str) -> bool {
-    operation.eq_ignore_ascii_case("逐行去尾空白")
+fn line_whitespace_trimmer(operation: &str) -> Option<fn(&str) -> &str> {
+    if operation.eq_ignore_ascii_case("逐行去尾空白")
         || operation.eq_ignore_ascii_case("trim-line-ends")
+    {
+        Some(str::trim_end)
+    } else if operation.eq_ignore_ascii_case("逐行去首空白")
+        || operation.eq_ignore_ascii_case("trim-line-starts")
+    {
+        Some(str::trim_start)
+    } else if operation.eq_ignore_ascii_case("逐行去两端空白")
+        || operation.eq_ignore_ascii_case("trim-line-edges")
+    {
+        Some(str::trim)
+    } else {
+        None
+    }
 }
 
 fn transform_line_slices(text: &str, newlines: &Regex, transform: impl Fn(&str) -> &str) -> String {
@@ -3242,6 +3249,26 @@ mod tests {
         assert_eq!(
             transform_text("依次处理 [\"逐行去尾空白\"] \"  甲 \t\r\n 乙\t\"").as_deref(),
             Ok("  甲\r\n 乙")
+        );
+    }
+
+    #[test]
+    fn trims_leading_whitespace_or_both_edges_without_normalizing_line_endings() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 逐行去首空白\r\n\u{a0}甲 \t\r\n \t\r\t乙 \u{2028} 茶\t ",
+        )
+        .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok("甲 \t\r\n\r乙 \u{2028}茶\t "),
+        );
+        assert_eq!(
+            transform_text("依次处理 [\"逐行去两端空白\"] \"  甲 一 \t\r\n 乙\t\"").as_deref(),
+            Ok("甲 一\r\n乙"),
+        );
+        assert_eq!(
+            transform_text("trim-line-edges  茶\t\u{2029}\u{3000}梨 ").as_deref(),
+            Ok("茶\u{2029}梨"),
         );
     }
 

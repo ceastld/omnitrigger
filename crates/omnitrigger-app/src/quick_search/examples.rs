@@ -4262,6 +4262,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "只去掉行首空白并保留行尾",
+        query: "文本: 逐行去首空白\n    苹果 \t\r\n  梨\t\n",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "去掉行首和行尾空白并保留换行",
+        query: "文本: 逐行去两端空白\n    苹果 \t\r\n  梨\t\n",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看各行末尾空白的位置和字符",
         query: "文本: 行尾空白CSV\n  苹果 \t\r\n梨\n茶\u{3000}",
     },
