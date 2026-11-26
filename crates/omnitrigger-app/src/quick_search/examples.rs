@@ -2460,6 +2460,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "在表格中查看一组耗时的统计摘要",
+        query: "时长: 摘要CSV 80ms,100ms,120ms to ms",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "在表格中比较多个时长分位数",
         query: r#"时长: 分位表 ["25%",0.5,"3/4"] 3s,1s,2s,4s"#,
     },

@@ -125,6 +125,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     if matches!(operation, "分位表" | "quantiles-csv") {
         return duration_quantiles_table(values, output);
     }
+    if matches!(operation, "摘要csv" | "summary-csv") {
+        return duration_summary_csv(values, output.unwrap_or("s"));
+    }
     let dispersion = match operation {
         "方差" | "样本方差" | "sample-variance" => Some((true, false)),
         "总体方差" | "population-variance" => Some((false, false)),
@@ -478,11 +481,54 @@ fn duration_dispersion(
     }
 }
 
+fn duration_summary_csv(input: &str, unit: &str) -> Result<String, DurationError> {
+    let (symbol, divisor, _) =
+        numeric_duration_unit(unit).ok_or(DurationError::ExactUnitArguments)?;
+    let divisor = BigInt::from(divisor);
+    let values = ordered_duration_values(input, DurationError::InvalidDispersionArguments)?;
+    let count = values.len();
+    let sum: BigRational = values.iter().sum();
+    let half = BigRational::new(1.into(), 2.into());
+    let median = interpolate_ordered_quantile(count as u64, &half, |rank| &values[rank as usize])
+        .map_err(|_| DurationError::OutOfRange)?;
+    let average = &sum / BigInt::from(count);
+    let shortest = values[0].clone();
+    let longest = values[count - 1].clone();
+    let variance = variance_unweighted(values, true).map_err(|_| DurationError::OutOfRange)?;
+    let mut rows = vec![
+        vec!["指标".to_owned(), "数值".to_owned(), "单位".to_owned()],
+        vec!["数量".to_owned(), count.to_string(), String::new()],
+    ];
+    for (label, value) in [
+        ("合计", sum),
+        ("平均", average),
+        ("中位数", median),
+        ("最短", shortest),
+        ("最长", longest),
+    ] {
+        rows.push(vec![
+            label.to_owned(),
+            (value / &divisor).to_string(),
+            symbol.to_owned(),
+        ]);
+    }
+    let (variance, deviation) = variance.map_or_else(
+        || (String::new(), String::new()),
+        |variance| {
+            let variance = variance / divisor.pow(2);
+            (variance.to_string(), format_square_root(&variance))
+        },
+    );
+    rows.push(vec!["样本方差".to_owned(), variance, format!("{symbol}²")]);
+    rows.push(vec!["样本标准差".to_owned(), deviation, symbol.to_owned()]);
+    Ok(write_rows(&rows, ','))
+}
+
 pub(super) fn is_duration_report(query: &str) -> bool {
     query.split_whitespace().next().is_some_and(|operation| {
         matches!(
             normalize(operation).to_ascii_lowercase().as_str(),
-            "分位表" | "quantiles-csv" | "单位表" | "units-csv"
+            "分位表" | "quantiles-csv" | "单位表" | "units-csv" | "摘要csv" | "summary-csv"
         )
     })
 }
@@ -1135,6 +1181,21 @@ mod tests {
             convert_duration("分位表 [0.5] 1ns,2ns"),
             Err(DurationError::Precision)
         );
+    }
+
+    #[test]
+    fn summarizes_durations_with_fractional_subnanosecond_statistics() {
+        assert_eq!(
+            convert_duration("摘要CSV 2ns,1ns to ns").as_deref(),
+            Ok(concat!(
+                "指标,数值,单位\r\n数量,2,\"\"\r\n合计,3,ns\r\n平均,3/2,ns\r\n中位数,3/2,ns",
+                "\r\n最短,1,ns\r\n最长,2,ns\r\n样本方差,1/2,ns²\r\n样本标准差,√(1/2),ns",
+            ))
+        );
+        assert!(convert_duration("summary-csv 1s")
+            .unwrap()
+            .ends_with("样本方差,\"\",s²\r\n样本标准差,\"\",s"));
+        assert!(is_duration_report("摘要CSV 1s,2s"));
     }
 
     #[test]
