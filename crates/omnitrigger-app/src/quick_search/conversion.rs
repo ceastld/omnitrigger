@@ -760,18 +760,10 @@ fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, C
         .split_once("用时")
         .ok_or(ConversionError::Incomplete)?;
     let (value, dimension) = exact_data_source(quantity.trim())?;
-    let elapsed = elapsed_duration(elapsed.trim()).map_err(|error| match error {
-        DurationError::Incomplete => ConversionError::Incomplete,
-        DurationError::OutOfRange => ConversionError::OutOfRange,
-        _ => ConversionError::InvalidTransferDuration,
-    })?;
-    if value.numer().sign() == Sign::Minus {
+    let seconds = exact_transfer_elapsed_seconds(elapsed.trim())?;
+    if value.numer().sign() == Sign::Minus || seconds.numer().sign() == Sign::Minus {
         return Err(ConversionError::InvalidTransferDuration);
     }
-    let seconds = BigRational::new(
-        BigInt::from(elapsed.as_nanos()),
-        BigInt::from(NANOS_PER_SECOND),
-    );
     let (result, dimension) = match (report_rate, dimension) {
         (true, Dimension::Data) if seconds.numer().sign() == Sign::Plus => {
             (value / seconds, Dimension::DataRate)
@@ -784,6 +776,27 @@ fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, C
         let value = exact_data_target_amount(&result, &dimension, &target)?;
         Ok(format_with_unit(value, &target))
     })
+}
+
+fn exact_transfer_elapsed_seconds(input: &str) -> Result<BigRational, ConversionError> {
+    let invalid = ConversionError::InvalidTransferDuration;
+    match elapsed_duration(input) {
+        Ok(duration) => Ok(BigRational::new(
+            duration.as_nanos().into(),
+            NANOS_PER_SECOND.into(),
+        )),
+        Err(DurationError::Incomplete) => Err(ConversionError::Incomplete),
+        Err(DurationError::OutOfRange) => Err(ConversionError::OutOfRange),
+        Err(_) => {
+            let amount = input.trim_end_matches(char::is_alphabetic);
+            let unit = input[amount.len()..].to_ascii_lowercase();
+            let (_, divisor, _) = numeric_duration_unit(&unit).ok_or(invalid)?;
+            let value = calculate_fraction(amount.trim_end()).map_err(|_| invalid)?;
+            let seconds = value * BigRational::new(divisor.into(), NANOS_PER_SECOND.into());
+            ensure_exact_size(&seconds).map_err(|_| ConversionError::OutOfRange)?;
+            Ok(seconds)
+        }
+    }
 }
 
 fn estimate_transfer_by_elapsed(quantity: &str, elapsed: &str) -> Result<String, ConversionError> {
@@ -2974,6 +2987,32 @@ mod tests {
             estimate_transfer("精确速率 1 B 用时 0秒"),
             Err(ConversionError::InvalidTransferDuration)
         );
+    }
+
+    #[test]
+    fn can_reuse_rational_transfer_durations_for_rate_or_amount() {
+        assert_eq!(
+            estimate_transfer("精确速率 1/3 b 用时 1/3 ns to Gb/s").as_deref(),
+            Ok("1 Gb/s")
+        );
+        assert_eq!(
+            estimate_transfer("精确传输量 3 b/s 用时 1/3秒 to b").as_deref(),
+            Ok("1 b")
+        );
+        assert_eq!(
+            estimate_transfer("精确传输量 1 b/s 用时 0.0000000001s to b").as_deref(),
+            Ok("1/10000000000 b")
+        );
+        for query in [
+            "精确速率 1 B 用时 0/3 s",
+            "精确传输量 1 b/s 用时 -1/3 s",
+            "精确传输量 3 b/s 用时 1/0 s",
+        ] {
+            assert_eq!(
+                estimate_transfer(query),
+                Err(ConversionError::InvalidTransferDuration)
+            );
+        }
     }
 
     #[test]
