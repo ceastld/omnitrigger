@@ -5193,6 +5193,48 @@ impl QuickSearch {
         true
     }
 
+    fn json_match_line_range(&self, row: Option<usize>, cx: &App) -> Option<Range<usize>> {
+        if self.expanded_value_pages.is_some() || self.input_before_result_search.is_some() {
+            return None;
+        }
+        let query = self.input.read(cx).text_ref();
+        let (Scope::Json, term) = scoped_query(query)? else {
+            return None;
+        };
+        let table = self.results.table_preview()?;
+        let row = row.or_else(|| {
+            table
+                .page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
+                .map(|(row, _)| row)
+        })?;
+        let line = table.data_cell(row, 1)?.parse().ok()?;
+        let range = json_tools::json_line_filter_source_range(term, line)?;
+        if term[range.clone()].trim() != table.data_cell(row, 2)? {
+            return None;
+        }
+        let (_, operand) = query.split_once([':', '：'])?;
+        let offset = query.len() - operand.trim_start().len();
+        Some(offset + range.start..offset + range.end)
+    }
+
+    fn select_json_match_line(
+        &self,
+        row: Option<usize>,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(range) = self.json_match_line_range(row, cx) else {
+            return false;
+        };
+        if !is_held {
+            self.input
+                .update(cx, |input, cx| input.select_range(range, cx));
+            window.focus(&self.input.focus_handle(cx));
+        }
+        true
+    }
+
     fn select_query_arguments(
         &self,
         is_held: bool,
@@ -5604,6 +5646,7 @@ impl QuickSearch {
                     cx,
                 ) || self.select_input_error(event.is_held, window, cx)
                     || self.show_text_match_original_line(None, event.is_held, window, cx)
+                    || self.select_json_match_line(None, event.is_held, window, cx)
                     || (!event.is_held && self.reveal_selected_file(window, cx))
                 {
                     cx.stop_propagation();
@@ -6312,6 +6355,19 @@ impl QuickSearch {
                         })),
                 )
             })
+            .when(self.json_match_line_range(None, cx).is_some(), |footer| {
+                footer.child(
+                    button("locate-json-match-line", "到原文", Tone::Ghost, true)
+                        .h(px(TABLE_PAGER_HEIGHT))
+                        .px(px(8.))
+                        .tooltip(theme::text_tooltip(
+                            "Alt+Enter 选中本页第一条原始记录".into(),
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.select_json_match_line(None, false, window, cx);
+                        })),
+                )
+            })
             .when(!table.input_errors().is_empty(), |footer| {
                 footer.child(
                     button("locate-input-table-error", "定位错误", Tone::Ghost, true)
@@ -6397,6 +6453,11 @@ impl QuickSearch {
                         || self.text_match_source_row(None, cx).is_some())
                     .then(|| {
                         cx.listener(|this, position: &(usize, usize), window, cx| {
+                            if position.1 == 1
+                                && this.select_json_match_line(Some(position.0), false, window, cx)
+                            {
+                                return;
+                            }
                             if !this.show_text_match_original_line(
                                 Some(position.0),
                                 false,

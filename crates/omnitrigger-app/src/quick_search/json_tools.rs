@@ -333,6 +333,25 @@ pub(super) fn json_csv_report(query: &str) -> Option<Result<String, JsonError>> 
         .then(|| operation.run(source))
 }
 
+pub(super) fn json_line_filter_source_range(
+    query: &str,
+    line_number: usize,
+) -> Option<Range<usize>> {
+    let (operation, arguments) = split_json_operation(query)?;
+    let operation = JsonCsvOperation::from_name(&operation.to_ascii_lowercase())?;
+    if !matches!(
+        operation,
+        JsonCsvOperation::LineFilter | JsonCsvOperation::LineAnyFilter
+    ) {
+        return None;
+    }
+    let (_, source) = json_value_and_source(arguments, JsonError::FilterConditions).ok()?;
+    let (_, range, _) =
+        json_lines_with_spans(source).find(|(number, _, _)| *number == line_number)?;
+    let offset = query.len() - source.len();
+    Some(offset + range.start..offset + range.end)
+}
+
 fn split_json_operation(query: &str) -> Option<(&str, &str)> {
     let (operation, source) = query.split_once(char::is_whitespace)?;
     let source = query[operation.len()..]
@@ -4663,6 +4682,9 @@ mod tests {
                 "\r\n4,\"{\"\"状态\"\":\"\"WARN\"\",\"\"金额\"\":0.5}\"",
             ))
         );
+        let info = json_line_filter_source_range(&any, 3).unwrap();
+        assert_eq!(&any[info], r#"{"状态":"INFO","金额":2e2}"#);
+        assert!(json_line_filter_source_range(&all, 2).is_none());
         let no_match = r#"行筛选CSV [["/金额",">",1]] {"金额":0}"#;
         assert_eq!(transform_json(no_match).as_deref(), Ok("原行号,原文"));
     }
