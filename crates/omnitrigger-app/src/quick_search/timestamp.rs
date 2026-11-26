@@ -203,8 +203,6 @@ enum TimestampReport {
     OffsetChanges,
     DailyClock,
     AbsoluteIntervals(IntervalOperation),
-    IntervalOverlaps,
-    IntervalLayers,
     EqualIntervals,
 }
 
@@ -220,6 +218,8 @@ enum IntervalOperation {
     Intersection,
     Difference,
     Gaps,
+    Overlaps,
+    Layers,
 }
 
 type AbsoluteInterval = (DateTime<Utc>, DateTime<Utc>);
@@ -249,8 +249,12 @@ impl TimestampReport {
             "区间空档" | "interval-gaps" => {
                 Some(Self::AbsoluteIntervals(IntervalOperation::Gaps))
             }
-            "区间冲突csv" | "interval-overlaps-csv" => Some(Self::IntervalOverlaps),
-            "区间层数csv" | "interval-layers-csv" => Some(Self::IntervalLayers),
+            "区间冲突csv" | "interval-overlaps-csv" => {
+                Some(Self::AbsoluteIntervals(IntervalOperation::Overlaps))
+            }
+            "区间层数csv" | "interval-layers-csv" => {
+                Some(Self::AbsoluteIntervals(IntervalOperation::Layers))
+            }
             "等分区间csv" | "split-interval-csv" => Some(Self::EqualIntervals),
             _ => None,
         }
@@ -291,13 +295,7 @@ fn convert_timestamp_with_local(
         Some(TimestampReport::OffsetChanges) => return timezone_offset_changes(argument),
         Some(TimestampReport::DailyClock) => return daily_clock_series(argument, &to_local),
         Some(TimestampReport::AbsoluteIntervals(operation)) => {
-            return absolute_intervals_csv(argument, now, operation);
-        }
-        Some(TimestampReport::IntervalOverlaps) => {
-            return absolute_interval_overlaps_csv(argument, now);
-        }
-        Some(TimestampReport::IntervalLayers) => {
-            return absolute_interval_layers_csv(argument, now);
+            return absolute_intervals_csv(argument, now, operation, &to_local);
         }
         Some(TimestampReport::EqualIntervals) => {
             return equal_intervals_csv(argument, now, &to_local);
@@ -914,8 +912,30 @@ fn absolute_intervals_csv(
     input: &str,
     now: DateTime<Utc>,
     operation: IntervalOperation,
+    to_local: &impl Fn(DateTime<Utc>) -> DateTime<FixedOffset>,
 ) -> Result<String, TimestampError> {
+    let (input, zone) = match split_conversion(input) {
+        Some((input, zone)) => (input, parse_display_zone(zone)?),
+        None => (input, DisplayZone::Utc),
+    };
     let intervals = parse_absolute_intervals(input, now)?;
+    let headers = if matches!(zone, DisplayZone::Utc) {
+        "开始UTC,结束UTC,时长"
+    } else {
+        "开始时刻,结束时刻,时长"
+    };
+    let format_time = |instant: DateTime<Utc>| {
+        let format = TimestampUnit::from_subsecond(instant.timestamp_subsec_nanos()).date_format();
+        format_display_time(instant, format, &zone, to_local)
+    };
+    let format_fields = |(start, end)| {
+        let duration = format_absolute_elapsed(start, end)?;
+        Ok(format!(
+            "{},{},{duration}",
+            format_time(start)?,
+            format_time(end)?
+        ))
+    };
     let intervals = match operation {
         IntervalOperation::Merge => merge_absolute_intervals(intervals),
         IntervalOperation::Intersection => intervals
@@ -931,39 +951,33 @@ fn absolute_intervals_csv(
             .windows(2)
             .map(|pair| (pair[0].1, pair[1].0))
             .collect(),
+        IntervalOperation::Overlaps => {
+            return absolute_interval_overlaps_csv(&intervals, headers, format_fields);
+        }
+        IntervalOperation::Layers => {
+            return absolute_interval_layers_csv(intervals, headers, format_fields);
+        }
     };
-    let mut result = String::from("开始UTC,结束UTC,时长");
-    for (start, end) in intervals {
-        let fields = absolute_interval_csv_fields(start, end)?;
+    let mut result = String::from(headers);
+    for interval in intervals {
+        let fields = format_fields(interval)?;
         result.push_str(&format!("\r\n{fields}"));
     }
     Ok(result)
 }
 
-fn absolute_interval_csv_fields(
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-) -> Result<String, TimestampError> {
-    let duration = format_absolute_elapsed(start, end)?;
-    Ok(format!(
-        "{},{},{duration}",
-        format_utc_instant(start),
-        format_utc_instant(end),
-    ))
-}
-
 fn absolute_interval_overlaps_csv(
-    input: &str,
-    now: DateTime<Utc>,
+    intervals: &[AbsoluteInterval],
+    headers: &str,
+    format_fields: impl Fn(AbsoluteInterval) -> Result<String, TimestampError>,
 ) -> Result<String, TimestampError> {
-    let intervals = parse_absolute_intervals(input, now)?;
-    let mut result = String::from("区间一,区间二,开始UTC,结束UTC,时长");
+    let mut result = format!("区间一,区间二,{headers}");
     for (left, &(start, end)) in intervals.iter().enumerate() {
         for (right, &(other_start, other_end)) in intervals.iter().enumerate().skip(left + 1) {
             let start = start.max(other_start);
             let end = end.min(other_end);
             if start < end {
-                let fields = absolute_interval_csv_fields(start, end)?;
+                let fields = format_fields((start, end))?;
                 result.push_str(&format!("\r\n{},{},{fields}", left + 1, right + 1));
             }
         }
@@ -971,20 +985,24 @@ fn absolute_interval_overlaps_csv(
     Ok(result)
 }
 
-fn absolute_interval_layers_csv(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
+fn absolute_interval_layers_csv(
+    intervals: Vec<AbsoluteInterval>,
+    headers: &str,
+    format_fields: impl Fn(AbsoluteInterval) -> Result<String, TimestampError>,
+) -> Result<String, TimestampError> {
     let mut changes = BTreeMap::<_, i32>::new();
-    for (start, end) in parse_absolute_intervals(input, now)? {
+    for (start, end) in intervals {
         *changes.entry(start).or_default() += 1;
         *changes.entry(end).or_default() -= 1;
     }
     changes.retain(|_, delta| *delta != 0);
 
-    let mut result = String::from("开始UTC,结束UTC,时长,覆盖数");
+    let mut result = format!("{headers},覆盖数");
     let mut coverage = 0;
     let mut previous = None;
     for (instant, delta) in changes {
         if let Some(start) = previous.filter(|_| coverage > 0) {
-            let fields = absolute_interval_csv_fields(start, instant)?;
+            let fields = format_fields((start, instant))?;
             result.push_str(&format!("\r\n{fields},{coverage}"));
         }
         coverage += delta;
@@ -1791,6 +1809,27 @@ mod tests {
         assert_eq!(
             convert_timestamp("逐日覆盖CSV 0s 到 1s", now),
             Err(TimestampError::DailyCoverageArguments)
+        );
+    }
+
+    #[test]
+    fn displays_absolute_interval_boundaries_in_the_requested_zone() {
+        let now = DateTime::UNIX_EPOCH;
+        assert_eq!(
+            convert_timestamp(
+                "区间合并 2026-03-08T01:30:00-05:00 到 2026-03-08T03:30:00-04:00 to America/New_York",
+                now,
+            )
+            .as_deref(),
+            Ok("开始时刻,结束时刻,时长\r\n2026-03-08T01:30:00-05:00,2026-03-08T03:30:00-04:00,01:00:00")
+        );
+        assert_eq!(
+            convert_timestamp("区间冲突CSV 0s 到 3s; 1s 到 2s to UTC+8", now).as_deref(),
+            Ok("区间一,区间二,开始时刻,结束时刻,时长\r\n1,2,1970-01-01T08:00:01+08:00,1970-01-01T08:00:02+08:00,00:00:01")
+        );
+        assert_eq!(
+            convert_timestamp("区间层数CSV 0s 到 1ns to UTC", now),
+            convert_timestamp("区间层数CSV 0s 到 1ns", now)
         );
     }
 
