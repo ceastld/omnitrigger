@@ -1,6 +1,6 @@
-use std::ops::Range;
+use std::{ops::Range, rc::Rc};
 
-use gpui::{div, prelude::*, px, relative, Div, FontWeight};
+use gpui::{div, prelude::*, px, relative, App, Div, FontWeight, Window};
 
 use crate::theme::{self, rgb};
 
@@ -172,7 +172,13 @@ impl TablePreview {
             .collect()
     }
 
-    pub(super) fn render(&self, row_page: usize, column_page: usize) -> Div {
+    pub(super) fn render(
+        &self,
+        row_page: usize,
+        column_page: usize,
+        inspect_cell: Option<impl Fn(&(usize, usize), &mut Window, &mut App) + 'static>,
+    ) -> Div {
+        let inspect_cell = inspect_cell.map(Rc::new);
         let rows = self.visible_rows(row_page, column_page);
         let column_widths = self.column_width_fractions(column_page);
         let visible_count = 1 + (self.data_rows - row_page * MAX_DATA_ROWS).min(MAX_DATA_ROWS);
@@ -210,10 +216,25 @@ impl TablePreview {
                         row.border_b_1().border_color(rgb(theme::BORDER))
                     })
                     .children(row.iter().enumerate().map(|(column, value)| {
+                        let column_index = first_column + column;
                         div()
+                            .id((
+                                "quick-search-table-cell",
+                                row_index * self.columns + column_index,
+                            ))
                             .w(relative(column_widths[column]))
                             .min_w_0()
                             .px(px(8.))
+                            .when_some(
+                                inspect_cell.clone().filter(|_| row_index > 0),
+                                |cell, inspect| {
+                                    cell.cursor_pointer()
+                                        .hover(|style| style.bg(rgb(theme::ACCENT_BG)))
+                                        .on_click(move |_, window, cx| {
+                                            inspect(&(row_index, column_index + 1), window, cx)
+                                        })
+                                },
+                            )
                             .when(
                                 self.is_cell_highlighted(row_index, first_column + column),
                                 |cell| {

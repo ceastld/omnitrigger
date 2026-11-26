@@ -3932,7 +3932,7 @@ impl QuickSearch {
             .is_some_and(|draft| draft.command == TABLE_CELL_COMMAND)
     }
 
-    fn table_cell_source(&self) -> Option<(&str, String)> {
+    fn table_cell_source(&self, position: Option<(usize, usize)>) -> Option<(&str, String)> {
         if self.input_before_result_search.is_some() || self.expanded_value_pages.is_some() {
             return None;
         }
@@ -3943,8 +3943,9 @@ impl QuickSearch {
         else {
             return None;
         };
-        let (row, column) =
-            table.page_first_data_cell(self.table_pages.rows, self.table_pages.columns)?;
+        let (row, column) = position.or_else(|| {
+            table.page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
+        })?;
         let coordinates = format!("{row},{column}");
         let available =
             INPUT_CHARACTER_LIMIT - TABLE_CELL_COMMAND.chars().count() - coordinates.len() - 3;
@@ -3952,13 +3953,18 @@ impl QuickSearch {
             .then_some((text.as_str(), coordinates))
     }
 
-    fn toggle_table_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_table_cell(
+        &mut self,
+        position: Option<(usize, usize)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.input.read(cx).is_composing() || self.file_operation_in_progress() {
             return;
         }
         if self.is_table_cell_lookup() {
             self.toggle_result_search(window, cx);
-        } else if let Some((text, coordinates)) = self.table_cell_source() {
+        } else if let Some((text, coordinates)) = self.table_cell_source(position) {
             let query = format!("{TABLE_CELL_COMMAND}[{coordinates}] {text}");
             let start = TABLE_CELL_COMMAND.len() + 1;
             let selection = start..start + coordinates.len();
@@ -4737,10 +4743,10 @@ impl QuickSearch {
                 && keystroke.modifiers.control
                 && keystroke.modifiers.shift
                 && keystroke.key == "j"
-                && (self.is_table_cell_lookup() || self.table_cell_source().is_some())
+                && (self.is_table_cell_lookup() || self.table_cell_source(None).is_some())
             {
                 if !event.is_held {
-                    self.toggle_table_cell(window, cx);
+                    self.toggle_table_cell(None, window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "d" {
@@ -5481,7 +5487,7 @@ impl QuickSearch {
                     )
                 },
             )
-            .when(self.table_cell_source().is_some(), |footer| {
+            .when(self.table_cell_source(None).is_some(), |footer| {
                 footer.child(
                     button("get-table-cell", "取单元格", Tone::Ghost, true)
                         .h(px(TABLE_PAGER_HEIGHT))
@@ -5490,7 +5496,7 @@ impl QuickSearch {
                             "Ctrl+Shift+J 输入数据行号和列号".into(),
                         ))
                         .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_table_cell(window, cx);
+                            this.toggle_table_cell(None, window, cx);
                         })),
                 )
             })
@@ -5565,7 +5571,15 @@ impl QuickSearch {
                 ..
             })) if self.expanded_value_pages.is_none() => self.render_visual_preview(
                 table.legend(),
-                table.render(self.table_pages.rows, self.table_pages.columns),
+                table.render(
+                    self.table_pages.rows,
+                    self.table_pages.columns,
+                    self.table_cell_source(None).is_some().then(|| {
+                        cx.listener(|this, position: &(usize, usize), window, cx| {
+                            this.toggle_table_cell(Some(*position), window, cx);
+                        })
+                    }),
+                ),
                 "复制 CSV  Enter",
                 self.table_footer(table, cx),
                 cx,
@@ -6624,7 +6638,7 @@ impl Render for QuickSearch {
                                 .px(px(10.))
                                 .tooltip(theme::text_tooltip("Ctrl+Shift+J 恢复表格查询".into()))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_table_cell(window, cx);
+                                    this.toggle_table_cell(None, window, cx);
                                 })),
                         )
                     })
@@ -9320,6 +9334,17 @@ mod tests {
             (1, 1)
         );
         assert!(!search.is_table_cell_lookup());
+        search.toggle_table_cell(Some((8, 8)), window, cx);
+        let opened = search.input.read(cx).text();
+        assert!(opened.starts_with("CSV: 取单元格 [8,8] "));
+        search.refresh_results(&opened, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("末列8"));
+        search.key_down(&key, window, cx);
+        search.refresh_results(&query, window, cx);
+        assert_eq!(
+            (search.table_pages.rows, search.table_pages.columns),
+            (1, 1)
+        );
     }
 
     #[cfg(target_os = "windows")]
