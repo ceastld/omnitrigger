@@ -275,7 +275,7 @@ fn convert_timestamp_with_local(
         }
         Some(TimestampReport::DailyDurations) => return daily_durations(argument, now),
         Some(TimestampReport::OffsetChanges) => return timezone_offset_changes(argument),
-        Some(TimestampReport::DailyClock) => return daily_clock_series(argument),
+        Some(TimestampReport::DailyClock) => return daily_clock_series(argument, &to_local),
         Some(TimestampReport::AbsoluteIntervals(operation)) => {
             return absolute_intervals_csv(argument, now, operation);
         }
@@ -606,8 +606,15 @@ fn timezone_offset_changes(input: &str) -> Result<String, TimestampError> {
     Ok(output)
 }
 
-fn daily_clock_series(input: &str) -> Result<String, TimestampError> {
+fn daily_clock_series(
+    input: &str,
+    to_local: &impl Fn(DateTime<Utc>) -> DateTime<FixedOffset>,
+) -> Result<String, TimestampError> {
     let invalid = TimestampError::DailyClockArguments;
+    let (input, target) = match split_conversion(input) {
+        Some((input, zone)) => (input, Some(parse_display_zone(zone)?)),
+        None => (input, None),
+    };
     let (source, count) = input.split_once('@').ok_or(invalid)?;
     let (clock, zone) = source
         .trim()
@@ -624,6 +631,9 @@ fn daily_clock_series(input: &str) -> Result<String, TimestampError> {
     let zone = explicit_timezone(zone, invalid)?;
     let mut clock = parse_named_clock(clock)?;
     let mut output = String::from("当地时间,UTC,状态");
+    if target.is_some() {
+        output.push_str(",目标时间");
+    }
     for index in 0..count {
         let unresolved = zone.to_ambiguous_timestamp(clock);
         let mut add =
@@ -633,10 +643,20 @@ fn daily_clock_series(input: &str) -> Result<String, TimestampError> {
                 let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
                 let utc = time.to_rfc3339_opts(unit.date_format(), true);
                 output.push_str(&format!("\r\n{clock},{utc},{status}"));
+                if let Some(target) = &target {
+                    let local = format_display_time(time, unit.date_format(), target, to_local)?;
+                    output.push(',');
+                    output.push_str(&local);
+                }
                 Ok(())
             };
         match unresolved.offset() {
-            AmbiguousOffset::Gap { .. } => output.push_str(&format!("\r\n{clock},\"\",跳过")),
+            AmbiguousOffset::Gap { .. } => {
+                output.push_str(&format!("\r\n{clock},\"\",跳过"));
+                if target.is_some() {
+                    output.push_str(",\"\"");
+                }
+            }
             AmbiguousOffset::Fold { .. } => {
                 add(unresolved.earlier(), "第一次")?;
                 add(unresolved.later(), "第二次")?;
@@ -1400,6 +1420,36 @@ mod tests {
                 now
             ),
             Err(TimestampError::UnsupportedPrecision),
+        );
+    }
+
+    #[test]
+    fn daily_clock_series_adds_target_times_and_leaves_missing_times_blank() {
+        let now = DateTime::UNIX_EPOCH;
+        assert_eq!(
+            convert_timestamp(
+                "每日同刻 2026-03-07 02:30 America/New_York @ 3 to UTC+8",
+                now
+            )
+            .as_deref(),
+            Ok(concat!(
+                "当地时间,UTC,状态,目标时间",
+                "\r\n2026-03-07T02:30:00,2026-03-07T07:30:00Z,正常,2026-03-07T15:30:00+08:00",
+                "\r\n2026-03-08T02:30:00,\"\",跳过,\"\"",
+                "\r\n2026-03-09T02:30:00,2026-03-09T06:30:00Z,正常,2026-03-09T14:30:00+08:00",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp(
+                "daily-clock 2026-11-01 01:30 America/New_York @ 1 to Asia/Shanghai",
+                now
+            )
+            .as_deref(),
+            Ok(concat!(
+                "当地时间,UTC,状态,目标时间",
+                "\r\n2026-11-01T01:30:00,2026-11-01T05:30:00Z,第一次,2026-11-01T13:30:00+08:00",
+                "\r\n2026-11-01T01:30:00,2026-11-01T06:30:00Z,第二次,2026-11-01T14:30:00+08:00",
+            ))
         );
     }
 

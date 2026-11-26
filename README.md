@@ -1332,6 +1332,7 @@
 - 用 `时间戳: 逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York` 可按当地日期汇总实际经过时间。三个日期分别为 10、23、10 小时。起点计入，终点排除。支持地区时区、`UTC` 或固定偏移，结果保留纳秒，最多输出 128 个当地日期。
 - 输入 `时间戳: 偏移变更 2026 America/New_York` 可列出指定 UTC 年份的时区偏移变化，包含生效的 UTC 时刻、变更前后的偏移和当地钟表移动的时长。固定偏移或当年全年使用同一偏移时只返回表头。 [Jiff 的时区过渡数据](https://docs.rs/jiff/latest/jiff/tz/struct.TimeZone.html#method.following)
 - 用 `时间戳: 每日同刻 2026-03-07 02:30 America/New_York @ 3` 可查连续三天当地 02:30 分别对应的 UTC 时间。支持 1 至 128 天。当地钟表跳过的时刻标记为“跳过”，回拨后重复的时刻显示两行。 [Jiff 的重复时刻处理](https://docs.rs/jiff/latest/jiff/tz/struct.AmbiguousTimestamp.html)
+- 在 `每日同刻` 后加 `to UTC+8` 或其他目标时区，可同时查看每项在该时区的时间。上例中纽约的 02:30 分别对应 `15:30`、空白和 `14:30`，便于核对切换夏令时前后的时间。
 - 时区偏移可精确到秒。把历史查询的结果作为输入，例如 `时间戳: 1900-01-01T00:09:21.123+00:09:21 to UTC`，可还原为 `1900-01-01T00:00:00.123Z`。结果中的毫秒一并保留。
 - 输入 `时间戳: 间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York` 得到 `01:00:00`。间隔按两端对应的 UTC 时间计算，支持地区时区和明确的 UTC 偏移，结果可精确到纳秒。交换两端会反转正负号。 [NIST 夏令时规则](https://www.nist.gov/pml/time-and-frequency-division/popular-links/daylight-saving-time-dst)
 - 日期时间间隔可加 `to s`、`to ms` 或其他时长单位。加 `to iso` 可生成 ISO 日时长，例如 `P1DT2.5S`。

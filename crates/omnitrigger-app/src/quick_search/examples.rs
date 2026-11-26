@@ -3207,7 +3207,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     Example {
         icon: Icon::Clock,
         title: "用当地时区逐日列出同一个钟表时刻",
-        query: "时间戳: 每日同刻 2026-03-07 02:30 America/New_York @ 3",
+        query: "时间戳: 每日同刻 2026-03-07 02:30 America/New_York @ 3 to UTC+8",
     },
     Example {
         icon: Icon::Clock,
