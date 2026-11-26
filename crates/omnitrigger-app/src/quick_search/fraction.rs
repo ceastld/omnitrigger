@@ -69,6 +69,8 @@ pub(super) enum FractionError {
     PositiveMeanArguments,
     RationalGeometricMean,
     AlignmentArguments,
+    StepIntervalArguments,
+    StepIntervalValue,
     RationalSquareRoot,
     RootDegree,
     RationalRoot,
@@ -143,6 +145,8 @@ impl FractionError {
             Self::PositiveMeanArguments => "gmean 和 hmean 的每个参数须为正数",
             Self::RationalGeometricMean => "这些参数的几何平均值无法表示为分数",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
+            Self::StepIntervalArguments => "填写对齐值、正步长和可选起点，例如 7/12 to 1/4 @ 1/12",
+            Self::StepIntervalValue => "填写落在指定步长刻度上的对齐值",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::RootDegree => "root 的次数须为 1 至 1024 的整数",
             Self::RationalRoot => "输入值须有可表示为分数的实数次方根",
@@ -376,6 +380,12 @@ fn simplify_fraction_using(
     };
     if let Some(alignment) = alignment {
         return align_fraction(expression.trim(), alignment).map(|value| value.to_string());
+    }
+    if verb == "步长区间" || verb.eq_ignore_ascii_case("step-rounding-interval") {
+        let (value, grid) =
+            split_conversion(expression.trim()).ok_or(FractionError::StepIntervalArguments)?;
+        let (step, origin) = grid.split_once('@').unwrap_or((grid, "0"));
+        return step_rounding_interval(calculate(value)?, calculate(step)?, calculate(origin)?);
     }
     let grouped = verb == "千分位" || verb.eq_ignore_ascii_case("grouped-decimal");
     let interval = verb == "舍入区间" || verb.eq_ignore_ascii_case("rounding-interval");
@@ -1736,6 +1746,32 @@ fn parse_alignment_step(step: &str) -> Result<BigRational, FractionError> {
         return Err(FractionError::AlignmentArguments);
     }
     Ok(step)
+}
+
+fn step_rounding_interval(
+    value: BigRational,
+    step: BigRational,
+    origin: BigRational,
+) -> Result<String, FractionError> {
+    if step.numer().sign() != Sign::Plus {
+        return Err(FractionError::StepIntervalArguments);
+    }
+    let tick = (&value - origin) / &step;
+    ensure_exact_size(&tick)?;
+    if !tick.is_integer() {
+        return Err(FractionError::StepIntervalValue);
+    }
+    let (open, close) = if tick.numer().magnitude().bit(0) {
+        ('(', ')')
+    } else {
+        ('[', ']')
+    };
+    let radius = step / BigInt::from(2);
+    let lower = &value - &radius;
+    let upper = value + radius;
+    ensure_exact_size(&lower)?;
+    ensure_exact_size(&upper)?;
+    Ok(format!("{open}{lower}, {upper}{close}"))
 }
 
 fn align_fraction_to_step(
@@ -4314,6 +4350,26 @@ mod tests {
             ("小数 1/3 to -1", FractionError::DecimalPlaces),
             ("小数 1/3 to 2.5", FractionError::DecimalPlaces),
             ("小数 1/0 to 2", FractionError::ZeroDenominator),
+        ] {
+            assert_eq!(simplify_fraction(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn inverts_exact_step_alignment_with_optional_shifted_origin() {
+        for (query, expected) in [
+            ("步长区间 1/2 to 1/4", "[3/8, 5/8]"),
+            ("步长区间 -1/4 to 1/4", "(-3/8, -1/8)"),
+            ("步长区间 7/12 转 1/4 @ 1/12", "[11/24, 17/24]"),
+            ("步长区间 1/3 to 1/4 @ 1/12", "(5/24, 11/24)"),
+            ("step-rounding-interval 0 to 1/3", "[-1/6, 1/6]"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("步长区间 1/5 to 1/4", FractionError::StepIntervalValue),
+            ("步长区间 0 to -1/4", FractionError::StepIntervalArguments),
+            ("步长区间 0 to 0", FractionError::StepIntervalArguments),
         ] {
             assert_eq!(simplify_fraction(query), Err(error), "{query}");
         }

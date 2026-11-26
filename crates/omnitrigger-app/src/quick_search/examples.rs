@@ -7547,6 +7547,11 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "反查按指定步长就近对齐前的区间",
+        query: "分数: 步长区间 7/12 to 1/4 @ 1/12",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在精确算式中按带起点的步长向下对齐",
         query: "分数: 计算 floorstep(3/8,1/4,1/10)",
     },
