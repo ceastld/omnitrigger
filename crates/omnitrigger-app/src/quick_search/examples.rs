@@ -4751,6 +4751,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "列出关键词命中的原文行号",
+        query: "文本: 搜索行CSV \"north 茶\" SOUTH 茶\nＮＯＲＴＨ 茶,甲\nSouth 米\nnorth 茶乙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按正则提取匹配行及前后的文本",
         query: "文本: 正则上下文 [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
     },

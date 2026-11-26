@@ -311,6 +311,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     match operation.to_ascii_lowercase().as_str() {
         "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
+        "搜索行csv" | "search-lines-csv" => Some(search_text_lines_csv(text)),
         "连续计数csv" | "count-consecutive-lines-csv" => {
             Some(count_consecutive_lines_csv(text))
         }
@@ -2231,12 +2232,36 @@ fn filter_result_lines(query: &str, text: &str) -> String {
     }
     logical_newline_pattern()
         .split(text)
-        .filter(|line| {
-            let key = search_key(line);
-            words.iter().all(|word| key.contains(word))
-        })
+        .filter(|line| contains_all_search_words(line, &words))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn search_text_lines_csv(input: &str) -> Result<String, TextError> {
+    let (query, text) = quoted_text_argument(input)?;
+    let query = search_key(&query);
+    let words: Vec<_> = query.split_whitespace().collect();
+    let mut csv = String::from("原行号,原文");
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        if !contains_all_search_words(line, &words) {
+            continue;
+        }
+        let number = (index + 1).to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [number.as_str(), line].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn contains_all_search_words(line: &str, words: &[&str]) -> bool {
+    if words.is_empty() {
+        return true;
+    }
+    let key = search_key(line);
+    words.iter().all(|word| key.contains(word))
 }
 
 fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
@@ -5010,6 +5035,18 @@ mod tests {
         assert_eq!(
             pick_original_result_lines("6", source),
             Err(TextError::MissingLine)
+        );
+    }
+
+    #[test]
+    fn reports_original_positions_of_matching_text_lines() {
+        let query = "搜索行CSV \"north 茶\" 茶 SOUTH\r\n ＮＯＲＴＨ 茶,甲 \u{2028}\rNorth 茶乙";
+        let expected = "原行号,原文\r\n2,\" ＮＯＲＴＨ 茶,甲 \"\r\n4,North 茶乙";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("search-lines-csv \"茶\" north").as_deref(),
+            Ok("原行号,原文")
         );
     }
 
