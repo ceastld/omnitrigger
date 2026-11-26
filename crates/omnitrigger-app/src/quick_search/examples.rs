@@ -5384,6 +5384,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用正则表达式查找嵌套 JSON 键名",
+        query: r#"JSON: 正则找键CSV "^(金额|价格)[0-9]*$" {"金额2":1.50,"订单":[{"价格":2e2}],"金额合计":3}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位 JSON 中同一对象内重复的键",
         query: r#"JSON: 重复键 {"订单":[{"价格":1,"价格":2},{"价格":3}]}"#,
     },
