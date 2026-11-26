@@ -23,6 +23,7 @@ pub(super) enum MatrixError {
     EigenvalueDimensions,
     EigenspaceArguments,
     SubmatrixArguments,
+    ConcatenationDimensions,
     ElementwiseDimensions,
     ProductDimensions,
     PowerExponent,
@@ -39,7 +40,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、子矩阵、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、子矩阵、横向拼接、纵向拼接、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -51,6 +52,7 @@ impl MatrixError {
                 "填写 [[行号],[列号]] @ 矩阵，序号从 1 开始、负数从末尾算起，null 表示全选"
             }
             Self::ElementwiseDimensions => "加减法和逐项乘法要求两个矩阵的行数和列数分别相同",
+            Self::ConcatenationDimensions => "横向拼接需要相同行数，纵向拼接需要相同列数",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
             Self::ConditionNorm => "填写 1 或 ∞，用 @ 隔开矩阵，例如 条件数 1 @ 2,0; 0,1/3",
@@ -124,6 +126,8 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
             kronecker_product(&left, &right).map(format_matrix)
         }
         "子矩阵" | "取行列" | "submatrix" => select_submatrix(input),
+        "横向拼接" | "hstack" => concatenate(input, true),
+        "纵向拼接" | "vstack" => concatenate(input, false),
         "乘方" | "幂" | "power" => {
             let (matrix, exponent) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
             let exponent = exponent
@@ -202,6 +206,30 @@ fn select_submatrix(input: &str) -> Result<String, MatrixError> {
             })
             .collect(),
     ))
+}
+
+fn concatenate(input: &str, horizontal: bool) -> Result<String, MatrixError> {
+    let (mut left, right) = parse_pair(input)?;
+    if horizontal {
+        if left.len() != right.len() {
+            return Err(MatrixError::ConcatenationDimensions);
+        }
+        if left[0].len() + right[0].len() > MAX_DIMENSION {
+            return Err(MatrixError::TooLarge);
+        }
+        for (left_row, right_row) in left.iter_mut().zip(right) {
+            left_row.extend(right_row);
+        }
+    } else {
+        if left[0].len() != right[0].len() {
+            return Err(MatrixError::ConcatenationDimensions);
+        }
+        if left.len() + right.len() > MAX_DIMENSION {
+            return Err(MatrixError::TooLarge);
+        }
+        left.extend(right);
+    }
+    Ok(format_matrix(left))
 }
 
 fn parse_pair(input: &str) -> Result<(Matrix, Matrix), MatrixError> {
@@ -916,6 +944,26 @@ mod tests {
                 Err(MatrixError::SubmatrixArguments)
             );
         }
+    }
+
+    #[test]
+    fn concatenates_matrices_along_a_compatible_axis() {
+        assert_eq!(
+            calculate_matrix("横向拼接 1,2; 3,4 @ 5; 6").as_deref(),
+            Ok("1, 2, 5\n3, 4, 6")
+        );
+        assert_eq!(
+            calculate_matrix("vstack 1/3,2 @ 3,4; 5,6").as_deref(),
+            Ok("1/3, 2\n3, 4\n5, 6")
+        );
+        assert_eq!(
+            calculate_matrix("纵向拼接 1 @ 2,3"),
+            Err(MatrixError::ConcatenationDimensions)
+        );
+        assert_eq!(
+            calculate_matrix("hstack 1,2,3,4,5 @ 6,7,8,9"),
+            Err(MatrixError::TooLarge)
+        );
     }
 
     #[test]

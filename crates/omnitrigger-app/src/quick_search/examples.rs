@@ -1409,6 +1409,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 子矩阵 [[3,1],[-1,1]] @ 1,2,3; 4,5,6; 7,8,9",
     },
     Example {
+        icon: Icon::Layers,
+        title: "在矩阵的右侧追加列",
+        query: "矩阵: 横向拼接 1,2; 3,4 @ 5; 6",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "在矩阵的下方追加行",
+        query: "矩阵: 纵向拼接 1,2 @ 3,4; 5,6",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "精确计算矩阵的整数次幂",
         query: "矩阵: 乘方 1,1; 1,0 @ 5",
@@ -8183,6 +8193,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                         "特征空间",
                         "克罗内克积",
                         "子矩阵",
+                        "横向拼接",
+                        "纵向拼接",
                     ]
                     .iter()
                     .any(|op| op.starts_with(term))) => {}
