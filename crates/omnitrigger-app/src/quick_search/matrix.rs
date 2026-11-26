@@ -38,7 +38,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -114,6 +114,10 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "乘法" | "乘" | "multiply" => {
             let (left, right) = parse_pair(input)?;
             multiply(&left, &right).map(format_matrix)
+        }
+        "克罗内克积" | "张量积" | "kronecker" | "kron" => {
+            let (left, right) = parse_pair(input)?;
+            kronecker_product(&left, &right).map(format_matrix)
         }
         "乘方" | "幂" | "power" => {
             let (matrix, exponent) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
@@ -651,6 +655,32 @@ fn multiply(left: &[Vec<BigRational>], right: &[Vec<BigRational>]) -> Result<Mat
         .collect()
 }
 
+fn kronecker_product(
+    left: &[Vec<BigRational>],
+    right: &[Vec<BigRational>],
+) -> Result<Matrix, MatrixError> {
+    let rows = left.len() * right.len();
+    let columns = left[0].len() * right[0].len();
+    if rows > MAX_DIMENSION || columns > MAX_DIMENSION {
+        return Err(MatrixError::TooLarge);
+    }
+    let mut product = Vec::with_capacity(rows);
+    for left_row in left {
+        for right_row in right {
+            let row = left_row
+                .iter()
+                .flat_map(|left| right_row.iter().map(move |right| left * right))
+                .map(|value| {
+                    ensure_exact_size(&value).map_err(MatrixError::Evaluation)?;
+                    Ok(value)
+                })
+                .collect::<Result<Vec<_>, MatrixError>>()?;
+            product.push(row);
+        }
+    }
+    Ok(product)
+}
+
 fn transpose(matrix: Matrix) -> Matrix {
     let mut result = vec![Vec::new(); matrix[0].len()];
     for row in matrix {
@@ -799,6 +829,22 @@ mod tests {
         assert_eq!(
             calculate_matrix("迹 1,2; 3,4; 5,6"),
             Err(MatrixError::SquareRequired)
+        );
+    }
+
+    #[test]
+    fn builds_exact_kronecker_product_blocks_for_rectangular_matrices() {
+        assert_eq!(
+            calculate_matrix("克罗内克积 1,2; 3,4 @ 1/2,0; 0,1").as_deref(),
+            Ok("1/2, 0, 1, 0\n0, 1, 0, 2\n3/2, 0, 2, 0\n0, 3, 0, 4")
+        );
+        assert_eq!(
+            calculate_matrix("kron 2,3 @ 5;7").as_deref(),
+            Ok("10, 15\n14, 21")
+        );
+        assert_eq!(
+            calculate_matrix("张量积 1,2,3 @ 4,5,6"),
+            Err(MatrixError::TooLarge)
         );
     }
 

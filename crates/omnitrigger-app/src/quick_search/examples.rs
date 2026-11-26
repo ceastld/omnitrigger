@@ -1399,6 +1399,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 乘法 1,2; 3,4 @ 5,6; 7,8",
     },
     Example {
+        icon: Icon::Layers,
+        title: "求两个矩阵的克罗内克积",
+        query: "矩阵: 克罗内克积 1,2; 3,4 @ 1/2,0; 0,1",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "精确计算矩阵的整数次幂",
         query: "矩阵: 乘方 1,1; 1,0 @ 5",
@@ -8171,6 +8176,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                         "正定性",
                         "左零空间",
                         "特征空间",
+                        "克罗内克积",
                     ]
                     .iter()
                     .any(|op| op.starts_with(term))) => {}
