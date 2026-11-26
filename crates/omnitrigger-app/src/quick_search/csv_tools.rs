@@ -3992,19 +3992,25 @@ fn summarize_csv_column_pair_errors(input: &str) -> Result<String, CsvError> {
 pub(super) fn csv_column_pair_report_source_range(
     query: &str,
     row: usize,
-    expected_old: &str,
-    expected_new: &str,
+    expected_values: Option<(&str, &str)>,
 ) -> Option<Range<usize>> {
+    if row == 0 {
+        return None;
+    }
     let (operation, arguments) = split_argument(query)?;
     let invalid = CsvError::ColumnPairDifferenceArguments;
-    let (columns, data) = match operation.to_ascii_lowercase().as_str() {
-        "两列差异"
-        | "column-pair-differences"
-        | "两列数值差异"
-        | "numeric-column-pair-differences" => {
+    let (columns, data) = match (operation.to_ascii_lowercase().as_str(), expected_values) {
+        (
+            "两列差异"
+            | "column-pair-differences"
+            | "两列数值差异"
+            | "numeric-column-pair-differences",
+            Some(_),
+        )
+        | ("两列偏差摘要" | "column-pair-error-summary", None) => {
             json_argument_and_data::<[ColumnReference; 2]>(arguments, invalid).ok()?
         }
-        "两列超差" | "out-of-tolerance-columns" => {
+        ("两列超差" | "out-of-tolerance-columns", Some(_)) => {
             let ((columns, _, _), data) =
                 json_argument_and_data::<([ColumnReference; 2], String, String)>(
                     arguments, invalid,
@@ -4021,9 +4027,11 @@ pub(super) fn csv_column_pair_report_source_range(
     let &[left, right] = columns.as_slice() else {
         return None;
     };
-    let record = rows.get(row)?;
-    if row == 0 || record[left] != expected_old || record[right] != expected_new {
-        return None;
+    if let Some((expected_old, expected_new)) = expected_values {
+        let record = rows.get(row)?;
+        if record[left] != expected_old || record[right] != expected_new {
+            return None;
+        }
     }
     let offset = data.as_ptr().addr().checked_sub(query.as_ptr().addr())?;
     let range = spans.get(row)?;
@@ -15999,13 +16007,23 @@ null"#
             "2,100,102,\"逗,号\n换行\"\r\n",
             "3,0,0.1,待确认",
         );
-        let range = csv_column_pair_report_source_range(query, 2, "100", "102").unwrap();
+        let range = csv_column_pair_report_source_range(query, 2, Some(("100", "102"))).unwrap();
         assert_eq!(query.get(range), Some("2,100,102,\"逗,号\n换行\""));
-        assert!(csv_column_pair_report_source_range(query, 2, "100", "0.1").is_none());
-        assert!(csv_column_pair_report_source_range(query, 0, "原值", "新值").is_none());
+        assert!(csv_column_pair_report_source_range(query, 2, Some(("100", "0.1"))).is_none());
+        assert!(csv_column_pair_report_source_range(query, 0, Some(("原值", "新值"))).is_none());
         let query = "两列差异 [2,3] 编号,旧,新\n1,相同,相同\n2,\"旧,值\",新";
-        let range = csv_column_pair_report_source_range(query, 2, "旧,值", "新").unwrap();
+        let range = csv_column_pair_report_source_range(query, 2, Some(("旧,值", "新"))).unwrap();
         assert_eq!(query.get(range), Some("2,\"旧,值\",新"));
+    }
+
+    #[test]
+    fn locates_the_original_record_for_the_largest_csv_pair_error() {
+        let query =
+            "两列偏差摘要 [1,2] 基准,实测,备注\r\n1,2,正常\r\n3,-1,\"有,逗号\n跨行\"\r\n2,4,待核对";
+        let range = csv_column_pair_report_source_range(query, 2, None).unwrap();
+        assert_eq!(query.get(range), Some("3,-1,\"有,逗号\n跨行\""));
+        assert!(csv_column_pair_report_source_range(query, 4, None).is_none());
+        assert!(csv_column_pair_report_source_range(query, 2, Some(("3", "-1"))).is_none());
     }
 
     #[test]

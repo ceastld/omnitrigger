@@ -5274,13 +5274,21 @@ impl QuickSearch {
                 .page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
                 .map(|(row, _)| (row, 1))
         })?;
-        if scope == Scope::Csv && column == 1 {
-            let range = csv_tools::csv_column_pair_report_source_range(
-                term,
-                table.data_cell(row, 1)?.parse().ok()?,
-                table.data_cell(row, 2)?,
-                table.data_cell(row, 3)?,
-            )?;
+        if scope == Scope::Csv {
+            let maximum = (1..=table_preview::MAX_DATA_ROWS).find(|&candidate| {
+                (cell.is_none() || candidate == row)
+                    && table.data_cell(candidate, 1) == Some("最大绝对差")
+            });
+            let (source_row, expected_values) = match maximum {
+                Some(maximum) => (table.data_cell(maximum, 3)?.parse().ok()?, None),
+                None if column == 1 => (
+                    table.data_cell(row, 1)?.parse().ok()?,
+                    Some((table.data_cell(row, 2)?, table.data_cell(row, 3)?)),
+                ),
+                None => return None,
+            };
+            let range =
+                csv_tools::csv_column_pair_report_source_range(term, source_row, expected_values)?;
             let offset = term.as_ptr().addr().checked_sub(query.as_ptr().addr())?;
             return Some(offset + range.start..offset + range.end);
         }
