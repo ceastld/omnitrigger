@@ -582,6 +582,7 @@
 - 用 `统计: 超几何分位点 10,4,3,90%` 得到 `2`，即满足“至多命中该次数的概率达到或超过 90%”的最小次数。输入 0% 可查最小可能命中数，100% 可查最大可能命中数。
 - 用 `统计: 二项摘要 4,1/3` 查看期望 `4/3`、方差 `8/9` 和标准差 `√(8/9)`。`超几何摘要 10,4,3` 对不放回命中数给出期望 `6/5`、方差 `14/25`。`几何摘要 25%` 按包含首次成功在内的试验次数计算，得到期望 `4`、方差 `12` 和标准差 `√12`。 [NIST 二项分布](https://www.itl.nist.gov/div898/handbook/eda/section3/eda366i.htm) [R 超几何分布](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/Hypergeometric.html) [R 负二项分布及其几何特例](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/NegBinomial.html)
 - 输入 `统计: 独立性卡方 1,2; 3,4` 得到皮尔逊卡方统计量 `5/63` 和自由度 `1`。用 `期望频数` 可查看按独立性假设计算的各格频数。表格支持 2 至 8 行、2 至 8 列的非负整数，各行和各列的合计须大于零。 [NIST 列联表卡方定义](https://itl.nist.gov/div898/software/dataplot/refman1/auxillar/chistest.htm)
+- 用 `统计: 二分类指标CSV 50,10; 5,35` 可从二分类混淆矩阵求准确率、精确率、召回率、特异度和 F1。实际类别分行，预测类别分列，负类在前。四格依次填写 `TN,FP; FN,TP`。结果为精确分数，分母为零的指标留空。 [混淆矩阵顺序](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.confusion_matrix.html) · [指标公式](https://scikit-learn.org/stable/modules/model_evaluation.html#binary-classification)
 - 输入 `统计: 差分 3/2,1,5/2` 依次得到 `-1/2` 和 `3/2`。用 `统计: 变化率 20,15,45` 得到 `-1/4` 和 `2`，每个结果为后项减前项再除以前项。输入至少两个数值，变化率要求每对的前项非零。
 - 输入 `统计: 均方根 1/2,3/2` 得到 `√(5/4)`。也可用频数组，例如 `统计: 均方根 频数 0@2,6@1,-8@1` 得到 `5`。
 - 输入 `统计: 调和平均 36,72` 得到 `48`，可用于按相同路程求两段的平均速度。数值须大于零，支持分数与 `频数` 数据，结果保留精确分数。 [调和平均定义](https://docs.python.org/3/library/statistics.html#statistics.harmonic_mean)

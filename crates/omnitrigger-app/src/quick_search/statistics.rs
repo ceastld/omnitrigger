@@ -66,6 +66,7 @@ pub(super) enum StatisticsError {
     HypergeometricQuantileArguments,
     HypergeometricTableRows,
     InvalidContingencyTable,
+    BinaryClassificationArguments,
     ZeroContingencyMargin,
     ContingencyInput(MatrixError),
     InvalidWindowWidth,
@@ -154,6 +155,7 @@ impl StatisticsError {
                 "命中次数的可能取值最多 129 个，请减少目标项数或抽取数"
             }
             Self::InvalidContingencyTable => "填写至少两行两列非负整数，用分号或换行分隔各行",
+            Self::BinaryClassificationArguments => "填写两行两列的非负整数，顺序为 TN,FP; FN,TP",
             Self::ZeroContingencyMargin => "列联表每行和每列的合计须大于零",
             Self::ContingencyInput(error) => error.message(),
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
@@ -414,6 +416,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "超几何分位点" | "hypergeometric-quantile" => return hypergeometric_quantile(values),
         "独立性卡方" | "chi-square" => return contingency_table(values, false),
         "期望频数" | "expected-counts" => return contingency_table(values, true),
+        "二分类指标csv" | "binary-classification-csv" => {
+            return binary_classification_csv(values)
+        }
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
@@ -993,6 +998,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
                 | "poisson-table"
                 | "超几何概率表"
                 | "hypergeometric-table"
+                | "二分类指标csv"
+                | "binary-classification-csv"
                 | "累计分布"
                 | "cumulative-distribution"
                 | "ecdf"
@@ -2403,6 +2410,63 @@ fn hypergeometric_quantile(input: &str) -> Result<String, StatisticsError> {
     .to_string())
 }
 
+fn binary_classification_csv(input: &str) -> Result<String, StatisticsError> {
+    let matrix = parse_matrix(input).map_err(StatisticsError::ContingencyInput)?;
+    let [negative, positive] = matrix.as_slice() else {
+        return Err(StatisticsError::BinaryClassificationArguments);
+    };
+    let ([true_negative, false_positive], [false_negative, true_positive]) =
+        (negative.as_slice(), positive.as_slice())
+    else {
+        return Err(StatisticsError::BinaryClassificationArguments);
+    };
+    if matrix
+        .iter()
+        .flatten()
+        .any(|count| !count.is_integer() || count.numer().sign() == Sign::Minus)
+    {
+        return Err(StatisticsError::BinaryClassificationArguments);
+    }
+    let (true_negative, false_positive) = (true_negative.numer(), false_positive.numer());
+    let (false_negative, true_positive) = (false_negative.numer(), true_positive.numer());
+    let actual_negative = true_negative + false_positive;
+    let actual_positive = false_negative + true_positive;
+    let twice_true_positive = true_positive + true_positive;
+    let metrics = [
+        (
+            "准确率",
+            true_negative + true_positive,
+            &actual_negative + &actual_positive,
+        ),
+        (
+            "精确率",
+            true_positive.clone(),
+            true_positive + false_positive,
+        ),
+        ("召回率", true_positive.clone(), actual_positive),
+        ("特异度", true_negative.clone(), actual_negative),
+        (
+            "F1",
+            twice_true_positive.clone(),
+            twice_true_positive + false_positive + false_negative,
+        ),
+    ];
+    let mut csv = String::from("指标,值");
+    for (metric, numerator, denominator) in metrics {
+        let value = if denominator.sign() == Sign::NoSign {
+            String::new()
+        } else {
+            bounded(BigRational::new(numerator, denominator))?.to_string()
+        };
+        append_bounded_csv_row(
+            &mut csv,
+            [metric, value.as_str()].into_iter(),
+            StatisticsError::ProbabilityTableTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
 fn contingency_table(input: &str, show_expected: bool) -> Result<String, StatisticsError> {
     let table = parse_matrix(input).map_err(StatisticsError::ContingencyInput)?;
     let rows = table.len();
@@ -2769,6 +2833,33 @@ mod tests {
             calculate_statistics("移动样本标准差 1 5,6"),
             Err(StatisticsError::SampleWindowWidth)
         );
+    }
+
+    #[test]
+    fn reports_exact_binary_classification_metrics_and_blank_undefined_values() {
+        let input = "二分类指标CSV 50,10; 5,35";
+        let expected =
+            "指标,值\r\n准确率,17/20\r\n精确率,7/9\r\n召回率,7/8\r\n特异度,5/6\r\nF1,14/17";
+        assert_eq!(calculate_statistics(input).as_deref(), Ok(expected));
+        assert_eq!(
+            statistics_csv_report(input).unwrap().as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            calculate_statistics("binary-classification-csv 50,0; 0,0").as_deref(),
+            Ok("指标,值\r\n准确率,1\r\n精确率,\"\"\r\n召回率,\"\"\r\n特异度,1\r\nF1,\"\"")
+        );
+        for input in [
+            "二分类指标CSV 1,2,3; 4,5,6",
+            "二分类指标CSV 1,2; -3,4",
+            "二分类指标CSV 1/2,2; 3,4",
+        ] {
+            assert_eq!(
+                calculate_statistics(input),
+                Err(StatisticsError::BinaryClassificationArguments),
+                "{input}",
+            );
+        }
     }
 
     #[test]
