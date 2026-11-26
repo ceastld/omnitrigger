@@ -2520,6 +2520,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "用精确数据量和耗时求平均速率",
+        query: "下载: 精确速率 1 GiB 用时 60秒 to MiB/s",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "用精确速率和耗时求传输量",
+        query: "下载: 精确传输量 1/3 MiB/s 用时 3秒 to KiB",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用传输量和耗时求平均速率",
         query: "下载: 600 MB 用时 2分钟",
     },

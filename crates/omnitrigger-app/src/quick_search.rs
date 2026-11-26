@@ -11443,7 +11443,9 @@ mod tests {
             (
                 "？ 速率",
                 &[
+                    "下载: 精确速率 1 GiB 用时 60秒 to MiB/s",
                     "数据换算: 1 MiB/s to MB/s",
+                    "下载: 精确传输量 1/3 MiB/s 用时 3秒 to KiB",
                     "下载: 600 MB 用时 2分钟",
                     "8Mbps to MB/s",
                 ][..],

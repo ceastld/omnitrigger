@@ -685,6 +685,13 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
     if let Some(arguments) = batch_arguments(input.trim_start(), "精确耗时", "exact-time") {
         return exact_transfer_time(arguments);
     }
+    if let Some(arguments) = batch_arguments(input.trim_start(), "精确速率", "exact-rate") {
+        return exact_transfer_by_elapsed(arguments, true);
+    }
+    if let Some(arguments) = batch_arguments(input.trim_start(), "精确传输量", "exact-amount")
+    {
+        return exact_transfer_by_elapsed(arguments, false);
+    }
     if let Some((quantity, elapsed)) = input.split_once("用时") {
         return estimate_transfer_by_elapsed(quantity.trim(), elapsed.trim());
     }
@@ -734,6 +741,39 @@ fn exact_transfer_time(input: &str) -> Result<String, ConversionError> {
     let seconds = bits / bits_per_second;
     ensure_exact_size(&seconds).map_err(|_| ConversionError::OutOfRange)?;
     Ok(format!("{seconds} s"))
+}
+
+fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, ConversionError> {
+    let default_unit = if report_rate { "b/s" } else { "B" };
+    let (input, target) = split_conversion(input).unwrap_or((input, default_unit));
+    let (quantity, elapsed) = input
+        .split_once("用时")
+        .ok_or(ConversionError::Incomplete)?;
+    let (value, dimension) = exact_data_source(quantity.trim())?;
+    let elapsed = elapsed_duration(elapsed.trim()).map_err(|error| match error {
+        DurationError::Incomplete => ConversionError::Incomplete,
+        DurationError::OutOfRange => ConversionError::OutOfRange,
+        _ => ConversionError::InvalidTransferDuration,
+    })?;
+    if value.numer().sign() == Sign::Minus {
+        return Err(ConversionError::InvalidTransferDuration);
+    }
+    let seconds = BigRational::new(
+        BigInt::from(elapsed.as_nanos()),
+        BigInt::from(super::duration::NANOS_PER_SECOND),
+    );
+    let (result, dimension) = match (report_rate, dimension) {
+        (true, Dimension::Data) if seconds.numer().sign() == Sign::Plus => {
+            (value / seconds, Dimension::DataRate)
+        }
+        (false, Dimension::DataRate) => (value * seconds, Dimension::Data),
+        _ => return Err(ConversionError::InvalidTransferDuration),
+    };
+    format_targets(target, |target| {
+        let target = exact_data_unit(target)?;
+        let value = exact_data_target_amount(&result, &dimension, &target)?;
+        Ok(format_with_unit(value, &target))
+    })
 }
 
 fn estimate_transfer_by_elapsed(quantity: &str, elapsed: &str) -> Result<String, ConversionError> {
@@ -2884,6 +2924,30 @@ mod tests {
                 Err(ConversionError::InvalidTransfer)
             );
         }
+    }
+
+    #[test]
+    fn computes_exact_transfer_rate_or_amount_from_elapsed_time() {
+        assert_eq!(
+            estimate_transfer("精确速率 1 GiB 用时 60秒 to MiB/s").as_deref(),
+            Ok("256/15 MiB/s")
+        );
+        assert_eq!(
+            estimate_transfer("精确传输量 1/3 MiB/s 用时 3秒 to KiB").as_deref(),
+            Ok("1024 KiB")
+        );
+        assert_eq!(
+            estimate_transfer("exact-rate 1 b 用时 3秒").as_deref(),
+            Ok("1/3 b/s")
+        );
+        assert_eq!(
+            estimate_transfer("exact-amount 1 B/s 用时 0秒").as_deref(),
+            Ok("0 B")
+        );
+        assert_eq!(
+            estimate_transfer("精确速率 1 B 用时 0秒"),
+            Err(ConversionError::InvalidTransferDuration)
+        );
     }
 
     #[test]
