@@ -1404,6 +1404,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 克罗内克积 1,2; 3,4 @ 1/2,0; 0,1",
     },
     Example {
+        icon: Icon::Layers,
+        title: "按指定顺序取出矩阵的行和列",
+        query: "矩阵: 子矩阵 [[3,1],[-1,1]] @ 1,2,3; 4,5,6; 7,8,9",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "精确计算矩阵的整数次幂",
         query: "矩阵: 乘方 1,1; 1,0 @ 5",
@@ -8177,6 +8182,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                         "左零空间",
                         "特征空间",
                         "克罗内克积",
+                        "子矩阵",
                     ]
                     .iter()
                     .any(|op| op.starts_with(term))) => {}

@@ -22,6 +22,7 @@ pub(super) enum MatrixError {
     SymmetricRequired,
     EigenvalueDimensions,
     EigenspaceArguments,
+    SubmatrixArguments,
     ElementwiseDimensions,
     ProductDimensions,
     PowerExponent,
@@ -38,7 +39,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、子矩阵、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -46,6 +47,9 @@ impl MatrixError {
             Self::SymmetricRequired => "正定性检查需要实对称方阵",
             Self::EigenvalueDimensions => "请输入 2 行 2 列的矩阵求特征值",
             Self::EigenspaceArguments => "填写方阵和有理数，例如 特征空间 2,1; 1,2 @ 3",
+            Self::SubmatrixArguments => {
+                "填写 [[行号],[列号]] @ 矩阵，序号从 1 开始、负数从末尾算起，null 表示全选"
+            }
             Self::ElementwiseDimensions => "加减法和逐项乘法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
@@ -119,6 +123,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
             let (left, right) = parse_pair(input)?;
             kronecker_product(&left, &right).map(format_matrix)
         }
+        "子矩阵" | "取行列" | "submatrix" => select_submatrix(input),
         "乘方" | "幂" | "power" => {
             let (matrix, exponent) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
             let exponent = exponent
@@ -154,6 +159,49 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         }
         _ => Err(MatrixError::UnknownOperation),
     }
+}
+
+fn select_submatrix(input: &str) -> Result<String, MatrixError> {
+    let invalid = MatrixError::SubmatrixArguments;
+    let (coordinates, input) = input.split_once('@').ok_or(invalid)?;
+    let [rows, columns] =
+        serde_json::from_str::<[Option<Vec<i32>>; 2]>(coordinates).map_err(|_| invalid)?;
+    let matrix = parse_matrix(input)?;
+    let resolve =
+        |coordinates: Option<Vec<i32>>, length: usize| -> Result<Vec<usize>, MatrixError> {
+            let Some(coordinates) = coordinates else {
+                return Ok((0..length).collect());
+            };
+            if !(1..=MAX_DIMENSION).contains(&coordinates.len()) {
+                return Err(invalid);
+            }
+            coordinates
+                .into_iter()
+                .map(|index| {
+                    let offset = index.unsigned_abs() as usize;
+                    if offset == 0 || offset > length {
+                        return Err(invalid);
+                    }
+                    Ok(if index < 0 {
+                        length - offset
+                    } else {
+                        offset - 1
+                    })
+                })
+                .collect()
+        };
+    let rows = resolve(rows, matrix.len())?;
+    let columns = resolve(columns, matrix[0].len())?;
+    Ok(format_matrix(
+        rows.into_iter()
+            .map(|row| {
+                columns
+                    .iter()
+                    .map(|&column| matrix[row][column].clone())
+                    .collect()
+            })
+            .collect(),
+    ))
 }
 
 fn parse_pair(input: &str) -> Result<(Matrix, Matrix), MatrixError> {
@@ -846,6 +894,28 @@ mod tests {
             calculate_matrix("张量积 1,2,3 @ 4,5,6"),
             Err(MatrixError::TooLarge)
         );
+    }
+
+    #[test]
+    fn selects_matrix_rows_and_columns_in_the_requested_order() {
+        assert_eq!(
+            calculate_matrix("子矩阵 [[3,1],[-1,1]] @ 1,2,3; 4,5,6; 7,8,9").as_deref(),
+            Ok("9, 7\n3, 1")
+        );
+        assert_eq!(
+            calculate_matrix("submatrix [null,[-1,-1]] @ 1,1/3; 2,5/6").as_deref(),
+            Ok("1/3, 1/3\n5/6, 5/6")
+        );
+        for query in [
+            "子矩阵 [[0],null] @ 1,2",
+            "子矩阵 [null,[-3]] @ 1,2",
+            "子矩阵 [[],null] @ 1,2",
+        ] {
+            assert_eq!(
+                calculate_matrix(query),
+                Err(MatrixError::SubmatrixArguments)
+            );
+        }
     }
 
     #[test]
