@@ -7867,7 +7867,10 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "降序",
         ],
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
+        Scope::Paper => &["出血"],
+        Scope::Color => &["色差"],
         Scope::Statistics => &[
+            "二分类指标CSV",
             "频数CSV",
             "分位表",
             "加权平均",
@@ -7934,6 +7937,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Radix
         | Scope::Duration
         | Scope::ExactData
+        | Scope::Paper
         | Scope::Pitch
         | Scope::Decibel
         | Scope::Tempo
@@ -8043,7 +8047,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term))) => {}
         Scope::Color
             if !term.is_empty()
-                && ["色阶", "线性色阶", "OKLab色阶"]
+                && ["色差", "色阶", "线性色阶", "OKLab色阶"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Timestamp
@@ -8097,9 +8101,17 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Matrix
             if matches!(term, "乘方" | "特" | "特征" | "特征值")
                 || (!term.is_empty()
-                    && ["通解", "最小二乘", "1范数", "无穷范数", "条件数", "正定性"]
-                        .iter()
-                        .any(|op| op.starts_with(term))) => {}
+                    && [
+                        "通解",
+                        "最小二乘",
+                        "1范数",
+                        "无穷范数",
+                        "条件数",
+                        "正定性",
+                        "左零空间",
+                    ]
+                    .iter()
+                    .any(|op| op.starts_with(term))) => {}
         Scope::Statistics
             if !term.is_empty()
                 && [
@@ -8674,7 +8686,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_parameters_in_geometry_vector_matrix_and_complex_examples() {
+    fn selects_parameters_in_named_tool_examples() {
         for (scope, operation, prefix, parameters) in [
             (Scope::Circle, "切点", "圆: 切点 ", "0,0 @ 1; 2,0"),
             (Scope::Complex, "极坐标", "复数: 极坐标 ", "3+4i"),
@@ -8685,6 +8697,15 @@ mod tests {
                 "3,4 @ 0,0; 2,0",
             ),
             (Scope::Matrix, "乘方", "矩阵: 乘方 ", "1,1; 1,0 @ 5"),
+            (Scope::Matrix, "左零", "矩阵: 左零空间 ", "1,2; 2,4; 3,6"),
+            (Scope::Color, "色差", "颜色: 色差 ", "red vs lime"),
+            (Scope::Paper, "出", "纸张: 出血 ", "A4 @ 3 mm"),
+            (
+                Scope::Statistics,
+                "二分类",
+                "统计: 二分类指标CSV ",
+                "50,10; 5,35",
+            ),
         ] {
             let items = tool_operation_examples(scope, operation).unwrap();
             let example = &EXAMPLES[items[0]];
