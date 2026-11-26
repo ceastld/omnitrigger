@@ -21,6 +21,7 @@ pub(super) enum MatrixError {
     SquareRequired,
     SymmetricRequired,
     EigenvalueDimensions,
+    EigenspaceArguments,
     ElementwiseDimensions,
     ProductDimensions,
     PowerExponent,
@@ -37,13 +38,14 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
-            Self::SquareRequired => "行列式、迹、乘方、求解、求逆和条件数需要方阵",
+            Self::SquareRequired => "行列式、迹、乘方、求解、求逆、条件数和特征空间需要方阵",
             Self::SymmetricRequired => "正定性检查需要实对称方阵",
             Self::EigenvalueDimensions => "请输入 2 行 2 列的矩阵求特征值",
+            Self::EigenspaceArguments => "填写方阵和有理数，例如 特征空间 2,1; 1,2 @ 3",
             Self::ElementwiseDimensions => "加减法和逐项乘法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
@@ -71,6 +73,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "行列式" | "det" => determinant(parse_matrix(input)?).map(|value| value.to_string()),
         "迹" | "trace" => trace(&parse_matrix(input)?).map(|value| value.to_string()),
         "特征值" | "eigenvalues" => eigenvalues(&parse_matrix(input)?),
+        "特征空间" | "eigenspace" => eigenspace(input),
         "秩" | "rank" => matrix_rank(parse_matrix(input)?).map(|value| value.to_string()),
         "行最简形" | "行最简" | "rref" => {
             reduced_row_echelon(parse_matrix(input)?).map(|(matrix, _)| format_matrix(matrix))
@@ -244,6 +247,23 @@ fn eigenvalues(matrix: &[Vec<BigRational>]) -> Result<String, MatrixError> {
     let half_difference = (a - d) / two;
     let distance_squared = &half_difference * &half_difference + b * c;
     format_centered_roots(center, distance_squared, "λ").map_err(MatrixError::Evaluation)
+}
+
+fn eigenspace(input: &str) -> Result<String, MatrixError> {
+    let (source, value) = input
+        .split_once('@')
+        .ok_or(MatrixError::EigenspaceArguments)?;
+    let mut matrix = parse_matrix(source)?;
+    if matrix[0].len() != matrix.len() {
+        return Err(MatrixError::SquareRequired);
+    }
+    let value = calculate_fraction(value).map_err(MatrixError::Evaluation)?;
+    for (index, row) in matrix.iter_mut().enumerate() {
+        let diagonal = &mut row[index];
+        *diagonal -= &value;
+        ensure_exact_size(diagonal).map_err(MatrixError::Evaluation)?;
+    }
+    nullspace_basis(matrix).map(|basis| format_basis("特征空间", basis))
 }
 
 fn scale_matrix(mut matrix: Matrix, factor: &BigRational) -> Result<Matrix, MatrixError> {
@@ -709,6 +729,22 @@ mod tests {
         ] {
             assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn computes_a_rational_eigenspace_as_the_shifted_nullspace() {
+        for (query, expected) in [
+            ("特征空间 2,1; 1,2 @ 3", "特征空间维数 1\n1, 1"),
+            ("eigenspace 3/2,1/4; 0,3/2 @ 1+1/2", "特征空间维数 1\n1, 0"),
+            ("特征空间 3,0; 0,3 @ 3", "特征空间维数 2\n1, 0\n0, 1"),
+            ("特征空间 2,1; 1,2 @ 4", "特征空间维数 0"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_matrix("特征空间 1,2 @ 1"),
+            Err(MatrixError::SquareRequired)
+        );
     }
 
     #[test]

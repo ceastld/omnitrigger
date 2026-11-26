@@ -1459,6 +1459,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 特征值 2,1; 1,2",
     },
     Example {
+        icon: Icon::Layers,
+        title: "计算给定有理特征值的特征空间",
+        query: "矩阵: 特征空间 2,1; 1,2 @ 3",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "计算两个复数的和",
         query: "复数: 加法 1,2 @ 3,4",
@@ -8125,6 +8130,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                         "条件数",
                         "正定性",
                         "左零空间",
+                        "特征空间",
                     ]
                     .iter()
                     .any(|op| op.starts_with(term))) => {}

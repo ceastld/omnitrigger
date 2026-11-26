@@ -423,6 +423,7 @@
 - 输入 `矩阵: 条件数 1 @ 2,0; 0,1/3` 得到 `6`。可选 `1` 或 `∞` 范数，用 `@` 隔开范数和方阵。搜索框计算矩阵与逆矩阵的范数乘积，奇异矩阵显示 `∞`。 [LAPACK 条件数定义](https://www.netlib.org/lapack/explore-html/d4/daf/group__gecon_ga4f9b830e19e12c7f082ddb497a57af18.html)
 - 输入 `矩阵: 正定性 2,1; 1,2` 可判定实对称方阵是否正定。样例的顺序主子式为 `2`、`3`，均为正。遇到非正的顺序主子式时会显示其阶数和精确数值。 [MIT 正定性判据](https://ocw.mit.edu/courses/15-084j-nonlinear-programming-spring-2004/8a2f7cda0c6c448c17e8a8272697f55c_lec4_quad_form.pdf#page=14)
 - 输入 `矩阵: 特征值 2,1; 1,2` 可求 2×2 矩阵的特征值 `1` 和 `3`。结果保留精确分数，支持根式、共轭复数和重复特征值。 [MIT 二维矩阵的特征方程](https://www.ocw.mit.edu/ans7870/18/18.013a/textbook/HTML/chapter04/section06.html)
+- 输入 `矩阵: 特征空间 2,1; 1,2 @ 3` 可求给定特征值对应的空间，得到维数 1 和基向量 `1, 1`。方阵最多 8 行 8 列，@ 后可填精确分数或算式。给定值使方程仅有零解时，维数为 0。 [MIT 特征空间求法](https://ocw.mit.edu/courses/es-1803-differential-equations-spring-2024/mites_1803_s24_topic16.pdf)
 - 分数算式可用 `**` 或 `^` 求整数次幂。`分数: 计算 2**80` 得到 `1208925819614629174706176`。指数绝对值最多为 1024，运算中分子和分母各最多 8192 个二进制位。[Python 幂运算优先级](https://docs.python.org/3/reference/expressions.html#the-power-operator)
 - 精确算式支持科学计数法。输入 `分数: 计算 2.5e-3 * 4e3` 得到 `10`。统计、矩阵和 CSV 数值排序中的数字也可使用这种写法。
 - 精确算式也支持 `0b`、`0o` 和 `0x` 开头的整数，允许在数字之间用下划线分组。`分数: 计算 0x2000_0000_0000_01 + 0b10` 得到 `9007199254740995`。
