@@ -69,6 +69,21 @@ pub(super) fn page_text<'a>(text: &'a str, starts: &[usize], page: usize) -> Opt
     text.get(start..end)
 }
 
+pub(super) fn original_line_position(text: &str, offset: usize) -> (usize, usize) {
+    original_line_starts(text).fold((0, 0), |(line, total), start| {
+        (line + usize::from(start <= offset), total + 1)
+    })
+}
+
+pub(super) fn page_for_original_line(text: &str, pages: &[usize], number: usize) -> Option<usize> {
+    let offset = original_line_starts(text).nth(number.checked_sub(1)?)?;
+    pages.partition_point(|&page| page <= offset).checked_sub(1)
+}
+
+fn original_line_starts(text: &str) -> impl Iterator<Item = usize> + '_ {
+    std::iter::once(0).chain(logical_newline_pattern().find_iter(text).map(|m| m.end()))
+}
+
 fn positioned_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut line_start = 0;
     let line_ends = logical_newline_pattern()
@@ -117,6 +132,20 @@ fn wrap_point(line: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_original_lines_to_pages_even_after_wrapping_and_mixed_newlines() {
+        let text = format!("{}\r\n乙\u{2028}\r丁\n", "A".repeat(90));
+        let pages = page_starts(&text, 2);
+        assert_eq!(pages, [0, 80, 98, 103]);
+        assert_eq!(original_line_position(&text, pages[1]), (1, 5));
+        assert_eq!(original_line_position(&text, pages[2]), (3, 5));
+        assert_eq!(page_for_original_line(&text, &pages, 2), Some(1));
+        assert_eq!(page_for_original_line(&text, &pages, 4), Some(2));
+        assert_eq!(page_for_original_line(&text, &pages, 5), Some(3));
+        assert_eq!(page_for_original_line(&text, &pages, 0), None);
+        assert_eq!(page_for_original_line(&text, &pages, 6), None);
+    }
 
     #[test]
     fn preview_keeps_line_breaks_and_wraps_whole_graphemes() {

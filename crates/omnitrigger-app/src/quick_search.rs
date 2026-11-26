@@ -2071,12 +2071,13 @@ enum LineJumpTarget {
     Input,
     Table(TableAxis),
     ExpandedPreview,
+    ExpandedSourceLine,
 }
 
 impl LineJumpTarget {
     fn number_label(self) -> &'static str {
         match self {
-            Self::Input | Self::Table(TableAxis::Rows) => "行号",
+            Self::Input | Self::Table(TableAxis::Rows) | Self::ExpandedSourceLine => "行号",
             Self::Table(TableAxis::Columns) => "列号",
             Self::ExpandedPreview => "页码",
         }
@@ -2723,6 +2724,17 @@ impl QuickSearch {
         cx.notify();
     }
 
+    fn paged_original_text(&self) -> Option<(&str, &[usize])> {
+        let Results::Value(Ok(value)) = &self.results else {
+            return None;
+        };
+        let pages = self
+            .expanded_value_pages
+            .as_deref()
+            .filter(|pages| pages.len() > 1)?;
+        Some((&value.text, pages))
+    }
+
     fn open_line_jump(
         &mut self,
         target: LineJumpTarget,
@@ -2751,6 +2763,13 @@ impl QuickSearch {
                 .as_ref()
                 .filter(|pages| pages.len() > 1)
                 .map(|pages| (self.selected + 1, pages.len())),
+            LineJumpTarget::ExpandedSourceLine => {
+                self.paged_original_text().and_then(|(text, pages)| {
+                    pages
+                        .get(self.selected)
+                        .map(|&start| value_preview::original_line_position(text, start))
+                })
+            }
         };
         let Some((number, total)) = position else {
             return;
@@ -2814,6 +2833,15 @@ impl QuickSearch {
                         return;
                     }
                     self.selected = number - 1;
+                    self.remember_result_pages(cx);
+                }
+                LineJumpTarget::ExpandedSourceLine => {
+                    let Some(page) = self.paged_original_text().and_then(|(text, pages)| {
+                        value_preview::page_for_original_line(text, pages, number)
+                    }) else {
+                        return;
+                    };
+                    self.selected = page;
                     self.remember_result_pages(cx);
                 }
             }
@@ -4832,6 +4860,8 @@ impl QuickSearch {
                         LineJumpTarget::ExpandedPreview
                     } else if keystroke.modifiers.shift {
                         LineJumpTarget::Table(TableAxis::Rows)
+                    } else if keystroke.modifiers.alt && self.expanded_value_pages.is_some() {
+                        LineJumpTarget::ExpandedSourceLine
                     } else if keystroke.modifiers.alt {
                         LineJumpTarget::Table(TableAxis::Columns)
                     } else {
@@ -5977,7 +6007,22 @@ impl QuickSearch {
                                 )
                                 .when(page_count > 1, |footer| {
                                     footer
-                                        .child("PgUp PgDn 翻页")
+                                        .child(
+                                            button("jump-preview-line", "跳行", Tone::Ghost, true)
+                                                .h(px(23.))
+                                                .px(px(6.))
+                                                .tooltip(theme::text_tooltip(
+                                                    "Ctrl+Alt+G 按行跳转。PageUp 和 PageDown 翻页"
+                                                        .into(),
+                                                ))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.open_line_jump(
+                                                        LineJumpTarget::ExpandedSourceLine,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
                                         .child(div().flex_1())
                                         .child(
                                             button(
@@ -6537,6 +6582,7 @@ impl QuickSearch {
             LineJumpTarget::Table(TableAxis::Rows) => "跳到表格数据行所在页",
             LineJumpTarget::Table(TableAxis::Columns) => "跳到表格列所在页",
             LineJumpTarget::ExpandedPreview => "跳到原文页",
+            LineJumpTarget::ExpandedSourceLine => "跳到原文行所在页",
         };
         Self::frame(cx)
             .child(
