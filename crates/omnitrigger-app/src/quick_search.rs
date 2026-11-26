@@ -167,6 +167,7 @@ use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
 
 const WIDTH: f32 = 500.;
+const WIDE_TABLE_WIDTH: f32 = 720.;
 const INPUT_CHARACTER_LIMIT: usize = 4096;
 const EXACT_MODE_PREFIX: &str = "分数: 计算 ";
 const PAGE_ROW_HEIGHT: f32 = 38.;
@@ -2676,6 +2677,7 @@ pub(super) struct QuickSearch {
     results: Results,
     expanded_value_pages: Option<Vec<usize>>,
     table_pages: TablePages,
+    preview_width: f32,
     selected: usize,
     application_refresh: ApplicationRefresh,
     input_before_help: Option<QueryDraft>,
@@ -2806,6 +2808,7 @@ impl QuickSearch {
             results,
             expanded_value_pages: None,
             table_pages: TablePages::default(),
+            preview_width: WIDTH,
             selected: 0,
             application_refresh: ApplicationRefresh::NotRequested,
             input_before_help: None,
@@ -2915,7 +2918,7 @@ impl QuickSearch {
             target,
             _changes: changes,
         });
-        window.resize(size(px(WIDTH), px(INPUT_PROMPT_HEIGHT)));
+        window.resize(size(px(self.preview_width), px(INPUT_PROMPT_HEIGHT)));
         self.activate_input(window, cx);
     }
 
@@ -2973,7 +2976,7 @@ impl QuickSearch {
         }
         self.line_jump = None;
         window.resize(size(
-            px(WIDTH),
+            px(self.preview_width),
             px(self.results.height(self.value_line_limit())),
         ));
         self.activate_input(window, cx);
@@ -3031,7 +3034,7 @@ impl QuickSearch {
         } else {
             INPUT_PROMPT_HEIGHT
         };
-        window.resize(size(px(WIDTH), px(height)));
+        window.resize(size(px(self.preview_width), px(height)));
         self.activate_input(window, cx);
     }
 
@@ -3083,7 +3086,7 @@ impl QuickSearch {
         }
         self.input_find = None;
         window.resize(size(
-            px(WIDTH),
+            px(self.preview_width),
             px(self.results.height(self.value_line_limit())),
         ));
         self.activate_input(window, cx);
@@ -3115,7 +3118,24 @@ impl QuickSearch {
             .map_or(0, |pages| pages.len().saturating_sub(1));
         self.remember_result_pages(cx);
         window.resize(size(
-            px(WIDTH),
+            px(self.preview_width),
+            px(self.results.height(self.value_line_limit())),
+        ));
+        cx.notify();
+    }
+
+    fn toggle_table_width(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_width = if self.preview_width > WIDTH {
+            WIDTH
+        } else {
+            let display_width = window.display(cx).map_or(WIDE_TABLE_WIDTH * 2., |display| {
+                f32::from(display.bounds().size.width)
+            });
+            // 窗口从显示器中央的紧凑位置向右展开。
+            ((display_width + WIDTH) * 0.5 - 16.).clamp(WIDTH, WIDE_TABLE_WIDTH)
+        };
+        window.resize(size(
+            px(self.preview_width),
             px(self.results.height(self.value_line_limit())),
         ));
         cx.notify();
@@ -3235,7 +3255,7 @@ impl QuickSearch {
                 && self.line_jump.is_none()
                 && self.input_find.is_none()
             {
-                window.resize(size(px(WIDTH), px(next_height)));
+                window.resize(size(px(self.preview_width), px(next_height)));
             }
         }
         self.restore_query_result_position(query, window, cx);
@@ -3440,8 +3460,10 @@ impl QuickSearch {
                         let _ = this.update(cx, |this, cx| {
                             this.results = Results::OpenWindowsUnavailable(error);
                             this.selected = 0;
-                            window
-                                .resize(size(px(WIDTH), px(this.results.height(MAX_VALUE_LINES))));
+                            window.resize(size(
+                                px(this.preview_width),
+                                px(this.results.height(MAX_VALUE_LINES)),
+                            ));
                             cx.notify();
                         });
                     }
@@ -3494,8 +3516,10 @@ impl QuickSearch {
                         Err(error) => {
                             this.results = Results::LocalFilesUnavailable(error);
                             this.selected = 0;
-                            window
-                                .resize(size(px(WIDTH), px(this.results.height(MAX_VALUE_LINES))));
+                            window.resize(size(
+                                px(this.preview_width),
+                                px(this.results.height(MAX_VALUE_LINES)),
+                            ));
                             cx.notify();
                         }
                     }
@@ -5045,7 +5069,10 @@ impl QuickSearch {
         self.input
             .update(cx, |input, _| input.set_placeholder("输入收藏名"));
         self.fill_query(name, window, cx);
-        window.resize(size(px(WIDTH), px(self.results.height(MAX_VALUE_LINES))));
+        window.resize(size(
+            px(self.preview_width),
+            px(self.results.height(MAX_VALUE_LINES)),
+        ));
         cx.notify();
     }
 
@@ -5375,7 +5402,16 @@ impl QuickSearch {
             return;
         }
         if modifiers != 0 {
-            if modifiers == 2
+            if modifiers == 1
+                && keystroke.modifiers.control
+                && keystroke.key == "f2"
+                && (self.preview_width > WIDTH || self.results.table_preview().is_some())
+            {
+                if !event.is_held {
+                    self.toggle_table_width(window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 2
                 && keystroke.modifiers.control
                 && keystroke.modifiers.shift
                 && keystroke.key == "r"
@@ -6448,6 +6484,22 @@ impl QuickSearch {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.copy_table(TableCopy::Tsv, false, window, cx);
                     })),
+            )
+            .child(
+                button(
+                    "toggle-table-width",
+                    if self.preview_width > WIDTH {
+                        "收窄"
+                    } else {
+                        "加宽"
+                    },
+                    Tone::Ghost,
+                    true,
+                )
+                .h(px(TABLE_PAGER_HEIGHT))
+                .px(px(8.))
+                .tooltip(theme::text_tooltip("Ctrl+F2 切换表格宽度".into()))
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_table_width(window, cx))),
             );
         if !table.spans_pages() {
             return actions;
