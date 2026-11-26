@@ -5104,6 +5104,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用正则查找 TOML 字符串值",
+        query: "TOML: 正则字符串CSV \"^北\"\nlabels = [\"\\u5317京\", '上海']\n[server]\nname = '北京'",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "压缩 JSON",
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },
