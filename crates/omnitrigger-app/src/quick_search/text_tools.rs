@@ -2215,7 +2215,7 @@ fn split_lines(input: &str) -> Result<String, TextError> {
 }
 
 #[derive(Clone, Copy)]
-enum TextWordMatch {
+pub(super) enum TextWordMatch {
     All,
     Any,
 }
@@ -2239,14 +2239,22 @@ fn search_text_lines(input: &str, mode: TextWordMatch) -> Result<String, TextErr
     Ok(filter_result_lines(&query, text, mode))
 }
 
-pub(super) fn search_result_text(arguments: &str, text: &str) -> Result<String, TextError> {
+pub(super) fn search_result_text(
+    arguments: &str,
+    text: &str,
+    mode: TextWordMatch,
+) -> Result<String, TextError> {
     let query = result_search_words(arguments)?;
-    Ok(filter_result_lines(&query, text, TextWordMatch::All))
+    Ok(filter_result_lines(&query, text, mode))
 }
 
-pub(super) fn search_result_text_csv(arguments: &str, text: &str) -> Result<String, TextError> {
+pub(super) fn search_result_text_csv(
+    arguments: &str,
+    text: &str,
+    mode: TextWordMatch,
+) -> Result<String, TextError> {
     let query = result_search_words(arguments)?;
-    filter_result_lines_csv(&query, text, TextWordMatch::All)
+    filter_result_lines_csv(&query, text, mode)
 }
 
 fn result_search_words(arguments: &str) -> Result<String, TextError> {
@@ -5099,7 +5107,7 @@ mod tests {
         assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
         let source = "茶 SOUTH\r\n ＮＯＲＴＨ 茶,甲 \u{2028}\rNorth 茶乙";
         assert_eq!(
-            search_result_text_csv(r#""north 茶""#, source).as_deref(),
+            search_result_text_csv(r#""north 茶""#, source, TextWordMatch::All).as_deref(),
             Ok(expected)
         );
         assert_eq!(
@@ -5111,13 +5119,16 @@ mod tests {
     #[test]
     fn filters_a_text_result_with_keywords_separate_from_its_lines() {
         let source = " 北: ＯＫ\r\n南: \"tea\"\u{2028}西: OFF \r";
-        assert_eq!(search_result_text(r#""""#, source).as_deref(), Ok(source));
         assert_eq!(
-            search_result_text("“北 ok”", source).as_deref(),
+            search_result_text(r#""""#, source, TextWordMatch::All).as_deref(),
+            Ok(source)
+        );
+        assert_eq!(
+            search_result_text("“北 ok”", source, TextWordMatch::All).as_deref(),
             Ok(" 北: ＯＫ")
         );
         assert_eq!(
-            search_result_text(r#""南" 其他文本"#, source),
+            search_result_text(r#""南" 其他文本"#, source, TextWordMatch::All),
             Err(TextError::InvalidTextArgument)
         );
     }
