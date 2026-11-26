@@ -56,7 +56,7 @@ pub(super) enum JsonError {
     ComparisonTooLarge,
     PointerListTooLarge,
     KeySearchArguments,
-    KeyPatternArguments,
+    SearchPatternArguments,
     ValueSearchArguments,
     DuplicateKeyReportTooLarge,
     DuplicateKeyPolicy,
@@ -136,7 +136,7 @@ impl JsonError {
             Self::KeySearchArguments => {
                 "先输入带双引号的键名，再输入 JSON，例如 \"编号\" {\"编号\":1}"
             }
-            Self::KeyPatternArguments => "用双引号括起有效的正则表达式，再输入 JSON",
+            Self::SearchPatternArguments => "用双引号括起有效的正则表达式，再输入 JSON",
             Self::ValueSearchArguments => "先输入要查找的 JSON 标量，再输入文档，例如 1.5 [1,1.50]",
             Self::DuplicateKeyReportTooLarge => "重复键报告超过 1 MiB，请缩小数据范围",
             Self::DuplicateKeyPolicy => "在 JSON 前填写留首或留末，指定保留哪次出现的键",
@@ -214,6 +214,7 @@ enum JsonCsvOperation {
     Keys,
     KeyPatterns,
     Values,
+    ValuePatterns,
 }
 
 impl JsonCsvOperation {
@@ -236,6 +237,7 @@ impl JsonCsvOperation {
             "找键csv" | "find-key-csv" => Some(Self::Keys),
             "正则找键csv" | "find-key-regex-csv" => Some(Self::KeyPatterns),
             "找值csv" | "find-value-csv" => Some(Self::Values),
+            "正则找值csv" | "find-value-regex-csv" => Some(Self::ValuePatterns),
             _ => None,
         }
     }
@@ -260,7 +262,8 @@ impl JsonCsvOperation {
             | Self::Leaves
             | Self::Keys
             | Self::KeyPatterns
-            | Self::Values => true,
+            | Self::Values
+            | Self::ValuePatterns => true,
         }
     }
 
@@ -286,9 +289,10 @@ impl JsonCsvOperation {
             Self::Leaves => {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
             }
-            Self::Keys => find_json_keys(source, PointerOutput::Csv, false),
-            Self::KeyPatterns => find_json_keys(source, PointerOutput::Csv, true),
+            Self::Keys => find_json_keys(source, PointerOutput::Csv),
+            Self::KeyPatterns => find_json_pattern(source, PointerOutput::Csv, true),
             Self::Values => find_json_values(source, PointerOutput::Csv),
+            Self::ValuePatterns => find_json_pattern(source, PointerOutput::Csv, false),
         }
     }
 }
@@ -517,11 +521,14 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
                 PointerOutput::Paths,
             )
         }
-        "找键" | "find-key" => return find_json_keys(source, PointerOutput::Paths, false),
+        "找键" | "find-key" => return find_json_keys(source, PointerOutput::Paths),
         "正则找键" | "find-key-regex" => {
-            return find_json_keys(source, PointerOutput::Paths, true)
+            return find_json_pattern(source, PointerOutput::Paths, true)
         }
         "找值" | "find-value" => return find_json_values(source, PointerOutput::Paths),
+        "正则找值" | "find-value-regex" => {
+            return find_json_pattern(source, PointerOutput::Paths, false)
+        }
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source, false),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
         "展平" | "flatten" => {
@@ -2781,20 +2788,24 @@ pub(super) fn append_pointer_key(pointer: &mut String, key: &str) {
     }
 }
 
-fn find_json_keys(query: &str, output: PointerOutput, pattern: bool) -> Result<String, JsonError> {
-    let invalid = if pattern {
-        JsonError::KeyPatternArguments
-    } else {
-        JsonError::KeySearchArguments
-    };
+fn find_json_keys(query: &str, output: PointerOutput) -> Result<String, JsonError> {
+    let invalid = JsonError::KeySearchArguments;
     let (key, source) = json_value_and_source(query, invalid)?;
     let key = serde_json::from_str::<String>(key.get()).map_err(|_| invalid)?;
-    if pattern {
-        let regex = super::text_tools::compile_regex(&key).map_err(|_| invalid)?;
-        write_json_pointer_results(source, PointerSelection::KeyPattern(&regex), output)
+    write_json_pointer_results(source, PointerSelection::Key(&key), output)
+}
+
+fn find_json_pattern(query: &str, output: PointerOutput, keys: bool) -> Result<String, JsonError> {
+    let invalid = JsonError::SearchPatternArguments;
+    let (pattern, source) = json_value_and_source(query, invalid)?;
+    let pattern = serde_json::from_str::<String>(pattern.get()).map_err(|_| invalid)?;
+    let regex = super::text_tools::compile_regex(&pattern).map_err(|_| invalid)?;
+    let selection = if keys {
+        PointerSelection::KeyPattern(&regex)
     } else {
-        write_json_pointer_results(source, PointerSelection::Key(&key), output)
-    }
+        PointerSelection::ValuePattern(&regex)
+    };
+    write_json_pointer_results(source, selection, output)
 }
 
 fn find_json_values(query: &str, output: PointerOutput) -> Result<String, JsonError> {
@@ -2809,6 +2820,7 @@ enum PointerSelection<'a> {
     Key(&'a str),
     KeyPattern(&'a regex::Regex),
     Value(&'a JsonScalar),
+    ValuePattern(&'a regex::Regex),
 }
 
 #[derive(Clone, Copy)]
@@ -2853,6 +2865,11 @@ fn write_json_pointer_results(
             PointerSelection::Leaves => children.is_empty(),
             PointerSelection::Key(_) | PointerSelection::KeyPattern(_) => matches_key,
             PointerSelection::Value(expected) => json_scalar(value)?.as_ref() == Some(expected),
+            PointerSelection::ValuePattern(regex) if kind == b'"' => {
+                let decoded: String = serde_json::from_str(raw).map_err(json_parse_error)?;
+                regex.is_match(&decoded)
+            }
+            PointerSelection::ValuePattern(_) => false,
         };
         for (key, child) in children.into_iter().rev() {
             let matches_key = kind == b'{'
@@ -3937,7 +3954,26 @@ mod tests {
         );
         assert_eq!(
             transform_json(r#"正则找键 "[" {"金额":1}"#),
-            Err(JsonError::KeyPatternArguments)
+            Err(JsonError::SearchPatternArguments)
+        );
+    }
+
+    #[test]
+    fn searches_decoded_json_string_values_and_keeps_their_original_literals() {
+        let query = r#"正则找值CSV "^北京$" {"城市":"\u5317京","备选":["北京","北京南"]}"#;
+        let expected = concat!(
+            "指针,类型,原值\r\n/城市,string,\"\"\"\\u5317京\"\"\"",
+            "\r\n/备选/0,string,\"\"\"北京\"\"\""
+        );
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json(r#"find-value-regex "^1$" [1,"1",{"1":false}]"#).as_deref(),
+            Ok(r#"["/1"]"#)
+        );
+        assert_eq!(
+            transform_json(r#"正则找值 "^北京$" "北京""#).as_deref(),
+            Ok(r#"[""]"#)
         );
     }
 

@@ -5389,6 +5389,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用正则表达式查找 JSON 中的字符串值",
+        query: r#"JSON: 正则找值CSV "^北京$" {"城市":"\u5317京","备选":["北京","北京南"]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位 JSON 中同一对象内重复的键",
         query: r#"JSON: 重复键 {"订单":[{"价格":1,"价格":2},{"价格":3}]}"#,
     },
