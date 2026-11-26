@@ -2024,6 +2024,7 @@ struct QueryDraft {
     suggestion: Option<String>,
     table_pages: Option<TablePages>,
     expanded_value: bool,
+    follow_value_end: bool,
     refill: Option<ResultRefill>,
 }
 
@@ -2137,8 +2138,13 @@ fn find_input_range(
 
 #[derive(Clone)]
 enum RefillKind {
-    Result { evaluated: bool },
-    File { path: String },
+    Result {
+        evaluated: bool,
+    },
+    File {
+        path: String,
+        format: FilePreviewFormat,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2883,7 +2889,11 @@ impl QuickSearch {
             .expanded_value_pages
             .is_none()
             .then(|| value_preview::page_starts(&value.text, EXPANDED_VALUE_LINES));
-        self.selected = 0;
+        self.selected = self
+            .expanded_value_pages
+            .as_ref()
+            .filter(|_| self.is_tail_file_preview())
+            .map_or(0, |pages| pages.len().saturating_sub(1));
         window.resize(size(
             px(WIDTH),
             px(self.results.height(self.value_line_limit())),
@@ -3514,9 +3524,19 @@ impl QuickSearch {
 
     fn file_preview_path(&self) -> Option<&str> {
         match &self.result_refill.as_ref()?.kind {
-            RefillKind::File { path } => Some(path),
+            RefillKind::File { path, .. } => Some(path),
             RefillKind::Result { .. } => None,
         }
+    }
+
+    fn is_tail_file_preview(&self) -> bool {
+        matches!(
+            self.result_refill.as_ref().map(|refill| &refill.kind),
+            Some(RefillKind::File {
+                format: FilePreviewFormat::Tail,
+                ..
+            })
+        )
     }
 
     fn read_text_file_preview(
@@ -3602,6 +3622,7 @@ impl QuickSearch {
                                         inserted: inserted.clone(),
                                         kind: RefillKind::File {
                                             path: selected_path,
+                                            format,
                                         },
                                     });
                                     this.fill_query(inserted, window, cx);
@@ -3711,7 +3732,7 @@ impl QuickSearch {
 
     fn refill_result(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(refill) = self.result_refill.take() {
-            if let RefillKind::File { path } = refill.kind {
+            if let RefillKind::File { path, .. } = refill.kind {
                 self.file_search_return = Some(FileSearchReturn {
                     query: refill.original.clone(),
                     path,
@@ -3953,6 +3974,11 @@ impl QuickSearch {
                 .map(str::to_owned),
             table_pages: self.results.table_preview().map(|_| self.table_pages),
             expanded_value: self.expanded_value_pages.is_some(),
+            follow_value_end: self.is_tail_file_preview()
+                && self
+                    .expanded_value_pages
+                    .as_ref()
+                    .is_some_and(|pages| self.selected + 1 == pages.len()),
             refill: self.refill_for_query(input.text_ref()),
         }
     }
@@ -3994,13 +4020,19 @@ impl QuickSearch {
             .expanded_value_pages
             .as_ref()
             .map_or_else(|| self.results.selectable_count(), Vec::len);
-        self.selected = draft
-            .suggestion
-            .as_deref()
-            .and_then(|suggestion| {
-                (0..count).find(|&index| self.results.suggested_input(index) == Some(suggestion))
-            })
-            .unwrap_or_else(|| draft.selected.min(count.saturating_sub(1)));
+        let last = count.saturating_sub(1);
+        self.selected = if draft.follow_value_end {
+            last
+        } else {
+            draft
+                .suggestion
+                .as_deref()
+                .and_then(|suggestion| {
+                    (0..count)
+                        .find(|&index| self.results.suggested_input(index) == Some(suggestion))
+                })
+                .unwrap_or_else(|| draft.selected.min(last))
+        };
         if let (Some(pages), Some(table)) = (draft.table_pages, self.results.table_preview()) {
             self.table_pages = pages.clamped_to(table);
         }
@@ -5544,13 +5576,20 @@ impl QuickSearch {
                         .text_color(rgb(theme::TEXT_MUTED))
                         .child("空文本")
                 } else if compact {
-                    let start = self
-                        .expanded_value_pages
-                        .as_ref()
-                        .map_or(0, |pages| pages[self.selected]);
-                    let mut preview = value_preview::lines(&result[start..]);
-                    let lines: Vec<_> = preview.by_ref().take(line_limit).collect();
-                    let clipped = self.expanded_value_pages.is_none() && preview.next().is_some();
+                    let tail = self.is_tail_file_preview() && self.expanded_value_pages.is_none();
+                    let (lines, clipped) = if tail {
+                        value_preview::last_lines(result, line_limit)
+                    } else {
+                        let start = self
+                            .expanded_value_pages
+                            .as_ref()
+                            .map_or(0, |pages| pages[self.selected]);
+                        let mut preview = value_preview::lines(&result[start..]);
+                        let lines = preview.by_ref().take(line_limit).collect();
+                        let clipped =
+                            self.expanded_value_pages.is_none() && preview.next().is_some();
+                        (lines, clipped)
+                    };
                     value
                         .flex()
                         .flex_col()
@@ -5560,8 +5599,12 @@ impl QuickSearch {
                         .text_size(px(14.))
                         .line_height(px(VALUE_LINE_HEIGHT))
                         .children(lines.into_iter().enumerate().map(|(index, text)| {
-                            let prefix = if index == 0 { "= " } else { "  " };
-                            let (text, suffix) = if clipped && index + 1 == line_limit {
+                            let prefix = match (index, tail && clipped) {
+                                (0, true) => "… ",
+                                (0, false) => "= ",
+                                _ => "  ",
+                            };
+                            let (text, suffix) = if clipped && !tail && index + 1 == line_limit {
                                 let columns = value_preview::columns(text.graphemes(true));
                                 let end = if columns >= value_preview::COLUMNS {
                                     text.grapheme_indices(true)
@@ -9447,6 +9490,7 @@ mod tests {
             inserted: PREVIEW.to_owned(),
             kind: RefillKind::File {
                 path: PATH.to_owned(),
+                format: FilePreviewFormat::Automatic,
             },
         });
         search.toggle_result_search(window, cx);

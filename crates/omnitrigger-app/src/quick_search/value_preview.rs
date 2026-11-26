@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::VecDeque};
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -41,6 +41,19 @@ pub(super) fn display_tabs(text: &str) -> Cow<'_, str> {
 
 pub(super) fn lines(text: &str) -> impl Iterator<Item = &str> {
     positioned_lines(text).map(|(_, line)| line)
+}
+
+pub(super) fn last_lines(text: &str, limit: usize) -> (Vec<&str>, bool) {
+    let mut recent = VecDeque::with_capacity(limit + 1);
+    let mut clipped = false;
+    for line in lines(text) {
+        recent.push_back(line);
+        if recent.len() > limit {
+            recent.pop_front();
+            clipped = true;
+        }
+    }
+    (recent.into(), clipped)
 }
 
 pub(super) fn page_starts(text: &str, page_size: usize) -> Vec<usize> {
@@ -114,6 +127,17 @@ mod tests {
         let prefix = "x".repeat(39);
         let mixed = format!("{prefix}👩‍💻a");
         assert_eq!(lines(&mixed).collect::<Vec<_>>(), [prefix.as_str(), "👩‍💻a"]);
+    }
+
+    #[test]
+    fn compact_tail_keeps_the_latest_visual_lines_in_order() {
+        assert_eq!(
+            last_lines("旧记录\r\n新记录 😀\n末尾", 2),
+            (vec!["新记录 😀", "末尾"], true)
+        );
+        assert_eq!(last_lines("保留行尾\n", 2), (vec!["保留行尾", ""], false));
+        let wrapped = format!("{}最后", "甲".repeat(COLUMNS / 2));
+        assert_eq!(last_lines(&wrapped, 1), (vec!["最后"], true));
     }
 
     #[test]
