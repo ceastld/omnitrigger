@@ -5099,6 +5099,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用正则筛选 TOML 配置的叶子路径",
+        query: "TOML: 正则叶子CSV \"^/server/(port|ports/[0-9]+)$\"\n[server]\nport = 8000\nports = [8001, 8002]\nname = 'api'",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "压缩 JSON",
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },

@@ -24,6 +24,7 @@ pub(super) enum TomlError {
     },
     NonFiniteFloat,
     InvalidPointer,
+    RegexPattern,
     MissingPointer,
     Serialization,
     Json(JsonError),
@@ -41,11 +42,12 @@ impl TomlError {
         match self {
             Self::Incomplete => "输入 TOML 内容，例如 TOML: 校验 port = 8000",
             Self::UnknownOperation => {
-                "用 校验、取值、取多路径、转JSON、从JSON 或 叶子CSV 处理 TOML"
+                "用 校验、取值、取多路径、转JSON、从JSON、叶子CSV 或 正则叶子CSV 处理 TOML"
             }
             Self::Invalid { .. } => "请检查 TOML 语法",
             Self::NonFiniteFloat => "JSON 无法表示 TOML 中的 inf 或 nan",
             Self::InvalidPointer => "填写有效路径，例如 /server/port，空路径可写成 \"\"",
+            Self::RegexPattern => "用双引号括起有效的路径正则表达式，再输入 TOML",
             Self::MissingPointer => "TOML 没有该路径，数组下标从 0 开始",
             Self::Serialization => "无法生成 JSON",
             Self::Json(error) => error.message(),
@@ -69,6 +71,7 @@ enum TomlOperation {
     Json,
     FromJson,
     LeavesCsv,
+    RegexLeavesCsv,
     Select,
     SelectPaths,
 }
@@ -82,6 +85,7 @@ impl TomlOperation {
             "转json" | "to-json" => Ok(Self::Json),
             "从json" | "from-json" => Ok(Self::FromJson),
             "叶子csv" | "leaves-csv" => Ok(Self::LeavesCsv),
+            "正则叶子csv" | "regex-leaves-csv" => Ok(Self::RegexLeavesCsv),
             "取值" | "get" => Ok(Self::Select),
             "取多路径" | "get-paths" => Ok(Self::SelectPaths),
             "" => Err(TomlError::Incomplete),
@@ -144,7 +148,11 @@ pub(super) fn toml_validation_report(
 pub(super) fn toml_csv_report(input: &str) -> Option<Result<String, TomlError>> {
     let (operation, source) = split_toml_input(input);
     let operation = TomlOperation::parse(operation).ok()?;
-    matches!(operation, TomlOperation::LeavesCsv).then(|| run_toml_operation(operation, source))
+    matches!(
+        operation,
+        TomlOperation::LeavesCsv | TomlOperation::RegexLeavesCsv
+    )
+    .then(|| run_toml_operation(operation, source))
 }
 
 fn toml_source(rest: &str) -> Result<&str, TomlError> {
@@ -181,7 +189,14 @@ fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, Tom
             let table = parse_toml_table(source)?;
             Ok(format!("TOML 有效 · {} 个顶层键", table.len()))
         }
-        TomlOperation::LeavesCsv => toml_leaves_csv(parse_toml_table(source)?),
+        TomlOperation::LeavesCsv => toml_leaves_csv(parse_toml_table(source)?, None),
+        TomlOperation::RegexLeavesCsv => {
+            let (pattern, source) = super::operators::json_argument_and_tail::<String>(source)
+                .ok_or(TomlError::RegexPattern)?;
+            let pattern =
+                super::text_tools::compile_regex(&pattern).map_err(|_| TomlError::RegexPattern)?;
+            toml_leaves_csv(parse_toml_table(source)?, Some(&pattern))
+        }
         TomlOperation::Json => write_toml_json(&toml::Value::Table(parse_toml_table(source)?)),
         TomlOperation::Select => select_toml_value(source),
         TomlOperation::SelectPaths => select_toml_paths(source),
@@ -308,7 +323,10 @@ fn write_toml_json(value: &toml::Value) -> Result<String, TomlError> {
     Ok(json)
 }
 
-fn toml_leaves_csv(table: toml::Table) -> Result<String, TomlError> {
+fn toml_leaves_csv(
+    table: toml::Table,
+    pattern: Option<&regex::Regex>,
+) -> Result<String, TomlError> {
     use toml::Value as TomlValue;
 
     let mut output = String::from("路径,类型,值");
@@ -350,6 +368,9 @@ fn toml_leaves_csv(table: toml::Table) -> Result<String, TomlError> {
             TomlValue::Array(_) => ("array", "[]".into()),
             TomlValue::Table(_) => ("table", "{}".into()),
         };
+        if pattern.is_some_and(|pattern| !pattern.is_match(&path)) {
+            continue;
+        }
         if path.contains('\0') || value.contains('\0') {
             return Err(TomlError::CsvNullCharacter);
         }
@@ -528,6 +549,29 @@ mod tests {
                 Err(error)
             );
         }
+    }
+
+    #[test]
+    fn finds_toml_leaves_by_escaped_path_including_array_indices() {
+        let query = concat!(
+            "正则叶子CSV \"^/server/(port|ports/[0-9]+)$\"\r\n",
+            "[server]\nname = 'api'\nports = [8001, 8002]\nport = 8000",
+        );
+        let expected = concat!(
+            "路径,类型,值\r\n/server/port,integer,8000",
+            "\r\n/server/ports/0,integer,8001\r\n/server/ports/1,integer,8002",
+        );
+        assert_eq!(transform_toml(query).as_deref(), Ok(expected));
+        assert_eq!(toml_csv_report(query).unwrap().as_deref(), Ok(expected));
+        let escaped = "regex-leaves-csv \"^/a~1b/x~0y$\"\n[\"a/b\"]\n\"x~y\" = true";
+        assert_eq!(
+            transform_toml(escaped).as_deref(),
+            Ok("路径,类型,值\r\n/a~1b/x~0y,boolean,true")
+        );
+        assert_eq!(
+            transform_toml("正则叶子CSV \"[\" port = 8000"),
+            Err(TomlError::RegexPattern)
+        );
     }
 
     #[test]
