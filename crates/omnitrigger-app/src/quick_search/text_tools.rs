@@ -117,6 +117,7 @@ pub(super) enum TextError {
     MissingRegexCaptures,
     ResultTooLarge,
     RegexFrequencyInputTooLarge,
+    RegexLineCountInputTooLarge,
     NullCharacter,
     InvalidBase64,
     InvalidBase32,
@@ -188,6 +189,7 @@ impl TextError {
             Self::MissingRegexCaptures => "请用括号定义至少一个要输出为列的捕获组",
             Self::ResultTooLarge => "文本结果超过 1 MiB",
             Self::RegexFrequencyInputTooLarge => "正则频数的原文超过 16 KiB",
+            Self::RegexLineCountInputTooLarge => "正则逐行计数的原文超过 16 KiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
             Self::InvalidBase32 => "Base32 编码无效",
@@ -332,6 +334,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "正则排除行csv" | "exclude-regex-lines-csv" => {
             Some(filter_regex_lines(text, false, LineOutput::Csv))
         }
+        "正则逐行计数csv" | "regex-line-count-csv" => Some(regex_line_counts_csv(text)),
         "连续计数csv" | "count-consecutive-lines-csv" => {
             Some(count_consecutive_lines_csv(text))
         }
@@ -2710,6 +2713,25 @@ fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
     Ok((compile_regex(&pattern)?, text))
 }
 
+fn regex_line_counts_csv(input: &str) -> Result<String, TextError> {
+    const MAX_INPUT_BYTES: usize = 16 * 1024;
+    let (pattern, text) = regex_text_argument(input)?;
+    if text.len() > MAX_INPUT_BYTES {
+        return Err(TextError::RegexLineCountInputTooLarge);
+    }
+    let mut csv = String::from("原行号,匹配次数,原文");
+    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        let number = (index + 1).to_string();
+        let matches = pattern.find_iter(line).count().to_string();
+        append_bounded_csv_row(
+            &mut csv,
+            [number.as_str(), matches.as_str(), line].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
 fn extract_regex_group(input: &str) -> Result<String, TextError> {
     let (pattern, index, text) = regex_group_arguments(input)?;
     Ok(regex_group_matches(&pattern, index, text)
@@ -4321,6 +4343,28 @@ mod tests {
         assert_eq!(
             transform_text(r#"正则计数 "[0-9]+" 没有数字"#).as_deref(),
             Ok("0 处匹配")
+        );
+    }
+
+    #[test]
+    fn counts_nonoverlapping_regex_matches_per_logical_line() {
+        let input = "正则逐行计数CSV \"[0-9]+\" \"A12,B34\r\n无编号\u{2028}\nC007\r\"";
+        assert_eq!(
+            transform_text(input).as_deref(),
+            Ok("原行号,匹配次数,原文\r\n1,2,\"A12,B34\"\r\n2,0,无编号\r\n3,0,\"\"\r\n4,1,C007")
+        );
+        assert_eq!(
+            transform_text("regex-line-count-csv \"^\" \"A\rB\"").as_deref(),
+            Ok("原行号,匹配次数,原文\r\n1,1,A\r\n2,1,B")
+        );
+        assert_eq!(
+            transform_text("正则逐行计数CSV \"[\" A"),
+            Err(TextError::InvalidRegex)
+        );
+        let input = format!("regex-line-count-csv \"x\" {}", "a".repeat(16 * 1024 + 1));
+        assert_eq!(
+            transform_text(&input),
+            Err(TextError::RegexLineCountInputTooLarge)
         );
     }
 

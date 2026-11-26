@@ -4879,6 +4879,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行统计正则匹配次数",
+        query: "文本: 正则逐行计数CSV \"[0-9]+\" A12 B34\n无编号\nC007",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },
