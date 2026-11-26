@@ -45,6 +45,7 @@ pub(super) enum TimestampError {
     IntervalOutput(DurationError),
     AbsoluteIntervalsArguments,
     AbsoluteIntervalOrder,
+    EqualIntervalsArguments,
     AlignmentArguments,
     SeriesArguments,
     UnsupportedPrecision,
@@ -82,6 +83,9 @@ impl TimestampError {
                 "填写 1 至 32 段 [开始,结束]，例如 [[\"0s\",\"10s\"],[\"5s\",\"15s\"]]"
             }
             Self::AbsoluteIntervalOrder => "每段时间的结束须晚于开始",
+            Self::EqualIntervalsArguments => {
+                "填写开始 到 结束 @ 段数，段数为 1 至 128，且每段至少一纳秒"
+            }
             Self::AlignmentArguments => "填写正的时间步长和时间，例如 15分钟 @ 1700000000",
             Self::SeriesArguments => "填写起始时刻、正步长和 1 至 128 项，可指定一个目标时区",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
@@ -195,6 +199,7 @@ enum TimestampReport {
     OffsetChanges,
     DailyClock,
     AbsoluteIntervals(IntervalOperation),
+    EqualIntervals,
 }
 
 enum CivilPeriod {
@@ -233,6 +238,7 @@ impl TimestampReport {
             "区间差集" | "subtract-intervals" => {
                 Some(Self::AbsoluteIntervals(IntervalOperation::Difference))
             }
+            "等分区间csv" | "split-interval-csv" => Some(Self::EqualIntervals),
             _ => None,
         }
     }
@@ -272,6 +278,9 @@ fn convert_timestamp_with_local(
         Some(TimestampReport::DailyClock) => return daily_clock_series(argument),
         Some(TimestampReport::AbsoluteIntervals(operation)) => {
             return absolute_intervals_csv(argument, now, operation);
+        }
+        Some(TimestampReport::EqualIntervals) => {
+            return equal_intervals_csv(argument, now, &to_local);
         }
         Some(TimestampReport::Zones) => true,
         None => false,
@@ -868,6 +877,51 @@ fn absolute_intervals_csv(
             format_utc_instant(start),
             format_utc_instant(end),
         ));
+    }
+    Ok(result)
+}
+
+fn equal_intervals_csv(
+    input: &str,
+    now: DateTime<Utc>,
+    to_local: &impl Fn(DateTime<Utc>) -> DateTime<FixedOffset>,
+) -> Result<String, TimestampError> {
+    let invalid = TimestampError::EqualIntervalsArguments;
+    let (input, zone) = match split_conversion(input) {
+        Some((input, zone)) => (input, parse_display_zone(zone)?),
+        None => (input, DisplayZone::Utc),
+    };
+    let (endpoints, count) = input.split_once('@').ok_or(invalid)?;
+    let count = count
+        .trim()
+        .parse::<i128>()
+        .ok()
+        .filter(|count| (1..=MAX_SERIES_TIMESTAMPS as i128).contains(count))
+        .ok_or(invalid)?;
+    let (start, end) = interval_nanos(endpoints, now, invalid)?;
+    let span = end - start;
+    if span < count {
+        return Err(invalid);
+    }
+    let bounds = (0..=count)
+        .map(|part| {
+            let offset = (span * part + count / 2) / count;
+            timestamp_from_unix_units(start + offset, TimestampUnit::Nanoseconds)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let format = bounds
+        .iter()
+        .map(|time| TimestampUnit::from_subsecond(time.timestamp_subsec_nanos()))
+        .max()
+        .unwrap_or(TimestampUnit::Seconds)
+        .date_format();
+    let mut result = String::from("序号,开始,结束,时长");
+    let mut from = format_display_time(bounds[0], format, &zone, to_local)?;
+    for (index, pair) in bounds.windows(2).enumerate() {
+        let to = format_display_time(pair[1], format, &zone, to_local)?;
+        let duration = format_absolute_elapsed(pair[0], pair[1])?;
+        result.push_str(&format!("\r\n{},{from},{to},{duration}", index + 1));
+        from = to;
     }
     Ok(result)
 }
@@ -1691,6 +1745,33 @@ mod tests {
         assert_eq!(
             convert_timestamp("间隔 0 到 9999999999999999999999999999999999999999ns", now),
             Err(TimestampError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn splits_intervals_by_elapsed_time_and_rounds_boundaries_to_nanoseconds() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = "等分区间CSV 2026-03-08T01:30:00-05:00 到 2026-03-08T04:30:00-04:00 @ 2 to America/New_York";
+        assert!(is_timestamp_report(query));
+        assert_eq!(
+            convert_timestamp(query, now).as_deref(),
+            Ok(concat!(
+                "序号,开始,结束,时长",
+                "\r\n1,2026-03-08T01:30:00-05:00,2026-03-08T03:30:00-04:00,01:00:00",
+                "\r\n2,2026-03-08T03:30:00-04:00,2026-03-08T04:30:00-04:00,01:00:00",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp("split-interval-csv 0ns 到 3ns @ 2", now).as_deref(),
+            Ok(concat!(
+                "序号,开始,结束,时长",
+                "\r\n1,1970-01-01T00:00:00.000000000Z,1970-01-01T00:00:00.000000002Z,00:00:00.000000002",
+                "\r\n2,1970-01-01T00:00:00.000000002Z,1970-01-01T00:00:00.000000003Z,00:00:00.000000001",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp("等分区间CSV 0 到 1ns @ 2", now),
+            Err(TimestampError::EqualIntervalsArguments)
         );
     }
 

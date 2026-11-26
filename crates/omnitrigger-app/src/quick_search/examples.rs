@@ -3191,6 +3191,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按实际经过的时间等分一个区间",
+        query: "时间戳: 等分区间CSV 0 到 10 @ 3 to UTC+8",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按当地日期查看两个时刻之间的实际时长",
         query: "时间戳: 逐日时长 2026-03-07T14:00:00-05:00 到 2026-03-09T10:00:00-04:00 to America/New_York",
     },
@@ -7911,7 +7916,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "降序",
         ],
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
-        Scope::Timestamp => &["中点"],
+        Scope::Timestamp => &["中点", "等分区间CSV"],
         Scope::Paper => &["出血"],
         Scope::Color => &["色差"],
         Scope::Statistics => &[
@@ -8116,6 +8121,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "区间合并",
                     "区间交集",
                     "区间差集",
+                    "等分区间CSV",
                     "覆盖时长",
                     "逐日时长",
                     "偏移变更",
