@@ -35,6 +35,7 @@ pub(super) enum TimestampError {
     CivilDayArguments,
     CivilPeriodArguments,
     DailyDurationArguments,
+    DailyCoverageArguments,
     TooManyDurationDays,
     OffsetChangesArguments,
     DailyClockArguments,
@@ -71,7 +72,8 @@ impl TimestampError {
                 "填写 ISO 周、年月、季度或年份及明确时区，例如 2026-Q1 America/New_York"
             }
             Self::DailyDurationArguments => "用“到”分隔起止时刻，起点须在终点之前或相同，再用 to 指定时区",
-            Self::TooManyDurationDays => "逐日时长最多输出 128 个当地日期",
+            Self::DailyCoverageArguments => "填写一组时间段，再用 to 指定时区，例如 0s 到 60s; 30s 到 90s to UTC",
+            Self::TooManyDurationDays => "逐日报表最多输出 128 个当地日期",
             Self::OffsetChangesArguments => "填写四位年份和明确时区，例如 2026 America/New_York",
             Self::DailyClockArguments => "填写当地起始时刻、明确时区和 1 至 128 天，例如 2026-03-07 02:30 America/New_York @ 3",
             Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
@@ -197,6 +199,7 @@ enum TimestampReport {
     CivilDays,
     CivilPeriod(CivilPeriod),
     DailyDurations,
+    DailyCoverage,
     OffsetChanges,
     DailyClock,
     AbsoluteIntervals(IntervalOperation),
@@ -231,6 +234,7 @@ impl TimestampReport {
             "季度区间" | "quarter-intervals" => Some(Self::CivilPeriod(CivilPeriod::Quarter)),
             "年区间" | "year-intervals" => Some(Self::CivilPeriod(CivilPeriod::Year)),
             "逐日时长" | "daily-durations" => Some(Self::DailyDurations),
+            "逐日覆盖csv" | "daily-coverage-csv" => Some(Self::DailyCoverage),
             "偏移变更" | "offset-changes" => Some(Self::OffsetChanges),
             "每日同刻" | "daily-clock" => Some(Self::DailyClock),
             "区间合并" | "merge-intervals" => {
@@ -283,6 +287,7 @@ fn convert_timestamp_with_local(
             return civil_period_intervals(argument, period)
         }
         Some(TimestampReport::DailyDurations) => return daily_durations(argument, now),
+        Some(TimestampReport::DailyCoverage) => return daily_coverage_csv(argument, now),
         Some(TimestampReport::OffsetChanges) => return timezone_offset_changes(argument),
         Some(TimestampReport::DailyClock) => return daily_clock_series(argument, &to_local),
         Some(TimestampReport::AbsoluteIntervals(operation)) => {
@@ -1095,8 +1100,6 @@ fn split_interval_endpoints(
 }
 
 fn daily_durations(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
-    const SECONDS_PER_DAY: i128 = 86_400;
-    const NANOS_PER_DAY: i128 = SECONDS_PER_DAY * NANOS_PER_SECOND as i128;
     let invalid = TimestampError::DailyDurationArguments;
     let (input, zone) = split_conversion(input).ok_or(invalid)?;
     let zone = explicit_timezone(zone, invalid)?;
@@ -1104,37 +1107,59 @@ fn daily_durations(input: &str, now: DateTime<Utc>) -> Result<String, TimestampE
     if end < start {
         return Err(invalid);
     }
+    daily_duration_csv([(start, end)], &zone)
+}
+
+fn daily_coverage_csv(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
+    let invalid = TimestampError::DailyCoverageArguments;
+    let (input, zone) = split_conversion(input).ok_or(invalid)?;
+    let zone = explicit_timezone(zone, invalid)?;
+    let intervals = merge_absolute_intervals(parse_absolute_intervals(input, now)?)
+        .into_iter()
+        .map(|(start, end)| (unix_nanos(start), unix_nanos(end)));
+    daily_duration_csv(intervals, &zone)
+}
+
+fn daily_duration_csv(
+    intervals: impl IntoIterator<Item = (i128, i128)>,
+    zone: &TimeZone,
+) -> Result<String, TimestampError> {
+    const SECONDS_PER_DAY: i128 = 86_400;
+    const NANOS_PER_DAY: i128 = SECONDS_PER_DAY * NANOS_PER_SECOND as i128;
     let mut output = String::from("当地日期,时长");
-    if start == end {
-        return Ok(output);
-    }
     let timestamp =
         |nanos| Timestamp::from_nanosecond(nanos).map_err(|_| TimestampError::OutOfRange);
-    let first = timestamp(start)?;
-    let last = timestamp(end)?;
     let mut totals = BTreeMap::<i128, u128>::new();
-    let mut offset_start = first;
-    let mut cursor = start;
-    // 先沿 UTC 时间线按偏移变化切分，再在固定偏移的各段内按当地午夜切分。
-    for offset_end in zone
-        .following(first)
-        .map(|transition| transition.timestamp())
-        .take_while(|transition| *transition < last)
-        .chain(std::iter::once(last))
-    {
-        let next_transition = offset_end.as_nanosecond();
-        let offset = i128::from(zone.to_offset(offset_start).seconds()) * NANOS_PER_SECOND as i128;
-        while cursor < next_transition {
-            let day = (cursor + offset).div_euclid(NANOS_PER_DAY);
-            let midnight = (day + 1) * NANOS_PER_DAY - offset;
-            let stop = next_transition.min(midnight);
-            *totals.entry(day).or_default() += (stop - cursor) as u128;
-            if totals.len() > MAX_DAILY_DURATION_ROWS {
-                return Err(TimestampError::TooManyDurationDays);
-            }
-            cursor = stop;
+    for (start, end) in intervals {
+        if start == end {
+            continue;
         }
-        offset_start = offset_end;
+        let first = timestamp(start)?;
+        let last = timestamp(end)?;
+        let mut offset_start = first;
+        let mut cursor = start;
+        // 先沿 UTC 时间线按偏移变化切分，再在固定偏移的各段内按当地午夜切分。
+        for offset_end in zone
+            .following(first)
+            .map(|transition| transition.timestamp())
+            .take_while(|transition| *transition < last)
+            .chain(std::iter::once(last))
+        {
+            let next_transition = offset_end.as_nanosecond();
+            let offset =
+                i128::from(zone.to_offset(offset_start).seconds()) * NANOS_PER_SECOND as i128;
+            while cursor < next_transition {
+                let day = (cursor + offset).div_euclid(NANOS_PER_DAY);
+                let midnight = (day + 1) * NANOS_PER_DAY - offset;
+                let stop = next_transition.min(midnight);
+                *totals.entry(day).or_default() += (stop - cursor) as u128;
+                if totals.len() > MAX_DAILY_DURATION_ROWS {
+                    return Err(TimestampError::TooManyDurationDays);
+                }
+                cursor = stop;
+            }
+            offset_start = offset_end;
+        }
     }
     for (day, nanos) in totals {
         let midnight = DateTime::from_timestamp((day * SECONDS_PER_DAY) as i64, 0)
@@ -1740,6 +1765,32 @@ mod tests {
         assert_eq!(
             convert_timestamp(&format!("覆盖时长 {excess}"), now),
             Err(TimestampError::AbsoluteIntervalsArguments)
+        );
+    }
+
+    #[test]
+    fn merges_absolute_coverage_before_totalling_local_dates() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = concat!(
+            "逐日覆盖CSV 2026-03-07T23:00:00-05:00 到 2026-03-08T12:00:00-04:00; ",
+            "2026-03-08T06:00:00-04:00 到 2026-03-09T01:00:00-04:00 to America/New_York",
+        );
+        assert!(is_timestamp_report(query));
+        assert_eq!(
+            convert_timestamp(query, now).as_deref(),
+            Ok("当地日期,时长\r\n2026-03-07,01:00:00\r\n2026-03-08,23:00:00\r\n2026-03-09,01:00:00")
+        );
+        assert_eq!(
+            convert_timestamp(
+                r#"daily-coverage-csv [["0s","1ns"],["0s","1ns"],["86400s","86400.000000002s"]] to UTC"#,
+                now
+            )
+            .as_deref(),
+            Ok("当地日期,时长\r\n1970-01-01,00:00:00.000000001\r\n1970-01-02,00:00:00.000000002")
+        );
+        assert_eq!(
+            convert_timestamp("逐日覆盖CSV 0s 到 1s", now),
+            Err(TimestampError::DailyCoverageArguments)
         );
     }
 

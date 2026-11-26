@@ -3346,6 +3346,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "合并重叠时间段并按当地日期统计覆盖时长",
+        query: "时间戳: 逐日覆盖CSV 0s 到 90s; 60s 到 120s to UTC",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查看某年时区偏移变更",
         query: "时间戳: 偏移变更 2026 America/New_York",
     },
@@ -8460,6 +8465,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "等分区间CSV",
                     "覆盖时长",
                     "逐日时长",
+                    "逐日覆盖CSV",
                     "偏移变更",
                     "每日同刻",
                     "序列",
