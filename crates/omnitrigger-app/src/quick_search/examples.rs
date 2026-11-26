@@ -5199,6 +5199,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行查找匹配正则的 JSONL 键名",
+        query: "JSON: 行正则找键CSV \"^金额$\"\n{\"订单\":[{\"金额\":1.50}]}\n{\"退款\":{\"金额\":0.75}}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "逐行查找匹配正则的 JSONL 字符串值",
+        query: "JSON: 行正则找值CSV \"^北\"\n{\"标签\":[\"\\u5317京\",\"南昌\"]}\n{\"城市\":\"北京\"}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "筛选缺少字段的 JSON 记录",
         query: r#"JSON: 多条件筛选 [["/状态","缺失"],["/金额",">=",1]] [{"金额":2},{"金额":2,"状态":null},{"金额":0}]"#,
     },
