@@ -89,6 +89,7 @@ pub(super) enum JsonError {
     RemoveRoot,
     NumberFilter,
     FilterConditions,
+    FilterRegex,
     SortFields,
     UniquePaths,
     LineUniquePaths,
@@ -178,6 +179,7 @@ impl JsonError {
             Self::FilterConditions => {
                 "填写 1 至 16 个 [路径,比较符,值]，例如 [[\"/金额\",\">=\",1.5]]"
             }
+            Self::FilterRegex => "正则筛选条件须填写有效的 JSON 正则字符串",
             Self::SortFields => {
                 "填写 1 至 8 个 [路径,排序方式]，方式可为文本升序、文本降序、数值升序或数值降序"
             }
@@ -1325,8 +1327,51 @@ fn filter_json_numbers(query: &str) -> Result<String, JsonError> {
 
 struct JsonCondition {
     keys: Vec<String>,
-    comparison: NumberComparison,
-    expected: JsonScalar,
+    predicate: JsonPredicate,
+}
+
+enum JsonPredicate {
+    Scalar {
+        comparison: NumberComparison,
+        expected: JsonScalar,
+    },
+    Regex {
+        pattern: regex::Regex,
+        keep_match: bool,
+    },
+}
+
+impl JsonPredicate {
+    fn parse(operator: &str, raw: &RawValue) -> Result<Self, JsonError> {
+        let regex = match operator {
+            "正则" | "regex" => Some(true),
+            "正则排除" | "not-regex" => Some(false),
+            _ => None,
+        };
+        if let Some(keep_match) = regex {
+            let pattern: String =
+                serde_json::from_str(raw.get()).map_err(|_| JsonError::FilterRegex)?;
+            let pattern =
+                super::text_tools::compile_regex(&pattern).map_err(|_| JsonError::FilterRegex)?;
+            return Ok(Self::Regex {
+                pattern,
+                keep_match,
+            });
+        }
+        let comparison = NumberComparison::parse(operator).ok_or(JsonError::FilterConditions)?;
+        let expected = json_scalar(raw)?.ok_or(JsonError::FilterConditions)?;
+        if !matches!(
+            comparison,
+            NumberComparison::Equal | NumberComparison::Different
+        ) && !matches!(expected, JsonScalar::Number(_))
+        {
+            return Err(JsonError::NumberFilter);
+        }
+        Ok(Self::Scalar {
+            comparison,
+            expected,
+        })
+    }
 }
 
 impl JsonCondition {
@@ -1337,13 +1382,24 @@ impl JsonCondition {
         let Some(actual) = json_scalar(value)? else {
             return Ok(false);
         };
-        Ok(match (&actual, &self.expected) {
-            (JsonScalar::Number(actual), JsonScalar::Number(expected)) => {
-                self.comparison.accepts(actual.compare(expected))
+        Ok(match &self.predicate {
+            JsonPredicate::Regex {
+                pattern,
+                keep_match,
+            } => {
+                matches!(actual, JsonScalar::String(text) if pattern.is_match(&text) == *keep_match)
             }
-            _ if matches!(self.comparison, NumberComparison::Equal) => actual == self.expected,
-            _ if matches!(self.comparison, NumberComparison::Different) => actual != self.expected,
-            _ => false,
+            JsonPredicate::Scalar {
+                comparison,
+                expected,
+            } => match (&actual, expected) {
+                (JsonScalar::Number(actual), JsonScalar::Number(expected)) => {
+                    comparison.accepts(actual.compare(expected))
+                }
+                _ if matches!(comparison, NumberComparison::Equal) => &actual == expected,
+                _ if matches!(comparison, NumberComparison::Different) => &actual != expected,
+                _ => false,
+            },
         })
     }
 }
@@ -1366,22 +1422,11 @@ fn filter_json_conditions(
     }
     let conditions = conditions
         .into_iter()
-        .map(|(pointer, comparison, raw)| {
+        .map(|(pointer, operator, raw)| {
             let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
-            let comparison =
-                NumberComparison::parse(&comparison).ok_or(JsonError::FilterConditions)?;
-            let expected = json_scalar(raw)?.ok_or(JsonError::FilterConditions)?;
-            if !matches!(
-                comparison,
-                NumberComparison::Equal | NumberComparison::Different
-            ) && !matches!(expected, JsonScalar::Number(_))
-            {
-                return Err(JsonError::NumberFilter);
-            }
             Ok(JsonCondition {
                 keys,
-                comparison,
-                expected,
+                predicate: JsonPredicate::parse(&operator, raw)?,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -4568,6 +4613,26 @@ mod tests {
         assert_eq!(
             transform_json(&format!("{query}\n{{\"金额\":[]}}")),
             Err(JsonError::ExpectedScalar)
+        );
+    }
+
+    #[test]
+    fn combines_regex_and_numeric_json_filters_without_rewriting_records() {
+        let filter = r#"["/状态","正则","^WARN"]"#;
+        let first = r#"{"状态":"WARN\u0020超时", "金额":1.50}"#;
+        let query = format!(
+            "行筛选 [{filter},[\"/金额\",\">=\",1]]\r\n{first}\r\n{{\"状态\":\"INFO\",\"金额\":3}}\r\n{{\"状态\":\"WARN\",\"金额\":0}}"
+        );
+        assert_eq!(transform_json(&query).as_deref(), Ok(first));
+        assert_eq!(
+            transform_json(
+                r#"多条件筛选 [["/状态","正则排除","^WARN"]] [{"状态":"WARN"},{"状态":"INFO"},{"状态":1},{}]"#
+            ).as_deref(),
+            Ok(r#"[{"状态":"INFO"}]"#)
+        );
+        assert_eq!(
+            transform_json(r#"多条件筛选 [["/状态","正则","["]] []"#),
+            Err(JsonError::FilterRegex)
         );
     }
 
