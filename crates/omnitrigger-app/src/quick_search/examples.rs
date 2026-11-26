@@ -2080,6 +2080,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "进制: 浮点分数 32 @ 0.1",
     },
     Example {
+        icon: Icon::Layers,
+        title: "计算单精度存储值与十进制数的差",
+        query: "进制: 浮点误差 32 @ 0.1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "比较双精度算式结果与精确分数",
+        query: "进制: 算式浮点误差 0.1+0.2",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "将原始浮点位模式换成精确分数",
         query: "进制: 读浮点分数 32 @ 0xBDCCCCCD",
@@ -7783,6 +7793,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "浮点分解",
             "读浮点位",
             "浮点分数",
+            "浮点误差",
+            "算式浮点误差",
             "读浮点分数",
             "浮点相邻",
             "读浮点相邻",

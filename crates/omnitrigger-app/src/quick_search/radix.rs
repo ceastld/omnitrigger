@@ -9,7 +9,10 @@ use num_rational::BigRational;
 use super::calculator::{evaluate, normalize, CalculationError};
 use super::conversion::ConversionError;
 use super::csv_tools::append_bounded_csv_row;
-use super::fraction::{repeating_radix, MAX_REPEATING_DECIMAL_PLACES};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, parse_fraction_literal, repeating_radix, FractionError,
+    MAX_REPEATING_DECIMAL_PLACES,
+};
 use super::scientific::decompose_float;
 
 const MAX_INTEGER_BITS: u64 = 8192;
@@ -65,6 +68,7 @@ pub(super) enum RadixError {
     FloatBitsWidthExceeded,
     FloatFractionNonfinite,
     FloatAdjacentNan,
+    FloatExactCalculation(FractionError),
     SheetColumnArguments,
     SheetCellArguments,
     SheetReferenceArguments,
@@ -110,6 +114,7 @@ impl RadixError {
             Self::FloatCalculation(error) => error.message(),
             Self::ReadFloatBitsArguments => "填写 32 或 64 位宽和非负位模式，例如 32 @ 0x3DCCCCCD",
             Self::FloatFractionNonfinite => "无穷和 NaN 没有对应的有限分数",
+            Self::FloatExactCalculation(error) => error.message(),
             Self::FloatAdjacentNan => "请填写可排序的浮点数，NaN 没有相邻数值",
             Self::WriteBitsArguments => {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
@@ -757,6 +762,8 @@ fn radix_report_operation(operation: &str) -> Option<RadixReport> {
         "格雷码表" | "gray-code-table" => Some(gray_code_table),
         "浮点位" | "float-bits" => Some(|input| float_bits_csv(input, false)),
         "算式浮点位" | "expression-float-bits" => Some(expression_float_bits_csv),
+        "浮点误差" | "float-error" => Some(float_error_csv),
+        "算式浮点误差" | "expression-float-error" => Some(expression_float_error_csv),
         "读浮点位" | "read-float-bits" => Some(|input| float_bits_csv(input, true)),
         "浮点相邻" | "float-neighbors" => Some(|input| float_adjacent_csv(input, false)),
         "读浮点相邻" | "read-float-neighbors" => Some(|input| float_adjacent_csv(input, true)),
@@ -884,13 +891,47 @@ fn format_float_value(value: impl Display + LowerExp) -> String {
 }
 
 fn float_fraction(input: &str, decode: bool) -> Result<String, RadixError> {
-    let value = match parse_float(input, decode)? {
+    parsed_float_fraction(parse_float(input, decode)?).map(|fraction| fraction.to_string())
+}
+
+fn parsed_float_fraction(parsed: ParsedFloat) -> Result<BigRational, RadixError> {
+    let value = match parsed {
         ParsedFloat::Single(value, _) => f64::from(value),
         ParsedFloat::Double(value, _) => value,
     };
-    BigRational::from_float(value)
-        .map(|fraction| fraction.to_string())
-        .ok_or(RadixError::FloatFractionNonfinite)
+    BigRational::from_float(value).ok_or(RadixError::FloatFractionNonfinite)
+}
+
+fn float_error_csv(input: &str) -> Result<String, RadixError> {
+    let original = input
+        .split_once('@')
+        .ok_or(RadixError::FloatBitsArguments)?
+        .1;
+    let value = parsed_float_fraction(parse_float(input, false)?)?;
+    let exact = parse_fraction_literal(original).map_err(RadixError::FloatExactCalculation)?;
+    format_float_error(exact, value)
+}
+
+fn expression_float_error_csv(expression: &str) -> Result<String, RadixError> {
+    let value = evaluate(expression).map_err(RadixError::FloatCalculation)?;
+    let value = BigRational::from_float(value).ok_or(RadixError::FloatFractionNonfinite)?;
+    let exact = calculate_fraction(expression).map_err(RadixError::FloatExactCalculation)?;
+    format_float_error(exact, value)
+}
+
+fn format_float_error(exact: BigRational, value: BigRational) -> Result<String, RadixError> {
+    let difference = &value - &exact;
+    ensure_exact_size(&difference).map_err(RadixError::FloatExactCalculation)?;
+    let relative = if exact.numer().sign() == Sign::NoSign {
+        "\"\"".to_owned()
+    } else {
+        let ratio = &difference / &exact;
+        ensure_exact_size(&ratio).map_err(RadixError::FloatExactCalculation)?;
+        ratio.to_string()
+    };
+    Ok(format!(
+        "字段,值\r\n原值,{exact}\r\n浮点分数,{value}\r\n差值,{difference}\r\n相对差值,{relative}"
+    ))
 }
 
 fn format_float_bits(
@@ -1318,6 +1359,26 @@ mod tests {
             Err(RadixError::FloatCalculation(
                 CalculationError::DivisionByZero
             ))
+        );
+    }
+
+    #[test]
+    fn reports_exact_errors_for_float_literals_and_calculated_results() {
+        let single = "浮点误差 32 @ 0.1";
+        let expected = concat!(
+            "字段,值\r\n原值,1/10\r\n浮点分数,13421773/134217728\r\n",
+            "差值,1/671088640\r\n相对差值,1/67108864",
+        );
+        assert_eq!(convert_arbitrary_radix(single).as_deref(), Ok(expected));
+        assert_eq!(radix_csv_report(single).unwrap().as_deref(), Ok(expected));
+        let expression = convert_arbitrary_radix("算式浮点误差 0.1+0.2").unwrap();
+        assert!(expression.contains("原值,3/10\r\n"));
+        assert!(expression.contains("差值,1/22517998136852480\r\n"));
+        let zero = convert_arbitrary_radix("float-error 64 @ -0").unwrap();
+        assert!(zero.ends_with("差值,0\r\n相对差值,\"\""));
+        assert_eq!(
+            convert_arbitrary_radix("浮点误差 32 @ NaN"),
+            Err(RadixError::FloatFractionNonfinite)
         );
     }
 
