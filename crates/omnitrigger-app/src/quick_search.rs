@@ -2029,6 +2029,12 @@ struct ResultSearchDraft {
     source: Option<String>,
 }
 
+struct TextMatchSearchReturn {
+    source_query: String,
+    filter: QueryDraft,
+    source: Option<String>,
+}
+
 impl ResultSearchDraft {
     fn command_arguments<'query>(&self, query: &'query str) -> Option<(&'static str, &'query str)> {
         if let (TEXT_SEARCH_COMMAND, Some(arguments)) =
@@ -2581,6 +2587,7 @@ pub(super) struct QuickSearch {
     input_before_bookmarks: Option<QueryDraft>,
     query_draft_return: Option<QueryDraft>,
     input_before_result_search: Option<ResultSearchDraft>,
+    text_match_search_return: Option<TextMatchSearchReturn>,
     result_refill: Option<ResultRefill>,
     file_search_return: Option<FileSearchReturn>,
     result_save: ResultSaveState,
@@ -2710,6 +2717,7 @@ impl QuickSearch {
             input_before_bookmarks: None,
             query_draft_return: None,
             input_before_result_search: None,
+            text_match_search_return: None,
             result_refill: None,
             file_search_return: None,
             result_save: ResultSaveState::Ready,
@@ -3019,6 +3027,13 @@ impl QuickSearch {
     fn refresh_results(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.bookmark_name_edit.is_some() {
             return;
+        }
+        if self
+            .text_match_search_return
+            .as_ref()
+            .is_some_and(|search| search.source_query != query)
+        {
+            self.text_match_search_return = None;
         }
         if self
             .result_refill
@@ -4062,11 +4077,21 @@ impl QuickSearch {
             return false;
         };
         if !is_held && !self.input.read(cx).is_composing() && !self.file_operation_in_progress() {
-            let mut draft = self.input_before_result_search.take().unwrap().original;
-            draft.expanded_value = true;
-            draft.follow_value_end = false;
-            draft.target_original_line = Some(line);
-            self.restore_query_draft(draft, window, cx);
+            let filter = self.query_draft(cx);
+            let ResultSearchDraft {
+                mut original,
+                source,
+                ..
+            } = self.input_before_result_search.take().unwrap();
+            self.text_match_search_return = Some(TextMatchSearchReturn {
+                source_query: original.text.clone(),
+                filter,
+                source,
+            });
+            original.expanded_value = true;
+            original.follow_value_end = false;
+            original.target_original_line = Some(line);
+            self.restore_query_draft(original, window, cx);
         }
         true
     }
@@ -4097,6 +4122,16 @@ impl QuickSearch {
         }
         if let Some(draft) = self.input_before_result_search.take() {
             self.restore_query_draft(draft.original, window, cx);
+        } else if let Some(search) = self
+            .text_match_search_return
+            .take_if(|search| search.source_query == self.input.read(cx).text_ref())
+        {
+            self.input_before_result_search = Some(ResultSearchDraft {
+                original: self.query_draft(cx),
+                command: TEXT_SEARCH_COMMAND,
+                source: search.source,
+            });
+            self.restore_query_draft(search.filter, window, cx);
         } else if let Some((command, text, needs_attachment)) = self.searchable_result_text() {
             let query = if needs_attachment {
                 format!("{command}\"\"")
@@ -6843,7 +6878,12 @@ impl Render for QuickSearch {
         let naming_bookmark = self.bookmark_name_edit.is_some();
         let selected_text_file = self.results.selected_text_file(self.selected).is_some();
         let preview_path = self.file_preview_path();
-        let action_padding = px(if preview_path.is_some() { 4. } else { 10. });
+        let text_search_view = self.text_search_views(&query).filter(|_| !naming_bookmark);
+        let action_padding = px(if preview_path.is_some() || text_search_view.is_some() {
+            4.
+        } else {
+            10.
+        });
         let title = if naming_bookmark {
             "命名收藏"
         } else {
@@ -7056,27 +7096,22 @@ impl Render for QuickSearch {
                             )
                         },
                     )
-                    .when_some(
-                        self.text_search_views(&query).filter(|_| !naming_bookmark),
-                        |header, (_, next)| {
-                            let label = if next == TEXT_SEARCH_CSV_COMMAND {
-                                "行号表"
-                            } else {
-                                "文本行"
-                            };
-                            header.child(
-                                button("switch-text-result-view", label, Tone::Ghost, true)
-                                    .h(px(24.))
-                                    .px(px(8.))
-                                    .tooltip(theme::text_tooltip(
-                                        "Ctrl+Alt+F 切换文本和行号表".into(),
-                                    ))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.switch_text_search_view(window, cx);
-                                    })),
-                            )
-                        },
-                    )
+                    .when_some(text_search_view, |header, (_, next)| {
+                        let label = if next == TEXT_SEARCH_CSV_COMMAND {
+                            "行号表"
+                        } else {
+                            "文本行"
+                        };
+                        header.child(
+                            button("switch-text-result-view", label, Tone::Ghost, true)
+                                .h(px(24.))
+                                .px(action_padding)
+                                .tooltip(theme::text_tooltip("Ctrl+Alt+F 切换文本和行号表".into()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.switch_text_search_view(window, cx);
+                                })),
+                        )
+                    })
                     .when_some(
                         refill_action.filter(|_| !self.is_table_cell_lookup()),
                         |header, label| {
@@ -10017,6 +10052,15 @@ mod tests {
         assert!(value_preview::page_text(text, pages, search.selected)
             .unwrap()
             .contains("南区: tea"));
+        let source_page = search.selected;
+        search.toggle_result_search(window, cx);
+        search.refresh_results(&report_query, window, cx);
+        assert_eq!(search.input.read(cx).text(), report_query);
+        assert!(search.results.table_preview().is_some());
+        search.toggle_result_search(window, cx);
+        search.refresh_results(QUERY, window, cx);
+        assert_eq!(search.input.read(cx).text(), QUERY);
+        assert_eq!(search.selected, source_page);
     }
 
     #[cfg(target_os = "windows")]
