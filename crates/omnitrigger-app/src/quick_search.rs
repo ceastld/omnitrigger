@@ -11222,12 +11222,15 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "windows")]
-    fn suggests_browsing_pasted_directory_paths_with_trailing_separators() {
+    fn suggests_browsing_pasted_directory_paths_without_a_required_separator() {
         let index = SearchIndex::default();
         for (query, expected) in [
+            (r"C:\Work Folder", r"文件: C:\Work Folder |"),
+            (r#""C:\Work Folder""#, r"文件: C:\Work Folder |"),
             (r"C:\Work Folder\", r"文件: C:\Work Folder\ |"),
             (r#""C:\Work Folder\""#, r"文件: C:\Work Folder\ |"),
             ("C:/Work Folder/", "文件: C:/Work Folder/ |"),
+            ("C:/Work Folder.v2/", "文件: C:/Work Folder.v2/ |"),
         ] {
             assert_eq!(index.results(query).suggested_input(0), Some(expected));
         }

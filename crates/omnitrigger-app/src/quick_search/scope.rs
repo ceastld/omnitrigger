@@ -101,10 +101,11 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
     if let Some((prefix, term)) = query.split_once([':', '：']) {
         let Some(scope) = parse_scope(prefix) else {
             let path = super::local_files::local_disk_path(query)?;
-            if path.ends_with(['\\', '/']) {
+            let parsed = Path::new(path);
+            if path.ends_with(['\\', '/']) || parsed.extension().is_none() {
                 return Some((Scope::LocalFiles, path));
             }
-            return super::supports_text_file_preview(Path::new(path))
+            return super::supports_text_file_preview(parsed)
                 .then_some((Scope::DirectFilePreview, path));
         };
         let term = term.trim_start();
