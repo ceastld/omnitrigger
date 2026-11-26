@@ -1033,18 +1033,20 @@ pub(super) fn directory_query(directory: &str) -> String {
     format!("文件: {directory} |")
 }
 
-fn directory_input(query: &str) -> Option<InputSuggestion> {
-    let directory = super::path_tools::strip_path_quotes(query.trim());
-    if directory.contains(['|', '<', '>', '?', '*']) {
+pub(super) fn local_disk_path(query: &str) -> Option<&str> {
+    let source = super::path_tools::strip_path_quotes(query.trim());
+    if source.contains(['|', '<', '>', '?', '*']) {
         return None;
     }
-    let path = super::path_tools::absolute_path(directory)?;
+    let path = super::path_tools::absolute_path(source)?;
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return None;
     };
-    if !matches!(prefix.kind(), Prefix::Disk(_)) || directory.get(2..)?.contains(':') {
-        return None;
-    }
+    (matches!(prefix.kind(), Prefix::Disk(_)) && !source.get(2..)?.contains(':')).then_some(source)
+}
+
+fn directory_input(query: &str) -> Option<InputSuggestion> {
+    let directory = local_disk_path(query)?;
     let expression = directory_query(directory);
     (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then_some(InputSuggestion {
         expression,

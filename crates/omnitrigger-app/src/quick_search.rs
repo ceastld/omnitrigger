@@ -1137,6 +1137,7 @@ impl Results {
                     Self::Destinations(windows_settings::matching_windows_settings(term))
                 }
                 Scope::LocalFiles => local_files.results(term),
+                Scope::DirectFilePreview => direct_file_preview_results(term),
                 Scope::RecentFilePreviews => recent.file_previews.results(term),
                 Scope::OpenWindows => open_windows.results(term),
                 Scope::Actions => {
@@ -1873,27 +1874,7 @@ impl Results {
         else {
             return None;
         };
-        matches!(
-            input_file_extension(Path::new(path)).as_deref(),
-            Some(
-                "txt"
-                    | "md"
-                    | "markdown"
-                    | "log"
-                    | "csv"
-                    | "tsv"
-                    | "json"
-                    | "jsonl"
-                    | "ndjson"
-                    | "toml"
-                    | "yaml"
-                    | "yml"
-                    | "ini"
-                    | "cfg"
-                    | "conf"
-            )
-        )
-        .then_some(path.as_str())
+        supports_text_file_preview(Path::new(path)).then_some(path.as_str())
     }
 
     fn value_preview_expandable(&self) -> bool {
@@ -2205,6 +2186,45 @@ fn input_file_query_prefix(path: &Path) -> &'static str {
         Some("toml") => "TOML: 校验 ",
         _ => "文本: 原文 ",
     }
+}
+
+fn supports_text_file_preview(path: &Path) -> bool {
+    matches!(
+        input_file_extension(path).as_deref(),
+        Some(
+            "txt"
+                | "md"
+                | "markdown"
+                | "log"
+                | "csv"
+                | "tsv"
+                | "json"
+                | "jsonl"
+                | "ndjson"
+                | "toml"
+                | "yaml"
+                | "yml"
+                | "ini"
+                | "cfg"
+                | "conf"
+        )
+    )
+}
+
+fn direct_file_preview_results(query: &str) -> Results {
+    let destination = local_files::local_disk_path(query).and_then(|source| {
+        let path = Path::new(source);
+        if !supports_text_file_preview(path) {
+            return None;
+        }
+        Some(Destination::LocalFile {
+            name: path.file_name()?.to_str()?.to_owned(),
+            path: source.to_owned(),
+            is_directory: false,
+            size_bytes: None,
+        })
+    });
+    Results::Destinations(destination.into_iter().collect())
 }
 
 fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String> {
@@ -2966,8 +2986,10 @@ impl QuickSearch {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let (Some((Scope::RecentFilePreviews, _)), Destination::LocalFile { path, .. }) =
-            (scoped_query(self.input.read(cx).text_ref()), &destination)
+        if let (
+            Some((Scope::DirectFilePreview | Scope::RecentFilePreviews, _)),
+            Destination::LocalFile { path, .. },
+        ) = (scoped_query(self.input.read(cx).text_ref()), &destination)
         {
             if let Some(index) = self.results.local_file_index(path) {
                 self.selected = index;
@@ -5222,6 +5244,8 @@ impl QuickSearch {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         let scope = scoped_query(self.input.read(cx).text_ref());
         let recent_previews = matches!(scope, Some((Scope::RecentFilePreviews, _)));
+        let preview_destinations =
+            recent_previews || matches!(scope, Some((Scope::DirectFilePreview, _)));
         match &self.results {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Table(table),
@@ -5609,6 +5633,7 @@ impl QuickSearch {
                 row.text_color(rgb(theme::TEXT_MUTED)).child(match scope {
                     Some((Scope::ApplicationHistory, "")) => "本次运行还没有从快速搜索打开的应用",
                     Some((Scope::RecentFilePreviews, "")) => "本次运行还没有预览过的文本文件",
+                    Some((Scope::DirectFilePreview, _)) => "输入本地文本文件的完整路径",
                     _ => "未找到匹配项",
                 })
             }
@@ -5651,7 +5676,7 @@ impl QuickSearch {
                                 } => (
                                     Icon::Layers,
                                     name.clone(),
-                                    if recent_previews {
+                                    if preview_destinations {
                                         Some(path.clone())
                                     } else {
                                         size_bytes
@@ -5756,13 +5781,16 @@ impl QuickSearch {
                                                         .truncate()
                                                         .text_size(px(11.))
                                                         .text_color(rgb(theme::TEXT_MUTED))
-                                                        .when(recent_previews, |detail_label| {
-                                                            detail_label.tooltip(
-                                                                theme::text_tooltip(
-                                                                    detail.clone().into(),
-                                                                ),
-                                                            )
-                                                        })
+                                                        .when(
+                                                            preview_destinations,
+                                                            |detail_label| {
+                                                                detail_label.tooltip(
+                                                                    theme::text_tooltip(
+                                                                        detail.clone().into(),
+                                                                    ),
+                                                                )
+                                                            },
+                                                        )
                                                         .child(detail),
                                                 )
                                             }),
@@ -5780,7 +5808,9 @@ impl QuickSearch {
                                             Destination::LocalFile {
                                                 is_directory: true, ..
                                             } => "Tab 进入 · Enter 复制路径",
-                                            Destination::LocalFile { .. } if recent_previews => {
+                                            Destination::LocalFile { .. }
+                                                if preview_destinations =>
+                                            {
                                                 "Enter 预览"
                                             }
                                             Destination::LocalFile { .. } => "Enter 复制路径",
@@ -11056,6 +11086,32 @@ mod tests {
         }
         index.recent.file_previews.record("C:/Settings/project.exe");
         assert_eq!(index.results("最近预览:").selected_text_file(0), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn offers_direct_file_previews_only_for_supported_absolute_disk_paths() {
+        let index = SearchIndex::default();
+        let result = index.results(r#"预览文件: "C:\Reports\配置 示例.YAML""#);
+        assert_eq!(
+            result.selected_text_file(0),
+            Some(r"C:\Reports\配置 示例.YAML")
+        );
+        for path in [
+            r"reports\demo.yaml",
+            r"C:demo.yaml",
+            r"C:\Reports\..\demo.yaml",
+            r"\\host\share\demo.yaml",
+            r"C:\Reports\demo.yaml:alternate",
+            r"C:\Reports\demo.exe",
+        ] {
+            assert_eq!(
+                index
+                    .results(&format!("预览文件: {path}"))
+                    .selectable_count(),
+                0
+            );
+        }
     }
 
     #[test]
