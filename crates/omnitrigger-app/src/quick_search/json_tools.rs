@@ -48,16 +48,27 @@ pub(super) enum JsonError {
     PatchLimit,
     PatchOutputLimit,
     PatchTestFailed,
-    PatchStep { index: usize, cause: &'static str },
+    PatchStep {
+        index: usize,
+        cause: &'static str,
+    },
     MergePatchArguments,
     MergePatchDepth,
     MergePatchOutputLimit,
     PipelineArguments,
     NestedPipeline,
     PipelineOutputTooLarge,
-    PipelineStep { index: usize, cause: &'static str },
+    PipelineStep {
+        index: usize,
+        cause: &'static str,
+    },
     ComparisonTooLarge,
     DuplicateComparisonKey,
+    KeyedComparisonRecord {
+        position: usize,
+        right: bool,
+        cause: &'static str,
+    },
     PointerListTooLarge,
     KeySearchArguments,
     SearchPatternArguments,
@@ -141,6 +152,7 @@ impl JsonError {
             Self::PipelineStep { cause, .. } => cause,
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::DuplicateComparisonKey => "每份 JSON 数组内用于对比的键值须唯一",
+            Self::KeyedComparisonRecord { cause, .. } => cause,
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::KeySearchArguments => {
                 "先输入带双引号的键名，再输入 JSON，例如 \"编号\" {\"编号\":1}"
@@ -3511,24 +3523,33 @@ struct KeyedJsonRecord<'a> {
 fn keyed_json_records<'a>(
     array: &'a RawValue,
     path: &[String],
+    right: bool,
 ) -> Result<Vec<KeyedJsonRecord<'a>>, JsonError> {
+    let at = |position, error: JsonError| JsonError::KeyedComparisonRecord {
+        position,
+        right,
+        cause: error.message(),
+    };
     let records = read_json_array(array.get())?
         .into_iter()
         .enumerate()
         .map(|(index, value)| {
-            let raw_key = select_pointer_keys(value, path)?;
-            let key = json_scalar(raw_key)?.ok_or(JsonError::ExpectedScalar)?;
+            let position = index + 1;
+            let raw_key = select_pointer_keys(value, path).map_err(|error| at(position, error))?;
+            let key = json_scalar(raw_key)
+                .and_then(|key| key.ok_or(JsonError::ExpectedScalar))
+                .map_err(|error| at(position, error))?;
             Ok(KeyedJsonRecord {
                 key,
                 raw_key,
                 value,
-                position: index + 1,
+                position,
             })
         })
         .collect::<Result<Vec<_>, JsonError>>()?;
     let mut unique = HashSet::with_capacity(records.len());
-    if records.iter().any(|record| !unique.insert(&record.key)) {
-        return Err(JsonError::DuplicateComparisonKey);
+    if let Some(record) = records.iter().find(|record| !unique.insert(&record.key)) {
+        return Err(at(record.position, JsonError::DuplicateComparisonKey));
     }
     Ok(records)
 }
@@ -3538,8 +3559,8 @@ fn compare_json_records_by_key(source: &str) -> Result<String, JsonError> {
     let path = json_pointer_tokens(&pointer)?;
     let (left, right) = json_value_and_source(source, JsonError::Invalid)?;
     let right = serde_json::from_str::<&RawValue>(right).map_err(json_parse_error)?;
-    let left = keyed_json_records(left, &path)?;
-    let right = keyed_json_records(right, &path)?;
+    let left = keyed_json_records(left, &path, false)?;
+    let right = keyed_json_records(right, &path, true)?;
     let mut remaining = right
         .iter()
         .map(|record| (&record.key, record))
@@ -5824,8 +5845,28 @@ mod tests {
         );
         assert_eq!(
             transform_json(r#"按键对比CSV /id [] [{"id":1},{"id":1e0}]"#),
-            Err(JsonError::DuplicateComparisonKey)
+            Err(JsonError::KeyedComparisonRecord {
+                right: true,
+                position: 2,
+                cause: JsonError::DuplicateComparisonKey.message(),
+            })
         );
+        assert!(matches!(
+            transform_json(r#"按键对比CSV /id [{"id":1},{"id":[]}] []"#),
+            Err(JsonError::KeyedComparisonRecord {
+                right: false,
+                position: 2,
+                ..
+            })
+        ));
+        assert!(matches!(
+            transform_json(r#"按键对比CSV /id [{"id":1},{}] []"#),
+            Err(JsonError::KeyedComparisonRecord {
+                right: false,
+                position: 2,
+                ..
+            })
+        ));
     }
 
     #[test]

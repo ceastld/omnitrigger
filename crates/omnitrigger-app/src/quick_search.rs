@@ -726,6 +726,14 @@ impl ValueError {
             Self::Json(JsonError::PatchStep { index, cause }) => {
                 return format!("第 {index} 步补丁失败 · {cause}").into();
             }
+            Self::Json(JsonError::KeyedComparisonRecord {
+                position,
+                right,
+                cause,
+            }) => {
+                let side = if right { "右侧" } else { "左侧" };
+                return format!("{side}第 {position} 条记录 · {cause}").into();
+            }
             Self::Csv(CsvError::CellEdit { index, cause }) => {
                 return format!("第 {index} 项单元格修改失败 · {cause}").into();
             }
