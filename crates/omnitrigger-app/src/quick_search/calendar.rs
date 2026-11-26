@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fmt::Write as _,
     ops::{Bound, RangeBounds},
 };
@@ -953,6 +953,7 @@ enum DateRangeOperation {
     Coverage,
     Gaps,
     Overlaps,
+    Layers,
 }
 
 fn combine_date_ranges(
@@ -962,7 +963,7 @@ fn combine_date_ranges(
 ) -> Result<String, DateError> {
     let (minimum, invalid, input, exceptions) = if matches!(
         operation,
-        DateRangeOperation::Coverage | DateRangeOperation::Gaps
+        DateRangeOperation::Coverage | DateRangeOperation::Gaps | DateRangeOperation::Layers
     ) {
         let (ranges, exceptions) = split_workday_exceptions(input);
         (1, DateError::DateCoverageArguments, ranges, exceptions)
@@ -1013,6 +1014,10 @@ fn combine_date_ranges(
             let exceptions = parse_workday_exceptions(exceptions)?;
             return Ok(date_range_overlaps_csv(&ranges, &exceptions));
         }
+        DateRangeOperation::Layers => {
+            let exceptions = parse_workday_exceptions(exceptions)?;
+            return date_range_layers_csv(&ranges, &exceptions);
+        }
         DateRangeOperation::Merge | DateRangeOperation::Coverage | DateRangeOperation::Gaps => {}
     }
     ranges.sort_unstable();
@@ -1056,6 +1061,37 @@ fn combine_date_ranges(
         .map(display_date_range)
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn date_range_layers_csv(
+    ranges: &[(NaiveDate, NaiveDate)],
+    exceptions: &HashMap<NaiveDate, bool>,
+) -> Result<String, DateError> {
+    let mut events = BTreeMap::<NaiveDate, i32>::new();
+    for &(start, end) in ranges {
+        *events.entry(start).or_default() += 1;
+        *events
+            .entry(end.succ_opt().ok_or(DateError::OutOfRange)?)
+            .or_default() -= 1;
+    }
+    let mut changes = events.into_iter().filter(|(_, change)| *change != 0);
+    let mut report = String::from("起始日期,截止日期,覆盖段数,天数,工作日");
+    let Some((mut start, mut coverage)) = changes.next() else {
+        return Ok(report);
+    };
+    for (boundary, change) in changes {
+        if coverage > 0 {
+            let end = boundary.pred_opt().ok_or(DateError::OutOfRange)?;
+            let days = end.signed_duration_since(start).num_days() + 1;
+            let workdays =
+                inclusive_workdays(start, end) + workday_adjustment(exceptions, start..=end);
+            write!(report, "\r\n{start},{end},{coverage},{days},{workdays}")
+                .expect("写入 String 不会出错");
+        }
+        start = boundary;
+        coverage += change;
+    }
+    Ok(report)
 }
 
 fn date_range_overlaps_csv(
@@ -1134,6 +1170,7 @@ enum DateReport {
     WeekdayCounts,
     RangeGaps,
     RangeOverlaps,
+    RangeLayers,
 }
 
 impl DateReport {
@@ -1150,6 +1187,7 @@ impl DateReport {
             "星期统计" | "weekday-counts" => return Some(Self::WeekdayCounts),
             "区间空档csv" | "range-gaps-csv" => return Some(Self::RangeGaps),
             "区间冲突csv" | "range-overlaps-csv" => return Some(Self::RangeOverlaps),
+            "区间层数csv" | "range-layers-csv" => return Some(Self::RangeLayers),
             _ => return None,
         };
         Some(Self::Split(split))
@@ -1860,6 +1898,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             DateReport::RangeOverlaps => {
                 combine_date_ranges(rest, today, DateRangeOperation::Overlaps)
             }
+            DateReport::RangeLayers => combine_date_ranges(rest, today, DateRangeOperation::Layers),
         };
     }
     match operation.to_ascii_lowercase().as_str() {
@@ -2585,6 +2624,34 @@ mod tests {
         assert_eq!(
             calculate_date("区间冲突CSV 今天至明天", today),
             Err(DateError::InvalidDateRanges)
+        );
+    }
+
+    #[test]
+    fn reports_continuous_segments_by_the_number_of_overlapping_date_ranges() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        let query = concat!(
+            "区间层数CSV 昨天至2024-03-02; 今天至2024-03-04; 2024-03-02至2024-03-02",
+            r#" 例外 [["2024-03-01"],["2024-03-02"]]"#,
+        );
+        assert_eq!(
+            calculate_date(query, today).as_deref(),
+            Ok(concat!(
+                "起始日期,截止日期,覆盖段数,天数,工作日",
+                "\r\n2024-02-28,2024-02-28,1,1,1",
+                "\r\n2024-02-29,2024-03-01,2,2,1",
+                "\r\n2024-03-02,2024-03-02,3,1,1",
+                "\r\n2024-03-03,2024-03-04,1,2,1",
+            ))
+        );
+        assert!(is_date_report(query));
+        assert_eq!(
+            calculate_date(
+                "range-layers-csv 9999-12-30至9999-12-30; 9999-12-31至9999-12-31",
+                today
+            )
+            .as_deref(),
+            Ok("起始日期,截止日期,覆盖段数,天数,工作日\r\n9999-12-30,9999-12-31,1,2,2")
         );
     }
 
