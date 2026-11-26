@@ -187,6 +187,7 @@ pub(super) fn url_csv_report(input: &str) -> Option<Result<String, UrlEncodingEr
         "参数csv" | "params-csv" => query_parameters_csv(value.trim()),
         "重复参数csv" | "duplicate-params-csv" => duplicate_query_parameters_csv(value.trim()),
         "参数差异csv" | "diff-params-csv" => query_changes_csv(value.trim()),
+        "路径分段csv" | "path-segments-csv" => path_segments_csv(value.trim()),
         "主机统计csv" | "host-counts-csv" => group_web_addresses(value, UrlGroupBy::Host),
         "源统计csv" | "origin-counts-csv" => group_web_addresses(value, UrlGroupBy::Origin),
         _ => return None,
@@ -288,6 +289,25 @@ fn decode_path_segments(input: &str) -> Result<String, UrlEncodingError> {
         .map(decode_percent_escapes)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::to_string(&segments).expect("路径段字符串可以序列化为 JSON"))
+}
+
+fn path_segments_csv(input: &str) -> Result<String, UrlEncodingError> {
+    if input.is_empty() {
+        return Err(UrlEncodingError::Incomplete);
+    }
+    let url = Url::parse(input).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let segments = url.path_segments().ok_or(UrlEncodingError::OpaquePath)?;
+    let mut result = String::from("段号,编码,解码");
+    for (index, segment) in segments.enumerate() {
+        let number = (index + 1).to_string();
+        let decoded = decode_value(segment)?;
+        append_bounded_csv_row(
+            &mut result,
+            [number.as_str(), segment, decoded.as_str()].into_iter(),
+            UrlEncodingError::ReportTooLarge,
+        )?;
+    }
+    Ok(result)
 }
 
 fn set_path_segments(input: &str) -> Result<String, UrlEncodingError> {
@@ -1040,6 +1060,23 @@ mod tests {
         assert_eq!(
             convert_url_component("路径分段 https://example.invalid/%FF"),
             Err(UrlEncodingError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn previews_encoded_and_decoded_url_path_segments_with_empty_tail() {
+        let query = "路径分段CSV https://example.invalid/a%2fb/a%2Cb/+%20/?original=1#part";
+        let expected =
+            "段号,编码,解码\r\n1,a%2fb,a/b\r\n2,a%2Cb,\"a,b\"\r\n3,+%20,+ \r\n4,\"\",\"\"";
+        assert_eq!(convert_url_component(query).as_deref(), Ok(expected));
+        assert_eq!(url_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            convert_url_component("path-segments-csv mailto:test@example.invalid"),
+            Err(UrlEncodingError::OpaquePath),
+        );
+        assert_eq!(
+            convert_url_component("路径分段CSV https://example.invalid/%00"),
+            Err(UrlEncodingError::NullCharacter),
         );
     }
 

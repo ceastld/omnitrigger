@@ -6748,6 +6748,11 @@ README"#,
     },
     Example {
         icon: Icon::Browser,
+        title: "并排查看 URL 路径段的编码和解码文字",
+        query: "URL: 路径分段CSV https://example.invalid/docs/a%2Fb/tea%20bag/",
+    },
+    Example {
+        icon: Icon::Browser,
         title: "从独立路径段设置 URL 路径",
         query: r#"URL: 设路径 ["文档","a/b",""] https://example.invalid/old?x=a%20b#keep"#,
     },
