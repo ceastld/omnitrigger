@@ -2029,6 +2029,23 @@ struct ResultSearchDraft {
     source: Option<String>,
 }
 
+impl ResultSearchDraft {
+    fn command_arguments<'query>(&self, query: &'query str) -> Option<(&'static str, &'query str)> {
+        if let (TEXT_SEARCH_COMMAND, Some(arguments)) =
+            (self.command, query.strip_prefix(TEXT_SEARCH_CSV_COMMAND))
+        {
+            return Some((TEXT_SEARCH_CSV_COMMAND, arguments));
+        }
+        query
+            .strip_prefix(self.command)
+            .map(|arguments| (self.command, arguments))
+    }
+
+    fn matches_query(&self, query: &str) -> bool {
+        self.command_arguments(query).is_some()
+    }
+}
+
 struct QueryDraft {
     text: String,
     selection: MessageSelection,
@@ -2058,6 +2075,7 @@ const INPUT_PROMPT_HEIGHT: f32 = 148.;
 const INPUT_REPLACE_HEIGHT: f32 = 200.;
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
+const TEXT_SEARCH_CSV_COMMAND: &str = "文本: 搜索行CSV ";
 const TEXT_LINES_COMMAND: &str = "文本: 取行 ";
 const TABLE_CELL_COMMAND: &str = "CSV: 取单元格 ";
 const MAX_RESULT_SEARCH_BYTES: usize = 1024 * 1024;
@@ -3072,8 +3090,8 @@ impl QuickSearch {
             .input_before_result_search
             .as_ref()
             .is_some_and(|draft| {
-                !query.starts_with(draft.command)
-                    && !before_help.is_some_and(|previous| previous.starts_with(draft.command))
+                !draft.matches_query(query)
+                    && !before_help.is_some_and(|previous| draft.matches_query(previous))
                     && !self.retains_result_source(draft)
             })
         {
@@ -3923,23 +3941,28 @@ impl QuickSearch {
     fn attached_search_result(&self, query: &str) -> Option<Results> {
         let draft = self.input_before_result_search.as_ref()?;
         let source = draft.source.as_deref()?;
-        let arguments = query.strip_prefix(draft.command)?;
+        let (command, arguments) = draft.command_arguments(query)?;
         if query.len() > INPUT_CHARACTER_LIMIT
             && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
         {
             return Some(Results::Value(Err(ValueError::InputTooLong)));
         }
-        if draft.command == TEXT_LINES_COMMAND {
+        if command == TEXT_LINES_COMMAND {
             return Some(Results::text_value(
                 text_tools::pick_original_result_lines(arguments, source).map_err(ValueError::Text),
             ));
         }
-        if draft.command == TEXT_SEARCH_COMMAND {
+        if command == TEXT_SEARCH_CSV_COMMAND {
+            return Some(Results::table_value(
+                text_tools::search_result_text_csv(arguments, source).map_err(ValueError::Text),
+            ));
+        }
+        if command == TEXT_SEARCH_COMMAND {
             return Some(Results::text_value(
                 text_tools::search_result_text(arguments, source).map_err(ValueError::Text),
             ));
         }
-        if draft.command == TABLE_CELL_COMMAND {
+        if command == TABLE_CELL_COMMAND {
             return Some(Results::text_value(
                 csv_tools::read_result_table_cell(arguments, source).map_err(ValueError::Csv),
             ));
@@ -3967,12 +3990,12 @@ impl QuickSearch {
         ]
         .into_iter()
         .flatten()
-        .any(|previous| previous.starts_with(draft.command))
+        .any(|previous| draft.matches_query(previous))
     }
 
     fn attached_result_query(&self, query: &str) -> Option<&str> {
         let draft = self.input_before_result_search.as_ref()?;
-        (draft.source.is_some() && query.starts_with(draft.command)).then(|| draft.original.text())
+        (draft.source.is_some() && draft.matches_query(query)).then(|| draft.original.text())
     }
 
     fn remember_confirmed_query(&self, query: &str) {
@@ -3980,6 +4003,33 @@ impl QuickSearch {
             .recent
             .queries
             .record_exact(self.attached_result_query(query).unwrap_or(query), "");
+    }
+
+    fn text_search_views(&self, query: &str) -> Option<(&'static str, &'static str)> {
+        let draft = self.input_before_result_search.as_ref()?;
+        if draft.command != TEXT_SEARCH_COMMAND {
+            return None;
+        }
+        let (command, arguments) = draft.command_arguments(query)?;
+        let next = if command == TEXT_SEARCH_COMMAND {
+            TEXT_SEARCH_CSV_COMMAND
+        } else {
+            TEXT_SEARCH_COMMAND
+        };
+        let available = INPUT_CHARACTER_LIMIT - next.chars().count();
+        (arguments.chars().take(available + 1).count() <= available).then_some((command, next))
+    }
+
+    fn switch_text_search_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        if input.is_composing() || self.file_operation_in_progress() {
+            return;
+        }
+        if let Some((command, next)) = self.text_search_views(&input.text()) {
+            self.input.update(cx, |input, cx| {
+                input.replace_leading_text(command, next, window, cx);
+            });
+        }
     }
 
     fn searchable_result_text(&self) -> Option<(&'static str, &str, bool)> {
@@ -4944,6 +4994,18 @@ impl QuickSearch {
                 && keystroke.key == "f3"
                 && self.refill_decimal_preview(event.is_held, window, cx)
             {
+                cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.alt
+                && keystroke.key == "f"
+                && self
+                    .text_search_views(&self.input.read(cx).text())
+                    .is_some()
+            {
+                if !event.is_held {
+                    self.switch_text_search_view(window, cx);
+                }
                 cx.stop_propagation();
             } else if modifiers == 1
                 && keystroke.modifiers.control
@@ -6916,6 +6978,27 @@ impl Render for QuickSearch {
                                     .tooltip(theme::text_tooltip("Ctrl+Shift+J 返回原文页".into()))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.toggle_original_line_lookup(window, cx);
+                                    })),
+                            )
+                        },
+                    )
+                    .when_some(
+                        self.text_search_views(&query).filter(|_| !naming_bookmark),
+                        |header, (_, next)| {
+                            let label = if next == TEXT_SEARCH_CSV_COMMAND {
+                                "行号表"
+                            } else {
+                                "文本行"
+                            };
+                            header.child(
+                                button("switch-text-result-view", label, Tone::Ghost, true)
+                                    .h(px(24.))
+                                    .px(px(8.))
+                                    .tooltip(theme::text_tooltip(
+                                        "Ctrl+Alt+F 切换文本和行号表".into(),
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.switch_text_search_view(window, cx);
                                     })),
                             )
                         },
@@ -9827,6 +9910,28 @@ mod tests {
         assert!(line.starts_with("南区: tea"));
         assert_eq!(line.chars().count(), 2000);
         assert_eq!(line.lines().count(), 1);
+
+        let before_switch = search.input.read(cx).selection();
+        search.switch_text_search_view(window, cx);
+        let report_query = search.input.read(cx).text();
+        assert_eq!(report_query, r#"文本: 搜索行CSV "TEA 南区""#);
+        search.refresh_results(&report_query, window, cx);
+        assert!(search.results.table_preview().is_some());
+        assert!(search
+            .results
+            .refillable_text()
+            .unwrap()
+            .starts_with("原行号,原文\r\n2,南区: tea"));
+
+        search.switch_text_search_view(window, cx);
+        search.refresh_results(filter, window, cx);
+        assert_eq!(search.input.read(cx).text(), filter);
+        assert_eq!(search.input.read(cx).selection(), before_switch);
+        assert!(search
+            .results
+            .refillable_text()
+            .unwrap()
+            .starts_with("南区: tea"));
 
         search.toggle_result_search(window, cx);
         search.refresh_results(QUERY, window, cx);

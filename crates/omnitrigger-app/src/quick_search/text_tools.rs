@@ -2214,6 +2214,16 @@ fn search_text_lines(input: &str) -> Result<String, TextError> {
 }
 
 pub(super) fn search_result_text(arguments: &str, text: &str) -> Result<String, TextError> {
+    let query = result_search_words(arguments)?;
+    Ok(filter_result_lines(&query, text))
+}
+
+pub(super) fn search_result_text_csv(arguments: &str, text: &str) -> Result<String, TextError> {
+    let query = result_search_words(arguments)?;
+    filter_result_lines_csv(&query, text)
+}
+
+fn result_search_words(arguments: &str) -> Result<String, TextError> {
     let (query, rest) = text_operand(arguments)?;
     if !rest.trim().is_empty() {
         return Err(TextError::InvalidTextArgument);
@@ -2221,7 +2231,7 @@ pub(super) fn search_result_text(arguments: &str, text: &str) -> Result<String, 
     if query.contains('\0') {
         return Err(TextError::NullCharacter);
     }
-    Ok(filter_result_lines(&query, text))
+    Ok(query)
 }
 
 fn filter_result_lines(query: &str, text: &str) -> String {
@@ -2239,7 +2249,11 @@ fn filter_result_lines(query: &str, text: &str) -> String {
 
 fn search_text_lines_csv(input: &str) -> Result<String, TextError> {
     let (query, text) = quoted_text_argument(input)?;
-    let query = search_key(&query);
+    filter_result_lines_csv(&query, text)
+}
+
+fn filter_result_lines_csv(query: &str, text: &str) -> Result<String, TextError> {
+    let query = search_key(query);
     let words: Vec<_> = query.split_whitespace().collect();
     let mut csv = String::from("原行号,原文");
     for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
@@ -5044,6 +5058,11 @@ mod tests {
         let expected = "原行号,原文\r\n2,\" ＮＯＲＴＨ 茶,甲 \"\r\n4,North 茶乙";
         assert_eq!(transform_text(query).as_deref(), Ok(expected));
         assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        let source = "茶 SOUTH\r\n ＮＯＲＴＨ 茶,甲 \u{2028}\rNorth 茶乙";
+        assert_eq!(
+            search_result_text_csv(r#""north 茶""#, source).as_deref(),
+            Ok(expected)
+        );
         assert_eq!(
             transform_text("search-lines-csv \"茶\" north").as_deref(),
             Ok("原行号,原文")
