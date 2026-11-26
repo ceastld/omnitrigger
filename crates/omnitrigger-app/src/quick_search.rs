@@ -1314,14 +1314,7 @@ impl Results {
                                 .map_err(ValueError::Csv),
                         )
                     } else if let Some(result) = csv_tools::csv_table_preview(term) {
-                        Self::Value(
-                            result
-                                .map(|(text, table)| ResultValue {
-                                    text,
-                                    kind: ValueKind::Table(table),
-                                })
-                                .map_err(ValueError::Csv),
-                        )
+                        Self::csv_preview_value(result)
                     } else if let Some(arguments) = csv_tools::scatter_arguments(term) {
                         Self::plot_value(
                             csv_tools::build_scatter_plot(arguments).map_err(ValueError::Csv),
@@ -1670,6 +1663,17 @@ impl Results {
                 kind: ValueKind::Table(table),
             })
         }))
+    }
+
+    fn csv_preview_value(result: Result<(String, table_preview::TablePreview), CsvError>) -> Self {
+        Self::Value(
+            result
+                .map_err(ValueError::Csv)
+                .map(|(text, table)| ResultValue {
+                    text,
+                    kind: ValueKind::Table(table),
+                }),
+        )
     }
 
     fn date_value(query: &str) -> Self {
@@ -2022,6 +2026,7 @@ impl TablePages {
 struct ResultSearchDraft {
     original: QueryDraft,
     command: &'static str,
+    table_source: Option<String>,
 }
 
 struct QueryDraft {
@@ -2054,6 +2059,7 @@ const INPUT_REPLACE_HEIGHT: f32 = 200.;
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
 const TABLE_CELL_COMMAND: &str = "CSV: 取单元格 ";
+const MAX_RESULT_TABLE_SEARCH_BYTES: usize = 1024 * 1024;
 
 struct BookmarkNameEdit {
     expression: String,
@@ -2990,6 +2996,8 @@ impl QuickSearch {
         }
         let next = if refilled {
             Results::RefilledInput
+        } else if let Some(result) = self.attached_table_result(query) {
+            result
         } else {
             self.index.results(query)
         };
@@ -3037,6 +3045,7 @@ impl QuickSearch {
             .is_some_and(|draft| {
                 !query.starts_with(draft.command)
                     && !before_help.is_some_and(|previous| previous.starts_with(draft.command))
+                    && !self.retains_attached_table(draft)
             })
         {
             self.input_before_result_search = None;
@@ -3341,10 +3350,7 @@ impl QuickSearch {
 
     fn prepare_value_copy(&self, value: &ResultValue, cx: &Context<Self>) -> ClipboardItem {
         self.remember_value(cx);
-        self.index
-            .recent
-            .queries
-            .record_exact(&self.input.read(cx).text(), "");
+        self.remember_confirmed_query(&self.input.read(cx).text());
         ClipboardItem::new_string(value.text.clone())
     }
 
@@ -3412,10 +3418,7 @@ impl QuickSearch {
                 }
                 TableCopy::Tsv => table.tsv(),
             };
-            self.index
-                .recent
-                .queries
-                .record_exact(&self.input.read(cx).text(), "");
+            self.remember_confirmed_query(&self.input.read(cx).text());
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             window.remove_window();
         }
@@ -3442,10 +3445,7 @@ impl QuickSearch {
             return false;
         };
         if !is_held {
-            self.index
-                .recent
-                .queries
-                .record_exact(&self.input.read(cx).text(), "");
+            self.remember_confirmed_query(&self.input.read(cx).text());
             cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
             window.remove_window();
         }
@@ -3824,7 +3824,7 @@ impl QuickSearch {
         cx: &mut Context<Self>,
     ) {
         let original = self.input.read(cx).text();
-        self.index.recent.queries.record_exact(&original, "");
+        self.remember_confirmed_query(&original);
         self.result_refill = Some(ResultRefill {
             original,
             inserted: inserted.clone(),
@@ -3887,7 +3887,55 @@ impl QuickSearch {
         true
     }
 
-    fn searchable_result_text(&self) -> Option<(&'static str, &str)> {
+    fn attached_table_result(&self, query: &str) -> Option<Results> {
+        let draft = self.input_before_result_search.as_ref()?;
+        let table = draft.table_source.as_deref()?;
+        let arguments = query.strip_prefix(draft.command)?;
+        if query.len() > INPUT_CHARACTER_LIMIT
+            && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
+        {
+            return Some(Results::Value(Err(ValueError::InputTooLong)));
+        }
+        Some(Results::csv_preview_value(csv_tools::search_result_table(
+            arguments, table,
+        )))
+    }
+
+    fn retains_attached_table(&self, draft: &ResultSearchDraft) -> bool {
+        if draft.table_source.is_none() {
+            return false;
+        }
+        [
+            self.result_refill
+                .as_ref()
+                .map(|refill| refill.original.as_str()),
+            self.input_before_calculation_history
+                .as_ref()
+                .map(QueryDraft::text),
+            self.input_before_query_history
+                .as_ref()
+                .map(QueryDraft::text),
+            self.input_before_bookmarks.as_ref().map(QueryDraft::text),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|previous| previous.starts_with(draft.command))
+    }
+
+    fn attached_table_query(&self, query: &str) -> Option<&str> {
+        let draft = self.input_before_result_search.as_ref()?;
+        (draft.table_source.is_some() && query.starts_with(draft.command))
+            .then(|| draft.original.text())
+    }
+
+    fn remember_confirmed_query(&self, query: &str) {
+        self.index
+            .recent
+            .queries
+            .record_exact(self.attached_table_query(query).unwrap_or(query), "");
+    }
+
+    fn searchable_result_text(&self) -> Option<(&'static str, &str, bool)> {
         let Results::Value(Ok(ResultValue { text, kind })) = &self.results else {
             return None;
         };
@@ -3899,7 +3947,10 @@ impl QuickSearch {
             _ => return None,
         };
         let available = INPUT_CHARACTER_LIMIT - command.chars().count() - extra;
-        (text.chars().take(available + 1).count() <= available).then_some((command, text.as_str()))
+        let needs_attachment = text.chars().take(available + 1).count() > available;
+        (!needs_attachment
+            || (command == TABLE_SEARCH_COMMAND && text.len() <= MAX_RESULT_TABLE_SEARCH_BYTES))
+            .then_some((command, text.as_str(), needs_attachment))
     }
 
     fn toggle_result_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3908,14 +3959,23 @@ impl QuickSearch {
         }
         if let Some(draft) = self.input_before_result_search.take() {
             self.restore_query_draft(draft.original, window, cx);
-        } else if let Some((command, text)) = self.searchable_result_text() {
-            let query = if command == TABLE_SEARCH_COMMAND {
+        } else if let Some((command, text, needs_attachment)) = self.searchable_result_text() {
+            let query = if needs_attachment {
+                format!("{command}\"\"")
+            } else if command == TABLE_SEARCH_COMMAND {
                 format!("{command}\"\" {text}")
             } else {
                 format!("{command}\"\" \"{text}\"")
             };
             let caret = command.len() + 1;
-            self.open_result_tool(command, query, caret..caret, window, cx);
+            self.open_result_tool(
+                command,
+                query,
+                caret..caret,
+                needs_attachment.then(|| text.to_owned()),
+                window,
+                cx,
+            );
         }
     }
 
@@ -3924,12 +3984,14 @@ impl QuickSearch {
         command: &'static str,
         query: String,
         selection: Range<usize>,
+        table_source: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.input_before_result_search = Some(ResultSearchDraft {
             original: self.query_draft(cx),
             command,
+            table_source,
         });
         self.fill_query(query, window, cx);
         self.input
@@ -3978,7 +4040,7 @@ impl QuickSearch {
             let query = format!("{TABLE_CELL_COMMAND}[{coordinates}] {text}");
             let start = TABLE_CELL_COMMAND.len() + 1;
             let selection = start..start + coordinates.len();
-            self.open_result_tool(TABLE_CELL_COMMAND, query, selection, window, cx);
+            self.open_result_tool(TABLE_CELL_COMMAND, query, selection, None, window, cx);
         }
     }
 
@@ -4282,6 +4344,9 @@ impl QuickSearch {
         let query = self.input.read(cx).text();
         if query.trim().is_empty() {
             self.toggle_bookmark_browser(window, cx);
+            return;
+        }
+        if self.attached_table_query(&query).is_some() {
             return;
         }
         let Some(target) = self.results.bookmark_query(&query, self.selected) else {
@@ -6527,7 +6592,7 @@ impl Render for QuickSearch {
         } else {
             None
         };
-        let bookmark_action = if naming_bookmark {
+        let bookmark_action = if naming_bookmark || self.attached_table_query(&query).is_some() {
             None
         } else if query.trim().is_empty() {
             Some(("查看收藏 F4", "F4 或 Ctrl+D 查看收藏".to_owned()))
@@ -9489,6 +9554,50 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_large_table_search(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        const QUERY: &str = "进制: 格雷码表 16,0,256";
+        search.fill_query(QUERY, window, cx);
+        search.refresh_results(QUERY, window, cx);
+        search.change_table_page(TableAxis::Rows, PageChange::Next, cx);
+        assert_eq!(search.table_pages.rows, 1);
+        search.toggle_result_search(window, cx);
+        let blank = search.input.read(cx).text();
+        assert_eq!(blank, "CSV: 搜索行 \"\"");
+        search.refresh_results(&blank, window, cx);
+        assert_eq!(search.results.table_preview().unwrap().row_pages(), 43);
+
+        let filtered = r#"CSV: 搜索行 "0b0000000011111111""#;
+        search.fill_query(filtered, window, cx);
+        search.refresh_results(filtered, window, cx);
+        let result = search.results.refillable_text().unwrap();
+        assert!(result.contains("\r\n170,"));
+        assert!(result.contains("\r\n255,"));
+        assert_eq!(result.lines().count(), 3);
+
+        search.refill_result(window, cx);
+        let refilled = search.input.read(cx).text();
+        search.refresh_results(&refilled, window, cx);
+        search.refill_result(window, cx);
+        search.refresh_results(filtered, window, cx);
+        assert_eq!(search.input.read(cx).text(), filtered);
+        assert_eq!(search.results.refillable_text().unwrap().lines().count(), 3);
+        assert_eq!(
+            search.index.results("查询历史:").suggested_input(0),
+            Some(QUERY)
+        );
+
+        search.toggle_result_search(window, cx);
+        search.refresh_results(QUERY, window, cx);
+        assert_eq!(search.input.read(cx).text(), QUERY);
+        assert_eq!(search.table_pages.rows, 1);
+        assert!(search.input_before_result_search.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_expanded_result_restore(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -10549,6 +10658,7 @@ mod tests {
                     reopened.update(cx, verify_input_replace).unwrap();
                     reopened.update(cx, verify_query_argument_selection).unwrap();
                     reopened.update(cx, verify_current_table_search).unwrap();
+                    reopened.update(cx, verify_large_table_search).unwrap();
                     reopened.update(cx, verify_table_cell_lookup).unwrap();
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();

@@ -8358,12 +8358,7 @@ fn order_records<Row: AsRef<[String]>>(
 pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePreview), CsvError>> {
     let (operation, data) = split_argument(query)?;
     if let Some(mode) = CsvKeywordMatch::from_operation(operation) {
-        return Some(search_csv_rows(data, mode, true).map(|matches| {
-            let text = write_rows(&matches.rows, ',');
-            let table =
-                TablePreview::from_rows(matches.rows).with_highlighted_cells(matches.highlighted);
-            (text, table)
-        }));
+        return Some(search_csv_rows(data, mode, true).map(csv_keyword_preview));
     }
     if matches!(
         operation.to_ascii_lowercase().as_str(),
@@ -8697,6 +8692,11 @@ struct CsvKeywordQuery<'a> {
 fn read_csv_keywords(input: &str) -> Result<CsvKeywordQuery<'_>, CsvError> {
     let invalid = CsvError::SearchRowKeywords;
     let (argument, data) = json_argument_and_data::<CsvKeywordArgument>(input, invalid)?;
+    csv_keywords(argument, data)
+}
+
+fn csv_keywords(argument: CsvKeywordArgument, data: &str) -> Result<CsvKeywordQuery<'_>, CsvError> {
+    let invalid = CsvError::SearchRowKeywords;
     let (keywords, columns) = match argument {
         CsvKeywordArgument::One(word) if word.is_empty() => {
             return Ok(CsvKeywordQuery {
@@ -8771,8 +8771,31 @@ struct CsvRowMatches {
     highlighted: Vec<(usize, usize)>,
 }
 
+fn csv_keyword_preview(matches: CsvRowMatches) -> (String, TablePreview) {
+    let text = write_rows(&matches.rows, ',');
+    let table = TablePreview::from_rows(matches.rows).with_highlighted_cells(matches.highlighted);
+    (text, table)
+}
+
+pub(super) fn search_result_table(
+    arguments: &str,
+    data: &str,
+) -> Result<(String, TablePreview), CsvError> {
+    let argument = serde_json::from_str(arguments).map_err(|_| CsvError::SearchRowKeywords)?;
+    let query = csv_keywords(argument, data)?;
+    search_csv_records(query, CsvKeywordMatch::All, true).map(csv_keyword_preview)
+}
+
 fn search_csv_rows(
     input: &str,
+    mode: CsvKeywordMatch,
+    highlight: bool,
+) -> Result<CsvRowMatches, CsvError> {
+    search_csv_records(read_csv_keywords(input)?, mode, highlight)
+}
+
+fn search_csv_records(
+    query: CsvKeywordQuery<'_>,
     mode: CsvKeywordMatch,
     highlight: bool,
 ) -> Result<CsvRowMatches, CsvError> {
@@ -8780,7 +8803,7 @@ fn search_csv_rows(
         keywords,
         columns,
         data,
-    } = read_csv_keywords(input)?;
+    } = query;
     let rows = read_table_for_preview(data, ',')?;
     if keywords.is_empty() {
         return Ok(CsvRowMatches {
@@ -13379,6 +13402,23 @@ B,乙
             .unwrap();
         assert_eq!(preview.first_match_column_page(), None);
         assert_eq!(preview.row_pages(), 0);
+    }
+
+    #[test]
+    fn searches_a_result_table_with_keywords_separate_from_the_data() {
+        let table = "\u{feff}编号,地区,备注\r\n001,北,ＮＯＲＴＨ\r\n002,南,\"北\n茶\"";
+        let (filtered, preview) =
+            search_result_table(r#"{"词":["north"],"列":["备注"]}"#, table).unwrap();
+        assert_eq!(filtered, "编号,地区,备注\r\n001,北,ＮＯＲＴＨ");
+        assert!(preview.is_cell_highlighted(1, 2));
+        assert_eq!(
+            search_result_table(r#""""#, table).unwrap().0,
+            table.trim_start_matches('\u{feff}')
+        );
+        assert!(matches!(
+            search_result_table(r#""北" 其他,数据"#, table),
+            Err(CsvError::SearchRowKeywords)
+        ));
     }
 
     #[test]
