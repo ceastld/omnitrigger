@@ -213,6 +213,7 @@ enum IntervalOperation {
     Merge,
     Intersection,
     Difference,
+    Gaps,
 }
 
 type AbsoluteInterval = (DateTime<Utc>, DateTime<Utc>);
@@ -237,6 +238,9 @@ impl TimestampReport {
             }
             "区间差集" | "subtract-intervals" => {
                 Some(Self::AbsoluteIntervals(IntervalOperation::Difference))
+            }
+            "区间空档" | "interval-gaps" => {
+                Some(Self::AbsoluteIntervals(IntervalOperation::Gaps))
             }
             "等分区间csv" | "split-interval-csv" => Some(Self::EqualIntervals),
             _ => None,
@@ -890,6 +894,10 @@ fn absolute_intervals_csv(
             .into_iter()
             .collect(),
         IntervalOperation::Difference => subtract_absolute_intervals(intervals),
+        IntervalOperation::Gaps => merge_absolute_intervals(intervals)
+            .windows(2)
+            .map(|pair| (pair[0].1, pair[1].0))
+            .collect(),
     };
     let mut result = String::from("开始UTC,结束UTC,时长");
     for (start, end) in intervals {
@@ -1528,6 +1536,33 @@ mod tests {
         assert_eq!(
             convert_timestamp(r#"区间合并 [["1ns","0s"]]"#, now),
             Err(TimestampError::AbsoluteIntervalOrder)
+        );
+    }
+
+    #[test]
+    fn finds_only_internal_gaps_between_merged_absolute_timestamps() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = r#"区间空档 [["10ns","14ns"],["-4ns","-2ns"],["0ns","2ns"],["2ns","6ns"]]"#;
+        assert!(is_timestamp_report(query));
+        assert_eq!(
+            convert_timestamp(query, now).as_deref(),
+            Ok(concat!(
+                "开始UTC,结束UTC,时长",
+                "\r\n1969-12-31T23:59:59.999999998Z,1970-01-01T00:00:00Z,00:00:00.000000002",
+                "\r\n1970-01-01T00:00:00.000000006Z,1970-01-01T00:00:00.000000010Z,00:00:00.000000004",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp(
+                r#"interval-gaps [["0s","10s"],["5s","15s"],["15s","20s"]]"#,
+                now
+            )
+            .as_deref(),
+            Ok("开始UTC,结束UTC,时长")
+        );
+        assert_eq!(
+            convert_timestamp(r#"区间空档 [["0s","10s"]]"#, now).as_deref(),
+            Ok("开始UTC,结束UTC,时长")
         );
     }
 

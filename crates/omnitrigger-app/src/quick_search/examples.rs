@@ -3316,6 +3316,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查看绝对时间区间之间的空档",
+        query: r#"时间戳: 区间空档 [["0s","10s"],["5s","15s"],["20s","26s"]]"#,
+    },
+    Example {
+        icon: Icon::Clock,
         title: "合计所有时间区间覆盖的实际时长",
         query: r#"时间戳: 覆盖时长 [["0s","10s"],["5s","15s"],["20s","26s"]]"#,
     },
@@ -8439,6 +8444,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "区间合并",
                     "区间交集",
                     "区间差集",
+                    "区间空档",
                     "等分区间CSV",
                     "覆盖时长",
                     "逐日时长",
