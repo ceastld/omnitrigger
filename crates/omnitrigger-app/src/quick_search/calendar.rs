@@ -36,6 +36,7 @@ pub(super) enum DateError {
     InvalidYearDay,
     InvalidOrdinalDate,
     InvalidWeekdayOccurrence,
+    InvalidWeekdayPosition,
     MissingWeekdayOccurrence,
     InvalidWeekdaySeries,
     AdjacentWeekdayArguments,
@@ -93,7 +94,9 @@ impl DateError {
             Self::InvalidWorkdayOrdinal => {
                 "填写月份和工作日序号，例如 2026-11 @ 3。用 -1 表示最后一个工作日"
             }
-            Self::InvalidWorkdayPosition => "填写单个日期，例如 2026-11-04 或 今天",
+            Self::InvalidWorkdayPosition | Self::InvalidWeekdayPosition => {
+                "填写单个日期，例如 2026-11-04 或 今天"
+            }
             Self::MissingWorkdayOrdinal => "该月的工作日不足指定序号",
             Self::InvalidWorkdaySeries => {
                 "填写起始月份、1 至 366 个月和工作日序号，例如 2026-11,3 @ -1"
@@ -1423,6 +1426,20 @@ fn workday_by_ordinal(input: &str, today: NaiveDate) -> Result<String, DateError
     month_workday(start, ordinal, &exceptions).map(|date| date.to_string())
 }
 
+fn weekday_position(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let (date, rest) = date_operand(input.trim(), today)?;
+    if !rest.trim().is_empty() {
+        return Err(DateError::InvalidWeekdayPosition);
+    }
+    let last = month_end(in_range(date.with_day(1))?, 1)?;
+    let weekday = WEEKDAY_LABELS[date.weekday().num_days_from_monday() as usize];
+    let from_start = date.day().div_ceil(7);
+    let from_end = (last.day() - date.day() + 1).div_ceil(7);
+    Ok(format!(
+        "{date} · 当月第 {from_start} 个{weekday}\n倒数第 {from_end} 个{weekday}"
+    ))
+}
+
 fn workday_position(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let (query, exceptions) = split_workday_exceptions(input.trim());
     if query.trim().is_empty() {
@@ -1819,6 +1836,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "季末序列" | "quarter-end-series" => return date_boundary_series(rest, today, 3, true),
         "工作日序号" | "nth-workday" => return workday_by_ordinal(rest, today),
         "工作日位置" | "workday-position" => return workday_position(rest, today),
+        "星期位置" | "weekday-position" => return weekday_position(rest, today),
         "工作日序列" | "workday-series" => return workday_series(rest, today),
         "星期序列" | "weekday-series" => return weekday_series(rest, today),
         "下一个星期" | "next-weekday" => return weekday_from_anchor(rest, today, false),
@@ -2886,6 +2904,39 @@ mod tests {
         assert_eq!(
             calculate_date("明年", NaiveDate::from_ymd_opt(9999, 12, 1).unwrap()),
             Err(DateError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn finds_the_weekday_occurrence_from_both_ends_of_the_month() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (input, expected) in [
+            (
+                "星期位置 2024-02-22",
+                "2024-02-22 · 当月第 4 个星期四\n倒数第 2 个星期四",
+            ),
+            (
+                "星期位置 2024年2月29日",
+                "2024-02-29 · 当月第 5 个星期四\n倒数第 1 个星期四",
+            ),
+            (
+                "星期位置 2026-W49-1",
+                "2026-11-30 · 当月第 5 个星期一\n倒数第 1 个星期一",
+            ),
+            (
+                "weekday-position 今天",
+                "2026-11-21 · 当月第 3 个星期六\n倒数第 2 个星期六",
+            ),
+        ] {
+            assert_eq!(
+                calculate_date(input, today).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_date("星期位置 今天 + 1天", today),
+            Err(DateError::InvalidWeekdayPosition)
         );
     }
 

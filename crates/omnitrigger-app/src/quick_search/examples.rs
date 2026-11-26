@@ -3227,6 +3227,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查看某日期在当月的星期序号",
+        query: "日期: 星期位置 2024-02-22",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "列出连续几个月的最后一个工作日",
         query: "日期: 工作日序列 2026-11,3 @ -1",
     },
@@ -7720,6 +7725,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "年月日差",
             "工作日序号",
             "工作日位置",
+            "星期位置",
             "工作日序列",
             "星期序列",
             "下一个星期",
