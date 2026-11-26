@@ -2,10 +2,15 @@ use std::{cell::RefCell, rc::Rc};
 
 use num_rational::BigRational;
 
-use super::examples::search_key;
-use super::InputSuggestion;
+use super::{csv_tools::csv_cell, examples::search_key, InputSuggestion, Results};
 
 const HISTORY_LIMIT: usize = 12;
+
+pub(super) fn csv_export_filter(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let (option, filter) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+    matches!(search_key(option).as_str(), "输出=csv" | "output=csv").then_some(filter.trim_start())
+}
 
 /// 同一工作台打开的搜索框共享本次运行中确认过的查询。
 #[derive(Clone, Default)]
@@ -52,6 +57,32 @@ impl RecentValues {
             .iter()
             .filter_map(|item| parse(&item.result))
             .nth(index)
+    }
+
+    pub(super) fn results(
+        &self,
+        query: &str,
+        expression_header: &str,
+        result_header: Option<&str>,
+        list: impl FnOnce(Vec<InputSuggestion>) -> Results,
+    ) -> Results {
+        let Some(filter) = csv_export_filter(query) else {
+            return list(self.matching(query));
+        };
+        let mut csv = expression_header.to_owned();
+        if let Some(header) = result_header {
+            csv.push(',');
+            csv.push_str(header);
+        }
+        for item in self.matching(filter) {
+            csv.push_str("\r\n");
+            csv.push_str(&csv_cell(&item.expression));
+            if result_header.is_some() {
+                csv.push(',');
+                csv.push_str(&csv_cell(&item.result));
+            }
+        }
+        Results::table_value(Ok(csv))
     }
 
     pub(super) fn matching(&self, query: &str) -> Vec<InputSuggestion> {

@@ -160,7 +160,7 @@ use triangle::{calculate_triangle, TriangleError};
 use triggers::{matching_triggers, search_triggers, SearchTrigger, TriggerSearchError};
 use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
-use value_history::RecentValues;
+use value_history::{csv_export_filter, RecentValues};
 use vector::{calculate_vector, VectorError};
 use video_frames::{convert_video_frames, VideoFrameError};
 use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
@@ -966,7 +966,11 @@ impl Results {
                 Scope::TriggerHistory => {
                     Self::Destinations(vec![Destination::TriggerHistoryQuery(term.to_owned())])
                 }
-                Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
+                Scope::CalculationHistory => {
+                    recent
+                        .calculations
+                        .results(term, "算式", Some("结果"), Self::Calculations)
+                }
                 Scope::BatchCalculation => {
                     let (kind, input) = batch_calculation_input(term);
                     let exact =
@@ -1012,8 +1016,12 @@ impl Results {
                         }
                     }
                 }
-                Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
-                Scope::QueryHistory => Self::Queries(recent.queries.matching(term)),
+                Scope::ConversionHistory => {
+                    recent
+                        .conversions
+                        .results(term, "换算", Some("结果"), Self::Conversions)
+                }
+                Scope::QueryHistory => recent.queries.results(term, "查询", None, Self::Queries),
                 Scope::BatchConversion => {
                     if let Some(arguments) = batch_arguments(term, "对照", "csv") {
                         Self::table_value(
@@ -4188,6 +4196,13 @@ impl QuickSearch {
         let query = self
             .attached_result_query(query)
             .map_or_else(|| self.replayable_csv_keyword_query(query), Cow::Borrowed);
+        if matches!(
+            scoped_query(&query),
+            Some((Scope::CalculationHistory | Scope::ConversionHistory | Scope::QueryHistory, term))
+                if csv_export_filter(term).is_some()
+        ) {
+            return;
+        }
         self.index.recent.queries.record_exact(&query, "");
     }
 
@@ -13198,6 +13213,41 @@ mod tests {
         assert_eq!(
             index.results("收藏: 周报 原文").suggested_input(0),
             Some(multiline)
+        );
+    }
+
+    #[test]
+    fn exports_recent_calculations_conversions_and_queries_as_tables() {
+        let index = SearchIndex::default();
+        index.recent.calculations.record("2**10", "1024");
+        index.recent.calculations.record("sqrt(81)", "9");
+        index.recent.conversions.record("1 GiB to MiB", "1024 MiB");
+        index
+            .recent
+            .queries
+            .record_exact("文本: 原文 甲,\r\n乙 ", "");
+        for (query, expected) in [
+            (
+                "算式历史: 输出=CSV",
+                "算式,结果\r\nsqrt(81),9\r\n2**10,1024",
+            ),
+            ("算式历史: 输出=CSV １０２４", "算式,结果\r\n2**10,1024"),
+            (
+                "换算历史: OUTPUT=CSV MiB",
+                "换算,结果\r\n1 GiB to MiB,1024 MiB",
+            ),
+            ("查询历史: 输出=CSV 甲", "查询\r\n\"文本: 原文 甲,\r\n乙 \""),
+            ("查询历史: 输出=CSV 未命中", "查询"),
+        ] {
+            assert_eq!(
+                index.results(query).refillable_text(),
+                Some(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            index.results("算式历史: 1024").suggested_input(0),
+            Some("2**10")
         );
     }
 

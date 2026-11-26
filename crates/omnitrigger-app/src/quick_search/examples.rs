@@ -4356,6 +4356,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把本次运行确认的算式和结果导出为 CSV",
+        query: "算式历史: 输出=CSV",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "找回用 Ctrl+D 收藏的查询",
         query: "收藏:",
     },
