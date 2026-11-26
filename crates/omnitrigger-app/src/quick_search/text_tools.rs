@@ -2409,7 +2409,19 @@ fn select_text_line_ranges(input: &str, keep_selected: bool) -> Result<String, T
         .split_once(char::is_whitespace)
         .ok_or(TextError::IncompleteTextArgument)?;
     let text = text_payload(text)?;
-    let lines: Vec<_> = text.lines().collect();
+    select_text_lines(ranges, text.lines().collect(), keep_selected)
+}
+
+pub(super) fn pick_original_result_lines(ranges: &str, text: &str) -> Result<String, TextError> {
+    let lines = logical_newline_pattern().split(text).collect();
+    select_text_lines(ranges.trim(), lines, true)
+}
+
+fn select_text_lines(
+    ranges: &str,
+    lines: Vec<&str>,
+    keep_selected: bool,
+) -> Result<String, TextError> {
     let selected = select_index_ranges(ranges, lines.len()).map_err(|error| match error {
         IndexRangeError::Invalid => TextError::InvalidLineRange,
         IndexRangeError::OutOfBounds => TextError::MissingLine,
@@ -4984,6 +4996,20 @@ mod tests {
         assert_eq!(
             transform_text(r#"保留行 "" 内容"#),
             Err(TextError::EmptySearchText)
+        );
+    }
+
+    #[test]
+    fn picks_original_result_lines_across_unicode_and_mixed_newlines() {
+        let source = " 甲 \r\n乙\u{2028}\r丁\n";
+        assert_eq!(
+            pick_original_result_lines("1,3-4", source).as_deref(),
+            Ok(" 甲 \n\n丁")
+        );
+        assert_eq!(pick_original_result_lines("5", source).as_deref(), Ok(""));
+        assert_eq!(
+            pick_original_result_lines("6", source),
+            Err(TextError::MissingLine)
         );
     }
 

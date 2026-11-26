@@ -2058,6 +2058,7 @@ const INPUT_PROMPT_HEIGHT: f32 = 148.;
 const INPUT_REPLACE_HEIGHT: f32 = 200.;
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
+const TEXT_LINES_COMMAND: &str = "文本: 取行 ";
 const TABLE_CELL_COMMAND: &str = "CSV: 取单元格 ";
 const MAX_RESULT_SEARCH_BYTES: usize = 1024 * 1024;
 
@@ -3928,6 +3929,11 @@ impl QuickSearch {
         {
             return Some(Results::Value(Err(ValueError::InputTooLong)));
         }
+        if draft.command == TEXT_LINES_COMMAND {
+            return Some(Results::text_value(
+                text_tools::pick_original_result_lines(arguments, source).map_err(ValueError::Text),
+            ));
+        }
         if draft.command == TEXT_SEARCH_COMMAND {
             return Some(Results::text_value(
                 text_tools::search_result_text(arguments, source).map_err(ValueError::Text),
@@ -4039,6 +4045,44 @@ impl QuickSearch {
         self.fill_query(query, window, cx);
         self.input
             .update(cx, |input, cx| input.select_range(selection, cx));
+    }
+
+    fn is_original_line_lookup(&self) -> bool {
+        self.input_before_result_search
+            .as_ref()
+            .is_some_and(|draft| draft.command == TEXT_LINES_COMMAND)
+    }
+
+    fn available_original_lines(&self) -> Option<(&str, &[usize])> {
+        if self.input_before_result_search.is_some() {
+            return None;
+        }
+        self.paged_original_text()
+            .filter(|(text, _)| text.len() <= MAX_RESULT_SEARCH_BYTES)
+    }
+
+    fn toggle_original_line_lookup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() || self.file_operation_in_progress() {
+            return;
+        }
+        if self.is_original_line_lookup() {
+            self.toggle_result_search(window, cx);
+        } else if let Some((source, pages)) = self.available_original_lines() {
+            let Some(&start) = pages.get(self.selected) else {
+                return;
+            };
+            let (line, _) = value_preview::original_line_position(source, start);
+            let query = format!("{TEXT_LINES_COMMAND}{line}");
+            let selection = TEXT_LINES_COMMAND.len()..query.len();
+            self.open_result_tool(
+                TEXT_LINES_COMMAND,
+                query,
+                selection,
+                Some(source.to_owned()),
+                window,
+                cx,
+            );
+        }
     }
 
     fn is_table_cell_lookup(&self) -> bool {
@@ -4909,6 +4953,16 @@ impl QuickSearch {
             {
                 if !event.is_held {
                     self.toggle_result_search(window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "j"
+                && (self.is_original_line_lookup() || self.available_original_lines().is_some())
+            {
+                if !event.is_held {
+                    self.toggle_original_line_lookup(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 2
@@ -6024,6 +6078,24 @@ impl QuickSearch {
                                                 })),
                                         )
                                         .child(div().flex_1())
+                                        .when(self.available_original_lines().is_some(), |footer| {
+                                            footer.child(
+                                                button(
+                                                    "pick-preview-lines",
+                                                    "取行",
+                                                    Tone::Ghost,
+                                                    true,
+                                                )
+                                                .h(px(23.))
+                                                .px(px(6.))
+                                                .tooltip(theme::text_tooltip(
+                                                    "Ctrl+Shift+J 选取当前原文中的行".into(),
+                                                ))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.toggle_original_line_lookup(window, cx);
+                                                })),
+                                            )
+                                        })
                                         .child(
                                             button(
                                                 "copy-expanded-value-page",
@@ -6834,6 +6906,20 @@ impl Render for QuickSearch {
                                 })),
                         )
                     })
+                    .when(
+                        !naming_bookmark && self.is_original_line_lookup(),
+                        |header| {
+                            header.child(
+                                button("return-to-original-text", "返回原文", Tone::Ghost, true)
+                                    .h(px(24.))
+                                    .px(px(10.))
+                                    .tooltip(theme::text_tooltip("Ctrl+Shift+J 返回原文页".into()))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_original_line_lookup(window, cx);
+                                    })),
+                            )
+                        },
+                    )
                     .when_some(
                         refill_action.filter(|_| !self.is_table_cell_lookup()),
                         |header, label| {

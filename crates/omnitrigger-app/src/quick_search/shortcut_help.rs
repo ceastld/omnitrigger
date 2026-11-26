@@ -66,6 +66,7 @@ const SHORTCUTS: &[[&str; 3]] = &[
     ["展开的原文", "PageDown", "向下翻原文页"],
     ["展开的原文", "Ctrl+Shift+G", "跳到指定的原文页"],
     ["展开的原文", "Ctrl+Alt+G", "跳到指定原文行所在页"],
+    ["展开的原文", "Ctrl+Shift+J", "选取原文行或返回原文页"],
     ["表格", "Ctrl+Shift+C", "复制多页表格的当前页"],
     ["表格", "Ctrl+Shift+T", "复制完整表格为 TSV"],
     ["表格", "Ctrl+Shift+Enter", "复制多页表格的当前页为 TSV"],
