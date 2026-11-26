@@ -215,6 +215,7 @@ enum JsonCsvOperation {
     KeyPatterns,
     Values,
     ValuePatterns,
+    PointerPatterns,
 }
 
 impl JsonCsvOperation {
@@ -238,6 +239,7 @@ impl JsonCsvOperation {
             "正则找键csv" | "find-key-regex-csv" => Some(Self::KeyPatterns),
             "找值csv" | "find-value-csv" => Some(Self::Values),
             "正则找值csv" | "find-value-regex-csv" => Some(Self::ValuePatterns),
+            "正则找路径csv" | "find-pointer-regex-csv" => Some(Self::PointerPatterns),
             _ => None,
         }
     }
@@ -263,7 +265,8 @@ impl JsonCsvOperation {
             | Self::Keys
             | Self::KeyPatterns
             | Self::Values
-            | Self::ValuePatterns => true,
+            | Self::ValuePatterns
+            | Self::PointerPatterns => true,
         }
     }
 
@@ -290,9 +293,14 @@ impl JsonCsvOperation {
                 write_json_pointer_results(source, PointerSelection::Leaves, PointerOutput::Csv)
             }
             Self::Keys => find_json_keys(source, PointerOutput::Csv),
-            Self::KeyPatterns => find_json_pattern(source, PointerOutput::Csv, true),
+            Self::KeyPatterns => find_json_pattern(source, PointerOutput::Csv, PatternTarget::Key),
             Self::Values => find_json_values(source, PointerOutput::Csv),
-            Self::ValuePatterns => find_json_pattern(source, PointerOutput::Csv, false),
+            Self::ValuePatterns => {
+                find_json_pattern(source, PointerOutput::Csv, PatternTarget::Value)
+            }
+            Self::PointerPatterns => {
+                find_json_pattern(source, PointerOutput::Csv, PatternTarget::Pointer)
+            }
         }
     }
 }
@@ -523,11 +531,14 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         }
         "找键" | "find-key" => return find_json_keys(source, PointerOutput::Paths),
         "正则找键" | "find-key-regex" => {
-            return find_json_pattern(source, PointerOutput::Paths, true)
+            return find_json_pattern(source, PointerOutput::Paths, PatternTarget::Key)
         }
         "找值" | "find-value" => return find_json_values(source, PointerOutput::Paths),
         "正则找值" | "find-value-regex" => {
-            return find_json_pattern(source, PointerOutput::Paths, false)
+            return find_json_pattern(source, PointerOutput::Paths, PatternTarget::Value)
+        }
+        "正则找路径" | "find-pointer-regex" => {
+            return find_json_pattern(source, PointerOutput::Paths, PatternTarget::Pointer)
         }
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source, false),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
@@ -2795,15 +2806,25 @@ fn find_json_keys(query: &str, output: PointerOutput) -> Result<String, JsonErro
     write_json_pointer_results(source, PointerSelection::Key(&key), output)
 }
 
-fn find_json_pattern(query: &str, output: PointerOutput, keys: bool) -> Result<String, JsonError> {
+enum PatternTarget {
+    Key,
+    Value,
+    Pointer,
+}
+
+fn find_json_pattern(
+    query: &str,
+    output: PointerOutput,
+    target: PatternTarget,
+) -> Result<String, JsonError> {
     let invalid = JsonError::SearchPatternArguments;
     let (pattern, source) = json_value_and_source(query, invalid)?;
     let pattern = serde_json::from_str::<String>(pattern.get()).map_err(|_| invalid)?;
     let regex = super::text_tools::compile_regex(&pattern).map_err(|_| invalid)?;
-    let selection = if keys {
-        PointerSelection::KeyPattern(&regex)
-    } else {
-        PointerSelection::ValuePattern(&regex)
+    let selection = match target {
+        PatternTarget::Key => PointerSelection::KeyPattern(&regex),
+        PatternTarget::Value => PointerSelection::ValuePattern(&regex),
+        PatternTarget::Pointer => PointerSelection::PathPattern(&regex),
     };
     write_json_pointer_results(source, selection, output)
 }
@@ -2821,6 +2842,7 @@ enum PointerSelection<'a> {
     KeyPattern(&'a regex::Regex),
     Value(&'a JsonScalar),
     ValuePattern(&'a regex::Regex),
+    PathPattern(&'a regex::Regex),
 }
 
 #[derive(Clone, Copy)]
@@ -2870,6 +2892,7 @@ fn write_json_pointer_results(
                 regex.is_match(&decoded)
             }
             PointerSelection::ValuePattern(_) => false,
+            PointerSelection::PathPattern(regex) => regex.is_match(&path),
         };
         for (key, child) in children.into_iter().rev() {
             let matches_key = kind == b'{'
@@ -3973,6 +3996,22 @@ mod tests {
         );
         assert_eq!(
             transform_json(r#"正则找值 "^北京$" "北京""#).as_deref(),
+            Ok(r#"[""]"#)
+        );
+    }
+
+    #[test]
+    fn searches_escaped_json_pointer_paths_in_document_order() {
+        let query = r#"正则找路径CSV "^/订单/[0-9]+/金额$" {"订单":[{"金额":1.50},{"金额":null}],"金额":3}"#;
+        let expected = "指针,类型,原值\r\n/订单/0/金额,number,1.50\r\n/订单/1/金额,null,null";
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json(r#"find-pointer-regex "^/a~1b$" {"a/b":1,"a":{"b":2}}"#).as_deref(),
+            Ok(r#"["/a~1b"]"#)
+        );
+        assert_eq!(
+            transform_json(r#"正则找路径 "^$" {"订单":[1]}"#).as_deref(),
             Ok(r#"[""]"#)
         );
     }
