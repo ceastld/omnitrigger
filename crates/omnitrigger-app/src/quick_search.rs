@@ -3320,7 +3320,8 @@ impl QuickSearch {
         cx: &mut Context<Self>,
     ) -> bool {
         let path = self.file_preview_path().or_else(|| {
-            let (Scope::DirectFilePreview, _) = scoped_query(self.input.read(cx).text_ref())?
+            let (Scope::DirectFilePreview | Scope::RecentFilePreviews, _) =
+                scoped_query(self.input.read(cx).text_ref())?
             else {
                 return None;
             };
@@ -5294,8 +5295,8 @@ impl QuickSearch {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         let scope = scoped_query(self.input.read(cx).text_ref());
         let recent_previews = matches!(scope, Some((Scope::RecentFilePreviews, _)));
-        let direct_preview = matches!(scope, Some((Scope::DirectFilePreview, _)));
-        let preview_destinations = recent_previews || direct_preview;
+        let preview_destinations =
+            recent_previews || matches!(scope, Some((Scope::DirectFilePreview, _)));
         match &self.results {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Table(table),
@@ -5858,13 +5859,10 @@ impl QuickSearch {
                                             Destination::LocalFile {
                                                 is_directory: true, ..
                                             } => "Tab 进入 · Enter 复制路径",
-                                            Destination::LocalFile { .. } if direct_preview => {
-                                                "Enter 预览 · Tab 同目录"
-                                            }
                                             Destination::LocalFile { .. }
                                                 if preview_destinations =>
                                             {
-                                                "Enter 预览"
+                                                "Enter 预览 · Tab 同目录"
                                             }
                                             Destination::LocalFile { .. } => "Enter 复制路径",
                                             Destination::ActionLibraryQuery(term)
