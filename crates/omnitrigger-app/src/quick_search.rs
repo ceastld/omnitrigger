@@ -3555,18 +3555,27 @@ impl QuickSearch {
         }
         let query = input.text();
         let revision = input.edit_revision();
-        let source = match action {
-            FilePreviewAction::Load => query.as_str(),
+        let format = match action {
+            FilePreviewAction::Load => match scoped_query(&query) {
+                Some((Scope::DirectFilePreview, term)) => direct_file_preview_parts(term).0,
+                Some((Scope::RecentFilePreviews, _)) => self
+                    .index
+                    .recent
+                    .file_previews
+                    .format_for(&path)
+                    .unwrap_or(FilePreviewFormat::Automatic),
+                _ => FilePreviewFormat::Automatic,
+            },
             FilePreviewAction::Refresh => {
-                let Some(refill) = &self.result_refill else {
+                let Some(ResultRefill {
+                    kind: RefillKind::File { format, .. },
+                    ..
+                }) = &self.result_refill
+                else {
                     return;
                 };
-                &refill.original
+                *format
             }
-        };
-        let format = match scoped_query(source) {
-            Some((Scope::DirectFilePreview, term)) => direct_file_preview_parts(term).0,
-            _ => FilePreviewFormat::Automatic,
         };
         self.input_file_load = InputFileLoadState::InProgress;
         cx.notify();
@@ -3609,7 +3618,10 @@ impl QuickSearch {
                                     let selection = input.selection_position();
                                     match action {
                                         FilePreviewAction::Load => {
-                                            this.index.recent.file_previews.record(&selected_path);
+                                            this.index
+                                                .recent
+                                                .file_previews
+                                                .record(&selected_path, format);
                                         }
                                         FilePreviewAction::Refresh => {
                                             let mut draft = this.query_draft(cx);
@@ -9085,7 +9097,11 @@ mod tests {
 
         const PATH: &str = r"C:\工作\报告\状态 001.txt";
         let query = "最近预览: 状态";
-        search.index.recent.file_previews.record(PATH);
+        search
+            .index
+            .recent
+            .file_previews
+            .record(PATH, FilePreviewFormat::Automatic);
         search.fill_query(query, window, cx);
         search.refresh_results(query, window, cx);
         search.key_down(&held, window, cx);
@@ -11391,9 +11407,12 @@ mod tests {
         let index = SearchIndex::default();
         let recent = index.recent.file_previews.clone();
         for number in 1..=13 {
-            recent.record(&format!(r"C:\Reports\Batch-{number}.csv"));
+            recent.record(
+                &format!(r"C:\Reports\Batch-{number}.csv"),
+                FilePreviewFormat::Automatic,
+            );
         }
-        recent.record(r"C:\Reports\Batch-5.csv");
+        recent.record(r"C:\Reports\Batch-5.csv", FilePreviewFormat::Automatic);
         let matches = index.results("最近预览: REPORTS");
         let Results::Destinations(items) = &matches else {
             panic!("最近预览应显示文件");
@@ -11440,14 +11459,20 @@ mod tests {
             "RS", "py", "js", "jsx", "ts", "tsx", "PS1", "psm1", "psd1", "sh", "bat", "cmd",
         ] {
             let path = format!("C:/Settings/project.{extension}");
-            index.recent.file_previews.record(&path);
+            index
+                .recent
+                .file_previews
+                .record(&path, FilePreviewFormat::Automatic);
             assert_eq!(
                 index.results("最近预览:").selected_text_file(0),
                 Some(path.as_str())
             );
             assert_eq!(input_file_query_prefix(Path::new(&path)), "文本: 原文 ");
         }
-        index.recent.file_previews.record("C:/Settings/project.exe");
+        index
+            .recent
+            .file_previews
+            .record("C:/Settings/project.exe", FilePreviewFormat::Automatic);
         assert_eq!(index.results("最近预览:").selected_text_file(0), None);
     }
 

@@ -23,7 +23,7 @@ use super::{
     csv_tools::csv_cell,
     path_tools::file_url,
     text_tools::{compare_natural, compile_regex},
-    title_rank, Destination, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
+    title_rank, Destination, FilePreviewFormat, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
 };
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -70,18 +70,37 @@ const OPTION_HELP: &[(&str, &str)] = &[
 ];
 
 #[derive(Clone, Default)]
-pub(super) struct RecentFilePreviews(Rc<RefCell<Vec<String>>>);
+pub(super) struct RecentFilePreviews(Rc<RefCell<Vec<RecentFilePreview>>>);
+
+struct RecentFilePreview {
+    path: String,
+    format: FilePreviewFormat,
+}
 
 impl RecentFilePreviews {
-    pub(super) fn record(&self, path: &str) {
-        let mut paths = self.0.borrow_mut();
-        paths.retain(|previous| previous != path);
-        paths.insert(0, path.to_owned());
-        paths.truncate(MAX_RECENT_PREVIEWS);
+    pub(super) fn record(&self, path: &str, format: FilePreviewFormat) {
+        let mut previews = self.0.borrow_mut();
+        previews.retain(|entry| entry.path != path);
+        previews.insert(
+            0,
+            RecentFilePreview {
+                path: path.to_owned(),
+                format,
+            },
+        );
+        previews.truncate(MAX_RECENT_PREVIEWS);
     }
 
     pub(super) fn remove(&self, path: &str) {
-        self.0.borrow_mut().retain(|previous| previous != path);
+        self.0.borrow_mut().retain(|entry| entry.path != path);
+    }
+
+    pub(super) fn format_for(&self, path: &str) -> Option<FilePreviewFormat> {
+        self.0
+            .borrow()
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.format)
     }
 
     pub(super) fn results(&self, query: &str) -> Results {
@@ -90,6 +109,7 @@ impl RecentFilePreviews {
             self.0
                 .borrow()
                 .iter()
+                .map(|entry| &entry.path)
                 .filter(|path| query.is_empty() || path.to_lowercase().contains(&query))
                 .map(|path| Destination::LocalFile {
                     name: Path::new(path)
@@ -1159,6 +1179,28 @@ mod tests {
             size_bytes: None,
             metadata: None,
         }
+    }
+
+    #[test]
+    fn recent_previews_keep_the_most_recent_format_for_each_path() {
+        let previews = RecentFilePreviews::default();
+        let log = r"C:\Work\service.log";
+        let json = r"C:\Work\records.jsonl";
+        previews.record(log, FilePreviewFormat::Head);
+        previews.record(json, FilePreviewFormat::Raw);
+        previews.record(log, FilePreviewFormat::Tail);
+        assert!(matches!(
+            previews.format_for(log),
+            Some(FilePreviewFormat::Tail)
+        ));
+        assert!(matches!(
+            previews.format_for(json),
+            Some(FilePreviewFormat::Raw)
+        ));
+        assert!(matches!(previews.results(""), Results::Destinations(items)
+            if matches!(items.as_slice(), [Destination::LocalFile { path, .. }, Destination::LocalFile { .. }] if path == log)));
+        previews.remove(log);
+        assert!(previews.format_for(log).is_none());
     }
 
     #[test]
