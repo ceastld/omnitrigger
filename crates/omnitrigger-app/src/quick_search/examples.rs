@@ -6395,6 +6395,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计表格关键词覆盖的行数",
+        query: "CSV: 关键词统计 {\"列\":[\"备注\"],\"词\":[\"warn\",\"茶\"]} 区域,备注\n北区,ＷＡＲＮ\n南区,warn 茶\n西区,米",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "只在指定表头列中搜索关键词",
         query: "CSV: 搜索行 {\"词\":[\"茶\"],\"列\":[\"备注\"]} 区域,备注,货品\n北区,咖啡,茶\n南区,茶,米",
     },

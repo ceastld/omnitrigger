@@ -8515,6 +8515,9 @@ fn csv_preview_output(operation: &str, input: &str) -> Option<Result<CsvPreviewD
     if operation == "命中位置" || operation.eq_ignore_ascii_case("keyword-positions") {
         return Some(csv_keyword_positions(input));
     }
+    if operation == "关键词统计" || operation.eq_ignore_ascii_case("keyword-summary") {
+        return Some(csv_keyword_summary(input));
+    }
     if operation == "分组加权平均" || operation.eq_ignore_ascii_case("group-weighted-mean") {
         return Some(csv_grouped_weighted_mean(input));
     }
@@ -8866,6 +8869,17 @@ fn csv_keyword_key(text: &str) -> String {
         .collect()
 }
 
+fn normalized_keyword_cells(row: &[String], columns: &[usize]) -> Vec<String> {
+    columns
+        .iter()
+        .map(|&index| csv_keyword_key(&row[index]))
+        .collect()
+}
+
+fn keyword_in_cells(word: &CsvKeyword, cells: &[String]) -> bool {
+    cells.iter().any(|cell| cell.contains(word.key.as_str()))
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum CsvKeywordMatch {
     All,
@@ -8946,12 +8960,8 @@ fn search_csv_records(
         highlighted: Vec::new(),
     };
     for row in rows {
-        let cells: Vec<_> = columns
-            .iter()
-            .map(|&index| csv_keyword_key(&row[index]))
-            .collect();
-        let contains =
-            |word: &CsvKeyword| cells.iter().any(|cell| cell.contains(word.key.as_str()));
+        let cells = normalized_keyword_cells(&row, &columns);
+        let contains = |word: &CsvKeyword| keyword_in_cells(word, &cells);
         let keep = match mode {
             CsvKeywordMatch::All => keywords.iter().all(contains),
             CsvKeywordMatch::Any => keywords.iter().any(contains),
@@ -8980,6 +8990,49 @@ fn search_csv_records(
         matches.rows.push(row);
     }
     Ok(matches)
+}
+
+fn csv_keyword_summary(input: &str) -> Result<CsvPreviewData, CsvError> {
+    let CsvKeywordQuery {
+        keywords,
+        columns,
+        data,
+    } = read_csv_keywords(input)?;
+    if keywords.is_empty() {
+        return Err(CsvError::SearchRowKeywords);
+    }
+    let rows = read_table_for_preview(data, ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let selected = keyword_column_indices(header, &columns)?;
+    let mut individual_counts = vec![0usize; keywords.len()];
+    let mut all = 0;
+    let mut any = 0;
+    for row in records {
+        let cells = normalized_keyword_cells(row, &selected);
+        let mut matched = 0;
+        for (word, count) in keywords.iter().zip(&mut individual_counts) {
+            if keyword_in_cells(word, &cells) {
+                *count += 1;
+                matched += 1;
+            }
+        }
+        all += usize::from(matched == keywords.len());
+        any += usize::from(matched > 0);
+    }
+    let total = records.len();
+    let mut report = vec![vec!["条件".into(), "关键词".into(), "数据行数".into()]];
+    for (label, count) in [
+        ("全部行", total),
+        ("匹配全部词", all),
+        ("匹配任一词", any),
+        ("无关键词", total - any),
+    ] {
+        report.push(vec![label.into(), String::new(), count.to_string()]);
+    }
+    for (word, count) in keywords.into_iter().zip(individual_counts) {
+        report.push(vec!["匹配单个词".into(), word.original, count.to_string()]);
+    }
+    Ok((write_rows(&report, ','), report))
 }
 
 fn csv_keyword_positions(input: &str) -> Result<CsvPreviewData, CsvError> {
@@ -13605,6 +13658,26 @@ B,乙
             read_csv_keywords(inline),
             Err(CsvError::SearchRowKeywords)
         ));
+    }
+
+    #[test]
+    fn reports_csv_keyword_coverage_by_row_and_by_individual_word() {
+        let query = concat!(
+            r#"关键词统计 {"列":["备注"],"词":["warn","茶"]} 区域,备注"#,
+            "\r\n茶,wARN ＷＡＲＮ\r\n北区,茶\r\n南区,warn 茶\r\nWARN,米"
+        );
+        let expected = concat!(
+            "条件,关键词,数据行数\r\n全部行,\"\",4\r\n匹配全部词,\"\",1\r\n匹配任一词,\"\",3",
+            "\r\n无关键词,\"\",1\r\n匹配单个词,warn,2\r\n匹配单个词,茶,2"
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        let (csv, table) = csv_table_preview(query).unwrap().unwrap();
+        assert_eq!(csv, expected);
+        assert_eq!(table.data_cell(5, 2), Some("warn"));
+        assert_eq!(
+            transform_csv(r#"关键词统计 "" 备注"#),
+            Err(CsvError::SearchRowKeywords)
+        );
     }
 
     #[test]
