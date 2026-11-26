@@ -7517,6 +7517,11 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "用表格查看精确舍入误差",
+        query: "分数: 舍入误差 1/3 to 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用千分位显示舍入后的数值",
         query: "分数: 千分位 1234567/2 to 2",
     },

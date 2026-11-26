@@ -949,6 +949,8 @@ fn fraction_csv_command(verb: &str, expression: &str) -> Option<Result<String, F
         || verb.eq_ignore_ascii_case("fraction-neighbors-csv")
     {
         Some(fraction_neighbors_csv(expression))
+    } else if verb == "舍入误差" || verb.eq_ignore_ascii_case("rounding-error-csv") {
+        Some(fraction_rounding_error_csv(expression))
     } else {
         None
     }
@@ -959,6 +961,31 @@ pub(super) fn fraction_csv_report(input: &str) -> Option<Result<String, Fraction
     let input = normalized.trim();
     let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     fraction_csv_command(verb, expression.trim())
+}
+
+fn fraction_rounding_error_csv(input: &str) -> Result<String, FractionError> {
+    let (source, places) = split_conversion(input).ok_or(FractionError::Incomplete)?;
+    let places = places
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|places| places.unsigned_abs() <= MAX_DECIMAL_PLACES)
+        .ok_or(FractionError::RoundPlaces)?;
+    let original = calculate_fraction(source)?;
+    let rounded = rational_round(original.clone(), places)?;
+    let difference = &rounded - &original;
+    ensure_exact_size(&difference)?;
+    let relative = if original.numer().sign() == Sign::NoSign {
+        "\"\"".to_owned()
+    } else {
+        let ratio = &difference / &original;
+        ensure_exact_size(&ratio)?;
+        ratio.to_string()
+    };
+    let displayed = rounded_decimal(rounded, places.max(0) as u32);
+    Ok(format!(
+        "项目,结果\r\n精确原值,{original}\r\n舍入结果,{displayed}\r\n差值,{difference}\r\n相对差值,{relative}"
+    ))
 }
 
 fn fraction_samples(input: &str) -> Result<String, FractionError> {
@@ -3106,6 +3133,31 @@ mod tests {
         assert_eq!(
             simplify_fraction("因数统计 0"),
             Err(FractionError::PrimeFactorizationDomain)
+        );
+    }
+
+    #[test]
+    fn reports_exact_difference_between_source_and_rounded_value() {
+        for (query, expected) in [
+            (
+                "舍入误差 1/3 to 2",
+                "项目,结果\r\n精确原值,1/3\r\n舍入结果,0.33\r\n差值,-1/300\r\n相对差值,-1/100",
+            ),
+            (
+                "rounding-error-csv 1250 转 -2",
+                "项目,结果\r\n精确原值,1250\r\n舍入结果,1200\r\n差值,-50\r\n相对差值,-1/25",
+            ),
+            (
+                "舍入误差 0 to 2",
+                "项目,结果\r\n精确原值,0\r\n舍入结果,0.00\r\n差值,0\r\n相对差值,\"\"",
+            ),
+        ] {
+            assert_eq!(fraction_csv_report(query).unwrap().as_deref(), Ok(expected));
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            fraction_csv_report("舍入误差 1/3 to -101"),
+            Some(Err(FractionError::RoundPlaces))
         );
     }
 
