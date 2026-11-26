@@ -78,6 +78,7 @@ pub(super) enum FractionError {
     QuotientRemainderArguments,
     CongruenceArguments,
     LinearCongruenceArguments,
+    BezoutArguments,
     BitwiseArguments,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
@@ -148,6 +149,7 @@ impl FractionError {
             Self::QuotientRemainderArguments => "用逗号分开被除数和除数，例如 -7,3",
             Self::CongruenceArguments => "填写 2 至 16 组余数和正模数，例如 2,3; 3,5; 2,7",
             Self::LinearCongruenceArguments => "填写整数系数、余数和正模数，例如 -14,30,100",
+            Self::BezoutArguments => "用逗号分隔两个整数，例如 30,18",
             Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
@@ -640,6 +642,39 @@ fn reduced_congruence_root(coefficient: BigInt, residue: BigInt, modulus: &BigIn
     }
 }
 
+fn bezout_coefficients_csv(input: &str) -> Result<String, FractionError> {
+    let mut terms = split_top_level_commas(input);
+    let (Some(first), Some(second), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(FractionError::BezoutArguments);
+    };
+    if first.trim().is_empty() || second.trim().is_empty() {
+        return Err(FractionError::BezoutArguments);
+    }
+    let first = calculate_fraction(first)?;
+    let second = calculate_fraction(second)?;
+    if !first.is_integer() || !second.is_integer() {
+        return Err(FractionError::BezoutArguments);
+    }
+    let first = first.to_integer();
+    let second = second.to_integer();
+    let divisor = exact_gcd(first.magnitude().clone(), second.magnitude().clone());
+    let gcd = BigInt::from(divisor.clone());
+    let (x, y) = if second.sign() == Sign::NoSign {
+        let sign = match first.sign() {
+            Sign::Minus => -1,
+            Sign::NoSign => 0,
+            Sign::Plus => 1,
+        };
+        (BigInt::from(sign), BigInt::default())
+    } else {
+        let period = BigInt::from(second.magnitude() / divisor);
+        let x = reduced_congruence_root(&first / &gcd, BigInt::from(1), &period);
+        let y = (&gcd - &first * &x) / second;
+        (x, y)
+    };
+    Ok(format!("最大公约数,x,y\r\n{gcd},{x},{y}"))
+}
+
 fn solve_congruences(input: &str) -> Result<String, FractionError> {
     let groups: Vec<_> = input
         .trim()
@@ -834,6 +869,9 @@ fn fraction_csv_command(verb: &str, expression: &str) -> Option<Result<String, F
         || verb.eq_ignore_ascii_case("divisor-pairs-csv")
     {
         Some(positive_divisor_pairs(expression))
+    } else if verb.eq_ignore_ascii_case("裴蜀系数CSV") || verb.eq_ignore_ascii_case("bezout-csv")
+    {
+        Some(bezout_coefficients_csv(expression))
     } else {
         None
     }
@@ -2799,6 +2837,32 @@ mod tests {
                 simplify_fraction(query),
                 Err(FractionError::LinearCongruenceArguments),
                 "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_bezout_coefficients_for_signed_and_large_integers() {
+        for (query, expected) in [
+            ("裴蜀系数CSV 30,18", "6,2,-3"),
+            ("裴蜀系数CSV -30,18", "6,1,2"),
+            ("裴蜀系数CSV 30,-18", "6,2,3"),
+            ("裴蜀系数CSV 0,-18", "18,0,-1"),
+            ("裴蜀系数CSV -30,0", "30,-1,0"),
+            ("裴蜀系数CSV 0,0", "0,0,0"),
+            ("bezout-csv 2**70*5,2**70*3", "1180591620717411303424,2,-3"),
+        ] {
+            assert_eq!(
+                simplify_fraction(query).as_deref(),
+                Ok(format!("最大公约数,x,y\r\n{expected}").as_str()),
+                "{query}",
+            );
+        }
+        for query in ["裴蜀系数CSV 1/2,2", "裴蜀系数CSV 2,", "裴蜀系数CSV 1,2,3"] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::BezoutArguments),
+                "{query}",
             );
         }
     }
