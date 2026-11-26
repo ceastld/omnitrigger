@@ -50,6 +50,7 @@ pub(super) enum FractionError {
     CombinatorialDomain,
     CombinatorialRange,
     DecimalPlaces,
+    RoundingIntervalValue,
     SignificantDigits,
     RoundPlaces,
     InterpolationInterval,
@@ -118,6 +119,7 @@ impl FractionError {
             Self::CombinatorialDomain => "组合数和排列数的参数必须是非负整数",
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
+            Self::RoundingIntervalValue => "先填写已按指定小数位舍入的值，例如 1.24 to 2",
             Self::SignificantDigits => "输入 1 至 100 的有效数字位数，例如 分数: 有效数字 1/3 to 4",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
             Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
@@ -374,7 +376,8 @@ fn simplify_fraction_using(
         return align_fraction(expression.trim(), alignment).map(|value| value.to_string());
     }
     let grouped = verb == "千分位" || verb.eq_ignore_ascii_case("grouped-decimal");
-    if grouped || verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
+    let interval = verb == "舍入区间" || verb.eq_ignore_ascii_case("rounding-interval");
+    if grouped || interval || verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
         let (source, places) = split_conversion(expression.trim())
             .or_else(|| grouped.then_some((expression.trim(), "0")))
             .ok_or(FractionError::Incomplete)?;
@@ -391,7 +394,11 @@ fn simplify_fraction_using(
         if places > MAX_DECIMAL_PLACES {
             return Err(FractionError::DecimalPlaces);
         }
-        let decimal = rounded_decimal(calculate(source)?, places);
+        let value = calculate(source)?;
+        if interval {
+            return decimal_rounding_interval(value, places);
+        }
+        let decimal = rounded_decimal(value, places);
         return Ok(if grouped {
             group_decimal_digits(&decimal)
         } else {
@@ -1411,6 +1418,24 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     let numerator = value.numer().magnitude() * unit;
     let rounded = round_magnitude_to_even(&numerator, value.denom().magnitude());
     format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places)
+}
+
+fn decimal_rounding_interval(value: BigRational, places: u32) -> Result<String, FractionError> {
+    let scale = BigInt::from(10u8).pow(places);
+    let tick = &value * &scale;
+    if !tick.is_integer() {
+        return Err(FractionError::RoundingIntervalValue);
+    }
+    // 偶数刻度在左右两个相邻的中点都胜出，奇数刻度则都归入相邻区间。
+    let (open, close) = if (tick.numer() % 2u8).sign() == Sign::NoSign {
+        ('[', ']')
+    } else {
+        ('(', ')')
+    };
+    let half_step = BigRational::new(1.into(), scale * 2u8);
+    let lower = rounded_decimal(&value - &half_step, places + 1);
+    let upper = rounded_decimal(value + half_step, places + 1);
+    Ok(format!("{open}{lower}, {upper}{close}"))
 }
 
 fn group_decimal_digits(decimal: &str) -> String {
@@ -4152,6 +4177,28 @@ mod tests {
         ] {
             assert_eq!(simplify_fraction(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn inverts_exact_decimal_rounding_with_open_and_closed_midpoint_boundaries() {
+        for (query, expected) in [
+            ("舍入区间 1.24 to 2", "[1.235, 1.245]"),
+            ("舍入区间 1.23 转 ２位小数", "(1.225, 1.235)"),
+            ("rounding-interval -1.24 to 2", "[-1.245, -1.235]"),
+            ("舍入区间 -1.23 to 2", "(-1.235, -1.225)"),
+            ("舍入区间 0 to 2", "[-0.005, 0.005]"),
+            ("舍入区间 3 to 0", "(2.5, 3.5)"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("舍入区间 1.234 to 2"),
+            Err(FractionError::RoundingIntervalValue)
+        );
+        assert_eq!(
+            simplify_fraction("舍入区间 0 to 101"),
+            Err(FractionError::DecimalPlaces)
+        );
     }
 
     #[test]

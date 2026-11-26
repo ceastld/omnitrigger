@@ -7507,6 +7507,11 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "反查舍入前的精确数值区间",
+        query: "分数: 舍入区间 1.24 to 2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用千分位显示舍入后的数值",
         query: "分数: 千分位 1234567/2 to 2",
     },
