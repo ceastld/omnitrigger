@@ -200,6 +200,7 @@ enum TimestampReport {
     DailyClock,
     AbsoluteIntervals(IntervalOperation),
     IntervalOverlaps,
+    IntervalLayers,
     EqualIntervals,
 }
 
@@ -244,6 +245,7 @@ impl TimestampReport {
                 Some(Self::AbsoluteIntervals(IntervalOperation::Gaps))
             }
             "区间冲突csv" | "interval-overlaps-csv" => Some(Self::IntervalOverlaps),
+            "区间层数csv" | "interval-layers-csv" => Some(Self::IntervalLayers),
             "等分区间csv" | "split-interval-csv" => Some(Self::EqualIntervals),
             _ => None,
         }
@@ -287,6 +289,9 @@ fn convert_timestamp_with_local(
         }
         Some(TimestampReport::IntervalOverlaps) => {
             return absolute_interval_overlaps_csv(argument, now);
+        }
+        Some(TimestampReport::IntervalLayers) => {
+            return absolute_interval_layers_csv(argument, now);
         }
         Some(TimestampReport::EqualIntervals) => {
             return equal_intervals_csv(argument, now, &to_local);
@@ -939,6 +944,28 @@ fn absolute_interval_overlaps_csv(
                 result.push_str(&format!("\r\n{},{},{fields}", left + 1, right + 1));
             }
         }
+    }
+    Ok(result)
+}
+
+fn absolute_interval_layers_csv(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
+    let mut changes = BTreeMap::<_, i32>::new();
+    for (start, end) in parse_absolute_intervals(input, now)? {
+        *changes.entry(start).or_default() += 1;
+        *changes.entry(end).or_default() -= 1;
+    }
+    changes.retain(|_, delta| *delta != 0);
+
+    let mut result = String::from("开始UTC,结束UTC,时长,覆盖数");
+    let mut coverage = 0;
+    let mut previous = None;
+    for (instant, delta) in changes {
+        if let Some(start) = previous.filter(|_| coverage > 0) {
+            let fields = absolute_interval_csv_fields(start, instant)?;
+            result.push_str(&format!("\r\n{fields},{coverage}"));
+        }
+        coverage += delta;
+        previous = Some(instant);
     }
     Ok(result)
 }
@@ -1624,6 +1651,35 @@ mod tests {
             Ok(concat!(
                 "区间一,区间二,开始UTC,结束UTC,时长",
                 "\r\n1,2,1970-01-01T00:00:00Z,1970-01-01T00:00:00.000000001Z,00:00:00.000000001",
+            ))
+        );
+    }
+
+    #[test]
+    fn breaks_absolute_coverage_at_count_changes_and_skips_gaps() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = concat!(
+            r#"区间层数CSV [["6s","9s"],["15s","20s"],["5s","15s"],"#,
+            r#"["0s","10s"],["22s","23s"]]"#,
+        );
+        assert!(is_timestamp_report(query));
+        assert_eq!(
+            convert_timestamp(query, now).as_deref(),
+            Ok(concat!(
+                "开始UTC,结束UTC,时长,覆盖数",
+                "\r\n1970-01-01T00:00:00Z,1970-01-01T00:00:05Z,00:00:05,1",
+                "\r\n1970-01-01T00:00:05Z,1970-01-01T00:00:06Z,00:00:01,2",
+                "\r\n1970-01-01T00:00:06Z,1970-01-01T00:00:09Z,00:00:03,3",
+                "\r\n1970-01-01T00:00:09Z,1970-01-01T00:00:10Z,00:00:01,2",
+                "\r\n1970-01-01T00:00:10Z,1970-01-01T00:00:20Z,00:00:10,1",
+                "\r\n1970-01-01T00:00:22Z,1970-01-01T00:00:23Z,00:00:01,1",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp(r#"interval-layers-csv [["0s","1ns"],["0s","1ns"]]"#, now).as_deref(),
+            Ok(concat!(
+                "开始UTC,结束UTC,时长,覆盖数",
+                "\r\n1970-01-01T00:00:00Z,1970-01-01T00:00:00.000000001Z,00:00:00.000000001,2",
             ))
         );
     }
