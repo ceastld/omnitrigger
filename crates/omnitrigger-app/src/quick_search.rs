@@ -11058,7 +11058,12 @@ mod tests {
                     if !items.is_empty()
                         || matches!(
                             scoped_query(example.query),
-                            Some((Scope::ApplicationHistory | Scope::RecentFilePreviews, ""))
+                            Some((
+                                Scope::ApplicationHistory
+                                    | Scope::RecentFilePreviews
+                                    | Scope::DirectFilePreview,
+                                ""
+                            ))
                         ) => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }

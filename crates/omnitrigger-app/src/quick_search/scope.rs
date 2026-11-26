@@ -150,6 +150,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::Folders => Some("文件夹:"),
         Scope::WindowsSettings => Some("系统设置:"),
         Scope::LocalFiles => Some("文件:"),
+        Scope::DirectFilePreview => Some("预览文件:"),
         Scope::RecentFilePreviews => Some("最近预览:"),
         Scope::OpenWindows => Some("窗口:"),
         Scope::Date => Some("日期:"),

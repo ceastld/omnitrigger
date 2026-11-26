@@ -1971,6 +1971,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "用完整路径预览本地文本文件",
+        query: "预览文件:",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按符号筛选换算单位",
         query: "1 GiB to Ti",
     },
@@ -7500,9 +7505,13 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
 
 pub(super) fn example_help_query(query: &str) -> Option<String> {
     let query = query.trim();
+    let scope = scoped_query(query);
+    if matches!(scope, Some((Scope::DirectFilePreview, _))) {
+        return Some("? 预览文件:".to_owned());
+    }
     let (name, _) = query.split_once([':', '：'])?;
     let keyword = tool_example_keyword(name)?;
-    let operation = scoped_query(query).and_then(|(scope, term)| {
+    let operation = scope.and_then(|(scope, term)| {
         let operation = term.split_whitespace().next()?;
         tool_operation_examples(scope, operation).map(|_| operation)
     });
@@ -8544,6 +8553,27 @@ mod tests {
             assert!(EXAMPLES[items[0]].query.starts_with(expected), "{query}");
         }
         assert!(tool_index_examples("circle 查无此工具用法").is_empty());
+    }
+
+    #[test]
+    fn finds_file_preview_in_the_tool_index_and_contextual_help() {
+        for items in [
+            tool_index_examples("预览文件"),
+            tool_index_examples("preview file"),
+            matching_examples("预览文件:"),
+        ] {
+            assert_eq!(items.len(), 1);
+            assert_eq!(EXAMPLES[items[0]].query, "预览文件:");
+        }
+        assert_eq!(
+            example_help_query(r"预览文件: C:\报告.csv").as_deref(),
+            Some("? 预览文件:")
+        );
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            example_help_query(r"C:\报告.csv").as_deref(),
+            Some("? 预览文件:")
+        );
     }
 
     #[test]
