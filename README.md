@@ -692,6 +692,7 @@
 - 用 `URL: 重复参数CSV` 可查找解码后同名的参数。各组按名称首次出现的顺序列出次数、首次位置和按原顺序排列的值。值数组用 `null` 表示无等号的参数，用 `""` 表示带等号的空值。
 - 用 `URL: 取参数 "tag"` 加上完整网址或查询串，可得到该名称的全部值，结果为 JSON 数组。名称按解码后内容匹配并区分大小写，空值保留原位置，没有匹配时返回 `[]`。
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
+- 用 `URL: 组成差异CSV ["原网址","新网址"]` 可并排查看变化的协议、主机、有效端口、路径、查询串和片段。空查询串或空片段仍会参与比较，例如移除末尾的 `?` 会列为删除查询串。
 - 用 `URL: 路径分段 https://example.invalid/docs/a%2Fb/` 得到 `["docs","a/b",""]`。用 `URL: 设路径 ["新文档","a/b",""]` 加上网址，可替换路径并保留查询串与片段。末尾的空段保留斜杠，段内的斜杠会编码为 `%2F`。 [Rust URL 路径段](https://docs.rs/url/2.5.8/url/struct.Url.html#method.path_segments)
 - 用 `URL: 路径分段CSV` 可逐段查看序号、URL 解析后的编码形式和解码文字。路径末尾的空段也占一行，段内的 `%2F` 解码为同一单元格里的斜杠。
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。

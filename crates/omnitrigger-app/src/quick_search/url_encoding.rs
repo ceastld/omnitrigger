@@ -187,6 +187,7 @@ pub(super) fn url_csv_report(input: &str) -> Option<Result<String, UrlEncodingEr
         "参数csv" | "params-csv" => query_parameters_csv(value.trim()),
         "重复参数csv" | "duplicate-params-csv" => duplicate_query_parameters_csv(value.trim()),
         "参数差异csv" | "diff-params-csv" => query_changes_csv(value.trim()),
+        "组成差异csv" | "diff-parts-csv" => url_component_changes_csv(value.trim()),
         "路径分段csv" | "path-segments-csv" => path_segments_csv(value.trim()),
         "主机统计csv" | "host-counts-csv" => group_web_addresses(value, UrlGroupBy::Host),
         "源统计csv" | "origin-counts-csv" => group_web_addresses(value, UrlGroupBy::Origin),
@@ -279,6 +280,44 @@ fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
         }
     }
     Ok(lines.join("\n"))
+}
+
+fn url_component_changes_csv(input: &str) -> Result<String, UrlEncodingError> {
+    let [old, new] = url_pair(input, UrlEncodingError::InvalidQueryDiffPair)?;
+    let old = Url::parse(&old).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let new = Url::parse(&new).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let old_port = old.port_or_known_default().map(|port| port.to_string());
+    let new_port = new.port_or_known_default().map(|port| port.to_string());
+    let mut result = String::from("组成,变更,原值,新值");
+    for (part, before, after) in [
+        ("协议", Some(old.scheme()), Some(new.scheme())),
+        ("主机", old.host_str(), new.host_str()),
+        ("有效端口", old_port.as_deref(), new_port.as_deref()),
+        ("路径", Some(old.path()), Some(new.path())),
+        ("查询串", old.query(), new.query()),
+        ("片段", old.fragment(), new.fragment()),
+    ] {
+        if before == after {
+            continue;
+        }
+        let operation = match (before, after) {
+            (None, _) => "新增",
+            (_, None) => "删除",
+            _ => "修改",
+        };
+        append_bounded_csv_row(
+            &mut result,
+            [
+                part,
+                operation,
+                before.unwrap_or_default(),
+                after.unwrap_or_default(),
+            ]
+            .into_iter(),
+            UrlEncodingError::ReportTooLarge,
+        )?;
+    }
+    Ok(result)
 }
 
 fn decode_path_segments(input: &str) -> Result<String, UrlEncodingError> {
@@ -1060,6 +1099,27 @@ mod tests {
         assert_eq!(
             convert_url_component("路径分段 https://example.invalid/%FF"),
             Err(UrlEncodingError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn compares_url_components_and_distinguishes_missing_and_empty_parts() {
+        let query =
+            r#"组成差异CSV ["HTTPS://EXAMPLE.INVALID:443/a?","https://example.invalid/b#"]"#;
+        let expected = "组成,变更,原值,新值\r\n路径,修改,/a,/b\r\n查询串,删除,\"\",\"\"\r\n片段,新增,\"\",\"\"";
+        assert_eq!(convert_url_component(query).as_deref(), Ok(expected));
+        assert_eq!(url_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            convert_url_component(r#"diff-parts-csv ["http://a.invalid/","https://b.invalid/"]"#)
+                .as_deref(),
+            Ok("组成,变更,原值,新值\r\n协议,修改,http,https\r\n主机,修改,a.invalid,b.invalid\r\n有效端口,修改,80,443"),
+        );
+        assert_eq!(
+            convert_url_component(
+                r#"diff-parts-csv ["https://example.invalid:443/","https://example.invalid/"]"#
+            )
+            .as_deref(),
+            Ok("组成,变更,原值,新值"),
         );
     }
 

@@ -6753,6 +6753,11 @@ README"#,
     },
     Example {
         icon: Icon::Browser,
+        title: "比较网址组成和空查询串或片段",
+        query: r#"URL: 组成差异CSV ["https://example.invalid/a?","https://example.invalid/b#"]"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "把 URL 路径拆分成已解码的路径段",
         query: "URL: 路径分段 https://example.invalid/docs/a%2Fb/tea%20bag/",
     },
