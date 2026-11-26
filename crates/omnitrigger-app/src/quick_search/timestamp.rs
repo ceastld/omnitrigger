@@ -199,6 +199,7 @@ enum TimestampReport {
     OffsetChanges,
     DailyClock,
     AbsoluteIntervals(IntervalOperation),
+    IntervalOverlaps,
     EqualIntervals,
 }
 
@@ -242,6 +243,7 @@ impl TimestampReport {
             "区间空档" | "interval-gaps" => {
                 Some(Self::AbsoluteIntervals(IntervalOperation::Gaps))
             }
+            "区间冲突csv" | "interval-overlaps-csv" => Some(Self::IntervalOverlaps),
             "等分区间csv" | "split-interval-csv" => Some(Self::EqualIntervals),
             _ => None,
         }
@@ -282,6 +284,9 @@ fn convert_timestamp_with_local(
         Some(TimestampReport::DailyClock) => return daily_clock_series(argument, &to_local),
         Some(TimestampReport::AbsoluteIntervals(operation)) => {
             return absolute_intervals_csv(argument, now, operation);
+        }
+        Some(TimestampReport::IntervalOverlaps) => {
+            return absolute_interval_overlaps_csv(argument, now);
         }
         Some(TimestampReport::EqualIntervals) => {
             return equal_intervals_csv(argument, now, &to_local);
@@ -901,12 +906,39 @@ fn absolute_intervals_csv(
     };
     let mut result = String::from("开始UTC,结束UTC,时长");
     for (start, end) in intervals {
-        let duration = format_absolute_elapsed(start, end)?;
-        result.push_str(&format!(
-            "\r\n{},{},{duration}",
-            format_utc_instant(start),
-            format_utc_instant(end),
-        ));
+        let fields = absolute_interval_csv_fields(start, end)?;
+        result.push_str(&format!("\r\n{fields}"));
+    }
+    Ok(result)
+}
+
+fn absolute_interval_csv_fields(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<String, TimestampError> {
+    let duration = format_absolute_elapsed(start, end)?;
+    Ok(format!(
+        "{},{},{duration}",
+        format_utc_instant(start),
+        format_utc_instant(end),
+    ))
+}
+
+fn absolute_interval_overlaps_csv(
+    input: &str,
+    now: DateTime<Utc>,
+) -> Result<String, TimestampError> {
+    let intervals = parse_absolute_intervals(input, now)?;
+    let mut result = String::from("区间一,区间二,开始UTC,结束UTC,时长");
+    for (left, &(start, end)) in intervals.iter().enumerate() {
+        for (right, &(other_start, other_end)) in intervals.iter().enumerate().skip(left + 1) {
+            let start = start.max(other_start);
+            let end = end.min(other_end);
+            if start < end {
+                let fields = absolute_interval_csv_fields(start, end)?;
+                result.push_str(&format!("\r\n{},{},{fields}", left + 1, right + 1));
+            }
+        }
     }
     Ok(result)
 }
@@ -1563,6 +1595,36 @@ mod tests {
         assert_eq!(
             convert_timestamp(r#"区间空档 [["0s","10s"]]"#, now).as_deref(),
             Ok("开始UTC,结束UTC,时长")
+        );
+    }
+
+    #[test]
+    fn reports_pairwise_absolute_interval_conflicts_in_input_order() {
+        let now = DateTime::UNIX_EPOCH;
+        let query = concat!(
+            r#"区间冲突CSV [["5s","15s"],["1970-01-01T08:00:00+08:00","10s"],"#,
+            r#"["10s","20s"],["20s","21s"]]"#,
+        );
+        assert!(is_timestamp_report(query));
+        assert_eq!(
+            convert_timestamp(query, now).as_deref(),
+            Ok(concat!(
+                "区间一,区间二,开始UTC,结束UTC,时长",
+                "\r\n1,2,1970-01-01T00:00:05Z,1970-01-01T00:00:10Z,00:00:05",
+                "\r\n1,3,1970-01-01T00:00:10Z,1970-01-01T00:00:15Z,00:00:05",
+            ))
+        );
+        assert_eq!(
+            convert_timestamp(r#"interval-overlaps-csv [["0s","1ns"],["1ns","2ns"]]"#, now)
+                .as_deref(),
+            Ok("区间一,区间二,开始UTC,结束UTC,时长")
+        );
+        assert_eq!(
+            convert_timestamp(r#"区间冲突CSV [["-1ns","1ns"],["0s","2ns"]]"#, now).as_deref(),
+            Ok(concat!(
+                "区间一,区间二,开始UTC,结束UTC,时长",
+                "\r\n1,2,1970-01-01T00:00:00Z,1970-01-01T00:00:00.000000001Z,00:00:00.000000001",
+            ))
         );
     }
 
