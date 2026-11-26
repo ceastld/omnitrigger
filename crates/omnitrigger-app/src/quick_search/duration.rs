@@ -221,8 +221,12 @@ fn duration_value(input: &str) -> Result<(i128, bool), DurationError> {
 
 pub(super) fn elapsed_clock_interval(start: &str, end: &str) -> Result<u128, DurationError> {
     let start = time_of_day(start)?;
-    let end = time_of_day(end)?;
-    Ok((end + NANOS_PER_DAY - start) % NANOS_PER_DAY)
+    let end = clock_time(end, NANOS_PER_DAY)?;
+    Ok(if start <= end {
+        end - start
+    } else {
+        NANOS_PER_DAY - start + end
+    })
 }
 
 fn elapsed_after_break(input: &str) -> Result<i128, DurationError> {
@@ -266,7 +270,7 @@ fn split_clock_spans(input: &str) -> Result<DaySegments, DurationError> {
         .split_once(['到', '至'])
         .ok_or(DurationError::InvalidOverlapArguments)?;
     let start = time_of_day(start)?;
-    let end = time_of_day(end)?;
+    let end = clock_time(end, NANOS_PER_DAY)?;
     Ok(if start <= end {
         [(start, end), (0, 0)]
     } else {
@@ -869,6 +873,10 @@ fn signed_duration(input: &str) -> Result<(i128, bool), DurationError> {
 }
 
 pub(super) fn time_of_day(input: &str) -> Result<u128, DurationError> {
+    clock_time(input, NANOS_PER_DAY - 1)
+}
+
+fn clock_time(input: &str, last_nanos: u128) -> Result<u128, DurationError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(DurationError::Incomplete);
@@ -886,7 +894,7 @@ pub(super) fn time_of_day(input: &str) -> Result<u128, DurationError> {
         DurationError::Invalid | DurationError::OutOfRange => DurationError::InvalidClockTime,
         error => error,
     })?;
-    if nanos >= NANOS_PER_DAY {
+    if nanos > last_nanos {
         return Err(DurationError::InvalidClockTime);
     }
     Ok(nanos)
@@ -1749,17 +1757,42 @@ mod tests {
             ("２３：４５ 至 ０１：１５ to min", "90 min"),
             ("23:59:59.999999999 到 00:00", "00:00:00.000000001"),
             ("03:45 到 03:45", "00:00:00"),
+            ("00:00 到 24:00", "24:00:00"),
+            ("23:59:59.999999999 到 24:00:00", "00:00:00.000000001"),
         ] {
             assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
         }
         for (query, error) in [
             ("24:00 到 01:15", DurationError::InvalidClockTime),
+            (
+                "00:00 到 24:00:00.000000001",
+                DurationError::InvalidClockTime,
+            ),
             ("01:60 到 02:00", DurationError::InvalidClockTime),
             ("01:00 到", DurationError::Incomplete),
             ("8 到 9", DurationError::InvalidClockTime),
         ] {
             assert_eq!(convert_duration(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn accepts_its_own_end_of_day_boundaries_in_clock_reports() {
+        assert_eq!(
+            convert_duration("合并时段CSV 00:00到01:00; 23:00到24:00").as_deref(),
+            Ok(concat!(
+                "起始时刻,截止时刻,时长",
+                "\r\n00:00:00,01:00:00,01:00:00\r\n23:00:00,24:00:00,01:00:00",
+            ))
+        );
+        assert_eq!(
+            convert_duration("空档时长 00:00 到 24:00").as_deref(),
+            Ok("00:00:00")
+        );
+        assert_eq!(
+            convert_duration("重叠 00:00到24:00 | 23:00到02:00").as_deref(),
+            Ok("03:00:00")
+        );
     }
 
     #[test]

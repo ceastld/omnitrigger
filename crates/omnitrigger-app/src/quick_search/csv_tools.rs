@@ -15520,13 +15520,13 @@ null"#
 
     #[test]
     fn appends_clock_differences_across_midnight_and_reports_invalid_times() {
-        let query = "时刻差列 [\"经过时长\",\"开始\",\"结束\"]\n开始,结束\n23:45,01:15\n０９：００：００．２５０,09:00:01\n12:00,12:00\n09:00,";
+        let query = "时刻差列 [\"经过时长\",\"开始\",\"结束\"]\n开始,结束\n23:45,01:15\n０９：００：００．２５０,09:00:01\n12:00,12:00\n09:00,24:00\n09:00,";
         assert_eq!(
             transform_csv(query).as_deref(),
-            Ok("开始,结束,经过时长\r\n23:45,01:15,01:30:00\r\n０９：００：００．２５０,09:00:01,00:00:00.75\r\n12:00,12:00,00:00:00\r\n09:00,\"\",\"\"")
+            Ok("开始,结束,经过时长\r\n23:45,01:15,01:30:00\r\n０９：００：００．２５０,09:00:01,00:00:00.75\r\n12:00,12:00,00:00:00\r\n09:00,24:00,15:00:00\r\n09:00,\"\",\"\"")
         );
         assert!(matches!(
-            transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:00"),
+            transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:01"),
             Err(CsvError::DataRowValue { row: 1, .. })
         ));
     }
