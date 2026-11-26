@@ -180,7 +180,7 @@ impl JsonError {
             Self::RemoveRoot => "删路径需要指向一个对象成员或数组项",
             Self::NumberFilter => "路径后填写比较符和 JSON 数字，例如 /价格 >= 1.5",
             Self::FilterConditions => {
-                "填写 1 至 16 个 [路径,比较符,值]，例如 [[\"/金额\",\">=\",1.5]]"
+                "填写 1 至 16 个筛选条件，例如 [[\"/状态\",\"存在\"],[\"/金额\",\">=\",1.5]]"
             }
             Self::FilterRegex => "正则筛选条件须填写有效的 JSON 正则字符串",
             Self::SortFields => {
@@ -1381,6 +1381,7 @@ struct JsonCondition {
 }
 
 enum JsonPredicate {
+    Presence(bool),
     Scalar {
         comparison: NumberComparison,
         expected: JsonScalar,
@@ -1392,7 +1393,14 @@ enum JsonPredicate {
 }
 
 impl JsonPredicate {
-    fn parse(operator: &str, raw: &RawValue) -> Result<Self, JsonError> {
+    fn parse(operator: &str, raw: Option<&RawValue>) -> Result<Self, JsonError> {
+        let Some(raw) = raw else {
+            return match operator {
+                "存在" | "exists" => Ok(Self::Presence(true)),
+                "缺失" | "missing" => Ok(Self::Presence(false)),
+                _ => Err(JsonError::FilterConditions),
+            };
+        };
         let regex = match operator {
             "正则" | "regex" => Some(true),
             "正则排除" | "not-regex" => Some(false),
@@ -1426,30 +1434,37 @@ impl JsonPredicate {
 
 impl JsonCondition {
     fn matches(&self, item: &RawValue) -> Result<bool, JsonError> {
-        let Some(value) = optional_pointer_value(item, &self.keys)? else {
-            return Ok(false);
-        };
-        let Some(actual) = json_scalar(value)? else {
-            return Ok(false);
-        };
-        Ok(match &self.predicate {
-            JsonPredicate::Regex {
-                pattern,
-                keep_match,
-            } => {
-                matches!(actual, JsonScalar::String(text) if pattern.is_match(&text) == *keep_match)
+        let value = optional_pointer_value(item, &self.keys)?;
+        Ok(match (&self.predicate, value) {
+            (JsonPredicate::Presence(expected), value) => value.is_some() == *expected,
+            (
+                JsonPredicate::Regex {
+                    pattern,
+                    keep_match,
+                },
+                Some(value),
+            ) => {
+                matches!(json_scalar(value)?, Some(JsonScalar::String(text)) if pattern.is_match(&text) == *keep_match)
             }
-            JsonPredicate::Scalar {
-                comparison,
-                expected,
-            } => match (&actual, expected) {
-                (JsonScalar::Number(actual), JsonScalar::Number(expected)) => {
+            (
+                JsonPredicate::Scalar {
+                    comparison,
+                    expected,
+                },
+                Some(value),
+            ) => match (json_scalar(value)?.as_ref(), expected) {
+                (Some(JsonScalar::Number(actual)), JsonScalar::Number(expected)) => {
                     comparison.accepts(actual.compare(expected))
                 }
-                _ if matches!(comparison, NumberComparison::Equal) => &actual == expected,
-                _ if matches!(comparison, NumberComparison::Different) => &actual != expected,
+                (Some(actual), _) if matches!(comparison, NumberComparison::Equal) => {
+                    actual == expected
+                }
+                (Some(actual), _) if matches!(comparison, NumberComparison::Different) => {
+                    actual != expected
+                }
                 _ => false,
             },
+            (_, None) => false,
         })
     }
 }
@@ -1466,14 +1481,24 @@ fn filter_json_conditions(
     records: ConditionRecords,
 ) -> Result<String, JsonError> {
     let (input, source) = json_value_and_source(query, JsonError::FilterConditions)?;
-    let conditions = serde_json::from_str::<Vec<(String, String, &RawValue)>>(input.get())
+    let conditions = serde_json::from_str::<Vec<Vec<&RawValue>>>(input.get())
         .map_err(|_| JsonError::FilterConditions)?;
     if !(1..=MAX_FILTER_CONDITIONS).contains(&conditions.len()) {
         return Err(JsonError::FilterConditions);
     }
     let conditions = conditions
         .into_iter()
-        .map(|(pointer, operator, raw)| {
+        .map(|parts| {
+            let (pointer, operator, raw) = match parts.as_slice() {
+                [pointer, operator] => (*pointer, *operator, None),
+                [pointer, operator, raw] => (*pointer, *operator, Some(*raw)),
+                _ => return Err(JsonError::FilterConditions),
+            };
+            let word = |value: &RawValue| {
+                serde_json::from_str::<String>(value.get()).map_err(|_| JsonError::FilterConditions)
+            };
+            let pointer = word(pointer)?;
+            let operator = word(operator)?;
             let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
             Ok(JsonCondition {
                 keys,
@@ -5354,6 +5379,33 @@ mod tests {
             transform_json(r#"字段覆盖CSV ["bad"] []"#),
             Err(JsonError::InvalidPointer)
         );
+    }
+
+    #[test]
+    fn filters_by_pointer_presence_without_treating_null_or_empty_containers_as_missing() {
+        let source = r#"[{"id":0},{"k":null},{"k":{}},{"k":[]},{"k":1.50}]"#;
+        for (conditions, expected) in [
+            (
+                r#"[["/k","存在"]]"#,
+                r#"[{"k":null},{"k":{}},{"k":[]},{"k":1.50}]"#,
+            ),
+            (r#"[["/k","missing"]]"#, r#"[{"id":0}]"#),
+            (r#"[["/k","exists"],["/k",">=",1]]"#, r#"[{"k":1.50}]"#),
+        ] {
+            let query = format!("多条件筛选 {conditions} {source}");
+            assert_eq!(transform_json(&query).as_deref(), Ok(expected));
+        }
+        let query = "行任一筛选CSV [[\"/k\",\"缺失\"],[\"/k\",\"=\",null]] {\"k\":null}\n\n{\"id\":2}\n{\"k\":3}";
+        assert_eq!(
+            json_csv_report(query).unwrap().as_deref(),
+            Ok("原行号,原文\r\n1,\"{\"\"k\"\":null}\"\r\n3,\"{\"\"id\"\":2}\"")
+        );
+        for invalid in [r#"[["/k","存在",true]]"#, r#"[["/k","="]]"#] {
+            assert_eq!(
+                transform_json(&format!("多条件筛选 {invalid} {source}")),
+                Err(JsonError::FilterConditions)
+            );
+        }
     }
 
     #[test]
