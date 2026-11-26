@@ -95,8 +95,13 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
     if let Some(term) = query.trim_start().strip_prefix(['@', '＠']) {
         return Some((Scope::Bookmarks, term.trim()));
     }
-    if let Some(url) = super::preview_file_url_input(query) {
-        return Some((Scope::DirectFilePreview, url));
+    if let Some(url) = super::local_files::local_file_url(query) {
+        let scope = if url.ends_with('/') {
+            Scope::LocalFiles
+        } else {
+            Scope::DirectFilePreview
+        };
+        return Some((scope, url));
     }
     if let Some((prefix, term)) = query.split_once([':', '：']) {
         let Some(scope) = parse_scope(prefix) else {

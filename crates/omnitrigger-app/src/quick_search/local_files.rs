@@ -1054,9 +1054,29 @@ pub(super) fn local_disk_path(query: &str) -> Option<&str> {
     (matches!(prefix.kind(), Prefix::Disk(_)) && !source.get(2..)?.contains(':')).then_some(source)
 }
 
+pub(super) fn local_file_url(query: &str) -> Option<&str> {
+    const PREFIX: &str = "file:///";
+    let source = super::path_tools::strip_path_quotes(query.trim());
+    source
+        .get(..PREFIX.len())?
+        .eq_ignore_ascii_case(PREFIX)
+        .then_some(source)
+}
+
+pub(super) fn decode_local_file_url(url: &str) -> Option<String> {
+    super::path_tools::path_from_file_url(url)
+        .ok()
+        .filter(|path| local_disk_path(path) == Some(path.as_str()))
+}
+
 fn directory_input(query: &str) -> Option<InputSuggestion> {
-    let directory = local_disk_path(query)?;
-    let expression = directory_query(directory);
+    let expression = match local_disk_path(query) {
+        Some(directory) => directory_query(directory),
+        None => {
+            let url = local_file_url(query).filter(|url| url.ends_with('/'))?;
+            directory_query(&decode_local_file_url(url)?)
+        }
+    };
     (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then_some(InputSuggestion {
         expression,
         label: Some("浏览目录"),

@@ -2216,21 +2216,10 @@ fn supports_text_file_preview(path: &Path) -> bool {
     )
 }
 
-fn preview_file_url_input(query: &str) -> Option<&str> {
-    const PREFIX: &str = "file:///";
-    let source = path_tools::strip_path_quotes(query.trim());
-    source
-        .get(..PREFIX.len())?
-        .eq_ignore_ascii_case(PREFIX)
-        .then_some(source)
-}
-
 fn direct_file_preview_destination(query: &str) -> Option<Destination> {
     let source = match local_files::local_disk_path(query) {
         Some(path) => path.to_owned(),
-        None => path_tools::path_from_file_url(preview_file_url_input(query)?)
-            .ok()
-            .filter(|path| local_files::local_disk_path(path) == Some(path.as_str()))?,
+        None => local_files::decode_local_file_url(local_files::local_file_url(query)?)?,
     };
     let path = Path::new(&source);
     if source.ends_with(['\\', '/']) || !supports_text_file_preview(path) {
@@ -11238,6 +11227,29 @@ mod tests {
             scoped_query(r"C:\Work Folder\report.pdf"),
             Some((Scope::LocalFiles, _))
         ));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn browses_pasted_local_directory_urls_with_encoded_paths() {
+        let index = SearchIndex::default();
+        for url in [
+            "file:///C:/Work%20Folder/",
+            r#""FILE:///C:/Work%20Folder/""#,
+        ] {
+            assert_eq!(
+                index.results(url).suggested_input(0),
+                Some(r"文件: C:\Work Folder\ |"),
+            );
+        }
+        for url in [
+            "file://server/share/",
+            "file:///C:/Work%20Folder/?page=1/",
+            "file:///C:/Work%20Folder/#part/",
+            "file:///C:/Work%00Folder/",
+        ] {
+            assert_eq!(index.results(url).suggested_input(0), None, "{url}");
+        }
     }
 
     #[test]
