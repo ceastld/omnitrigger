@@ -125,10 +125,6 @@ impl TablePreview {
         self.row_pages() > 1 || self.column_pages() > 1
     }
 
-    pub(super) fn spans_both_axes(&self) -> bool {
-        self.row_pages() > 1 && self.column_pages() > 1
-    }
-
     pub(super) fn page_csv(&self, row_page: usize, column_page: usize) -> String {
         write_rows(self.visible_rows(row_page, column_page), ',')
     }
@@ -321,7 +317,7 @@ mod tests {
         .map(|row| row.map(str::to_owned).into())
         .collect();
         let preview = TablePreview::from_rows(rows).with_columns_per_page(2);
-        assert!(preview.spans_both_axes());
+        assert_eq!((preview.row_pages(), preview.column_pages()), (2, 2));
         assert_eq!(
             preview.tsv(),
             "编号\t备注\t值\r\n001\t甲,乙\t1/3\r\n002\t\"含\t制表符\"\t\"\"\r\n003\t\"带\n\"\"换行\"\"\"\t0.50\r\n004\t\"\"\t4\r\n005\t  原样  \t5\r\n006\t\"\"\t6\r\n007\t末行\t7"

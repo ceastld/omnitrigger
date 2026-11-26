@@ -330,7 +330,7 @@ impl ResultValue {
     fn visual_preview_height(&self) -> Option<f32> {
         match &self.kind {
             ValueKind::Table(table) => {
-                let extra = if table.spans_both_axes() {
+                let extra = if table.spans_pages() {
                     TABLE_PAGER_HEIGHT + TABLE_FOOTER_ROW_GAP
                 } else {
                     0.
@@ -5293,6 +5293,9 @@ impl QuickSearch {
                         this.copy_table(TableCopy::Tsv, false, window, cx);
                     })),
             );
+        if !table.spans_pages() {
+            return actions;
+        }
         let pagination = div()
             .flex()
             .items_center()
@@ -5303,18 +5306,12 @@ impl QuickSearch {
             .when(table.column_pages() > 1, |pager| {
                 pager.child(self.table_page_controls(TableAxis::Columns, table.column_pages(), cx))
             });
-        if table.spans_both_axes() {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(TABLE_FOOTER_ROW_GAP))
-                .child(actions)
-                .child(pagination.justify_end().px(px(10.)))
-        } else {
-            actions
-                .child(div().flex_1())
-                .when(table.spans_pages(), |footer| footer.child(pagination))
-        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(TABLE_FOOTER_ROW_GAP))
+            .child(actions)
+            .child(pagination.justify_end().px(px(10.)))
     }
 
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
@@ -7944,9 +7941,16 @@ mod tests {
     }
 
     #[test]
-    fn reserves_a_second_footer_row_only_when_table_paginates_on_both_axes() {
-        for (data_rows, extra) in [(2, 0.), (8, TABLE_PAGER_HEIGHT + TABLE_FOOTER_ROW_GAP)] {
-            let csv = format!("A,B,C,D,E,F,G,H{}", "\n1,2,3,4,5,6,7,8".repeat(data_rows));
+    fn reserves_a_second_footer_row_for_any_table_pagination() {
+        let extra = TABLE_PAGER_HEIGHT + TABLE_FOOTER_ROW_GAP;
+        for (columns, data_rows, extra) in [
+            ("A,B", 2, 0.),
+            ("A,B", 8, extra),
+            ("A,B,C,D,E,F,G,H", 2, extra),
+            ("A,B,C,D,E,F,G,H", 8, extra),
+        ] {
+            let fields = vec!["1"; columns.split(',').count()].join(",");
+            let csv = format!("{columns}{}", format!("\n{fields}").repeat(data_rows));
             let result = Results::table_value(Ok(csv));
             let table = result.table_preview().expect("应返回表格");
             assert_eq!(
