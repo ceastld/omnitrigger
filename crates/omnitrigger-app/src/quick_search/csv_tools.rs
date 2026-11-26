@@ -16,8 +16,8 @@ use num_rational::BigRational;
 use regex::Regex;
 use serde::{
     de::DeserializeOwned,
-    ser::{Serialize, SerializeMap, Serializer},
-    Deserialize,
+    ser::{SerializeMap, Serializer},
+    Deserialize, Serialize,
 };
 use serde_json::value::RawValue;
 
@@ -1115,7 +1115,7 @@ enum MarkdownAlignment {
     Right,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(untagged)]
 pub(super) enum ColumnReference {
     Number(usize),
@@ -8687,13 +8687,13 @@ enum CsvKeywordArgument {
     Scoped(CsvKeywordScope),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CsvKeywordScope {
-    #[serde(rename = "词", alias = "keywords")]
-    keywords: Vec<String>,
     #[serde(rename = "列", alias = "columns")]
     columns: Vec<ColumnReference>,
+    #[serde(rename = "词", alias = "keywords")]
+    keywords: Vec<String>,
 }
 
 struct CsvKeywordQuery<'a> {
@@ -8708,45 +8708,77 @@ pub(super) struct CsvKeywordEdit {
     pub(super) caret: usize,
 }
 
-pub(super) fn add_csv_keyword_argument(arguments: &str) -> Option<CsvKeywordEdit> {
-    let mut argument =
-        serde_json::Deserializer::from_str(arguments).into_iter::<CsvKeywordArgument>();
-    let existing = argument.next()?.ok()?;
-    let argument_end = argument.byte_offset();
-    if arguments[argument_end..]
-        .chars()
-        .next()
-        .is_some_and(|ch| !ch.is_whitespace())
-    {
+#[derive(Clone, Copy)]
+pub(super) enum CsvKeywordAction {
+    Add,
+    ToggleColumn(usize),
+}
+
+fn editable_csv_keywords(arguments: &str) -> Option<(CsvKeywordScope, usize)> {
+    let (argument, tail) = super::operators::json_value_and_tail::<CsvKeywordArgument>(arguments)?;
+    if tail.chars().next().is_some_and(|ch| !ch.is_whitespace()) {
         return None;
     }
 
-    let (mut keywords, columns) = match existing {
-        CsvKeywordArgument::One(word) => (vec![word], None),
-        CsvKeywordArgument::List(words) => (words, None),
-        CsvKeywordArgument::Scoped(scope) => {
-            // 原样保留列名和列号的 JSON 类型。
-            let object: serde_json::Value =
-                serde_json::from_str(&arguments[..argument_end]).ok()?;
-            let columns = object.get("列").or_else(|| object.get("columns"))?;
-            (scope.keywords, Some(columns.to_string()))
-        }
+    let scope = match argument {
+        CsvKeywordArgument::One(word) => CsvKeywordScope {
+            keywords: vec![word],
+            columns: Vec::new(),
+        },
+        CsvKeywordArgument::List(keywords) => CsvKeywordScope {
+            keywords,
+            columns: Vec::new(),
+        },
+        CsvKeywordArgument::Scoped(scope) => scope,
     };
-    if keywords.is_empty()
-        || keywords.len() >= MAX_FILTER_CONDITIONS
-        || keywords.iter().any(|word| word.trim().is_empty())
+    if !(1..=MAX_FILTER_CONDITIONS).contains(&scope.keywords.len())
+        || scope.keywords.iter().any(|word| word.trim().is_empty())
+        || scope.columns.len() > MAX_FILTER_CONDITIONS
     {
         return None;
     }
-    keywords.push(String::new());
-    let words = serde_json::to_string(&keywords).ok()?;
-    let (replacement, caret) = if let Some(columns) = columns {
-        let head = format!("{{\"列\":{columns},\"词\":");
-        let caret = head.len() + words.len() - 2;
-        (format!("{head}{words}}}"), caret)
+    Some((scope, arguments.len() - tail.len()))
+}
+
+fn single_numbered_column(columns: &[ColumnReference]) -> Option<usize> {
+    match columns {
+        [ColumnReference::Number(column)] => Some(*column),
+        _ => None,
+    }
+}
+
+pub(super) fn csv_keyword_column_selection(arguments: &str) -> Option<Option<usize>> {
+    let (scope, _) = editable_csv_keywords(arguments)?;
+    Some(single_numbered_column(&scope.columns))
+}
+
+pub(super) fn edit_csv_keyword_argument(
+    arguments: &str,
+    action: CsvKeywordAction,
+) -> Option<CsvKeywordEdit> {
+    let (mut scope, argument_end) = editable_csv_keywords(arguments)?;
+    match action {
+        CsvKeywordAction::Add if scope.keywords.len() < MAX_FILTER_CONDITIONS => {
+            scope.keywords.push(String::new());
+        }
+        CsvKeywordAction::ToggleColumn(column) if column > 0 => {
+            scope.columns = if single_numbered_column(&scope.columns) == Some(column) {
+                Vec::new()
+            } else {
+                vec![ColumnReference::Number(column)]
+            };
+        }
+        _ => return None,
+    }
+    let unscoped = scope.columns.is_empty();
+    let replacement = if unscoped {
+        serde_json::to_string(&scope.keywords).ok()?
     } else {
-        let caret = words.len() - 2;
-        (words, caret)
+        serde_json::to_string(&scope).ok()?
+    };
+    let caret = match action {
+        CsvKeywordAction::Add => replacement.len() - if unscoped { 2 } else { 3 },
+        CsvKeywordAction::ToggleColumn(_) => replacement.len(),
     };
     Some(CsvKeywordEdit {
         argument_end,
@@ -13500,17 +13532,39 @@ B,乙
     #[test]
     fn appends_a_keyword_slot_without_changing_selected_columns_or_csv() {
         let original = r#""北 茶" 商品,数量"#;
-        let edit = add_csv_keyword_argument(original).unwrap();
+        let edit = edit_csv_keyword_argument(original, CsvKeywordAction::Add).unwrap();
         assert_eq!(edit.replacement, r#"["北 茶",""]"#);
         assert_eq!(&edit.replacement[edit.caret..], r#""]"#);
         assert_eq!(&original[edit.argument_end..], " 商品,数量");
         let scoped = r#"{"keywords":["甲","乙"],"columns":[1,"备注"]}"#;
-        let edit = add_csv_keyword_argument(scoped).unwrap();
+        let edit = edit_csv_keyword_argument(scoped, CsvKeywordAction::Add).unwrap();
         assert_eq!(edit.replacement, r#"{"列":[1,"备注"],"词":["甲","乙",""]}"#);
         assert_eq!(&edit.replacement[edit.caret..], r#""]}"#);
         assert_eq!(edit.argument_end, scoped.len());
-        assert!(add_csv_keyword_argument(r#""""#).is_none());
-        assert!(add_csv_keyword_argument(r#"["甲",""]"#).is_none());
+        assert!(edit_csv_keyword_argument(r#""""#, CsvKeywordAction::Add).is_none());
+        assert!(edit_csv_keyword_argument(r#"["甲",""]"#, CsvKeywordAction::Add).is_none());
+    }
+
+    #[test]
+    fn toggles_numbered_csv_keyword_columns_without_changing_words_or_table() {
+        let tail = " 商品,备注\n甲,乙";
+        let query = format!(r#"  {{"columns":["商品",2],"keywords":["甲","乙"]}}{tail}"#);
+        let action = CsvKeywordAction::ToggleColumn(2);
+        let scoped = edit_csv_keyword_argument(&query, action).unwrap();
+        assert_eq!(&query[scoped.argument_end..], tail);
+        assert_eq!(scoped.replacement, r#"{"列":[2],"词":["甲","乙"]}"#);
+        assert_eq!(
+            csv_keyword_column_selection(&scoped.replacement),
+            Some(Some(2))
+        );
+
+        let cleared = edit_csv_keyword_argument(&scoped.replacement, action).unwrap();
+        assert_eq!(cleared.replacement, r#"["甲","乙"]"#);
+        assert_eq!(
+            csv_keyword_column_selection(&cleared.replacement),
+            Some(None)
+        );
+        assert!(edit_csv_keyword_argument(r#""甲""#, CsvKeywordAction::ToggleColumn(0)).is_none());
     }
 
     #[test]

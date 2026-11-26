@@ -187,8 +187,11 @@ impl TablePreview {
         row_page: usize,
         column_page: usize,
         inspect_cell: Option<impl Fn(&(usize, usize), &mut Window, &mut App) + 'static>,
+        selected_column: Option<usize>,
+        select_column: Option<impl Fn(&usize, &mut Window, &mut App) + 'static>,
     ) -> Div {
         let inspect_cell = inspect_cell.map(Rc::new);
+        let select_column = select_column.map(Rc::new);
         let rows = self.visible_rows(row_page, column_page);
         let column_widths = self.column_width_fractions(column_page);
         let visible_count = 1 + (self.data_rows - row_page * MAX_DATA_ROWS).min(MAX_DATA_ROWS);
@@ -245,8 +248,24 @@ impl TablePreview {
                                         })
                                 },
                             )
+                            .when_some(
+                                select_column.clone().filter(|_| row_index == 0),
+                                |cell, select| {
+                                    let number = column_index + 1;
+                                    let hint = if selected_column == Some(number) {
+                                        "取消列限制"
+                                    } else {
+                                        "只在此列查找"
+                                    };
+                                    cell.cursor_pointer()
+                                        .hover(|style| style.bg(rgb(theme::ACCENT_BG)))
+                                        .tooltip(theme::text_tooltip(hint.into()))
+                                        .on_click(move |_, window, cx| select(&number, window, cx))
+                                },
+                            )
                             .when(
-                                self.is_cell_highlighted(row_index, first_column + column),
+                                (row_index == 0 && selected_column == Some(column_index + 1))
+                                    || self.is_cell_highlighted(row_index, column_index),
                                 |cell| {
                                     cell.bg(rgb(theme::ACCENT_BG))
                                         .text_color(rgb(theme::ACCENT))

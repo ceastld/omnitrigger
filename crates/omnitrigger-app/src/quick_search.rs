@@ -3216,7 +3216,12 @@ impl QuickSearch {
                 ..
             })) = &self.results
             {
-                self.table_pages.columns = table.first_match_column_page().unwrap_or_default();
+                self.table_pages.columns = self
+                    .csv_keyword_column_selection(query)
+                    .flatten()
+                    .and_then(|column| table.page_for_column(column))
+                    .or_else(|| table.first_match_column_page())
+                    .unwrap_or_default();
             }
             self.selected = 0;
             if previous_height != next_height
@@ -4266,26 +4271,35 @@ impl QuickSearch {
         })
     }
 
-    fn csv_keyword_edit(&self, query: &str) -> Option<(&'static str, csv_tools::CsvKeywordEdit)> {
+    fn csv_keyword_edit(
+        &self,
+        query: &str,
+        action: csv_tools::CsvKeywordAction,
+    ) -> Option<(&'static str, csv_tools::CsvKeywordEdit)> {
         let (mode, arguments) = self
             .input_before_result_search
             .as_ref()?
             .table_search(query)?;
         let command = mode.result_search_prefix();
-        let edit = csv_tools::add_csv_keyword_argument(arguments)?;
+        let edit = csv_tools::edit_csv_keyword_argument(arguments, action)?;
         let remaining = command.chars().count() + arguments[edit.argument_end..].chars().count();
         let available = INPUT_CHARACTER_LIMIT.checked_sub(remaining)?;
         (edit.replacement.chars().take(available + 1).count() <= available)
             .then_some((command, edit))
     }
 
-    fn add_csv_search_keyword(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn edit_csv_search_keywords(
+        &mut self,
+        action: csv_tools::CsvKeywordAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let input = self.input.read(cx);
         if input.is_composing() || self.file_operation_in_progress() {
             return;
         }
         let query = input.text_ref();
-        if let Some((command, edit)) = self.csv_keyword_edit(query) {
+        if let Some((command, edit)) = self.csv_keyword_edit(query, action) {
             let start_units = command.encode_utf16().count();
             let end = command.len() + edit.argument_end;
             let end_units = query[..end].encode_utf16().count();
@@ -4300,6 +4314,14 @@ impl QuickSearch {
                 input.select_range(caret..caret, cx);
             });
         }
+    }
+
+    fn csv_keyword_column_selection(&self, query: &str) -> Option<Option<usize>> {
+        let (_, arguments) = self
+            .input_before_result_search
+            .as_ref()?
+            .table_search(query)?;
+        csv_tools::csv_keyword_column_selection(arguments)
     }
 
     fn switch_search_words(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5452,11 +5474,14 @@ impl QuickSearch {
                 && keystroke.modifiers.alt
                 && keystroke.key == "k"
                 && self
-                    .csv_keyword_edit(self.input.read(cx).text_ref())
+                    .csv_keyword_edit(
+                        self.input.read(cx).text_ref(),
+                        csv_tools::CsvKeywordAction::Add,
+                    )
                     .is_some()
             {
                 if !event.is_held {
-                    self.add_csv_search_keyword(window, cx);
+                    self.edit_csv_search_keywords(csv_tools::CsvKeywordAction::Add, window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
@@ -6331,7 +6356,9 @@ impl QuickSearch {
 
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
-        let scope = scoped_query(self.input.read(cx).text_ref());
+        let query = self.input.read(cx).text_ref();
+        let scope = scoped_query(query);
+        let column_selection = self.csv_keyword_column_selection(query);
         let recent_previews = matches!(scope, Some((Scope::RecentFilePreviews, _)));
         let preview_destinations =
             recent_previews || matches!(scope, Some((Scope::DirectFilePreview, _)));
@@ -6356,6 +6383,16 @@ impl QuickSearch {
                             ) {
                                 this.toggle_table_cell(Some(*position), window, cx);
                             }
+                        })
+                    }),
+                    column_selection.flatten(),
+                    column_selection.map(|_| {
+                        cx.listener(|this, column: &usize, window, cx| {
+                            this.edit_csv_search_keywords(
+                                csv_tools::CsvKeywordAction::ToggleColumn(*column),
+                                window,
+                                cx,
+                            );
                         })
                     }),
                 ),
@@ -7262,7 +7299,10 @@ impl Render for QuickSearch {
             .filter(|_| !naming_bookmark)
             .map(|(current, _)| matches!(current.pattern, TextSearchPattern::Regex));
         let search_words = self.search_word_switch(&query).filter(|_| !naming_bookmark);
-        let add_csv_keyword = !naming_bookmark && self.csv_keyword_edit(&query).is_some();
+        let add_csv_keyword = !naming_bookmark
+            && self
+                .csv_keyword_edit(&query, csv_tools::CsvKeywordAction::Add)
+                .is_some();
         let text_search_action = self.text_search_action(&query).filter(|_| !naming_bookmark);
         let result_search_actions = text_search_view.is_some()
             || text_search_regex.is_some()
@@ -7545,7 +7585,11 @@ impl Render for QuickSearch {
                                 .px(action_padding)
                                 .tooltip(theme::text_tooltip("Alt+K 新增一个关键词".into()))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_csv_search_keyword(window, cx);
+                                    this.edit_csv_search_keywords(
+                                        csv_tools::CsvKeywordAction::Add,
+                                        window,
+                                        cx,
+                                    );
                                 })),
                         )
                     })
@@ -10351,6 +10395,24 @@ mod tests {
         assert_eq!(
             (search.table_pages.rows, search.table_pages.columns),
             (0, 0)
+        );
+        search.input.update(cx, |input, cx| {
+            input.replace_text_in_range(None, "8", window, cx);
+        });
+        let matching = search.input.read(cx).text();
+        search.refresh_results(&matching, window, cx);
+        search.key_down(&event("shift-pagedown", false), window, cx);
+        search.edit_csv_search_keywords(csv_tools::CsvKeywordAction::ToggleColumn(8), window, cx);
+        let scoped = search.input.read(cx).text();
+        search.refresh_results(&scoped, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("A,B,C,D,E,F,G,H"));
+        assert_eq!(search.table_pages.columns, 1);
+        search.edit_csv_search_keywords(csv_tools::CsvKeywordAction::ToggleColumn(8), window, cx);
+        let cleared = search.input.read(cx).text();
+        search.refresh_results(&cleared, window, cx);
+        assert_eq!(
+            search.results.refillable_text(),
+            Some("A,B,C,D,E,F,G,H\r\n8,b,c,d,e,f,g,末列")
         );
         search.key_down(&event("ctrl-f", false), window, cx);
         assert_eq!(search.input.read(cx).text(), query);
