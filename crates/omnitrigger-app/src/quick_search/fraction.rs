@@ -77,6 +77,7 @@ pub(super) enum FractionError {
     DivisorPairOutputTooLarge,
     QuotientRemainderArguments,
     CongruenceArguments,
+    LinearCongruenceArguments,
     BitwiseArguments,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
@@ -146,6 +147,7 @@ impl FractionError {
             Self::DivisorPairOutputTooLarge => "因数配对结果超过 1 MiB",
             Self::QuotientRemainderArguments => "用逗号分开被除数和除数，例如 -7,3",
             Self::CongruenceArguments => "填写 2 至 16 组余数和正模数，例如 2,3; 3,5; 2,7",
+            Self::LinearCongruenceArguments => "填写整数系数、余数和正模数，例如 -14,30,100",
             Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
@@ -357,6 +359,9 @@ fn simplify_fraction_using(
     }
     if verb == "同余方程" || verb.eq_ignore_ascii_case("crt") {
         return solve_congruences(expression);
+    }
+    if verb == "一次同余" || verb.eq_ignore_ascii_case("linear-congruence") {
+        return solve_linear_congruence(expression);
     }
     let alignment = match verb.to_ascii_lowercase().as_str() {
         "就近对齐" | "round-step" => Some(FractionAlignment::Nearest),
@@ -582,6 +587,59 @@ fn parse_congruence(input: &str) -> Result<(BigInt, BigInt), FractionError> {
     Ok((residue.to_integer(), modulus.to_integer()))
 }
 
+fn solve_linear_congruence(input: &str) -> Result<String, FractionError> {
+    let mut terms = split_top_level_commas(input);
+    let (Some(coefficient), Some(residue), Some(modulus), None) =
+        (terms.next(), terms.next(), terms.next(), terms.next())
+    else {
+        return Err(FractionError::LinearCongruenceArguments);
+    };
+    if [coefficient, residue, modulus]
+        .iter()
+        .any(|term| term.trim().is_empty())
+    {
+        return Err(FractionError::LinearCongruenceArguments);
+    }
+    let coefficient = calculate_fraction(coefficient)?;
+    let residue = calculate_fraction(residue)?;
+    let modulus = calculate_fraction(modulus)?;
+    if !coefficient.is_integer()
+        || !residue.is_integer()
+        || !modulus.is_integer()
+        || modulus.numer().sign() != Sign::Plus
+    {
+        return Err(FractionError::LinearCongruenceArguments);
+    }
+    let coefficient = coefficient.to_integer();
+    let residue = residue.to_integer();
+    let modulus = modulus.to_integer();
+    let gcd = BigInt::from(exact_gcd(
+        coefficient.magnitude().clone(),
+        modulus.magnitude().clone(),
+    ));
+    if (&residue % &gcd).sign() != Sign::NoSign {
+        return Ok("无整数解".to_owned());
+    }
+    let period = modulus / &gcd;
+    let root = reduced_congruence_root(coefficient / &gcd, residue / gcd, &period);
+    Ok(format!("x ≡ {root} (mod {period})"))
+}
+
+fn reduced_congruence_root(coefficient: BigInt, residue: BigInt, modulus: &BigInt) -> BigInt {
+    if modulus.bits() == 1 {
+        return BigInt::default();
+    }
+    let inverse = coefficient
+        .modinv(modulus)
+        .expect("约去最大公约数后，系数和模数互质");
+    let root = (residue * inverse) % modulus;
+    if root.sign() == Sign::Minus {
+        root + modulus
+    } else {
+        root
+    }
+}
+
 fn solve_congruences(input: &str) -> Result<String, FractionError> {
     let groups: Vec<_> = input
         .trim()
@@ -615,13 +673,7 @@ fn solve_congruences(input: &str) -> Result<String, FractionError> {
             return Err(FractionError::ExactRange);
         }
         // 新解形如 residue + period * k，约去公因数后可用逆元求出 k。
-        let inverse = (&period / &gcd)
-            .modinv(&reduced)
-            .expect("约去最大公约数后，余下的模数互质");
-        let mut steps = ((delta / &gcd) * inverse) % &reduced;
-        if steps.sign() == Sign::Minus {
-            steps += &reduced;
-        }
+        let steps = reduced_congruence_root(&period / &gcd, delta / &gcd, &reduced);
         residue += &period * steps;
         period = combined_period;
     }
@@ -2718,6 +2770,35 @@ mod tests {
             assert_eq!(
                 simplify_fraction(query),
                 Err(FractionError::CongruenceArguments)
+            );
+        }
+    }
+
+    #[test]
+    fn solves_exact_linear_congruences_and_detects_when_no_integer_solution_exists() {
+        for (query, expected) in [
+            ("一次同余 -14,30,100", "x ≡ 5 (mod 50)"),
+            ("一次同余 6,-8,14", "x ≡ 1 (mod 7)"),
+            ("一次同余 6,3,14", "无整数解"),
+            ("一次同余 0,-14,7", "x ≡ 0 (mod 1)"),
+            ("一次同余 0,1,7", "无整数解"),
+            ("linear-congruence 2**61,2**61,3*2**61", "x ≡ 1 (mod 3)"),
+            ("一次同余 gcd(6,10),3,5", "x ≡ 4 (mod 5)"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "一次同余 1,3",
+            "一次同余 1,,3",
+            "一次同余 1,2,3,4",
+            "一次同余 1/2,2,3",
+            "一次同余 1,2,0",
+            "一次同余 1,2,-3",
+        ] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::LinearCongruenceArguments),
+                "{query}"
             );
         }
     }
