@@ -336,13 +336,7 @@ fn simplify_fraction_using(
         _ => None,
     };
     if let Some(direction) = approximation {
-        let (value, limit) =
-            split_conversion(expression.trim()).ok_or(FractionError::DenominatorLimit)?;
-        let limit = limit
-            .parse::<u32>()
-            .ok()
-            .filter(|limit| (1..=MAX_APPROXIMATION_DENOMINATOR).contains(limit))
-            .ok_or(FractionError::DenominatorLimit)?;
+        let (value, limit) = denominator_limit_arguments(expression)?;
         let approximation = approximate_fraction(calculate(value)?, limit, direction);
         ensure_exact_size(&approximation)?;
         return Ok(approximation.to_string());
@@ -872,6 +866,10 @@ fn fraction_csv_command(verb: &str, expression: &str) -> Option<Result<String, F
     } else if verb.eq_ignore_ascii_case("裴蜀系数CSV") || verb.eq_ignore_ascii_case("bezout-csv")
     {
         Some(bezout_coefficients_csv(expression))
+    } else if verb.eq_ignore_ascii_case("邻分数CSV")
+        || verb.eq_ignore_ascii_case("fraction-neighbors-csv")
+    {
+        Some(fraction_neighbors_csv(expression))
     } else {
         None
     }
@@ -998,6 +996,17 @@ enum FractionApproximation {
     Upper,
 }
 
+fn denominator_limit_arguments(expression: &str) -> Result<(&str, u32), FractionError> {
+    let (value, limit) =
+        split_conversion(expression.trim()).ok_or(FractionError::DenominatorLimit)?;
+    let limit = limit
+        .parse::<u32>()
+        .ok()
+        .filter(|limit| (1..=MAX_APPROXIMATION_DENOMINATOR).contains(limit))
+        .ok_or(FractionError::DenominatorLimit)?;
+    Ok((value, limit))
+}
+
 fn approximate_fraction(
     value: BigRational,
     max_denominator: u32,
@@ -1007,6 +1016,24 @@ fn approximate_fraction(
     if value.denom().magnitude() <= &limit {
         return value;
     }
+    let (lower, upper) = denominator_bounds(&value, &limit);
+    match direction {
+        FractionApproximation::Lower => lower,
+        FractionApproximation::Upper => upper,
+        FractionApproximation::Nearest => {
+            let order = (&value - &lower)
+                .cmp(&(&upper - &value))
+                .then_with(|| lower.denom().cmp(upper.denom()));
+            if order.is_gt() {
+                upper
+            } else {
+                lower
+            }
+        }
+    }
+}
+
+fn denominator_bounds(value: &BigRational, limit: &BigUint) -> (BigRational, BigRational) {
     let mut dividend = value.numer().magnitude().clone();
     let mut divisor = value.denom().magnitude().clone();
     let mut preceding = (BigUint::from(0u8), BigUint::from(1u8));
@@ -1014,9 +1041,9 @@ fn approximate_fraction(
     let boundary = loop {
         let coefficient = &dividend / &divisor;
         let denominator = &closest.1 * &coefficient + &preceding.1;
-        if denominator > limit {
+        if &denominator > limit {
             // 下一个收敛分数已超限，保留最大的仍然可用的中间系数。
-            let allowed = (&limit - &preceding.1) / &closest.1;
+            let allowed = (limit - &preceding.1) / &closest.1;
             break BigRational::new(
                 (&closest.0 * &allowed + &preceding.0).into(),
                 (&closest.1 * &allowed + &preceding.1).into(),
@@ -1034,25 +1061,38 @@ fn approximate_fraction(
     } else {
         (latest, boundary)
     };
-    let (lower, upper) = if first < second {
+    if first < second {
         (first, second)
     } else {
         (second, first)
-    };
-    match direction {
-        FractionApproximation::Lower => lower,
-        FractionApproximation::Upper => upper,
-        FractionApproximation::Nearest => {
-            let order = (&value - &lower)
-                .cmp(&(&upper - &value))
-                .then_with(|| lower.denom().cmp(upper.denom()));
-            if order.is_gt() {
-                upper
-            } else {
-                lower
-            }
-        }
     }
+}
+
+fn fraction_neighbors_csv(expression: &str) -> Result<String, FractionError> {
+    let (value, limit) = denominator_limit_arguments(expression)?;
+    let value = calculate_fraction(value)?;
+    let limit = BigUint::from(limit);
+    let (lower, upper) = if value.denom().magnitude() > &limit {
+        denominator_bounds(&value, &limit)
+    } else {
+        let limit = BigInt::from(limit);
+        (
+            strict_fraction_neighbor(&value, &limit, -1),
+            strict_fraction_neighbor(&value, &limit, 1),
+        )
+    };
+    ensure_exact_size(&lower)?;
+    ensure_exact_size(&upper)?;
+    Ok(format!("下界,原值,上界\r\n{lower},{value},{upper}"))
+}
+
+fn strict_fraction_neighbor(value: &BigRational, limit: &BigInt, direction: i32) -> BigRational {
+    let (numerator, denominator) = (value.numer(), value.denom());
+    // 相邻最简分数的交叉乘积差为 ±1，取对应同余类中允许的最大分母。
+    let first = reduced_congruence_root(numerator.clone(), BigInt::from(-direction), denominator);
+    let neighbor_denominator = &first + ((limit - &first) / denominator) * denominator;
+    let neighbor_numerator = (numerator * &neighbor_denominator + direction) / denominator;
+    BigRational::new(neighbor_numerator, neighbor_denominator)
 }
 
 fn fraction_sequence(input: &str, geometric: bool) -> Result<String, FractionError> {
@@ -3969,6 +4009,29 @@ mod tests {
                 Err(FractionError::RoundPlaces)
             );
         }
+    }
+
+    #[test]
+    fn finds_strict_fraction_neighbors_under_the_denominator_limit() {
+        for (input, expected) in [
+            ("邻分数CSV 1/3 to 8", "2/7,1/3,3/8"),
+            ("邻分数CSV -1/3 to 8", "-3/8,-1/3,-2/7"),
+            ("邻分数CSV 355/113 to 100", "311/99,355/113,22/7"),
+            ("邻分数CSV -355/113 to 100", "-22/7,-355/113,-311/99"),
+            ("邻分数CSV 2 to 4", "7/4,2,9/4"),
+            ("邻分数CSV 0 to 1", "-1,0,1"),
+            ("fraction-neighbors-csv 1/3 to 3", "0,1/3,1/2"),
+        ] {
+            assert_eq!(
+                simplify_fraction(input).as_deref(),
+                Ok(format!("下界,原值,上界\r\n{expected}").as_str()),
+                "{input}",
+            );
+        }
+        assert_eq!(
+            simplify_fraction("邻分数CSV 1/2 to 0"),
+            Err(FractionError::DenominatorLimit)
+        );
     }
 
     #[test]
