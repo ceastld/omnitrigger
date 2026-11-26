@@ -8702,6 +8702,59 @@ struct CsvKeywordQuery<'a> {
     data: &'a str,
 }
 
+pub(super) struct CsvKeywordEdit {
+    pub(super) argument_end: usize,
+    pub(super) replacement: String,
+    pub(super) caret: usize,
+}
+
+pub(super) fn add_csv_keyword_argument(arguments: &str) -> Option<CsvKeywordEdit> {
+    let mut argument =
+        serde_json::Deserializer::from_str(arguments).into_iter::<CsvKeywordArgument>();
+    let existing = argument.next()?.ok()?;
+    let argument_end = argument.byte_offset();
+    if arguments[argument_end..]
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_whitespace())
+    {
+        return None;
+    }
+
+    let (mut keywords, columns) = match existing {
+        CsvKeywordArgument::One(word) => (vec![word], None),
+        CsvKeywordArgument::List(words) => (words, None),
+        CsvKeywordArgument::Scoped(scope) => {
+            // 原样保留列名和列号的 JSON 类型。
+            let object: serde_json::Value =
+                serde_json::from_str(&arguments[..argument_end]).ok()?;
+            let columns = object.get("列").or_else(|| object.get("columns"))?;
+            (scope.keywords, Some(columns.to_string()))
+        }
+    };
+    if keywords.is_empty()
+        || keywords.len() >= MAX_FILTER_CONDITIONS
+        || keywords.iter().any(|word| word.trim().is_empty())
+    {
+        return None;
+    }
+    keywords.push(String::new());
+    let words = serde_json::to_string(&keywords).ok()?;
+    let (replacement, caret) = if let Some(columns) = columns {
+        let head = format!("{{\"列\":{columns},\"词\":");
+        let caret = head.len() + words.len() - 2;
+        (format!("{head}{words}}}"), caret)
+    } else {
+        let caret = words.len() - 2;
+        (words, caret)
+    };
+    Some(CsvKeywordEdit {
+        argument_end,
+        replacement,
+        caret,
+    })
+}
+
 fn read_csv_keywords(input: &str) -> Result<CsvKeywordQuery<'_>, CsvError> {
     let invalid = CsvError::SearchRowKeywords;
     let (argument, data) = json_argument_and_data::<CsvKeywordArgument>(input, invalid)?;
@@ -13442,6 +13495,22 @@ B,乙
             .unwrap();
         assert_eq!(preview.first_match_column_page(), None);
         assert_eq!(preview.row_pages(), 0);
+    }
+
+    #[test]
+    fn appends_a_keyword_slot_without_changing_selected_columns_or_csv() {
+        let original = r#""北 茶" 商品,数量"#;
+        let edit = add_csv_keyword_argument(original).unwrap();
+        assert_eq!(edit.replacement, r#"["北 茶",""]"#);
+        assert_eq!(&edit.replacement[edit.caret..], r#""]"#);
+        assert_eq!(&original[edit.argument_end..], " 商品,数量");
+        let scoped = r#"{"keywords":["甲","乙"],"columns":[1,"备注"]}"#;
+        let edit = add_csv_keyword_argument(scoped).unwrap();
+        assert_eq!(edit.replacement, r#"{"列":[1,"备注"],"词":["甲","乙",""]}"#);
+        assert_eq!(&edit.replacement[edit.caret..], r#""]}"#);
+        assert_eq!(edit.argument_end, scoped.len());
+        assert!(add_csv_keyword_argument(r#""""#).is_none());
+        assert!(add_csv_keyword_argument(r#"["甲",""]"#).is_none());
     }
 
     #[test]

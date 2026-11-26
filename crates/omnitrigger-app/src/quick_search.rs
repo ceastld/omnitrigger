@@ -4266,6 +4266,42 @@ impl QuickSearch {
         })
     }
 
+    fn csv_keyword_edit(&self, query: &str) -> Option<(&'static str, csv_tools::CsvKeywordEdit)> {
+        let (mode, arguments) = self
+            .input_before_result_search
+            .as_ref()?
+            .table_search(query)?;
+        let command = mode.result_search_prefix();
+        let edit = csv_tools::add_csv_keyword_argument(arguments)?;
+        let remaining = command.chars().count() + arguments[edit.argument_end..].chars().count();
+        let available = INPUT_CHARACTER_LIMIT.checked_sub(remaining)?;
+        (edit.replacement.chars().take(available + 1).count() <= available)
+            .then_some((command, edit))
+    }
+
+    fn add_csv_search_keyword(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        if input.is_composing() || self.file_operation_in_progress() {
+            return;
+        }
+        let query = input.text_ref();
+        if let Some((command, edit)) = self.csv_keyword_edit(query) {
+            let start_units = command.encode_utf16().count();
+            let end = command.len() + edit.argument_end;
+            let end_units = query[..end].encode_utf16().count();
+            let caret = command.len() + edit.caret;
+            self.input.update(cx, |input, cx| {
+                input.replace_text_in_range(
+                    Some(start_units..end_units),
+                    &edit.replacement,
+                    window,
+                    cx,
+                );
+                input.select_range(caret..caret, cx);
+            });
+        }
+    }
+
     fn switch_search_words(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.input.read(cx);
         if input.is_composing() || self.file_operation_in_progress() {
@@ -5401,16 +5437,26 @@ impl QuickSearch {
                     self.switch_text_result_view(window, cx);
                 }
                 cx.stop_propagation();
-            } else if modifiers == 2
-                && keystroke.modifiers.control
-                && keystroke.modifiers.alt
-                && keystroke.key == "r"
+            } else if modifiers == 1
+                && keystroke.modifiers.shift
+                && keystroke.key == "f4"
                 && self
                     .text_search_change(self.input.read(cx).text_ref(), TextSearchChange::Regex)
                     .is_some()
             {
                 if !event.is_held {
                     self.switch_result_regex(window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1
+                && keystroke.modifiers.alt
+                && keystroke.key == "k"
+                && self
+                    .csv_keyword_edit(self.input.read(cx).text_ref())
+                    .is_some()
+            {
+                if !event.is_held {
+                    self.add_csv_search_keyword(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
@@ -7216,6 +7262,7 @@ impl Render for QuickSearch {
             .filter(|_| !naming_bookmark)
             .map(|(current, _)| matches!(current.pattern, TextSearchPattern::Regex));
         let search_words = self.search_word_switch(&query).filter(|_| !naming_bookmark);
+        let add_csv_keyword = !naming_bookmark && self.csv_keyword_edit(&query).is_some();
         let text_search_action = self.text_search_action(&query).filter(|_| !naming_bookmark);
         let result_search_actions = text_search_view.is_some()
             || text_search_regex.is_some()
@@ -7472,13 +7519,13 @@ impl Render for QuickSearch {
                             (
                                 "disable-result-regex",
                                 Tone::Primary,
-                                "Ctrl+Alt+R 返回关键词查找",
+                                "Shift+F4 返回关键词查找",
                             )
                         } else {
                             (
                                 "enable-result-regex",
                                 Tone::Ghost,
-                                "Ctrl+Alt+R 使用正则表达式逐行查找",
+                                "Shift+F4 使用正则表达式逐行查找",
                             )
                         };
                         header.child(
@@ -7488,6 +7535,17 @@ impl Render for QuickSearch {
                                 .tooltip(theme::text_tooltip(hint.into()))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.switch_result_regex(window, cx);
+                                })),
+                        )
+                    })
+                    .when(add_csv_keyword, |header| {
+                        header.child(
+                            button("add-csv-search-keyword", "加词", Tone::Ghost, true)
+                                .h(px(24.))
+                                .px(action_padding)
+                                .tooltip(theme::text_tooltip("Alt+K 新增一个关键词".into()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_csv_search_keyword(window, cx);
                                 })),
                         )
                     })
@@ -10579,6 +10637,15 @@ mod tests {
         let filtered = search.input.read(cx).text();
         search.refresh_results(&filtered, window, cx);
         assert_eq!(search.results.refillable_text(), Some("北区: OK"));
+        search.key_down(&key("shift-f4", true), window, cx);
+        assert_eq!(search.input.read(cx).text(), filtered);
+        search.key_down(&key("shift-f4", false), window, cx);
+        let regex = search.input.read(cx).text();
+        assert!(regex.starts_with("文本: 正则保留行 "));
+        search.refresh_results(&regex, window, cx);
+        search.key_down(&key("shift-f4", false), window, cx);
+        assert_eq!(search.input.read(cx).text(), filtered);
+        search.refresh_results(&filtered, window, cx);
         search.key_down(&key("f1", false), window, cx);
         let help = search.input.read(cx).text();
         search.refresh_results(&help, window, cx);
