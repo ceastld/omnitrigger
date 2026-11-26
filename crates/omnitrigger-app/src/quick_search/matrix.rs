@@ -24,6 +24,7 @@ pub(super) enum MatrixError {
     EigenspaceArguments,
     SubmatrixArguments,
     ConcatenationDimensions,
+    CovarianceObservations,
     ElementwiseDimensions,
     ProductDimensions,
     PowerExponent,
@@ -40,7 +41,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、子矩阵、横向拼接、纵向拼接、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、子矩阵、横向拼接、纵向拼接、协方差矩阵、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -53,6 +54,7 @@ impl MatrixError {
             }
             Self::ElementwiseDimensions => "加减法和逐项乘法要求两个矩阵的行数和列数分别相同",
             Self::ConcatenationDimensions => "横向拼接需要相同行数，纵向拼接需要相同列数",
+            Self::CovarianceObservations => "样本协方差矩阵至少需要两行观测",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
             Self::ConditionNorm => "填写 1 或 ∞，用 @ 隔开矩阵，例如 条件数 1 @ 2,0; 0,1/3",
@@ -128,6 +130,10 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "子矩阵" | "取行列" | "submatrix" => select_submatrix(input),
         "横向拼接" | "hstack" => concatenate(input, true),
         "纵向拼接" | "vstack" => concatenate(input, false),
+        "协方差矩阵" | "样本协方差矩阵" | "covariance-matrix" => {
+            covariance_matrix(input, true)
+        }
+        "总体协方差矩阵" | "population-covariance-matrix" => covariance_matrix(input, false),
         "乘方" | "幂" | "power" => {
             let (matrix, exponent) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
             let exponent = exponent
@@ -230,6 +236,38 @@ fn concatenate(input: &str, horizontal: bool) -> Result<String, MatrixError> {
         left.extend(right);
     }
     Ok(format_matrix(left))
+}
+
+fn covariance_matrix(input: &str, sample: bool) -> Result<String, MatrixError> {
+    let observations = parse_matrix(input)?;
+    let count = observations.len();
+    let divisor = count - usize::from(sample);
+    if divisor == 0 {
+        return Err(MatrixError::CovarianceObservations);
+    }
+    let count = BigRational::from_integer(BigInt::from(count));
+    let divisor = BigRational::from_integer(BigInt::from(divisor));
+    let mut centered = transpose(observations);
+    for variable in &mut centered {
+        let sum = variable
+            .iter()
+            .try_fold(BigRational::default(), |mut sum, value| {
+                sum += value;
+                ensure_exact_size(&sum).map_err(MatrixError::Evaluation)?;
+                Ok::<_, MatrixError>(sum)
+            })?;
+        let mean = sum / &count;
+        for value in variable {
+            *value -= &mean;
+            ensure_exact_size(value).map_err(MatrixError::Evaluation)?;
+        }
+    }
+    let mut covariance = multiply(&centered, &transpose(centered.clone()))?;
+    for value in covariance.iter_mut().flatten() {
+        *value /= &divisor;
+        ensure_exact_size(value).map_err(MatrixError::Evaluation)?;
+    }
+    Ok(format_matrix(covariance))
 }
 
 fn parse_pair(input: &str) -> Result<(Matrix, Matrix), MatrixError> {
@@ -963,6 +1001,26 @@ mod tests {
         assert_eq!(
             calculate_matrix("hstack 1,2,3,4,5 @ 6,7,8,9"),
             Err(MatrixError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn computes_sample_and_population_covariance_matrices_exactly() {
+        assert_eq!(
+            calculate_matrix("协方差矩阵 1,2; 2,4; 3,8").as_deref(),
+            Ok("1, 3\n3, 28/3")
+        );
+        assert_eq!(
+            calculate_matrix("总体协方差矩阵 1,2; 2,4; 3,8").as_deref(),
+            Ok("2/3, 2\n2, 56/9")
+        );
+        assert_eq!(
+            calculate_matrix("covariance-matrix 1,2"),
+            Err(MatrixError::CovarianceObservations)
+        );
+        assert_eq!(
+            calculate_matrix("population-covariance-matrix 1,2").as_deref(),
+            Ok("0, 0\n0, 0")
         );
     }
 
