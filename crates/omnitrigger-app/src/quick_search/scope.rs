@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::trigger_browse::{FacetValue, ScopeKind, StatusKind};
 
 use super::{
@@ -95,8 +97,12 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
     }
     if let Some((prefix, term)) = query.split_once([':', '：']) {
         let Some(scope) = parse_scope(prefix) else {
-            return super::direct_file_preview_path(query)
-                .map(|path| (Scope::DirectFilePreview, path));
+            let path = super::local_files::local_disk_path(query)?;
+            if path.ends_with(['\\', '/']) {
+                return Some((Scope::LocalFiles, path));
+            }
+            return super::supports_text_file_preview(Path::new(path))
+                .then_some((Scope::DirectFilePreview, path));
         };
         let term = term.trim_start();
         let keep_trailing = scope == Scope::Csv

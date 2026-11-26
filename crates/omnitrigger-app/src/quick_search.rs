@@ -11160,6 +11160,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
+    fn suggests_browsing_pasted_directory_paths_with_trailing_separators() {
+        let index = SearchIndex::default();
+        for (query, expected) in [
+            (r"C:\Work Folder\", r"文件: C:\Work Folder\ |"),
+            (r#""C:\Work Folder\""#, r"文件: C:\Work Folder\ |"),
+            ("C:/Work Folder/", "文件: C:/Work Folder/ |"),
+        ] {
+            assert_eq!(index.results(query).suggested_input(0), Some(expected));
+        }
+        assert!(!matches!(
+            scoped_query(r"C:\Work Folder\report.pdf"),
+            Some((Scope::LocalFiles, _))
+        ));
+    }
+
+    #[test]
     fn bookmarks_the_selected_example_or_history_entry() {
         let index = SearchIndex::default();
         let filter = "? 分数: 等差求和";
