@@ -4631,6 +4631,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "导出指定原文行及其行号",
+        query: "文本: 取行CSV 2,4-5 标题\n苹果\n略过\n梨\n茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "取出多行文本开头的指定行数",
         query: "文本: 取开头行 2 甲\n乙\n丙",
     },

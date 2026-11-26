@@ -311,6 +311,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     match operation.to_ascii_lowercase().as_str() {
         "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
+        "取行csv" | "pick-lines-csv" => Some(select_text_line_ranges_csv(text)),
         "重复位置csv" | "duplicate-line-positions-csv" => {
             Some(duplicate_line_positions_csv(text))
         }
@@ -2360,11 +2361,16 @@ fn filter_result_lines_csv(
 }
 
 fn numbered_line_report(text: &str, matches: impl Fn(&str) -> bool) -> Result<String, TextError> {
+    line_position_report(
+        numbered_text_lines(text, logical_newline_pattern()).filter(|(_, line)| matches(line)),
+    )
+}
+
+fn line_position_report<'a>(
+    lines: impl Iterator<Item = (usize, &'a str)>,
+) -> Result<String, TextError> {
     let mut csv = String::from("原行号,原文");
-    for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
-        if !matches(line) {
-            continue;
-        }
+    for (index, line) in lines {
         let number = (index + 1).to_string();
         append_bounded_csv_row(
             &mut csv,
@@ -2557,6 +2563,28 @@ fn select_text_line_ranges(input: &str, keep_selected: bool) -> Result<String, T
     select_text_lines(ranges, text.lines().collect(), keep_selected)
 }
 
+fn select_text_line_ranges_csv(input: &str) -> Result<String, TextError> {
+    let (ranges, text) = input
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::IncompleteTextArgument)?;
+    pick_original_result_line_report(ranges, text_payload(text)?)
+}
+
+pub(super) fn pick_original_result_line_report(
+    ranges: &str,
+    text: &str,
+) -> Result<String, TextError> {
+    let lines: Vec<_> = logical_newline_pattern().split(text).collect();
+    let selected = selected_line_indices(ranges.trim(), lines.len())?;
+    line_position_report(
+        lines
+            .into_iter()
+            .zip(selected)
+            .enumerate()
+            .filter_map(|(index, (line, selected))| selected.then_some((index, line))),
+    )
+}
+
 pub(super) fn pick_original_result_lines(ranges: &str, text: &str) -> Result<String, TextError> {
     let lines = logical_newline_pattern().split(text).collect();
     select_text_lines(ranges.trim(), lines, true)
@@ -2567,16 +2595,20 @@ fn select_text_lines(
     lines: Vec<&str>,
     keep_selected: bool,
 ) -> Result<String, TextError> {
-    let selected = select_index_ranges(ranges, lines.len()).map_err(|error| match error {
-        IndexRangeError::Invalid => TextError::InvalidLineRange,
-        IndexRangeError::OutOfBounds => TextError::MissingLine,
-    })?;
+    let selected = selected_line_indices(ranges, lines.len())?;
     Ok(lines
         .into_iter()
         .zip(selected)
         .filter_map(|(line, selected)| (selected == keep_selected).then_some(line))
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn selected_line_indices(ranges: &str, line_count: usize) -> Result<Vec<bool>, TextError> {
+    select_index_ranges(ranges, line_count).map_err(|error| match error {
+        IndexRangeError::Invalid => TextError::InvalidLineRange,
+        IndexRangeError::OutOfBounds => TextError::MissingLine,
+    })
 }
 
 fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
@@ -5172,6 +5204,18 @@ mod tests {
         assert_eq!(
             transform_text("search-any-lines \"\" 甲\r\n乙").as_deref(),
             Ok("甲\r\n乙")
+        );
+    }
+
+    #[test]
+    fn reports_selected_original_line_numbers_in_source_order() {
+        let query = "取行CSV 3-4,1,3 \"一\r\n二\u{2028}三,详情\n\"";
+        let expected = "原行号,原文\r\n1,一\r\n3,\"三,详情\"\r\n4,\"\"";
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("取行CSV 3 一\n二"),
+            Err(TextError::MissingLine)
         );
     }
 
