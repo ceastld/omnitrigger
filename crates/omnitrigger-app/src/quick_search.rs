@@ -3087,12 +3087,17 @@ impl QuickSearch {
             self.result_copied = true;
             self.prepare_value_copy(value, cx)
         } else {
-            let path = self.results.local_file_path(self.selected)?;
-            self.copied_file_path = Some(path.to_owned());
-            ClipboardItem::new_string(path.to_owned())
+            let path = self.results.local_file_path(self.selected)?.to_owned();
+            return Some(self.prepare_file_path_copy(path, cx));
         };
         cx.notify();
         Some(item)
+    }
+
+    fn prepare_file_path_copy(&mut self, path: String, cx: &mut Context<Self>) -> ClipboardItem {
+        self.copied_file_path = Some(path.clone());
+        cx.notify();
+        ClipboardItem::new_string(path)
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4224,6 +4229,18 @@ impl QuickSearch {
                     self.restore_previous_input(window, cx);
                 }
                 cx.stop_propagation();
+            } else if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.alt
+                && keystroke.key == "c"
+            {
+                if let Some(path) = self.file_preview_path() {
+                    if !event.is_held {
+                        let item = self.prepare_file_path_copy(path.to_owned(), cx);
+                        cx.write_to_clipboard(item);
+                    }
+                    cx.stop_propagation();
+                }
             } else if modifiers == 2
                 && keystroke.modifiers.control
                 && keystroke.modifiers.shift
@@ -6132,9 +6149,14 @@ impl Render for QuickSearch {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title.to_owned())
                             .when_some(preview_path, |title, path| {
+                                let hint = if self.copied_file_path.as_deref() == Some(path) {
+                                    "已复制路径"
+                                } else {
+                                    "Ctrl+Alt+C 复制路径"
+                                };
                                 title
                                     .mr(px(6.))
-                                    .tooltip(theme::text_tooltip(path.to_owned().into()))
+                                    .tooltip(theme::text_tooltip(format!("{hint}\n{path}").into()))
                             }),
                     )
                     .when(
@@ -9177,6 +9199,17 @@ mod tests {
         search.refresh_results(PREVIEW, window, cx);
         assert_eq!(search.input.read(cx).text_ref(), PREVIEW);
         assert_eq!(search.file_preview_path(), Some(PATH));
+        let held_copy = KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("ctrl-alt-c").unwrap(),
+            is_held: true,
+        };
+        search.copied_file_path = None;
+        search.key_down(&held_copy, window, cx);
+        assert!(search.copied_file_path.is_none());
+        let path = search.file_preview_path().unwrap().to_owned();
+        let item = search.prepare_file_path_copy(path, cx);
+        assert_eq!(item.text().as_deref(), Some(PATH));
+        assert_eq!(search.copied_file_path.as_deref(), Some(PATH));
         assert_eq!(
             search
                 .result_refill
