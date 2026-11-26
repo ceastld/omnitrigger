@@ -453,7 +453,7 @@ pub(super) struct SearchIndex {
 struct RememberedSearchInput {
     query: String,
     selection: Option<MessageSelection>,
-    preview_origin: Option<FileSearchReturn>,
+    refill: Option<ResultRefill>,
 }
 
 #[derive(Clone, Default)]
@@ -2036,7 +2036,7 @@ struct QueryDraft {
     suggestion: Option<String>,
     table_pages: Option<TablePages>,
     expanded_value: bool,
-    preview_origin: Option<FileSearchReturn>,
+    refill: Option<ResultRefill>,
 }
 
 impl QueryDraft {
@@ -2099,6 +2099,7 @@ impl LineJump {
     }
 }
 
+#[derive(Clone)]
 struct ResultRefill {
     original: String,
     inserted: String,
@@ -2146,6 +2147,7 @@ fn find_input_range(
     }
 }
 
+#[derive(Clone)]
 enum RefillKind {
     Result { evaluated: bool },
     File { path: String },
@@ -2157,20 +2159,9 @@ enum FilePreviewAction {
     Refresh,
 }
 
-#[derive(Clone)]
 struct FileSearchReturn {
     query: String,
     path: String,
-}
-
-impl FileSearchReturn {
-    fn into_preview(self, inserted: String) -> ResultRefill {
-        ResultRefill {
-            original: self.query,
-            inserted,
-            kind: RefillKind::File { path: self.path },
-        }
-    }
 }
 
 enum ResultSaveState {
@@ -2405,14 +2396,7 @@ impl QuickSearch {
             this.bookmark_limit_reached = false;
             this.bookmark_save_error = None;
             this.refresh_results(&query, window, cx);
-            if !query.trim().is_empty() && !this.has_temporary_query() {
-                let preview_origin = this.file_preview_origin(&query);
-                *this.index.recent.last_input.borrow_mut() = RememberedSearchInput {
-                    query,
-                    selection: Some(selection),
-                    preview_origin,
-                };
-            }
+            this.remember_search_input(query, selection);
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
@@ -3304,20 +3288,6 @@ impl QuickSearch {
         }
     }
 
-    fn file_preview_origin(&self, query: &str) -> Option<FileSearchReturn> {
-        let refill = self
-            .result_refill
-            .as_ref()
-            .filter(|refill| refill.inserted == query)?;
-        let RefillKind::File { path } = &refill.kind else {
-            return None;
-        };
-        Some(FileSearchReturn {
-            query: refill.original.clone(),
-            path: path.clone(),
-        })
-    }
-
     fn read_text_file_preview(
         &mut self,
         path: String,
@@ -3693,9 +3663,7 @@ impl QuickSearch {
         if query.is_empty() {
             return;
         }
-        if let Some(origin) = self.previous_input.preview_origin.clone() {
-            self.result_refill = Some(origin.into_preview(query.clone()));
-        }
+        self.result_refill = self.previous_input.refill.clone();
         self.fill_query(query, window, cx);
         if let Some(selection) = self.previous_input.selection {
             self.input
@@ -3711,6 +3679,24 @@ impl QuickSearch {
             || self.input_before_result_search.is_some()
     }
 
+    fn refill_for_query(&self, query: &str) -> Option<ResultRefill> {
+        self.result_refill
+            .as_ref()
+            .filter(|refill| refill.inserted == query)
+            .cloned()
+    }
+
+    fn remember_search_input(&self, query: String, selection: MessageSelection) {
+        if !query.trim().is_empty() && !self.has_temporary_query() {
+            let refill = self.refill_for_query(&query);
+            *self.index.recent.last_input.borrow_mut() = RememberedSearchInput {
+                query,
+                selection: Some(selection),
+                refill,
+            };
+        }
+    }
+
     fn query_draft(&self, cx: &Context<Self>) -> QueryDraft {
         let input = self.input.read(cx);
         QueryDraft {
@@ -3723,7 +3709,7 @@ impl QuickSearch {
                 .map(str::to_owned),
             table_pages: self.results.table_preview().map(|_| self.table_pages),
             expanded_value: self.expanded_value_pages.is_some(),
-            preview_origin: self.file_preview_origin(input.text_ref()),
+            refill: self.refill_for_query(input.text_ref()),
         }
     }
 
@@ -3735,9 +3721,7 @@ impl QuickSearch {
     ) {
         let text = draft.text.clone();
         let selection = draft.selection;
-        if let Some(origin) = draft.preview_origin.take() {
-            self.result_refill = Some(origin.into_preview(text.clone()));
-        }
+        self.result_refill = draft.refill.take();
         self.query_draft_return = Some(draft);
         self.input.update(cx, |input, cx| {
             input.set_text(text, cx);
@@ -4565,9 +4549,12 @@ impl QuickSearch {
                     }) = &mut self.result_refill
                     {
                         *evaluated = true;
-                        let query = self.input.read(cx).text();
+                        let input = self.input.read(cx);
+                        let query = input.text();
+                        let selection = input.selection_position();
                         self.result_save = ResultSaveState::Ready;
                         self.refresh_results(&query, window, cx);
+                        self.remember_search_input(query, selection);
                     }
                 }
             }
@@ -9314,6 +9301,14 @@ mod tests {
         search.refresh_results(result, window, cx);
         assert!(matches!(search.results, Results::RefilledInput));
         assert!(search.application_refresh == application_refresh);
+        search.toggle_bookmark_browser(window, cx);
+        let temporary = search.input.read(cx).text();
+        assert!(QuickSearch::is_bookmark_query(&temporary));
+        search.refresh_results(&temporary, window, cx);
+        search.toggle_bookmark_browser(window, cx);
+        search.refresh_results(result, window, cx);
+        assert_eq!(search.input.read(cx).text_ref(), result);
+        assert!(matches!(search.results, Results::RefilledInput));
         search.key_down(&key(true), window, cx);
         assert_eq!(search.input.read(cx).text(), result);
         search.key_down(&key(false), window, cx);
@@ -9368,10 +9363,21 @@ mod tests {
         search.key_down(&refresh, window, cx);
         assert_eq!(search.results.refillable_text(), Some("0.375"));
         assert_eq!(search.input.read(cx).selection(), 6..6);
+        let remembered = search.index.recent.last_input.borrow().clone();
+        assert_eq!(remembered.query, expression);
+        assert!(matches!(
+            remembered.refill.as_ref().map(|refill| &refill.kind),
+            Some(RefillKind::Result { evaluated: true })
+        ));
+        let previous = std::mem::replace(&mut search.previous_input, remembered);
+        search.fill_query("", window, cx);
+        search.refresh_results("", window, cx);
+        search.restore_previous_input(window, cx);
         search.refresh_results(expression, window, cx);
         assert_eq!(search.results.refillable_text(), Some("0.375"));
         search.key_down(&key(false), window, cx);
         assert_eq!(search.input.read(cx).text(), original);
+        search.previous_input = previous;
     }
 
     #[cfg(target_os = "windows")]
