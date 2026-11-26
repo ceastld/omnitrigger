@@ -33,7 +33,7 @@ pub(super) struct Color {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct ColorContrast {
+pub(super) struct ColorComparison {
     pub(super) output: String,
     pub(super) swatches: [u32; 2],
 }
@@ -42,6 +42,7 @@ pub(super) struct ColorContrast {
 pub(super) enum ColorError {
     Incomplete,
     IncompleteContrast,
+    IncompleteDifference,
     Invalid,
     InvalidFormat,
     OutsideSrgbGamut,
@@ -49,6 +50,7 @@ pub(super) enum ColorError {
     InvalidPalette,
     MixColorSpace,
     TransparentContrast,
+    TransparentDifference,
     TransparentTextBackground,
 }
 
@@ -57,6 +59,7 @@ impl ColorError {
         match self {
             Self::Incomplete => "输入 HEX、RGB、HSL、HWB、OKLab、OKLCH 或 CSS 颜色名",
             Self::IncompleteContrast => "输入两个颜色，例如 对比度: #fff vs #000",
+            Self::IncompleteDifference => "输入两个颜色，例如 颜色: 色差 red vs lime",
             Self::Invalid => "检查颜色名、HEX 位数或颜色通道范围",
             Self::InvalidFormat => "目标颜色格式可用 HEX、RGB、HSL、HWB、OKLab 或 OKLCH",
             Self::OutsideSrgbGamut => "这个颜色超出 sRGB 色域",
@@ -66,6 +69,7 @@ impl ColorError {
             }
             Self::MixColorSpace => "颜色混合支持 in srgb、in srgb-linear 或 in oklab",
             Self::TransparentContrast => "计算对比度需要两个不透明颜色",
+            Self::TransparentDifference => "计算色差需要两个不透明颜色",
             Self::TransparentTextBackground => "需要不透明底色，也可先叠加到实际背景上",
         }
     }
@@ -731,21 +735,48 @@ fn color_pair<'a>(input: &'a str, local: &str, english: &str) -> Option<(&'a str
     })
 }
 
-pub(super) fn calculate_contrast(input: &str) -> Result<ColorContrast, ColorError> {
+fn opaque_color_pair(
+    input: &str,
+    incomplete: ColorError,
+    transparent: ColorError,
+) -> Result<[Channels; 2], ColorError> {
     let input = normalize(input);
-    let (first, second) =
-        color_pair(&input, "对比", " vs ").ok_or(ColorError::IncompleteContrast)?;
+    let (first, second) = color_pair(&input, "对比", " vs ").ok_or(incomplete)?;
     let first = Channels::parse(first.trim())?;
     let second = Channels::parse(second.trim())?;
     if first.alpha.unwrap_or(255) != 255 || second.alpha.unwrap_or(255) != 255 {
-        return Err(ColorError::TransparentContrast);
+        return Err(transparent);
     }
+    Ok([first, second])
+}
+
+pub(super) fn calculate_contrast(input: &str) -> Result<ColorComparison, ColorError> {
+    let [first, second] = opaque_color_pair(
+        input,
+        ColorError::IncompleteContrast,
+        ColorError::TransparentContrast,
+    )?;
     let first_luminance = relative_luminance(first.rgb);
     let second_luminance = relative_luminance(second.rgb);
     let ratio = contrast_ratio(first_luminance, second_luminance);
     let ratio = format_result(ratio).map_err(|_| ColorError::Invalid)?;
-    Ok(ColorContrast {
+    Ok(ColorComparison {
         output: format!("{ratio}:1"),
+        swatches: [first.swatch(), second.swatch()],
+    })
+}
+
+pub(super) fn calculate_color_difference(input: &str) -> Result<ColorComparison, ColorError> {
+    let [first, second] = opaque_color_pair(
+        input,
+        ColorError::IncompleteDifference,
+        ColorError::TransparentDifference,
+    )?;
+    let [l1, a1, b1] = oklab_from_srgb(first.rgb);
+    let [l2, a2, b2] = oklab_from_srgb(second.rgb);
+    let delta = ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt();
+    Ok(ColorComparison {
+        output: format_result(delta).map_err(|_| ColorError::Invalid)?,
         swatches: [first.swatch(), second.swatch()],
     })
 }
@@ -753,6 +784,30 @@ pub(super) fn calculate_contrast(input: &str) -> Result<ColorContrast, ColorErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compares_opaque_srgb_colors_by_oklab_distance() {
+        let comparison = calculate_color_difference("red vs lime").unwrap();
+        let distance = comparison.output.parse::<f64>().unwrap();
+        assert!((distance - 0.519814).abs() < 0.000002);
+        assert_eq!(comparison.swatches, [0xff0000ff, 0x00ff00ff]);
+        assert_eq!(
+            calculate_color_difference("lime 对比 red").unwrap().output,
+            comparison.output,
+        );
+        assert_eq!(
+            calculate_color_difference("#fff vs white").unwrap().output,
+            "0"
+        );
+        assert_eq!(
+            calculate_color_difference("red vs #fffa"),
+            Err(ColorError::TransparentDifference),
+        );
+        assert_eq!(
+            calculate_color_difference("red"),
+            Err(ColorError::IncompleteDifference),
+        );
+    }
 
     #[test]
     fn picks_the_higher_contrast_of_black_or_white_for_an_opaque_background() {
@@ -969,7 +1024,7 @@ mod tests {
         ] {
             assert_eq!(
                 calculate_contrast(input),
-                Ok(ColorContrast {
+                Ok(ColorComparison {
                     output: ratio.to_owned(),
                     swatches
                 }),

@@ -4087,6 +4087,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "比较两个色值的 OKLab 色差",
+        query: "颜色: 色差 red vs lime",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "将半透明颜色叠加到底色",
         query: "颜色: #0080FF80 叠加 #fff",
     },

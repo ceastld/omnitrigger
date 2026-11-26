@@ -97,8 +97,8 @@ use calendar::{
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
 use color::{
-    calculate_contrast, convert_color, convert_color_to_hex, hex_for_swatch, make_color_palette,
-    ColorError, ColorMixSpace,
+    calculate_color_difference, calculate_contrast, convert_color, convert_color_to_hex,
+    hex_for_swatch, make_color_palette, ColorComparison, ColorError, ColorMixSpace,
 };
 use complex::{calculate_complex, ComplexError};
 use conversion::{
@@ -393,7 +393,7 @@ enum ValueKind {
     },
     Conversion(Option<String>),
     Color(u32),
-    ColorContrast([u32; 2]),
+    ColorPair([u32; 2]),
     Scatter(scatter_plot::ScatterPlot),
     BoxPlot(box_plot::BoxPlot),
     BinPlot(bin_plot::BinPlot),
@@ -1239,6 +1239,9 @@ impl Results {
                     Self::text_value(transform_semver(term).map_err(ValueError::Identifier))
                 }
                 Scope::Color => {
+                    if let Some(input) = batch_arguments(term, "色差", "delta-e-ok") {
+                        return Self::color_comparison_value(calculate_color_difference(input));
+                    }
                     let palette = batch_arguments(term, "色阶", "palette")
                         .map(|input| (input, ColorMixSpace::Srgb))
                         .or_else(|| {
@@ -1264,14 +1267,7 @@ impl Results {
                         )
                     }
                 }
-                Scope::ColorContrast => Self::Value(
-                    calculate_contrast(term)
-                        .map(|contrast| ResultValue {
-                            text: contrast.output,
-                            kind: ValueKind::ColorContrast(contrast.swatches),
-                        })
-                        .map_err(ValueError::Color),
-                ),
+                Scope::ColorContrast => Self::color_comparison_value(calculate_contrast(term)),
                 Scope::TextCount => Self::text_value(count_text(term).map_err(ValueError::Text)),
                 Scope::TextTools => match text_tools::text_csv_report(term) {
                     Some(report) => Self::table_value(report.map_err(ValueError::Text)),
@@ -1644,6 +1640,17 @@ impl Results {
 
     fn table_value(result: Result<String, ValueError>) -> Self {
         Self::table_value_with_columns(result, table_preview::MAX_VISIBLE_COLUMNS)
+    }
+
+    fn color_comparison_value(result: Result<ColorComparison, ColorError>) -> Self {
+        Self::Value(
+            result
+                .map(|comparison| ResultValue {
+                    text: comparison.output,
+                    kind: ValueKind::ColorPair(comparison.swatches),
+                })
+                .map_err(ValueError::Color),
+        )
     }
 
     fn table_value_with_columns(result: Result<String, ValueError>, columns: usize) -> Self {
@@ -5373,7 +5380,7 @@ impl QuickSearch {
                 let extra_height = value_extra_height(result, line_limit);
                 let swatches: &[u32] = match &output.kind {
                     ValueKind::Color(color) => std::slice::from_ref(color),
-                    ValueKind::ColorContrast(colors) => colors,
+                    ValueKind::ColorPair(colors) => colors,
                     _ => &[],
                 };
                 let value = div()
