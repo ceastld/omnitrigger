@@ -17,6 +17,7 @@ use super::csv_tools::csv_cell;
 use super::duration::{
     elapsed_duration, format_clock_duration, format_duration_unit, DurationError, NANOS_PER_SECOND,
 };
+use super::text_tools::logical_newline_pattern;
 
 const MAX_TARGET_ZONES: usize = 8;
 const MAX_SERIES_TIMESTAMPS: usize = 128;
@@ -80,7 +81,7 @@ impl TimestampError {
             Self::IntervalEndpoints => "用 到 或 至 隔开两个带时区的时间",
             Self::IntervalOutput(error) => error.message(),
             Self::AbsoluteIntervalsArguments => {
-                "填写 1 至 32 段 [开始,结束]，例如 [[\"0s\",\"10s\"],[\"5s\",\"15s\"]]"
+                "填写 1 至 32 段时间，例如 0s 到 10s; 5s 到 15s，也可用 JSON 数组"
             }
             Self::AbsoluteIntervalOrder => "每段时间的结束须晚于开始",
             Self::EqualIntervalsArguments => {
@@ -859,20 +860,37 @@ fn parse_absolute_intervals(
     now: DateTime<Utc>,
 ) -> Result<Vec<AbsoluteInterval>, TimestampError> {
     let invalid = TimestampError::AbsoluteIntervalsArguments;
-    let intervals: Vec<[String; 2]> = serde_json::from_str(input).map_err(|_| invalid)?;
-    if !(1..=MAX_ABSOLUTE_INTERVALS).contains(&intervals.len()) {
+    let parse = |(start, end): (&str, &str)| {
+        let start = interval_endpoint(start.trim(), Some(now))?;
+        let end = interval_endpoint(end.trim(), Some(now))?;
+        if start >= end {
+            return Err(TimestampError::AbsoluteIntervalOrder);
+        }
+        Ok((start, end))
+    };
+    if input.trim_start().starts_with('[') {
+        let intervals: Vec<[String; 2]> = serde_json::from_str(input).map_err(|_| invalid)?;
+        if !(1..=MAX_ABSOLUTE_INTERVALS).contains(&intervals.len()) {
+            return Err(invalid);
+        }
+        return intervals
+            .iter()
+            .map(|[start, end]| parse((start, end)))
+            .collect();
+    }
+
+    let spans = logical_newline_pattern()
+        .split(input)
+        .flat_map(|line| line.split(';'))
+        .filter(|span| !span.trim().is_empty())
+        .take(MAX_ABSOLUTE_INTERVALS + 1)
+        .collect::<Vec<_>>();
+    if !(1..=MAX_ABSOLUTE_INTERVALS).contains(&spans.len()) {
         return Err(invalid);
     }
-    intervals
+    spans
         .into_iter()
-        .map(|[start, end]| {
-            let start = interval_endpoint(start.trim(), Some(now))?;
-            let end = interval_endpoint(end.trim(), Some(now))?;
-            if start >= end {
-                return Err(TimestampError::AbsoluteIntervalOrder);
-            }
-            Ok((start, end))
-        })
+        .map(|span| split_interval_endpoints(span, invalid).and_then(parse))
         .collect()
 }
 
@@ -1059,15 +1077,21 @@ fn interval_nanos(
     now: DateTime<Utc>,
     invalid: TimestampError,
 ) -> Result<(i128, i128), TimestampError> {
-    let (start, end) = input.split_once(['到', '至']).ok_or(invalid)?;
-    let timeline_nanos = |value: &str| {
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(invalid);
-        }
-        interval_endpoint(value, Some(now)).map(unix_nanos)
-    };
+    let (start, end) = split_interval_endpoints(input, invalid)?;
+    let timeline_nanos = |value: &str| interval_endpoint(value, Some(now)).map(unix_nanos);
     Ok((timeline_nanos(start)?, timeline_nanos(end)?))
+}
+
+fn split_interval_endpoints(
+    input: &str,
+    invalid: TimestampError,
+) -> Result<(&str, &str), TimestampError> {
+    let (start, end) = input.split_once(['到', '至']).ok_or(invalid)?;
+    let (start, end) = (start.trim(), end.trim());
+    if start.is_empty() || end.is_empty() {
+        return Err(invalid);
+    }
+    Ok((start, end))
 }
 
 fn daily_durations(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
@@ -1681,6 +1705,41 @@ mod tests {
                 "开始UTC,结束UTC,时长,覆盖数",
                 "\r\n1970-01-01T00:00:00Z,1970-01-01T00:00:00.000000001Z,00:00:00.000000001,2",
             ))
+        );
+    }
+
+    #[test]
+    fn accepts_inline_and_multiline_absolute_interval_lists() {
+        let now = DateTime::UNIX_EPOCH;
+        let pairs = r#"[["现在","10s"],["5s","15s"],["20s","26s"]]"#;
+        let text = "现在 到 10s；5s 至 15s\r\n\r\n20s到26s";
+        for operation in [
+            "区间合并",
+            "区间交集",
+            "区间差集",
+            "区间空档",
+            "区间冲突CSV",
+            "区间层数CSV",
+            "覆盖时长",
+        ] {
+            let expected = convert_timestamp(&format!("{operation} {pairs}"), now).unwrap();
+            assert_eq!(
+                convert_timestamp(&format!("{operation} {text}"), now),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            convert_timestamp("覆盖时长 2s 到 1s", now),
+            Err(TimestampError::AbsoluteIntervalOrder)
+        );
+        assert_eq!(
+            convert_timestamp("区间合并 0s 到", now),
+            Err(TimestampError::AbsoluteIntervalsArguments)
+        );
+        let excess = "0s到1s;".repeat(MAX_ABSOLUTE_INTERVALS + 1);
+        assert_eq!(
+            convert_timestamp(&format!("覆盖时长 {excess}"), now),
+            Err(TimestampError::AbsoluteIntervalsArguments)
         );
     }
 

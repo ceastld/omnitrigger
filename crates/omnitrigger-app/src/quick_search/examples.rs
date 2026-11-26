@@ -3327,7 +3327,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     Example {
         icon: Icon::Clock,
         title: "按同时覆盖的数量拆分绝对时间区间",
-        query: r#"时间戳: 区间层数CSV [["0s","10s"],["5s","15s"],["6s","9s"]]"#,
+        query: "时间戳: 区间层数CSV 0s 到 10s; 5s 到 15s; 6s 到 9s",
     },
     Example {
         icon: Icon::Clock,
