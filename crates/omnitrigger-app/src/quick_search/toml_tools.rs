@@ -25,6 +25,7 @@ pub(super) enum TomlError {
     NonFiniteFloat,
     InvalidPointer,
     RegexPattern,
+    TypeSearchArguments,
     MissingPointer,
     Serialization,
     Json(JsonError),
@@ -42,12 +43,15 @@ impl TomlError {
         match self {
             Self::Incomplete => "输入 TOML 内容，例如 TOML: 校验 port = 8000",
             Self::UnknownOperation => {
-                "用 校验、取值、取多路径、转JSON、从JSON、叶子CSV、正则叶子CSV 或 正则字符串CSV 处理 TOML"
+                "用 校验、取值、取多路径、转JSON、从JSON、叶子CSV、正则叶子CSV、正则字符串CSV 或 找类型CSV 处理 TOML"
             }
             Self::Invalid { .. } => "请检查 TOML 语法",
             Self::NonFiniteFloat => "JSON 无法表示 TOML 中的 inf 或 nan",
             Self::InvalidPointer => "填写有效路径，例如 /server/port，空路径可写成 \"\"",
             Self::RegexPattern => "用双引号括起有效的正则表达式，再输入 TOML",
+            Self::TypeSearchArguments => {
+                "输入字符串或数组指定类型，可用 string、integer、float、boolean、datetime、array、table"
+            }
             Self::MissingPointer => "TOML 没有该路径，数组下标从 0 开始",
             Self::Serialization => "无法生成 JSON",
             Self::Json(error) => error.message(),
@@ -73,6 +77,7 @@ enum TomlOperation {
     LeavesCsv,
     RegexLeavesCsv,
     RegexStringsCsv,
+    FindTypesCsv,
     Select,
     SelectPaths,
 }
@@ -88,6 +93,7 @@ impl TomlOperation {
             "叶子csv" | "leaves-csv" => Ok(Self::LeavesCsv),
             "正则叶子csv" | "regex-leaves-csv" => Ok(Self::RegexLeavesCsv),
             "正则字符串csv" | "regex-strings-csv" => Ok(Self::RegexStringsCsv),
+            "找类型csv" | "find-type-csv" => Ok(Self::FindTypesCsv),
             "取值" | "get" => Ok(Self::Select),
             "取多路径" | "get-paths" => Ok(Self::SelectPaths),
             "" => Err(TomlError::Incomplete),
@@ -152,7 +158,10 @@ pub(super) fn toml_csv_report(input: &str) -> Option<Result<String, TomlError>> 
     let operation = TomlOperation::parse(operation).ok()?;
     matches!(
         operation,
-        TomlOperation::LeavesCsv | TomlOperation::RegexLeavesCsv | TomlOperation::RegexStringsCsv
+        TomlOperation::LeavesCsv
+            | TomlOperation::RegexLeavesCsv
+            | TomlOperation::RegexStringsCsv
+            | TomlOperation::FindTypesCsv
     )
     .then(|| run_toml_operation(operation, source))
 }
@@ -206,6 +215,28 @@ fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, Tom
                 }
             })
         }
+        TomlOperation::FindTypesCsv => {
+            let (argument, source) =
+                super::operators::json_argument_and_tail::<TypeArgument>(source)
+                    .ok_or(TomlError::TypeSearchArguments)?;
+            let types = match argument {
+                TypeArgument::One(kind) => vec![kind],
+                TypeArgument::Many(kinds) => kinds,
+            };
+            if !(1..=7).contains(&types.len())
+                || types.iter().any(|kind| {
+                    !matches!(
+                        kind.as_str(),
+                        "string" | "integer" | "float" | "boolean" | "datetime" | "array" | "table"
+                    )
+                })
+            {
+                return Err(TomlError::TypeSearchArguments);
+            }
+            toml_leaves_csv(parse_toml_table(source)?, |_, kind, _| {
+                types.iter().any(|item| item == kind)
+            })
+        }
         TomlOperation::Json => write_toml_json(&toml::Value::Table(parse_toml_table(source)?)),
         TomlOperation::Select => select_toml_value(source),
         TomlOperation::SelectPaths => select_toml_paths(source),
@@ -219,6 +250,13 @@ fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, Tom
             Ok(output)
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum TypeArgument {
+    One(String),
+    Many(Vec<String>),
 }
 
 fn json_table(input: &str, depth: usize) -> Result<toml::Table, TomlError> {
@@ -603,6 +641,35 @@ mod tests {
             transform_toml("regex-strings-csv \"^other$\" name = '北京'").as_deref(),
             Ok("路径,类型,值")
         );
+    }
+
+    #[test]
+    fn finds_toml_leaves_by_native_types_in_report_order() {
+        let source = concat!(
+            "first = [8000, '8001', [8002]]\n",
+            "enabled = true\n",
+            "date = 2024-02-29\n",
+            "ratio = 2.5\n",
+            "empty = []\n",
+            "[group]\n",
+        );
+        let query = format!(r#"找类型CSV ["integer","datetime","array"] {source}"#);
+        let expected = concat!(
+            "路径,类型,值\r\n/date,datetime,2024-02-29\r\n/empty,array,[]",
+            "\r\n/first/0,integer,8000\r\n/first/2/0,integer,8002",
+        );
+        assert_eq!(transform_toml(&query).as_deref(), Ok(expected));
+        assert_eq!(toml_csv_report(&query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_toml(&format!(r#"find-type-csv "table" {source}"#)).as_deref(),
+            Ok("路径,类型,值\r\n/group,table,{}")
+        );
+        for types in ["[]", "123", r#"["number"]"#, r#"["integer",null]"#] {
+            assert_eq!(
+                transform_toml(&format!("找类型CSV {types} {source}")),
+                Err(TomlError::TypeSearchArguments)
+            );
+        }
     }
 
     #[test]

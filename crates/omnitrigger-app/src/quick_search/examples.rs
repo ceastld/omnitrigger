@@ -5109,6 +5109,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按原生类型查找 TOML 配置值",
+        query: "TOML: 找类型CSV [\"integer\",\"datetime\"]\nport = 8000\ndate = 2024-02-29\nlabel = '8000'",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "压缩 JSON",
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },
