@@ -85,6 +85,11 @@ const SHORTCUTS: &[[&str; 3]] = &[
     ],
     ["JSON 指针表", "Alt+Enter", "选中本页第一项的原值"],
     [
+        "JSON 按键对比表",
+        "Alt+Enter",
+        "选中本页第一条变更对应的原始记录",
+    ],
+    [
         "JSON 对比CSV",
         "Alt+Enter",
         "选中本页第一项的左值或新增的右值",

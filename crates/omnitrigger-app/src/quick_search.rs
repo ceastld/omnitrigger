@@ -5260,6 +5260,20 @@ impl QuickSearch {
         if scope != Scope::Json {
             return None;
         }
+        let keyed_columns = match column {
+            1 if table.data_cell(row, 3).is_some_and(str::is_empty) => Some((4, 6, true)),
+            1 | 3 | 5 => Some((3, 5, false)),
+            4 | 6 => Some((4, 6, true)),
+            _ => None,
+        };
+        let keyed = keyed_columns.and_then(|(position, value, right)| {
+            json_tools::json_keyed_diff_report_source_range(
+                term,
+                table.data_cell(row, position)?.parse().ok()?,
+                table.data_cell(row, value)?,
+                right,
+            )
+        });
         let locator = table.data_cell(row, 1)?;
         let difference_column = match column {
             1 if table.data_cell(row, 3).is_some_and(str::is_empty) => 4,
@@ -5285,7 +5299,7 @@ impl QuickSearch {
                 table.data_cell(row, 4)?,
             )
         });
-        let range = if let Some(range) = difference.or(line_pointer) {
+        let range = if let Some(range) = keyed.or(difference).or(line_pointer) {
             range
         } else if column != 1 {
             return None;

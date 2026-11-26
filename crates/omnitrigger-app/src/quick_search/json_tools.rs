@@ -457,6 +457,34 @@ pub(super) fn json_diff_report_source_range(
     raw_value_span(query, value).ok()
 }
 
+pub(super) fn json_keyed_diff_report_source_range(
+    query: &str,
+    position: usize,
+    expected_raw: &str,
+    right: bool,
+) -> Option<Range<usize>> {
+    let (operation, arguments) = split_json_operation(query)?;
+    if !matches!(
+        JsonCsvOperation::from_name(&operation.to_ascii_lowercase()),
+        Some(JsonCsvOperation::KeyedDifferences)
+    ) {
+        return None;
+    }
+    let (_, sources) = pointer_and_source(arguments).ok()?;
+    let (left, right_source) = json_value_and_source(sources, JsonError::Invalid).ok()?;
+    let root = if right {
+        serde_json::from_str::<&RawValue>(right_source).ok()?
+    } else {
+        left
+    };
+    let index = position.checked_sub(1)?;
+    let record = read_json_array(root.get()).ok()?.get(index).copied()?.get();
+    if record != expected_raw {
+        return None;
+    }
+    raw_value_span(query, record).ok()
+}
+
 pub(super) fn json_line_pointer_report_source_range(
     query: &str,
     line: usize,
@@ -5798,6 +5826,22 @@ mod tests {
             transform_json(r#"按键对比CSV /id [] [{"id":1},{"id":1e0}]"#),
             Err(JsonError::DuplicateComparisonKey)
         );
+    }
+
+    #[test]
+    fn locates_each_side_of_a_keyed_json_comparison_in_its_original_array() {
+        let query = concat!(
+            r#"按键对比CSV "/id" [{"id":1.00,"qty":2}, {"id":2}]"#,
+            r#" [{"id":3}, {"id":1e0,  "qty":3}]"#,
+        );
+        let left = r#"{"id":1.00,"qty":2}"#;
+        let right = r#"{"id":1e0,  "qty":3}"#;
+        let left_range = json_keyed_diff_report_source_range(query, 1, left, false).unwrap();
+        let right_range = json_keyed_diff_report_source_range(query, 2, right, true).unwrap();
+        assert_eq!(&query[left_range], left);
+        assert_eq!(&query[right_range], right);
+        assert!(json_keyed_diff_report_source_range(query, 1, right, true).is_none());
+        assert!(json_keyed_diff_report_source_range(query, 0, left, false).is_none());
     }
 
     #[test]
