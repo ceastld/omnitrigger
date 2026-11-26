@@ -1875,7 +1875,23 @@ impl Results {
         };
         matches!(
             input_file_extension(Path::new(path)).as_deref(),
-            Some("txt" | "md" | "log" | "csv" | "tsv" | "json" | "jsonl" | "ndjson" | "toml")
+            Some(
+                "txt"
+                    | "md"
+                    | "markdown"
+                    | "log"
+                    | "csv"
+                    | "tsv"
+                    | "json"
+                    | "jsonl"
+                    | "ndjson"
+                    | "toml"
+                    | "yaml"
+                    | "yml"
+                    | "ini"
+                    | "cfg"
+                    | "conf"
+            )
         )
         .then_some(path.as_str())
     }
@@ -10959,6 +10975,22 @@ mod tests {
             matches.selected_text_file(0),
             Some(r"C:\Reports\Batch-13.csv")
         );
+    }
+
+    #[test]
+    fn previews_common_text_configuration_extensions_as_raw_text() {
+        let index = SearchIndex::default();
+        for extension in ["YAML", "yml", "ini", "cfg", "CONF", "Markdown"] {
+            let path = format!("C:/Settings/project.{extension}");
+            index.recent.file_previews.record(&path);
+            assert_eq!(
+                index.results("最近预览:").selected_text_file(0),
+                Some(path.as_str())
+            );
+            assert_eq!(input_file_query_prefix(Path::new(&path)), "文本: 原文 ");
+        }
+        index.recent.file_previews.record("C:/Settings/project.exe");
+        assert_eq!(index.results("最近预览:").selected_text_file(0), None);
     }
 
     #[test]
