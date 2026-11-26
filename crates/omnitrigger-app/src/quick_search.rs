@@ -5218,7 +5218,7 @@ impl QuickSearch {
             }
             range
         } else {
-            json_tools::json_leaf_report_source_range(term, locator, table.data_cell(row, 3)?)?
+            json_tools::json_pointer_report_source_range(term, locator, table.data_cell(row, 3)?)?
         };
         let (_, operand) = query.split_once([':', '：'])?;
         let offset = query.len() - operand.trim_start().len();

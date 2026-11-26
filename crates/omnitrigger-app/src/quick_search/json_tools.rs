@@ -373,18 +373,23 @@ pub(super) fn json_line_report_source_range(
     Some((offset + range.start..offset + range.end, original_column))
 }
 
-pub(super) fn json_leaf_report_source_range(
+pub(super) fn json_pointer_report_source_range(
     query: &str,
     pointer: &str,
     expected_raw: &str,
 ) -> Option<Range<usize>> {
-    let (operation, source) = split_json_operation(query)?;
-    if !matches!(
-        JsonCsvOperation::from_name(&operation.to_ascii_lowercase()),
-        Some(JsonCsvOperation::Leaves)
-    ) {
-        return None;
-    }
+    let (operation, arguments) = split_json_operation(query)?;
+    let operation = JsonCsvOperation::from_name(&operation.to_ascii_lowercase())?;
+    let source = match operation {
+        JsonCsvOperation::Leaves => arguments,
+        JsonCsvOperation::Keys
+        | JsonCsvOperation::KeyPatterns
+        | JsonCsvOperation::Values
+        | JsonCsvOperation::ValuePatterns
+        | JsonCsvOperation::PointerPatterns
+        | JsonCsvOperation::Types => json_value_and_source(arguments, JsonError::Invalid).ok()?.1,
+        _ => return None,
+    };
     let root = serde_json::from_str::<&RawValue>(source).ok()?;
     let value = select_json_path(root, pointer).ok()?.get();
     if value != expected_raw {
@@ -5474,19 +5479,40 @@ mod tests {
     #[test]
     fn locates_a_json_csv_leaf_by_pointer_and_preserves_its_raw_spelling() {
         let query = r#"叶子CSV {"a/b":{"x~y":1.50},"second":1.50,"s":"\u5317京"}"#;
-        let first = json_leaf_report_source_range(query, "/a~1b/x~0y", "1.50").unwrap();
-        let second = json_leaf_report_source_range(query, "/second", "1.50").unwrap();
+        let first = json_pointer_report_source_range(query, "/a~1b/x~0y", "1.50").unwrap();
+        let second = json_pointer_report_source_range(query, "/second", "1.50").unwrap();
         assert_eq!(first.start, query.find("1.50").unwrap());
         assert_eq!(second.start, query.rfind("1.50").unwrap());
         let string = r#""\u5317京""#;
-        let span = json_leaf_report_source_range(query, "/s", string).unwrap();
+        let span = json_pointer_report_source_range(query, "/s", string).unwrap();
         assert_eq!(&query[span], string);
         assert_eq!(
-            json_leaf_report_source_range("叶子CSV {}", "", "{}"),
+            json_pointer_report_source_range("叶子CSV {}", "", "{}"),
             Some(10..12)
         );
-        assert!(json_leaf_report_source_range(query, "/second", "1.5").is_none());
-        assert!(json_leaf_report_source_range("对比CSV 1 2", "", "1").is_none());
+        assert!(json_pointer_report_source_range(query, "/second", "1.5").is_none());
+        assert!(json_pointer_report_source_range("对比CSV 1 2", "", "1").is_none());
+    }
+
+    #[test]
+    fn locates_json_pointer_search_hits_after_their_search_arguments() {
+        let raw = r#""\u5317京""#;
+        for operation in [
+            r#"找键CSV "a/b""#,
+            r#"正则找键CSV "^a/b$""#,
+            r#"找值CSV "北京""#,
+            r#"正则找值CSV "^北""#,
+            r#"正则找路径CSV "^/a~1b$""#,
+            r#"找类型CSV ["string","number"]"#,
+        ] {
+            let query = format!("{operation}\r\n{{\"a/b\":{raw},\"else\":\"南昌\"}}");
+            let range = json_pointer_report_source_range(&query, "/a~1b", raw).unwrap();
+            assert_eq!(&query[range], raw, "{operation}");
+        }
+        let query = "找类型CSV \"object\"\n {\n  \"a\":1.50\n}";
+        let raw = "{\n  \"a\":1.50\n}";
+        let range = json_pointer_report_source_range(query, "", raw).unwrap();
+        assert_eq!(&query[range], raw);
     }
 
     #[test]
