@@ -3051,7 +3051,7 @@ impl QuickSearch {
         self.activate_input(window, cx);
     }
 
-    fn replace_input_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn replace_input_matches(&mut self, all: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(find) = &self.input_find else {
             return;
         };
@@ -3064,15 +3064,34 @@ impl QuickSearch {
             return;
         }
         let (needle, replacement) = (needle.text_ref(), replacement.text_ref());
-        let text = self.input.read(cx).text_ref();
-        let count = text.matches(needle).count();
+        let input = self.input.read(cx);
+        let text = input.text_ref();
+        let (range, count) = if all {
+            (0..text.len(), text.matches(needle).count())
+        } else {
+            let selection = input.selection();
+            let range = if &text[selection.clone()] == needle {
+                Some(selection)
+            } else {
+                find_input_range(text, needle, selection, false)
+            };
+            let Some(range) = range else {
+                return;
+            };
+            (range, 1)
+        };
         if count == 0 || !input_replacement_fits(text, needle, replacement, count) {
             return;
         }
-        let len = text.encode_utf16().count();
-        let edited = text.replace(needle, replacement);
+        let start = text[..range.start].encode_utf16().count();
+        let end = start + text[range].encode_utf16().count();
+        let edited = if all {
+            text.replace(needle, replacement)
+        } else {
+            replacement.to_owned()
+        };
         self.input.update(cx, |input, cx| {
-            input.replace_text_in_range(Some(0..len), &edited, window, cx);
+            input.replace_text_in_range(Some(start..end), &edited, window, cx);
         });
         self.finish_input_find(None, window, cx);
     }
@@ -5424,13 +5443,15 @@ impl QuickSearch {
                 return;
             }
             let cancels = key.key == "escape" && modifiers == 0;
+            let replaces_one = replacement.is_some() && modifiers == 1 && key.modifiers.alt;
             let confirms = key.key == "enter"
                 && (modifiers == 0
+                    || replaces_one
                     || (replacement.is_none() && modifiers == 1 && key.modifiers.shift));
             if cancels || confirms {
                 if !event.is_held {
                     if confirms && replacement.is_some() {
-                        self.replace_input_matches(window, cx);
+                        self.replace_input_matches(!replaces_one, window, cx);
                     } else {
                         self.finish_input_find(confirms.then_some(key.modifiers.shift), window, cx);
                     }
@@ -7404,13 +7425,17 @@ impl QuickSearch {
             text.matches(needle).count()
         };
         let replacement = find.replacement.as_ref();
-        let fits = replacement.is_none_or(|replacement| {
-            input_replacement_fits(text, needle, replacement.input.read(cx).text_ref(), count)
-        });
+        let fits = |count| {
+            replacement.is_none_or(|replacement| {
+                input_replacement_fits(text, needle, replacement.input.read(cx).text_ref(), count)
+            })
+        };
+        let fits_all = fits(count);
+        let fits_one = count > 0 && fits(1);
         let status = if needle.is_empty() {
             "输入关键词后查找".to_owned()
-        } else if !fits {
-            format!("替换后将超过 {INPUT_CHARACTER_LIMIT} 字符")
+        } else if !fits_all {
+            format!("全部替换将超过 {INPUT_CHARACTER_LIMIT} 字符")
         } else {
             format!("{count} 处匹配")
         };
@@ -7446,18 +7471,37 @@ impl QuickSearch {
                     .child(div().text_color(rgb(theme::TEXT_MUTED)).child(status))
                     .when(replacement.is_some(), |row| {
                         row.child(
-                            button(
-                                "replace-input-matches",
-                                "全部替换  Enter",
-                                Tone::Primary,
-                                count > 0 && fits,
-                            )
-                            .h(px(28.))
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.replace_input_matches(window, cx);
-                                },
-                            )),
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .child(
+                                    button(
+                                        "replace-one-input-match",
+                                        "替换一处  Alt+Enter",
+                                        Tone::Ghost,
+                                        fits_one,
+                                    )
+                                    .h(px(28.))
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.replace_input_matches(false, window, cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    button(
+                                        "replace-input-matches",
+                                        "全部替换  Enter",
+                                        Tone::Primary,
+                                        count > 0 && fits_all,
+                                    )
+                                    .h(px(28.))
+                                    .on_click(cx.listener(
+                                        |this, _, window, cx| {
+                                            this.replace_input_matches(true, window, cx);
+                                        },
+                                    )),
+                                ),
                         )
                     })
                     .when(replacement.is_none(), |row| {
@@ -10389,6 +10433,34 @@ mod tests {
             search.input.read(cx).text_ref(),
             "文本: 原文 😀\r\n\u{2028}a+"
         );
+        search.fill_query(query, window, cx);
+        let start = query.rfind("A+").unwrap();
+        let selection = start..start + 2;
+        search
+            .input
+            .update(cx, |input, cx| input.select_range(selection.clone(), cx));
+        search.key_down(&key("ctrl-h", false), window, cx);
+        let replacement = search
+            .input_find
+            .as_ref()
+            .unwrap()
+            .replacement
+            .as_ref()
+            .unwrap()
+            .input
+            .clone();
+        replacement.update(cx, |input, cx| input.set_text("北", cx));
+        search.key_down(&key("alt-enter", true), window, cx);
+        assert_eq!(search.input.read(cx).text_ref(), query);
+        search.key_down(&key("alt-enter", false), window, cx);
+        assert!(search.input_find.is_none());
+        assert_eq!(
+            search.input.read(cx).text_ref(),
+            "文本: 原文 😀A+\r\n北\u{2028}a+"
+        );
+        search.key_down(&key("ctrl-z", false), window, cx);
+        assert_eq!(search.input.read(cx).text_ref(), query);
+        assert_eq!(search.input.read(cx).selection(), selection);
     }
 
     #[cfg(target_os = "windows")]
