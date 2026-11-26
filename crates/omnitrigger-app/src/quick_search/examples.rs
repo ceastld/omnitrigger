@@ -8098,6 +8098,56 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 
 fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
     match scope {
+        Scope::Fraction => &[
+            "小数",
+            "decimal",
+            "千分位",
+            "grouped-decimal",
+            "舍入区间",
+            "rounding-interval",
+            "有效数字区间",
+            "significant-interval",
+            "舍入误差",
+            "rounding-error-csv",
+            "步长区间",
+            "step-rounding-interval",
+            "因数配对CSV",
+            "循环小数",
+            "有效数字",
+            "工程计数法",
+            "百分比",
+            "从百分比",
+            "取值表",
+            "取值CSV",
+            "精确采样",
+            "平均变化率",
+            "割线式",
+            "等差数列",
+            "等比数列",
+            "等差求和",
+            "等比求和",
+            "连分数",
+            "收敛分数",
+            "从连分数",
+            "从循环小数",
+            "比较",
+            "带分数",
+            "从带分数",
+            "限分母",
+            "限分母下界",
+            "限分母上界",
+            "质因数分解",
+            "因数统计",
+            "商和余数",
+            "同余方程",
+            "一次同余",
+            "裴蜀系数CSV",
+            "邻分数CSV",
+            "化简比例",
+            "就近对齐",
+            "向下对齐",
+            "向上对齐",
+        ],
         Scope::Equation => &[
             "验根",
             "求根",
@@ -8390,6 +8440,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Solid
         | Scope::Equation
         | Scope::LinearSystem
+        | Scope::Fraction
         | Scope::LinearFit
             if !term.is_empty()
                 && replaceable_tool_operations(scope).iter().any(|operation| {
@@ -8414,47 +8465,6 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "分数明"
                     | "分数明细"
             ) => {}
-        Scope::Fraction
-            if !term.is_empty()
-                && [
-                    "循环小数",
-                    "有效数字",
-                    "工程计数法",
-                    "百分比",
-                    "从百分比",
-                    "取值表",
-                    "取值CSV",
-                    "精确采样",
-                    "平均变化率",
-                    "割线式",
-                    "等差数列",
-                    "等比数列",
-                    "等差求和",
-                    "等比求和",
-                    "连分数",
-                    "收敛分数",
-                    "从连分数",
-                    "从循环小数",
-                    "比较",
-                    "带分数",
-                    "从带分数",
-                    "限分母",
-                    "限分母下界",
-                    "限分母上界",
-                    "质因数分解",
-                    "因数统计",
-                    "商和余数",
-                    "同余方程",
-                    "一次同余",
-                    "裴蜀系数CSV",
-                    "邻分数CSV",
-                    "化简比例",
-                    "就近对齐",
-                    "向下对齐",
-                    "向上对齐",
-                ]
-                .into_iter()
-                .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchConversion
             if matches!(
                 term,
@@ -9018,6 +9028,25 @@ mod tests {
     }
 
     #[test]
+    fn selects_fraction_rounding_arguments_in_active_queries() {
+        for (query, expected) in [
+            ("分数：舍入误差 5/7 to 3", Some("5/7 to 3")),
+            (
+                "fraction: step-rounding-interval 1/3 to 1/4 @ 1/12",
+                Some("1/3 to 1/4 @ 1/12"),
+            ),
+            ("分数: 舍入区间", None),
+            ("分数: 1.24", None),
+        ] {
+            assert_eq!(
+                query_argument_range(query).map(|range| &query[range]),
+                expected,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn selects_function_parameters_or_the_whole_exact_expression() {
         for (query, expected) in [
             ("root(-125/343,3)", Some(("-125/343,3", ")"))),
@@ -9163,6 +9192,13 @@ mod tests {
             (Scope::Matrix, "左零", "矩阵: 左零空间 ", "1,2; 2,4; 3,6"),
             (Scope::Color, "色差", "颜色: 色差 ", "red vs lime"),
             (Scope::Paper, "出", "纸张: 出血 ", "A4 @ 3 mm"),
+            (Scope::Fraction, "舍入区间", "分数: 舍入区间 ", "1.24 to 2"),
+            (
+                Scope::Fraction,
+                "有效数字区间",
+                "分数: 有效数字区间 ",
+                "1.00e1 to 3",
+            ),
             (
                 Scope::Statistics,
                 "二分类",
