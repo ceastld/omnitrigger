@@ -454,6 +454,7 @@ struct RememberedSearchInput {
     query: String,
     selection: Option<MessageSelection>,
     refill: Option<ResultRefill>,
+    table_pages: Option<TablePages>,
 }
 
 #[derive(Clone, Default)]
@@ -2790,6 +2791,7 @@ impl QuickSearch {
                         TableAxis::Rows => self.table_pages.rows = page,
                         TableAxis::Columns => self.table_pages.columns = page,
                     }
+                    self.remember_table_pages(cx);
                 }
                 LineJumpTarget::ExpandedPreview => {
                     if self
@@ -3997,6 +3999,26 @@ impl QuickSearch {
         if query.is_empty() {
             return;
         }
+        if let (Some(selection), Some(pages)) = (
+            self.previous_input.selection,
+            self.previous_input.table_pages,
+        ) {
+            self.restore_query_draft(
+                QueryDraft {
+                    text: query,
+                    selection,
+                    selected: 0,
+                    suggestion: None,
+                    table_pages: Some(pages),
+                    expanded_value: false,
+                    follow_value_end: false,
+                    refill: self.previous_input.refill.clone(),
+                },
+                window,
+                cx,
+            );
+            return;
+        }
         self.result_refill = self.previous_input.refill.clone();
         self.fill_query(query, window, cx);
         if let Some(selection) = self.previous_input.selection {
@@ -4027,7 +4049,18 @@ impl QuickSearch {
                 query,
                 selection: Some(selection),
                 refill,
+                table_pages: self.results.table_preview().map(|_| self.table_pages),
             };
+        }
+    }
+
+    fn remember_table_pages(&self, cx: &App) {
+        if self.has_temporary_query() {
+            return;
+        }
+        let mut last = self.index.recent.last_input.borrow_mut();
+        if last.query == self.input.read(cx).text_ref() {
+            last.table_pages = Some(self.table_pages);
         }
     }
 
@@ -5083,6 +5116,7 @@ impl QuickSearch {
         let next = movement.target(*page, count - 1);
         if next != *page {
             *page = next;
+            self.remember_table_pages(cx);
             cx.notify();
         }
         true
@@ -9191,6 +9225,7 @@ mod tests {
         let query = format!("CSV: 表格预览 {data}");
         search.fill_query(&query, window, cx);
         search.refresh_results(&query, window, cx);
+        search.remember_search_input(query.clone(), search.input.read(cx).selection_position());
         let pages = |search: &QuickSearch| (search.table_pages.rows, search.table_pages.columns);
         let press =
             |search: &mut QuickSearch, key, window: &mut Window, cx: &mut Context<QuickSearch>| {
@@ -9277,6 +9312,16 @@ mod tests {
         assert_eq!(pages(search), (1, 1));
         assert_eq!(search.input.read(cx).text(), query);
         assert_eq!(search.input.read(cx).selection(), selection);
+        let remembered = search.index.recent.last_input.borrow().clone();
+        let previous = std::mem::replace(&mut search.previous_input, remembered);
+        search.fill_query("", window, cx);
+        search.refresh_results("", window, cx);
+        assert_eq!(pages(search), (0, 0));
+        search.restore_previous_input(window, cx);
+        search.refresh_results(&query, window, cx);
+        assert_eq!(search.input.read(cx).text(), query);
+        assert_eq!(pages(search), (1, 1));
+        search.previous_input = previous;
         search.fill_query("CSV: 表格预览 x,y\n1,2", window, cx);
         search.refresh_results("CSV: 表格预览 x,y\n1,2", window, cx);
         assert_eq!(pages(search), (0, 0));
