@@ -47,10 +47,11 @@ use super::{
         format_clock_duration, DurationError,
     },
     fraction::{
-        calculate_fraction_with_variables, ensure_exact_size, format_engineering_notation,
-        format_significant_digits, format_square_root, format_square_root_sum,
-        fraction_alignment_converter, interpolate_fraction, parse_fraction_literal,
-        rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
+        calculate_fraction, calculate_fraction_with_variables, ensure_exact_size,
+        exact_tolerance_limit, format_engineering_notation, format_significant_digits,
+        format_square_root, format_square_root_sum, fraction_alignment_converter,
+        interpolate_fraction, parse_fraction_literal, rounded_decimal, valid_exact_tolerances,
+        FractionError, MAX_DECIMAL_PLACES,
     },
     json_tools::{
         json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens,
@@ -141,6 +142,7 @@ pub(super) enum CsvError {
     DuplicateComparisonKey,
     ColumnComparisonTooLarge,
     ColumnPairDifferenceArguments,
+    ColumnPairToleranceArguments,
     FillTooLarge,
     InterpolationColumns,
     ConstantColumnArguments,
@@ -389,6 +391,7 @@ impl CsvError {
             Self::DuplicateComparisonKey => "对比列需要每张表中的键组合各出现一次",
             Self::ColumnComparisonTooLarge => "表格对比结果超过 1 MiB，请缩小表格范围",
             Self::ColumnPairDifferenceArguments => "填写两个不同的列名或列号，例如 [\"原备注\",\"新备注\"]",
+            Self::ColumnPairToleranceArguments => "填写两个不同的列、相对容差和绝对容差，例如 [[1,2],\"1/100\",\"0.05\"]。相对容差须小于 1，且两个容差均须非负",
             Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
             Self::InterpolationColumns => "填写数值列和分组列，例如 [\"金额\",[\"地区\"]]",
             Self::ConstantColumnArguments => {
@@ -1391,6 +1394,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "两列差异" | "column-pair-differences" => return compare_csv_column_pair(input, false),
         "两列数值差异" | "numeric-column-pair-differences" => {
             return compare_csv_column_pair(input, true)
+        }
+        "两列超差" | "out-of-tolerance-columns" => {
+            return report_csv_column_pair_tolerance(input)
         }
         "数值对比列" | "compare-numeric-column" => {
             return compare_csv_column(input, ComparisonMode::Numeric)
@@ -3818,6 +3824,59 @@ fn compare_csv_column_pair(input: &str, numeric: bool) -> Result<String, CsvErro
             append_bounded_csv_row(
                 &mut output,
                 [row_label.as_str(), old, new].into_iter(),
+                CsvError::ColumnComparisonTooLarge,
+            )?;
+        }
+    }
+    Ok(output)
+}
+
+fn report_csv_column_pair_tolerance(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::ColumnPairToleranceArguments;
+    let ((columns, relative, absolute), data) =
+        json_argument_and_data::<([ColumnReference; 2], String, String)>(input, invalid)?;
+    let relative = calculate_fraction(&relative).map_err(|_| invalid)?;
+    let absolute = calculate_fraction(&absolute).map_err(|_| invalid)?;
+    if !valid_exact_tolerances(&relative, &absolute) {
+        return Err(invalid);
+    }
+    let rows = read_rows(data.strip_prefix('\u{feff}').unwrap_or(data), ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let sources = resolve_distinct_columns(header, &columns, invalid)?;
+    let &[old, new] = sources.as_slice() else {
+        return Err(invalid);
+    };
+    let mut output = String::from("数据行,原值,新值,新值减原值,容差");
+    for (index, record) in records.iter().enumerate() {
+        let (left_text, right_text) = (record[old].as_str(), record[new].as_str());
+        if left_text.trim().is_empty() || right_text.trim().is_empty() {
+            continue;
+        }
+        let row = index + 1;
+        let parse = |text| {
+            parse_fraction_literal(text).map_err(|_| CsvError::DataRowValue {
+                row,
+                cause: CsvError::InvalidNumber.message(),
+            })
+        };
+        let left = parse(left_text)?;
+        let right = parse(right_text)?;
+        let limit = exact_tolerance_limit(&left, &right, &relative, &absolute);
+        let difference = right - left;
+        if difference > limit || difference < -&limit {
+            let row_label = row.to_string();
+            let signed_difference = difference.to_string();
+            let allowed_difference = limit.to_string();
+            append_bounded_csv_row(
+                &mut output,
+                [
+                    row_label.as_str(),
+                    left_text,
+                    right_text,
+                    signed_difference.as_str(),
+                    allowed_difference.as_str(),
+                ]
+                .into_iter(),
                 CsvError::ColumnComparisonTooLarge,
             )?;
         }
@@ -8429,6 +8488,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "column-pair-differences"
             | "两列数值差异"
             | "numeric-column-pair-differences"
+            | "两列超差"
+            | "out-of-tolerance-columns"
             | "数值对比列"
             | "compare-numeric-column"
             | "正则提取多列"
@@ -15714,6 +15775,28 @@ null"#
         );
         assert!(matches!(
             transform_csv("累计合计列 [\"累计\",1,[]]\n金额\n1\n坏值"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn reports_only_signed_csv_differences_outside_the_exact_tolerance_limit() {
+        let query = concat!(
+            "两列超差 [[1,2],\"1/100\",\"1/20\"] 原值,新值\n",
+            "100,100.5\n100,102\n0,0.05\n0,0.1\n-100,-102\n,2",
+        );
+        let expected = concat!(
+            "数据行,原值,新值,新值减原值,容差",
+            "\r\n2,100,102,2,51/50\r\n4,0,0.1,1/10,1/20\r\n5,-100,-102,-2,51/50",
+        );
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected));
+        assert!(csv_table_preview(query).unwrap().is_ok());
+        assert_eq!(
+            transform_csv("两列超差 [[1,2],\"1\",\"0\"] 原值,新值"),
+            Err(CsvError::ColumnPairToleranceArguments)
+        );
+        assert!(matches!(
+            transform_csv("两列超差 [[1,2],\"0\",\"0\"] 原值,新值\n1,1\na,2"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
     }

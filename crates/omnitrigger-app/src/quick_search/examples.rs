@@ -6929,6 +6929,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 两列数值差异 [1,2]\n原金额,新金额\n1.50,3/2\n3,13/4",
     },
     Example {
+        icon: Icon::Layers,
+        title: "查找两列数值超出精确容差的记录",
+        query: "CSV: 两列超差 [[1,2],\"1/100\",\"0.05\"]\n原金额,新金额\n100,100.5\n100,102\n0,0.1",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按精确数值比较两张表中的金额",
         query: r#"CSV: 数值对比列 [["编号"],"金额"] ["编号,金额\n001,1.50\n002,2\n003,","金额,编号\n3/2,001\n5/2,002\n0,003"]"#,

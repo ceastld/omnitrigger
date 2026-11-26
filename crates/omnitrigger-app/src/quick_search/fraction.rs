@@ -798,6 +798,30 @@ fn split_fraction_comparison(input: &str) -> Option<(&str, NumberComparison, &st
     Some((&input[..start], comparison, &input[start + length..]))
 }
 
+pub(super) fn valid_exact_tolerances(relative: &BigRational, absolute: &BigRational) -> bool {
+    relative.numer().sign() != Sign::Minus
+        && relative.numer() < relative.denom()
+        && absolute.numer().sign() != Sign::Minus
+}
+
+pub(super) fn exact_tolerance_limit(
+    left: &BigRational,
+    right: &BigRational,
+    relative: &BigRational,
+    absolute: &BigRational,
+) -> BigRational {
+    let magnitude = |value: &BigRational| {
+        if value.numer().sign() == Sign::Minus {
+            -value
+        } else {
+            value.clone()
+        }
+    };
+    absolute
+        .clone()
+        .max(relative * magnitude(left).max(magnitude(right)))
+}
+
 pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
     calculate_fraction_with_variables(input, None, None)
 }
@@ -2535,22 +2559,12 @@ impl FractionParser<'_> {
             .next()
             .unwrap_or_else(|| BigRational::new(1.into(), 1_000_000_000.into()));
         let absolute = values.next().unwrap_or_default();
-        if relative.numer().sign() == Sign::Minus
-            || relative.numer() >= relative.denom()
-            || absolute.numer().sign() == Sign::Minus
-        {
+        if !valid_exact_tolerances(&relative, &absolute) {
             return Err(FractionError::ToleranceArguments);
         }
-        let magnitude = |value: &BigRational| {
-            if value.numer().sign() == Sign::Minus {
-                -value
-            } else {
-                value.clone()
-            }
-        };
-        let distance = magnitude(&(&left - &right));
-        let close =
-            distance <= absolute || distance <= relative * magnitude(&left).max(magnitude(&right));
+        let limit = exact_tolerance_limit(&left, &right, &relative, &absolute);
+        let difference = &left - &right;
+        let close = difference <= limit && difference >= -limit;
         Ok(BigRational::from_integer(u8::from(close).into()))
     }
 
