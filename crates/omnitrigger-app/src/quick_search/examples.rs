@@ -2520,6 +2520,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "根据传输进度计算剩余耗时",
+        query: "下载: 剩余耗时 1 GiB 已传 512 MiB 按 4 MiB/s to [s, min]",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用精确数据量和耗时求平均速率",
         query: "下载: 精确速率 1 GiB 用时 60秒 to MiB/s",
     },

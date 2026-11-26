@@ -34,6 +34,7 @@ pub(super) enum ConversionError {
     InvalidTransfer,
     InvalidTransferTimeUnit,
     InvalidTransferDuration,
+    InvalidTransferProgress,
     InvalidPace,
     InvalidPixelDensity,
     ScaleArguments,
@@ -89,6 +90,7 @@ impl ConversionError {
             Self::InvalidTransferDuration => {
                 "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
+            Self::InvalidTransferProgress => "已传数据量须在零和总数据量之间",
             Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
             Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
             Self::ScaleArguments => "输入比例和距离，例如 1:50000 3.2 cm to km",
@@ -687,7 +689,10 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
     }
     let input = normalize(query).replace(char::is_whitespace, " ");
     if let Some(arguments) = batch_arguments(input.trim_start(), "精确耗时", "exact-time") {
-        return exact_transfer_time(arguments);
+        return exact_transfer_time(arguments, false);
+    }
+    if let Some(arguments) = batch_arguments(input.trim_start(), "剩余耗时", "remaining-time") {
+        return exact_transfer_time(arguments, true);
     }
     if let Some(arguments) = batch_arguments(input.trim_start(), "精确速率", "exact-rate") {
         return exact_transfer_by_elapsed(arguments, true);
@@ -731,9 +736,26 @@ fn transfer_rate_arguments(input: &str) -> Result<(&str, &str), ConversionError>
     Ok((data, rate))
 }
 
-fn exact_transfer_time(input: &str) -> Result<String, ConversionError> {
+fn exact_transfer_time(input: &str, use_progress: bool) -> Result<String, ConversionError> {
     let (input, targets) = split_conversion(input).unwrap_or((input, "s"));
     let (data, rate) = transfer_rate_arguments(input)?;
+    let (data, completed) = if use_progress {
+        let (total, completed) = data
+            .split_once("已传")
+            .or_else(|| {
+                const SEPARATOR: &str = " completed ";
+                let index = data.to_ascii_lowercase().find(SEPARATOR)?;
+                Some((&data[..index], &data[index + SEPARATOR.len()..]))
+            })
+            .ok_or(ConversionError::Incomplete)?;
+        let (total, completed) = (total.trim(), completed.trim());
+        if total.is_empty() || completed.is_empty() {
+            return Err(ConversionError::Incomplete);
+        }
+        (total, Some(completed))
+    } else {
+        (data, None)
+    };
     let (bits, size_dimension) = exact_data_source(data)?;
     let (bits_per_second, rate_dimension) = exact_data_source(rate)?;
     if size_dimension != Dimension::Data
@@ -743,6 +765,25 @@ fn exact_transfer_time(input: &str) -> Result<String, ConversionError> {
     {
         return Err(ConversionError::InvalidTransfer);
     }
+    let bits = if let Some(completed) = completed {
+        let transferred = if completed.ends_with('%') {
+            &bits
+                * parse_probability(completed)
+                    .map_err(|_| ConversionError::InvalidTransferProgress)?
+        } else {
+            let (transferred, dimension) = exact_data_source(completed)?;
+            if dimension != Dimension::Data
+                || transferred.numer().sign() == Sign::Minus
+                || transferred > bits
+            {
+                return Err(ConversionError::InvalidTransferProgress);
+            }
+            transferred
+        };
+        bits - transferred
+    } else {
+        bits
+    };
     let seconds = bits / bits_per_second;
     format_targets(targets, |target| {
         let (symbol, divisor, _) = numeric_duration_unit(&target.to_ascii_lowercase())
@@ -2962,6 +3003,36 @@ mod tests {
         assert_eq!(
             estimate_transfer("精确耗时 1 B 按 1 B/s to B"),
             Err(ConversionError::InvalidTransferTimeUnit)
+        );
+    }
+
+    #[test]
+    fn computes_exact_remaining_transfer_time_from_mixed_data_units() {
+        for (input, expected) in [
+            (
+                "剩余耗时 1 GiB 已传 512 MiB 按 4 MiB/s to [s, min]",
+                "128 s\n32/15 min",
+            ),
+            ("剩余耗时 1 GiB 已传 25% 按 4 MiB/s", "192 s"),
+            ("剩余耗时 2 b 已传 1/2 b 按 1 Gb/s to ns", "3/2 ns"),
+            ("remaining-time 1 B COMPLETED 8 b at 2 b/s", "0 s"),
+        ] {
+            assert_eq!(estimate_transfer(input).as_deref(), Ok(expected), "{input}");
+        }
+        for input in [
+            "剩余耗时 1 B 已传 9 b 按 2 b/s",
+            "剩余耗时 1 B 已传 125% 按 2 b/s",
+            "剩余耗时 1 B 已传 -1/2 b 按 2 b/s",
+            "剩余耗时 1 B 已传 1 b/s 按 2 b/s",
+        ] {
+            assert_eq!(
+                estimate_transfer(input),
+                Err(ConversionError::InvalidTransferProgress)
+            );
+        }
+        assert_eq!(
+            estimate_transfer("剩余耗时 1 B 已传 按 2 b/s"),
+            Err(ConversionError::Incomplete)
         );
     }
 
