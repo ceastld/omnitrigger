@@ -5196,7 +5196,11 @@ impl QuickSearch {
         true
     }
 
-    fn json_report_source_range(&self, row: Option<usize>, cx: &App) -> Option<Range<usize>> {
+    fn json_report_source_range(
+        &self,
+        cell: Option<(usize, usize)>,
+        cx: &App,
+    ) -> Option<Range<usize>> {
         if self.expanded_value_pages.is_some() || self.input_before_result_search.is_some() {
             return None;
         }
@@ -5205,13 +5209,32 @@ impl QuickSearch {
             return None;
         };
         let table = self.results.table_preview()?;
-        let row = row.or_else(|| {
+        let (row, column) = cell.or_else(|| {
             table
                 .page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
-                .map(|(row, _)| row)
+                .map(|(row, _)| (row, 1))
         })?;
         let locator = table.data_cell(row, 1)?;
-        let range = if let Ok(line) = locator.parse() {
+        let difference_column = match column {
+            1 if table.data_cell(row, 3).is_some_and(str::is_empty) => 4,
+            1 => 3,
+            column => column,
+        };
+        let difference = matches!(difference_column, 3 | 4)
+            .then(|| {
+                json_tools::json_diff_report_source_range(
+                    term,
+                    locator,
+                    table.data_cell(row, difference_column)?,
+                    difference_column == 4,
+                )
+            })
+            .flatten();
+        let range = if let Some(range) = difference {
+            range
+        } else if column != 1 {
+            return None;
+        } else if let Ok(line) = locator.parse() {
             let (range, original_column) = json_tools::json_line_report_source_range(term, line)?;
             if term[range.clone()].trim() != table.data_cell(row, original_column)? {
                 return None;
@@ -5227,12 +5250,12 @@ impl QuickSearch {
 
     fn select_json_report_source(
         &self,
-        row: Option<usize>,
+        cell: Option<(usize, usize)>,
         is_held: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(range) = self.json_report_source_range(row, cx) else {
+        let Some(range) = self.json_report_source_range(cell, cx) else {
             return false;
         };
         if !is_held {
@@ -6464,14 +6487,7 @@ impl QuickSearch {
                         || self.text_match_source_row(None, cx).is_some())
                     .then(|| {
                         cx.listener(|this, position: &(usize, usize), window, cx| {
-                            if position.1 == 1
-                                && this.select_json_report_source(
-                                    Some(position.0),
-                                    false,
-                                    window,
-                                    cx,
-                                )
-                            {
+                            if this.select_json_report_source(Some(*position), false, window, cx) {
                                 return;
                             }
                             if !this.show_text_match_original_line(

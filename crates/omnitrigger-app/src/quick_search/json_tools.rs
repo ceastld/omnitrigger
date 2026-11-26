@@ -400,6 +400,32 @@ pub(super) fn json_pointer_report_source_range(
     Some(offset + span.start..offset + span.end)
 }
 
+pub(super) fn json_diff_report_source_range(
+    query: &str,
+    pointer: &str,
+    expected_raw: &str,
+    right: bool,
+) -> Option<Range<usize>> {
+    let (operation, arguments) = split_json_operation(query)?;
+    if !matches!(
+        JsonCsvOperation::from_name(&operation.to_ascii_lowercase()),
+        Some(JsonCsvOperation::Differences)
+    ) {
+        return None;
+    }
+    let (left, right_source) = json_value_and_source(arguments, JsonError::Invalid).ok()?;
+    let root = if right {
+        serde_json::from_str::<&RawValue>(right_source).ok()?
+    } else {
+        left
+    };
+    let value = select_json_path(root, pointer).ok()?.get();
+    if value != expected_raw {
+        return None;
+    }
+    raw_value_span(query, value).ok()
+}
+
 fn split_json_operation(query: &str) -> Option<(&str, &str)> {
     let (operation, source) = query.split_once(char::is_whitespace)?;
     let source = query[operation.len()..]
@@ -5513,6 +5539,20 @@ mod tests {
         let raw = "{\n  \"a\":1.50\n}";
         let range = json_pointer_report_source_range(query, "", raw).unwrap();
         assert_eq!(&query[range], raw);
+    }
+
+    #[test]
+    fn locates_each_existing_side_of_a_json_difference_in_the_original_input() {
+        let query = r#"对比CSV {"a/b":1.50,"gone":true} {"a/b":2e2,"new":null}"#;
+        let left = json_diff_report_source_range(query, "/a~1b", "1.50", false).unwrap();
+        let right = json_diff_report_source_range(query, "/a~1b", "2e2", true).unwrap();
+        assert_eq!(&query[left], "1.50");
+        assert_eq!(&query[right], "2e2");
+        let new = json_diff_report_source_range(query, "/new", "null", true).unwrap();
+        assert_eq!(&query[new], "null");
+        assert!(json_diff_report_source_range(query, "/new", "", false).is_none());
+        assert!(json_diff_report_source_range(query, "/gone", "", true).is_none());
+        assert!(json_diff_report_source_range(query, "/a~1b", "2e2", false).is_none());
     }
 
     #[test]
