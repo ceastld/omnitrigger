@@ -432,6 +432,30 @@ pub(super) fn json_diff_report_source_range(
     raw_value_span(query, value).ok()
 }
 
+pub(super) fn json_line_pointer_report_source_range(
+    query: &str,
+    line: usize,
+    pointer: &str,
+    expected_raw: &str,
+) -> Option<Range<usize>> {
+    let (operation, arguments) = split_json_operation(query)?;
+    if !matches!(
+        JsonCsvOperation::from_name(&operation.to_ascii_lowercase()),
+        Some(JsonCsvOperation::LinePointerPatterns)
+    ) {
+        return None;
+    }
+    let (_, source) = json_value_and_source(arguments, JsonError::Invalid).ok()?;
+    let (_, record) = json_lines(source).find(|(number, _)| *number == line)?;
+    let value = select_json_path(parse_json_line(record).ok()?, pointer)
+        .ok()?
+        .get();
+    if value != expected_raw {
+        return None;
+    }
+    raw_value_span(query, value).ok()
+}
+
 fn split_json_operation(query: &str) -> Option<(&str, &str)> {
     let (operation, source) = query.split_once(char::is_whitespace)?;
     let source = query[operation.len()..]
@@ -5627,6 +5651,29 @@ mod tests {
             transform_json("行正则找路径CSV \"^/x$\" {}\n[1,]"),
             Err(JsonError::InvalidLine)
         );
+    }
+
+    #[test]
+    fn selects_the_exact_jsonl_value_when_multiple_rows_have_the_same_raw_value() {
+        let query = concat!(
+            "行正则找路径CSV \"^/a~1b/[0-9]+$\"\r\n",
+            r#"{"a/b":[1.50,1.50]}"#,
+            "\r\n\r\n",
+            r#"{"a/b":[1.50]}"#,
+        );
+        let first = json_line_pointer_report_source_range(query, 1, "/a~1b/0", "1.50").unwrap();
+        let second = json_line_pointer_report_source_range(query, 1, "/a~1b/1", "1.50").unwrap();
+        let third = json_line_pointer_report_source_range(query, 3, "/a~1b/0", "1.50").unwrap();
+        let starts = query
+            .match_indices("1.50")
+            .map(|(start, _)| start)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            [first.start, second.start, third.start].as_slice(),
+            starts.as_slice()
+        );
+        assert!(json_line_pointer_report_source_range(query, 2, "/a~1b/0", "1.50").is_none());
+        assert!(json_line_pointer_report_source_range(query, 3, "/a~1b/0", "1.5").is_none());
     }
 
     #[test]

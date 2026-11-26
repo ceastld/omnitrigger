@@ -5230,11 +5230,20 @@ impl QuickSearch {
                 )
             })
             .flatten();
-        let range = if let Some(range) = difference {
+        let line = locator.parse().ok();
+        let line_pointer = line.filter(|_| matches!(column, 1 | 2)).and_then(|line| {
+            json_tools::json_line_pointer_report_source_range(
+                term,
+                line,
+                table.data_cell(row, 2)?,
+                table.data_cell(row, 4)?,
+            )
+        });
+        let range = if let Some(range) = difference.or(line_pointer) {
             range
         } else if column != 1 {
             return None;
-        } else if let Ok(line) = locator.parse() {
+        } else if let Some(line) = line {
             let (range, original_column) = json_tools::json_line_report_source_range(term, line)?;
             if term[range.clone()].trim() != table.data_cell(row, original_column)? {
                 return None;
