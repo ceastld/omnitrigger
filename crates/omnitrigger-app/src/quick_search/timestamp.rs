@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::Range};
 
 use chrono::{
     DateTime, Datelike, Days, FixedOffset, Local, Months, NaiveDate, NaiveTime, SecondsFormat,
@@ -17,6 +17,7 @@ use super::csv_tools::csv_cell;
 use super::duration::{
     elapsed_duration, format_clock_duration, format_duration_unit, DurationError, NANOS_PER_SECOND,
 };
+use super::json_tools::read_json_array;
 use super::text_tools::logical_newline_pattern;
 
 const MAX_TARGET_ZONES: usize = 8;
@@ -882,10 +883,7 @@ fn parse_absolute_intervals(
             .collect();
     }
 
-    let spans = logical_newline_pattern()
-        .split(input)
-        .flat_map(|line| line.split(';'))
-        .filter(|span| !span.trim().is_empty())
+    let spans = absolute_interval_pieces(input)
         .take(MAX_ABSOLUTE_INTERVALS + 1)
         .collect::<Vec<_>>();
     if !(1..=MAX_ABSOLUTE_INTERVALS).contains(&spans.len()) {
@@ -895,6 +893,49 @@ fn parse_absolute_intervals(
         .into_iter()
         .map(|span| split_interval_endpoints(span, invalid).and_then(parse))
         .collect()
+}
+
+fn absolute_interval_pieces(input: &str) -> impl Iterator<Item = &str> {
+    logical_newline_pattern()
+        .split(input)
+        .flat_map(|line| line.split(';'))
+        .map(str::trim)
+        .filter(|span| !span.is_empty())
+}
+
+pub(super) fn absolute_conflict_source_range(query: &str, index: usize) -> Option<Range<usize>> {
+    let normalized = normalize(query);
+    let (operation, arguments) = normalized.split_once(char::is_whitespace)?;
+    if !matches!(
+        TimestampReport::from_operation(operation),
+        Some(TimestampReport::AbsoluteIntervals(
+            IntervalOperation::Overlaps
+        ))
+    ) {
+        return None;
+    }
+    let input = split_conversion(arguments)
+        .map_or(arguments, |(input, _)| input)
+        .trim();
+    let selected = if input.starts_with('[') {
+        read_json_array(input).ok()?.get(index).copied()?.get()
+    } else {
+        absolute_interval_pieces(input).nth(index)?
+    };
+    // normalize 逐字符替换，先换算为字符位置，再回到原输入的 UTF-8 字节位置。
+    let start = selected
+        .as_ptr()
+        .addr()
+        .checked_sub(normalized.as_ptr().addr())?;
+    let first = normalized.get(..start)?.chars().count();
+    let after_last = first + selected.chars().count();
+    let original_offset = |character| {
+        query
+            .char_indices()
+            .nth(character)
+            .map_or(query.len(), |(offset, _)| offset)
+    };
+    Some(original_offset(first)..original_offset(after_last))
 }
 
 fn absolute_intervals_covered_duration(
@@ -1831,6 +1872,25 @@ mod tests {
             convert_timestamp("区间层数CSV 0s 到 1ns to UTC", now),
             convert_timestamp("区间层数CSV 0s 到 1ns", now)
         );
+    }
+
+    #[test]
+    fn locates_the_selected_absolute_conflict_interval_in_the_original_input() {
+        for (query, expected) in [
+            (
+                "区间冲突ＣＳＶ 0s 到 2s；\r\n\r\n １s 至 ３s ｔｏ UTC+8",
+                "１s 至 ３s",
+            ),
+            (
+                r#"interval-overlaps-csv [["0s","4s"], ["1s", "2s"]] to UTC"#,
+                r#"["1s", "2s"]"#,
+            ),
+        ] {
+            let range = absolute_conflict_source_range(query, 1).unwrap();
+            assert_eq!(query.get(range), Some(expected));
+            assert!(absolute_conflict_source_range(query, 2).is_none());
+        }
+        assert!(absolute_conflict_source_range("区间合并 0s 到 1s", 0).is_none());
     }
 
     #[test]

@@ -5223,24 +5223,31 @@ impl QuickSearch {
         true
     }
 
-    fn json_report_source_range(
-        &self,
-        cell: Option<(usize, usize)>,
-        cx: &App,
-    ) -> Option<Range<usize>> {
+    fn report_source_range(&self, cell: Option<(usize, usize)>, cx: &App) -> Option<Range<usize>> {
         if self.expanded_value_pages.is_some() || self.input_before_result_search.is_some() {
             return None;
         }
         let query = self.input.read(cx).text_ref();
-        let (Scope::Json, term) = scoped_query(query)? else {
-            return None;
-        };
+        let (scope, term) = scoped_query(query)?;
         let table = self.results.table_preview()?;
         let (row, column) = cell.or_else(|| {
             table
                 .page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
                 .map(|(row, _)| (row, 1))
         })?;
+        if scope == Scope::Timestamp && matches!(column, 1 | 2) {
+            let index = table
+                .data_cell(row, column)?
+                .parse::<usize>()
+                .ok()?
+                .checked_sub(1)?;
+            let range = timestamp::absolute_conflict_source_range(term, index)?;
+            let offset = term.as_ptr().addr().checked_sub(query.as_ptr().addr())?;
+            return Some(offset + range.start..offset + range.end);
+        }
+        if scope != Scope::Json {
+            return None;
+        }
         let locator = table.data_cell(row, 1)?;
         let difference_column = match column {
             1 if table.data_cell(row, 3).is_some_and(str::is_empty) => 4,
@@ -5284,14 +5291,14 @@ impl QuickSearch {
         Some(offset + range.start..offset + range.end)
     }
 
-    fn select_json_report_source(
+    fn select_report_source(
         &self,
         cell: Option<(usize, usize)>,
         is_held: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(range) = self.json_report_source_range(cell, cx) else {
+        let Some(range) = self.report_source_range(cell, cx) else {
             return false;
         };
         if !is_held {
@@ -5722,7 +5729,7 @@ impl QuickSearch {
                     cx,
                 ) || self.select_input_error(event.is_held, window, cx)
                     || self.show_text_match_original_line(None, event.is_held, window, cx)
-                    || self.select_json_report_source(None, event.is_held, window, cx)
+                    || self.select_report_source(None, event.is_held, window, cx)
                     || (!event.is_held && self.reveal_selected_file(window, cx))
                 {
                     cx.stop_propagation();
@@ -6431,22 +6438,19 @@ impl QuickSearch {
                         })),
                 )
             })
-            .when(
-                self.json_report_source_range(None, cx).is_some(),
-                |footer| {
-                    footer.child(
-                        button("locate-json-report-source", "到原文", Tone::Ghost, true)
-                            .h(px(TABLE_PAGER_HEIGHT))
-                            .px(px(8.))
-                            .tooltip(theme::text_tooltip(
-                                "Alt+Enter 选中本页第一项在输入中的原文".into(),
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.select_json_report_source(None, false, window, cx);
-                            })),
-                    )
-                },
-            )
+            .when(self.report_source_range(None, cx).is_some(), |footer| {
+                footer.child(
+                    button("locate-report-source", "到原文", Tone::Ghost, true)
+                        .h(px(TABLE_PAGER_HEIGHT))
+                        .px(px(8.))
+                        .tooltip(theme::text_tooltip(
+                            "Alt+Enter 选中本页第一项在输入中的原文".into(),
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.select_report_source(None, false, window, cx);
+                        })),
+                )
+            })
             .when(!table.input_errors().is_empty(), |footer| {
                 footer.child(
                     button("locate-input-table-error", "定位错误", Tone::Ghost, true)
@@ -6548,7 +6552,7 @@ impl QuickSearch {
                         || self.text_match_source_row(None, cx).is_some())
                     .then(|| {
                         cx.listener(|this, position: &(usize, usize), window, cx| {
-                            if this.select_json_report_source(Some(*position), false, window, cx) {
+                            if this.select_report_source(Some(*position), false, window, cx) {
                                 return;
                             }
                             if !this.show_text_match_original_line(
