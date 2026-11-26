@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     ops::Range,
 };
@@ -26,6 +26,7 @@ const MAX_MERGE_PATCH_DEPTH: usize = 64;
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
 const MAX_UNIQUE_PATHS: usize = 8;
+const MAX_COVERAGE_PATHS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JsonError {
@@ -37,6 +38,7 @@ pub(super) enum JsonError {
     InvalidPointer,
     InvalidPointerSegment,
     PointerSelection,
+    CoveragePaths,
     WildcardPathArguments,
     SourceAndTargetPaths,
     MoveIntoDescendant,
@@ -113,6 +115,7 @@ impl JsonError {
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
             Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
+            Self::CoveragePaths => "填入 1 至 16 个不同的 JSON 指针，例如 [\"/金额\",\"/状态\"]",
             Self::WildcardPathArguments => {
                 "填写由字符串和 null 组成的路径数组，例如 [\"订单\",null,\"金额\"]"
             }
@@ -227,6 +230,8 @@ enum JsonCsvOperation {
     Types,
     StructureStats,
     LineStructureStats,
+    FieldCoverage,
+    LineFieldCoverage,
 }
 
 impl JsonCsvOperation {
@@ -256,6 +261,8 @@ impl JsonCsvOperation {
             "找类型csv" | "find-type-csv" => Some(Self::Types),
             "结构统计csv" | "structure-stats-csv" => Some(Self::StructureStats),
             "行结构统计csv" | "jsonl-structure-stats-csv" => Some(Self::LineStructureStats),
+            "字段覆盖csv" | "field-coverage-csv" => Some(Self::FieldCoverage),
+            "行字段覆盖csv" | "jsonl-field-coverage-csv" => Some(Self::LineFieldCoverage),
             _ => None,
         }
     }
@@ -287,7 +294,9 @@ impl JsonCsvOperation {
             | Self::PointerPatterns
             | Self::Types
             | Self::StructureStats
-            | Self::LineStructureStats => true,
+            | Self::LineStructureStats
+            | Self::FieldCoverage
+            | Self::LineFieldCoverage => true,
         }
     }
 
@@ -329,6 +338,8 @@ impl JsonCsvOperation {
             Self::Types => find_json_types(source, PointerOutput::Csv),
             Self::StructureStats => json_structure_stats_csv(source),
             Self::LineStructureStats => json_line_structure_stats_csv(source),
+            Self::FieldCoverage => json_field_coverage_csv(source, read_json_array),
+            Self::LineFieldCoverage => json_field_coverage_csv(source, read_json_lines),
         }
     }
 }
@@ -3573,6 +3584,59 @@ fn json_line_structure_stats_csv(source: &str) -> Result<String, JsonError> {
     Ok(result)
 }
 
+fn json_field_coverage_csv(
+    query: &str,
+    read_records: impl FnOnce(&str) -> Result<Vec<&RawValue>, JsonError>,
+) -> Result<String, JsonError> {
+    let (pointers, source) = selected_pointers(query).map_err(|error| match error {
+        JsonError::PointerSelection => JsonError::CoveragePaths,
+        _ => error,
+    })?;
+    if pointers.len() > MAX_COVERAGE_PATHS {
+        return Err(JsonError::CoveragePaths);
+    }
+    let records = read_records(source)?;
+    let total = records.len().to_string();
+    let mut output = String::from("指针,记录数,存在,缺失,空值,非空类型");
+    for pointer in pointers {
+        if pointer.contains('\0') {
+            return Err(JsonError::CsvNullCharacter);
+        }
+        let keys = json_pointer_tokens(&pointer)?;
+        let mut types = BTreeMap::<&str, usize>::new();
+        let mut missing = 0;
+        for record in &records {
+            match select_pointer_keys(record, &keys) {
+                Ok(value) => *types.entry(json_type_name(value)).or_default() += 1,
+                Err(JsonError::MissingValue) => missing += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        let present = (records.len() - missing).to_string();
+        let missing = missing.to_string();
+        let nulls = types.remove("null").unwrap_or(0).to_string();
+        let types = types
+            .into_iter()
+            .map(|(kind, count)| format!("{kind}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        append_bounded_csv_row(
+            &mut output,
+            [
+                pointer.as_str(),
+                total.as_str(),
+                present.as_str(),
+                missing.as_str(),
+                nulls.as_str(),
+                types.as_str(),
+            ]
+            .into_iter(),
+            JsonError::CsvOutputTooLarge,
+        )?;
+    }
+    Ok(output)
+}
+
 fn decode_pointer_key(token: &str) -> Result<String, JsonError> {
     let mut decoded = String::with_capacity(token.len());
     let mut chars = token.chars();
@@ -5257,6 +5321,38 @@ mod tests {
         assert_eq!(
             transform_json("行结构统计CSV {}\n[1,]"),
             Err(JsonError::InvalidLine)
+        );
+    }
+
+    #[test]
+    fn summarizes_json_pointer_coverage_with_distinct_null_and_missing_fields() {
+        let records = [
+            r#"{"金额":1.50,"状态":null,"a/b":[true]}"#,
+            r#"{"金额":"1.50","a/b":[]}"#,
+            r#"{"状态":true}"#,
+            "null",
+        ];
+        let paths = r#"["/金额","/状态","/a~1b/0",""]"#;
+        let array = format!("字段覆盖CSV {paths} [{}]", records.join(","));
+        let lines = format!("行字段覆盖CSV {paths}\n{}", records.join("\r\n\r\n"));
+        let expected = concat!(
+            "指针,记录数,存在,缺失,空值,非空类型",
+            "\r\n/金额,4,2,2,0,\"number=1, string=1\"",
+            "\r\n/状态,4,2,2,1,boolean=1",
+            "\r\n/a~1b/0,4,1,3,0,boolean=1",
+            "\r\n\"\",4,4,0,1,object=3",
+        );
+        for query in [array, lines] {
+            assert_eq!(transform_json(&query).as_deref(), Ok(expected));
+            assert_eq!(json_csv_report(&query).unwrap().as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            transform_json(r#"字段覆盖CSV ["/a"] [{"a":1,"a":null}]"#),
+            Err(JsonError::DuplicateKey)
+        );
+        assert_eq!(
+            transform_json(r#"字段覆盖CSV ["bad"] []"#),
+            Err(JsonError::InvalidPointer)
         );
     }
 

@@ -5184,6 +5184,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计 JSON 数组中字段的缺失与空值",
+        query: r#"JSON: 字段覆盖CSV ["/金额","/状态"] [{"金额":1.50,"状态":null},{"金额":"1.50"},{"状态":true}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "统计 JSONL 记录中字段的出现和类型",
+        query: "JSON: 行字段覆盖CSV [\"/金额\",\"/状态\"]\n{\"金额\":1.50,\"状态\":null}\n{\"金额\":\"1.50\"}\n{\"状态\":true}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "读取 JSON 指针指向的值类型",
         query: r#"JSON: 类型 /订单/0/金额 {"订单":[{"金额":9007199254740993}]}"#,
     },
