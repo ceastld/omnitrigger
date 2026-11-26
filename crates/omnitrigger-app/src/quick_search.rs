@@ -3148,12 +3148,13 @@ impl QuickSearch {
                     }
                 }));
         }
+        let evaluated_query = self.replayable_csv_keyword_query(query);
         let next = if refilled {
             Results::RefilledInput
-        } else if let Some(result) = self.attached_search_result(query) {
+        } else if let Some(result) = self.attached_search_result(&evaluated_query) {
             result
         } else {
-            self.index.results(query)
+            self.index.results(&evaluated_query)
         };
         if !Self::shows_help(query, &next) {
             self.input_before_help = None;
@@ -3217,7 +3218,7 @@ impl QuickSearch {
             })) = &self.results
             {
                 self.table_pages.columns = self
-                    .csv_keyword_column_selection(query)
+                    .csv_keyword_column_selection(&evaluated_query)
                     .flatten()
                     .and_then(|column| table.page_for_column(column))
                     .or_else(|| table.first_match_column_page())
@@ -4157,10 +4158,10 @@ impl QuickSearch {
     }
 
     fn remember_confirmed_query(&self, query: &str) {
-        self.index
-            .recent
-            .queries
-            .record_exact(self.attached_result_query(query).unwrap_or(query), "");
+        let query = self
+            .attached_result_query(query)
+            .map_or_else(|| self.replayable_csv_keyword_query(query), Cow::Borrowed);
+        self.index.recent.queries.record_exact(&query, "");
     }
 
     fn text_search_change(
@@ -4269,6 +4270,18 @@ impl QuickSearch {
             label,
             hint,
         })
+    }
+
+    fn replayable_csv_keyword_query<'a>(&self, query: &'a str) -> Cow<'a, str> {
+        let adjusted = self
+            .input_before_result_search
+            .as_ref()
+            .and_then(|draft| draft.table_search(query))
+            .and_then(|(mode, arguments)| {
+                let arguments = csv_tools::csv_keyword_arguments_without_pending_slot(arguments)?;
+                Some(format!("{}{arguments}", mode.result_search_prefix()))
+            });
+        adjusted.map_or_else(|| Cow::Borrowed(query), Cow::Owned)
     }
 
     fn csv_keyword_edit(
@@ -4954,7 +4967,8 @@ impl QuickSearch {
         if self.attached_result_query(&query).is_some() {
             return;
         }
-        let Some(target) = self.results.bookmark_query(&query, self.selected) else {
+        let replayable = self.replayable_csv_keyword_query(&query);
+        let Some(target) = self.results.bookmark_query(&replayable, self.selected) else {
             return;
         };
         let saved = self.index.recent.bookmarks.toggle(target);
@@ -6359,6 +6373,11 @@ impl QuickSearch {
         let query = self.input.read(cx).text_ref();
         let scope = scoped_query(query);
         let column_selection = self.csv_keyword_column_selection(query);
+        let selected_column = column_selection.flatten().or_else(|| {
+            let evaluated_query = self.replayable_csv_keyword_query(query);
+            self.csv_keyword_column_selection(&evaluated_query)
+                .flatten()
+        });
         let recent_previews = matches!(scope, Some((Scope::RecentFilePreviews, _)));
         let preview_destinations =
             recent_previews || matches!(scope, Some((Scope::DirectFilePreview, _)));
@@ -6385,7 +6404,7 @@ impl QuickSearch {
                             }
                         })
                     }),
-                    column_selection.flatten(),
+                    selected_column,
                     column_selection.map(|_| {
                         cx.listener(|this, column: &usize, window, cx| {
                             this.edit_csv_search_keywords(
@@ -7357,8 +7376,9 @@ impl Render for QuickSearch {
         } else if query.trim().is_empty() {
             Some(("查看收藏 F4", "F4 或 Ctrl+D 查看收藏".to_owned()))
         } else {
+            let replayable = self.replayable_csv_keyword_query(&query);
             self.results
-                .bookmark_query(&query, self.selected)
+                .bookmark_query(&replayable, self.selected)
                 .map(|target| {
                     let (label, hint) = if let Some(error) = &self.bookmark_save_error {
                         ("收藏保存失败", error.as_str())

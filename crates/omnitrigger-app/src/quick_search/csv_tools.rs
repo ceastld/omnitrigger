@@ -8714,7 +8714,7 @@ pub(super) enum CsvKeywordAction {
     ToggleColumn(usize),
 }
 
-fn editable_csv_keywords(arguments: &str) -> Option<(CsvKeywordScope, usize)> {
+fn csv_keyword_scope_and_tail(arguments: &str) -> Option<(CsvKeywordScope, &str)> {
     let (argument, tail) = super::operators::json_value_and_tail::<CsvKeywordArgument>(arguments)?;
     if tail.chars().next().is_some_and(|ch| !ch.is_whitespace()) {
         return None;
@@ -8731,13 +8731,35 @@ fn editable_csv_keywords(arguments: &str) -> Option<(CsvKeywordScope, usize)> {
         },
         CsvKeywordArgument::Scoped(scope) => scope,
     };
-    if !(1..=MAX_FILTER_CONDITIONS).contains(&scope.keywords.len())
-        || scope.keywords.iter().any(|word| word.trim().is_empty())
-        || scope.columns.len() > MAX_FILTER_CONDITIONS
-    {
+    ((1..=MAX_FILTER_CONDITIONS).contains(&scope.keywords.len())
+        && scope.columns.len() <= MAX_FILTER_CONDITIONS)
+        .then_some((scope, tail))
+}
+
+fn nonempty_csv_keywords(words: &[String]) -> bool {
+    words.iter().all(|word| !word.trim().is_empty())
+}
+
+fn write_csv_keyword_scope(scope: &CsvKeywordScope) -> Option<String> {
+    if scope.columns.is_empty() {
+        serde_json::to_string(&scope.keywords).ok()
+    } else {
+        serde_json::to_string(scope).ok()
+    }
+}
+
+pub(super) fn csv_keyword_arguments_without_pending_slot(arguments: &str) -> Option<String> {
+    let (mut scope, tail) = csv_keyword_scope_and_tail(arguments)?;
+    if scope.keywords.len() < 2 || !scope.keywords.last().is_some_and(String::is_empty) {
         return None;
     }
-    Some((scope, arguments.len() - tail.len()))
+    scope.keywords.pop();
+    if !nonempty_csv_keywords(&scope.keywords) {
+        return None;
+    }
+    let mut adjusted = write_csv_keyword_scope(&scope)?;
+    adjusted.push_str(tail);
+    Some(adjusted)
 }
 
 fn single_numbered_column(columns: &[ColumnReference]) -> Option<usize> {
@@ -8748,15 +8770,19 @@ fn single_numbered_column(columns: &[ColumnReference]) -> Option<usize> {
 }
 
 pub(super) fn csv_keyword_column_selection(arguments: &str) -> Option<Option<usize>> {
-    let (scope, _) = editable_csv_keywords(arguments)?;
-    Some(single_numbered_column(&scope.columns))
+    let (scope, _) = csv_keyword_scope_and_tail(arguments)?;
+    nonempty_csv_keywords(&scope.keywords).then(|| single_numbered_column(&scope.columns))
 }
 
 pub(super) fn edit_csv_keyword_argument(
     arguments: &str,
     action: CsvKeywordAction,
 ) -> Option<CsvKeywordEdit> {
-    let (mut scope, argument_end) = editable_csv_keywords(arguments)?;
+    let (mut scope, tail) = csv_keyword_scope_and_tail(arguments)?;
+    if !nonempty_csv_keywords(&scope.keywords) {
+        return None;
+    }
+    let argument_end = arguments.len() - tail.len();
     match action {
         CsvKeywordAction::Add if scope.keywords.len() < MAX_FILTER_CONDITIONS => {
             scope.keywords.push(String::new());
@@ -8771,15 +8797,8 @@ pub(super) fn edit_csv_keyword_argument(
         _ => return None,
     }
     let unscoped = scope.columns.is_empty();
-    let replacement = if unscoped {
-        serde_json::to_string(&scope.keywords).ok()?
-    } else {
-        serde_json::to_string(&scope).ok()?
-    };
-    let caret = match action {
-        CsvKeywordAction::Add => replacement.len() - if unscoped { 2 } else { 3 },
-        CsvKeywordAction::ToggleColumn(_) => replacement.len(),
-    };
+    let replacement = write_csv_keyword_scope(&scope)?;
+    let caret = replacement.len() - if unscoped { 2 } else { 3 };
     Some(CsvKeywordEdit {
         argument_end,
         replacement,
@@ -13565,6 +13584,27 @@ B,乙
             Some(None)
         );
         assert!(edit_csv_keyword_argument(r#""甲""#, CsvKeywordAction::ToggleColumn(0)).is_none());
+    }
+
+    #[test]
+    fn keeps_only_the_final_empty_keyword_slot_out_of_the_live_preview() {
+        let attached = r#"{"列":[2],"词":["茶",""]}"#;
+        assert_eq!(
+            csv_keyword_arguments_without_pending_slot(attached).as_deref(),
+            Some(r#"{"列":[2],"词":["茶"]}"#)
+        );
+        let inline = "[\"绿茶\",\"\"] 商品,备注\r\n绿茶,热销";
+        assert_eq!(
+            csv_keyword_arguments_without_pending_slot(inline).as_deref(),
+            Some("[\"绿茶\"] 商品,备注\r\n绿茶,热销")
+        );
+        for arguments in [r#""""#, r#"["","茶",""]"#, r#"["茶"," "]"#, r#"["茶"]"#] {
+            assert!(csv_keyword_arguments_without_pending_slot(arguments).is_none());
+        }
+        assert!(matches!(
+            read_csv_keywords(inline),
+            Err(CsvError::SearchRowKeywords)
+        ));
     }
 
     #[test]
