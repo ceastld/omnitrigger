@@ -2268,6 +2268,29 @@ fn result_search_words(arguments: &str) -> Result<String, TextError> {
     Ok(query)
 }
 
+pub(super) fn first_result_keyword_byte(arguments: &str, line: &str) -> Option<usize> {
+    let (query, _) = text_operand(arguments).ok()?;
+    let key = search_key(line);
+    let start = search_key(&query)
+        .split_whitespace()
+        .filter_map(|word| key.find(word))
+        .min()?;
+
+    // 全角转换和小写展开会改变字节数，定位时使用原文的字符边界。
+    let mut normalized_end = 0;
+    for (offset, ch) in line.char_indices() {
+        let narrowed = match ch {
+            '\u{3000}' => ' ',
+            _ => narrow_ascii_graphic(ch),
+        };
+        normalized_end += narrowed.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if start < normalized_end {
+            return Some(offset);
+        }
+    }
+    None
+}
+
 fn filter_result_lines(query: &str, text: &str, mode: TextWordMatch) -> String {
     let query = search_key(query);
     let words: Vec<_> = query.split_whitespace().collect();
@@ -5131,6 +5154,22 @@ mod tests {
             search_result_text(r#""南" 其他文本"#, source, TextWordMatch::All),
             Err(TextError::InvalidTextArgument)
         );
+    }
+
+    #[test]
+    fn finds_the_first_keyword_byte_in_original_unicode_text() {
+        let line = "Ａİ😀　ＷＡＲＮ 网关错误";
+        let arguments = r#""错误 warn" "内嵌原文""#;
+        assert_eq!(
+            first_result_keyword_byte(arguments, line),
+            Some("Ａİ😀　".len())
+        );
+        assert_eq!(
+            first_result_keyword_byte(r#""错误""#, line),
+            line.find("错误")
+        );
+        assert_eq!(first_result_keyword_byte(r#""""#, line), None);
+        assert_eq!(first_result_keyword_byte(r#""其他""#, line), None);
     }
 
     #[test]

@@ -2128,7 +2128,7 @@ struct QueryDraft {
     table_pages: Option<TablePages>,
     expanded_value: bool,
     follow_value_end: bool,
-    target_original_line: Option<usize>,
+    target_original_line: Option<(usize, usize)>,
     refill: Option<ResultRefill>,
 }
 
@@ -4207,7 +4207,7 @@ impl QuickSearch {
         }
     }
 
-    fn text_match_original_line(&self, row: Option<usize>, cx: &App) -> Option<usize> {
+    fn text_match_source_row(&self, row: Option<usize>, cx: &App) -> Option<(usize, usize)> {
         if self.expanded_value_pages.is_some() {
             return None;
         }
@@ -4222,7 +4222,8 @@ impl QuickSearch {
                 .page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
                 .map(|(row, _)| row)
         })?;
-        table.data_cell(row, 1)?.parse().ok()
+        let line = table.data_cell(row, 1)?.parse().ok()?;
+        Some((row, line))
     }
 
     fn show_text_match_original_line(
@@ -4232,10 +4233,23 @@ impl QuickSearch {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(line) = self.text_match_original_line(row, cx) else {
+        let Some((row, line)) = self.text_match_source_row(row, cx) else {
             return false;
         };
         if !is_held && !self.input.read(cx).is_composing() && !self.file_operation_in_progress() {
+            let byte_in_line = self
+                .input_before_result_search
+                .as_ref()
+                .and_then(|draft| draft.text_search(self.input.read(cx).text_ref()))
+                .zip(
+                    self.results
+                        .table_preview()
+                        .and_then(|table| table.data_cell(row, 2)),
+                )
+                .and_then(|((_, arguments), text)| {
+                    text_tools::first_result_keyword_byte(arguments, text)
+                })
+                .unwrap_or_default();
             let filter = self.query_draft(cx);
             let ResultSearchDraft {
                 mut original,
@@ -4249,7 +4263,7 @@ impl QuickSearch {
             });
             original.expanded_value = true;
             original.follow_value_end = false;
-            original.target_original_line = Some(line);
+            original.target_original_line = Some((line, byte_in_line));
             self.restore_query_draft(original, window, cx);
         }
         true
@@ -4617,9 +4631,10 @@ impl QuickSearch {
         if let (Some(pages), Some(table)) = (draft.table_pages, self.results.table_preview()) {
             self.table_pages = pages.clamped_to(table);
         }
-        if let Some(page) = draft.target_original_line.and_then(|line| {
-            self.paged_original_text()
-                .and_then(|(text, pages)| value_preview::page_for_original_line(text, pages, line))
+        if let Some(page) = draft.target_original_line.and_then(|(line, byte_in_line)| {
+            self.paged_original_text().and_then(|(text, pages)| {
+                value_preview::page_for_original_line_at(text, pages, line, byte_in_line)
+            })
         }) {
             self.selected = page;
         }
@@ -6062,22 +6077,19 @@ impl QuickSearch {
                         })),
                 )
             })
-            .when(
-                self.text_match_original_line(None, cx).is_some(),
-                |footer| {
-                    footer.child(
-                        button("goto-match-source-line", "到原文", Tone::Ghost, true)
-                            .h(px(TABLE_PAGER_HEIGHT))
-                            .px(px(8.))
-                            .tooltip(theme::text_tooltip(
-                                "Alt+Enter 跳到本页首条命中行的原文".into(),
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_text_match_original_line(None, false, window, cx);
-                            })),
-                    )
-                },
-            )
+            .when(self.text_match_source_row(None, cx).is_some(), |footer| {
+                footer.child(
+                    button("goto-match-source-line", "到原文", Tone::Ghost, true)
+                        .h(px(TABLE_PAGER_HEIGHT))
+                        .px(px(8.))
+                        .tooltip(theme::text_tooltip(
+                            "Alt+Enter 跳到本页首条命中行原文中的关键词".into(),
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_text_match_original_line(None, false, window, cx);
+                        })),
+                )
+            })
             .when(!table.input_errors().is_empty(), |footer| {
                 footer.child(
                     button("locate-input-table-error", "定位错误", Tone::Ghost, true)
@@ -6153,7 +6165,7 @@ impl QuickSearch {
                     self.table_pages.rows,
                     self.table_pages.columns,
                     (self.table_cell_source(None).is_some()
-                        || self.text_match_original_line(None, cx).is_some())
+                        || self.text_match_source_row(None, cx).is_some())
                     .then(|| {
                         cx.listener(|this, position: &(usize, usize), window, cx| {
                             if !this.show_text_match_original_line(
@@ -10176,7 +10188,7 @@ mod tests {
         let result = search.results.refillable_text().unwrap();
         assert_eq!(result.lines().count(), 3);
         assert!(result.contains("\r\n0,"));
-        assert!(result.contains("\r\n170,"));
+        assert!(result.contains("\r\n255,"));
         search.switch_search_words(window, cx);
         let excluded = search.input.read(cx).text();
         assert_eq!(excluded, mixed.replacen("搜索行", "排除关键词", 1));

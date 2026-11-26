@@ -76,7 +76,22 @@ pub(super) fn original_line_position(text: &str, offset: usize) -> (usize, usize
 }
 
 pub(super) fn page_for_original_line(text: &str, pages: &[usize], number: usize) -> Option<usize> {
-    let offset = original_line_starts(text).nth(number.checked_sub(1)?)?;
+    page_for_original_line_at(text, pages, number, 0)
+}
+
+pub(super) fn page_for_original_line_at(
+    text: &str,
+    pages: &[usize],
+    number: usize,
+    byte_in_line: usize,
+) -> Option<usize> {
+    let mut starts = original_line_starts(text);
+    let line_start = starts.nth(number.checked_sub(1)?)?;
+    let next_start = starts.next().unwrap_or(text.len());
+    let offset = line_start
+        .checked_add(byte_in_line)
+        .filter(|&offset| offset < next_start)
+        .unwrap_or(line_start);
     pages.partition_point(|&page| page <= offset).checked_sub(1)
 }
 
@@ -145,6 +160,8 @@ mod tests {
         assert_eq!(page_for_original_line(&text, &pages, 5), Some(3));
         assert_eq!(page_for_original_line(&text, &pages, 0), None);
         assert_eq!(page_for_original_line(&text, &pages, 6), None);
+        assert_eq!(page_for_original_line_at(&text, &pages, 1, 88), Some(1));
+        assert_eq!(page_for_original_line_at(&text, &pages, 1, 100), Some(0));
     }
 
     #[test]
