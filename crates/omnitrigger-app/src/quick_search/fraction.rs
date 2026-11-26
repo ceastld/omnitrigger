@@ -83,6 +83,7 @@ pub(super) enum FractionError {
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
     TableInputs,
+    SubstitutionArguments,
     SampleArguments,
     SampleOutputTooLarge,
     SecantArguments,
@@ -156,6 +157,7 @@ impl FractionError {
             Self::TableInputs => {
                 "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
             }
+            Self::SubstitutionArguments => "在 @ 左侧填写 x 或 y 的值，例如 x=1/3,y=2 @ x*y",
             Self::SampleArguments => {
                 "填写 [起点,终点,点数] 和算式，例如 [-1,1,5] x**2，支持 2 至 128 个点"
             }
@@ -286,6 +288,9 @@ fn simplify_fraction_using(
     }
     if verb == "取值表" || verb.eq_ignore_ascii_case("table") {
         return fraction_table(expression.trim(), FractionTableFormat::Tsv);
+    }
+    if verb == "代入" || verb.eq_ignore_ascii_case("substitute") {
+        return substitute_fractions(expression, answer_at).map(|value| value.to_string());
     }
     if let Some(report) = fraction_csv_command(verb, expression.trim()) {
         return report;
@@ -803,6 +808,38 @@ pub(super) fn calculate_fraction_with_variables(
     y: Option<&BigRational>,
 ) -> Result<BigRational, FractionError> {
     evaluate_fraction(input, x, y, None)
+}
+
+fn substitute_fractions(
+    input: &str,
+    answer_at: Option<ExactAnswerLookup<'_>>,
+) -> Result<BigRational, FractionError> {
+    let invalid = FractionError::SubstitutionArguments;
+    let (assignments, expression) = input.split_once('@').ok_or(invalid)?;
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return Err(invalid);
+    }
+    let mut bindings = [None, None];
+    for assignment in split_top_level_commas(assignments) {
+        let (name, value) = assignment.split_once('=').ok_or(invalid)?;
+        let binding = match name.trim() {
+            "x" => &mut bindings[0],
+            "y" => &mut bindings[1],
+            _ => return Err(invalid),
+        };
+        let value = value.trim();
+        if binding.is_some() || value.is_empty() {
+            return Err(invalid);
+        }
+        *binding = Some(evaluate_fraction(value, None, None, answer_at)?);
+    }
+    evaluate_fraction(
+        expression,
+        bindings[0].as_ref(),
+        bindings[1].as_ref(),
+        answer_at,
+    )
 }
 
 fn evaluate_fraction(
@@ -3138,6 +3175,30 @@ mod tests {
             simplify_fraction("取值表 [2] xx"),
             Err(FractionError::Invalid)
         );
+    }
+
+    #[test]
+    fn substitutes_exact_values_for_x_and_y_without_losing_answer_references() {
+        assert_eq!(
+            simplify_fraction("代入 x=1/3,y=2 @ x*y+1/6").as_deref(),
+            Ok("5/6")
+        );
+        assert_eq!(
+            simplify_fraction("substitute y=max(1/3,1/2) @ y**2").as_deref(),
+            Ok("1/4")
+        );
+        let six = BigRational::from_integer(BigInt::from(6));
+        assert_eq!(
+            simplify_fraction_with_answers("代入 x=ans/2 @ x+ans", &|_| Some(six.clone()))
+                .as_deref(),
+            Ok("9")
+        );
+        for query in ["代入 x=1,x=2 @ x", "代入 z=1 @ z", "代入 x= @ x"] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::SubstitutionArguments)
+            );
+        }
     }
 
     #[test]

@@ -7497,6 +7497,11 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "把两个精确数值代入同一个算式",
+        query: "分数: 代入 x=1/3,y=2 @ x*y+1/6",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按给定横坐标计算精确值并预览 CSV",
         query: "分数: 取值CSV [3/2,-2,1.50,0] x**2+1/3",
     },
