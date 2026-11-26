@@ -4801,6 +4801,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计匹配全部、任一或没有关键词的原文行",
+        query: "文本: 关键词统计CSV \"warn 错误\" 恢复\nＷＡＲＮ 网关\n错误\nWARN 错误",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按正则提取匹配行及前后的文本",
         query: "文本: 正则上下文 [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
     },

@@ -5401,7 +5401,8 @@ impl QuickSearch {
                     self.switch_text_result_view(window, cx);
                 }
                 cx.stop_propagation();
-            } else if modifiers == 1
+            } else if modifiers == 2
+                && keystroke.modifiers.control
                 && keystroke.modifiers.alt
                 && keystroke.key == "r"
                 && self
@@ -7467,13 +7468,21 @@ impl Render for QuickSearch {
                         )
                     })
                     .when_some(text_search_regex, |header, enabled| {
-                        let (tone, hint) = if enabled {
-                            (Tone::Primary, "Alt+R 返回关键词查找")
+                        let (id, tone, hint) = if enabled {
+                            (
+                                "disable-result-regex",
+                                Tone::Primary,
+                                "Ctrl+Alt+R 返回关键词查找",
+                            )
                         } else {
-                            (Tone::Ghost, "Alt+R 使用正则表达式逐行查找")
+                            (
+                                "enable-result-regex",
+                                Tone::Ghost,
+                                "Ctrl+Alt+R 使用正则表达式逐行查找",
+                            )
                         };
                         header.child(
-                            button("switch-result-regex", "正则", tone, true)
+                            button(id, "正则", tone, true)
                                 .h(px(24.))
                                 .px(action_padding)
                                 .tooltip(theme::text_tooltip(hint.into()))

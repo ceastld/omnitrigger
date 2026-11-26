@@ -325,6 +325,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "排除关键词csv" | "exclude-keyword-lines-csv" => {
             Some(search_text_lines_csv(text, TextWordMatch::Exclude))
         }
+        "关键词统计csv" | "line-keyword-summary-csv" => Some(line_keyword_summary_csv(text)),
         "正则保留行csv" | "keep-regex-lines-csv" => {
             Some(filter_regex_lines(text, true, LineOutput::Csv))
         }
@@ -2409,6 +2410,29 @@ fn filter_result_lines(query: &str, text: &str, mode: TextWordMatch) -> String {
 fn search_text_lines_csv(input: &str, mode: TextWordMatch) -> Result<String, TextError> {
     let (query, text) = quoted_text_argument(input)?;
     filter_result_lines_csv(&query, text, mode)
+}
+
+fn line_keyword_summary_csv(input: &str) -> Result<String, TextError> {
+    let (query, text) = quoted_text_argument(input)?;
+    let query = search_key(&query);
+    let words: Vec<_> = query.split_whitespace().collect();
+    if words.is_empty() {
+        return Err(TextError::EmptySearchText);
+    }
+    let mut total = 0;
+    let mut all = 0;
+    let mut any = 0;
+    for (_, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        let key = search_key(line);
+        let hits = words.iter().filter(|word| key.contains(**word)).count();
+        total += 1;
+        all += usize::from(hits == words.len());
+        any += usize::from(hits > 0);
+    }
+    let none = total - any;
+    Ok(format!(
+        "条件,行数\r\n全部行,{total}\r\n匹配全部词,{all}\r\n匹配任一词,{any}\r\n无关键词,{none}"
+    ))
 }
 
 fn filter_result_lines_csv(
@@ -5352,6 +5376,19 @@ mod tests {
         assert_eq!(
             search_result_regex_lines(r#""[""#, source, true),
             Err(TextError::InvalidRegex)
+        );
+    }
+
+    #[test]
+    fn summarizes_keyword_match_modes_over_original_text_lines() {
+        let input =
+            "关键词统计CSV \"warn 错误\" \"恢复\r\nＷＡＲＮ 网关\u{2028}错误\nWARN 错误\r\"";
+        let expected = "条件,行数\r\n全部行,4\r\n匹配全部词,1\r\n匹配任一词,3\r\n无关键词,1";
+        assert_eq!(text_csv_report(input).unwrap().as_deref(), Ok(expected));
+        assert_eq!(transform_text(input).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("关键词统计CSV \"　\" 恢复"),
+            Err(TextError::EmptySearchText)
         );
     }
 
