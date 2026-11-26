@@ -1976,7 +1976,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
-        title: "用完整路径预览本地文本文件",
+        title: "用完整路径预览本地文件，可在路径前加「原文」",
         query: "预览文件:",
     },
     Example {

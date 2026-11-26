@@ -2177,6 +2177,8 @@ fn input_file_extension(path: &Path) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+const RAW_TEXT_FILE_PREFIX: &str = "文本: 原文 ";
+
 fn input_file_query_prefix(path: &Path) -> &'static str {
     match input_file_extension(path).as_deref() {
         Some("csv") => "CSV: 表格预览 ",
@@ -2184,7 +2186,7 @@ fn input_file_query_prefix(path: &Path) -> &'static str {
         Some("json") => "JSON: 格式化 ",
         Some("jsonl" | "ndjson") => "JSON: 合并行 ",
         Some("toml") => "TOML: 校验 ",
-        _ => "文本: 原文 ",
+        _ => RAW_TEXT_FILE_PREFIX,
     }
 }
 
@@ -2233,8 +2235,14 @@ fn direct_file_preview_destination(query: &str) -> Option<Destination> {
     })
 }
 
+fn raw_file_preview_path(query: &str) -> Option<&str> {
+    let (mode, path) = query.split_once(char::is_whitespace)?;
+    (mode == "原文" || mode.eq_ignore_ascii_case("raw")).then_some(path.trim_start())
+}
+
 fn direct_file_preview_results(query: &str) -> Results {
-    Results::Destinations(direct_file_preview_destination(query).into_iter().collect())
+    let path = raw_file_preview_path(query).unwrap_or(query);
+    Results::Destinations(direct_file_preview_destination(path).into_iter().collect())
 }
 
 fn read_input_file(path: &Path, character_limit: usize) -> Result<String, String> {
@@ -2296,8 +2304,12 @@ fn decode_input_file(bytes: &[u8], character_limit: usize) -> Result<String, Str
     Ok(text)
 }
 
-fn read_selected_text_query(path: &str) -> Result<String, String> {
-    let prefix = input_file_query_prefix(Path::new(path));
+fn read_selected_text_query(path: &str, raw: bool) -> Result<String, String> {
+    let prefix = if raw {
+        RAW_TEXT_FILE_PREFIX
+    } else {
+        input_file_query_prefix(Path::new(path))
+    };
     let character_limit = INPUT_CHARACTER_LIMIT - prefix.chars().count();
     let bytes = omnitrigger_windows::read_local_preview_file(
         path,
@@ -3372,13 +3384,26 @@ impl QuickSearch {
         }
         let query = input.text();
         let revision = input.edit_revision();
+        let source = match action {
+            FilePreviewAction::Load => query.as_str(),
+            FilePreviewAction::Refresh => {
+                let Some(refill) = &self.result_refill else {
+                    return;
+                };
+                &refill.original
+            }
+        };
+        let raw = matches!(
+            scoped_query(source),
+            Some((Scope::DirectFilePreview, term)) if raw_file_preview_path(term).is_some()
+        );
         self.input_file_load = InputFileLoadState::InProgress;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let selected_path = path.clone();
             let loaded = cx
                 .background_executor()
-                .spawn(async move { read_selected_text_query(&path) })
+                .spawn(async move { read_selected_text_query(&path, raw) })
                 .await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |this, cx| {
@@ -10880,16 +10905,23 @@ mod tests {
         let path = dir.path().join("记录.JSONL");
         let payload = "{\"编号\":\"001\",\"金额\":1.50}\r\n{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}";
         std::fs::write(&path, payload).unwrap();
-        let result = read_selected_text_query(path.to_str().unwrap()).unwrap();
+        let result = read_selected_text_query(path.to_str().unwrap(), false).unwrap();
         assert_eq!(result, format!("JSON: 合并行 {payload}"));
         assert_eq!(
             for_query(&result, &[]).refillable_text(),
             Some("[{\"编号\":\"001\",\"金额\":1.50},{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}]")
         );
+        let raw_payload = "  {\"编号\":\"001\"}\r\n  未完成\t\n";
+        std::fs::write(&path, raw_payload).unwrap();
+        let raw = read_selected_text_query(path.to_str().unwrap(), true).unwrap();
+        assert_eq!(raw, format!("文本: 原文 {raw_payload}"));
+        assert_eq!(for_query(&raw, &[]).refillable_text(), Some(raw_payload));
         std::fs::write(&path, "甲".repeat(INPUT_CHARACTER_LIMIT)).unwrap();
-        assert!(read_selected_text_query(path.to_str().unwrap())
-            .unwrap_err()
-            .contains("字符"));
+        for raw in [false, true] {
+            assert!(read_selected_text_query(path.to_str().unwrap(), raw)
+                .unwrap_err()
+                .contains("字符"));
+        }
     }
 
     #[test]
@@ -11146,6 +11178,7 @@ mod tests {
         let index = SearchIndex::default();
         for query in [
             r#"预览文件: "C:\Reports\配置 示例.YAML""#,
+            r#"预览文件: 原文 "C:\Reports\配置 示例.YAML""#,
             r#""C:\Reports\配置 示例.YAML""#,
             r"C:\Reports\配置 示例.YAML",
         ] {
@@ -11181,6 +11214,7 @@ mod tests {
             "FILE:///C:/Reports/%E8%8C%B6%20%23.YAML",
             r#""file:///C:/Reports/%E8%8C%B6%20%23.YAML""#,
             "预览文件: file:///C:/Reports/%E8%8C%B6%20%23.YAML",
+            "预览文件: RAW file:///C:/Reports/%E8%8C%B6%20%23.YAML",
         ] {
             assert_eq!(
                 index.results(query).selected_text_file(0),
