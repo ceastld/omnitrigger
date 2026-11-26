@@ -2211,12 +2211,14 @@ fn supports_text_file_preview(path: &Path) -> bool {
     )
 }
 
+fn direct_file_preview_path(query: &str) -> Option<&str> {
+    local_files::local_disk_path(query)
+        .filter(|source| supports_text_file_preview(Path::new(source)))
+}
+
 fn direct_file_preview_results(query: &str) -> Results {
-    let destination = local_files::local_disk_path(query).and_then(|source| {
+    let destination = direct_file_preview_path(query).and_then(|source| {
         let path = Path::new(source);
-        if !supports_text_file_preview(path) {
-            return None;
-        }
         Some(Destination::LocalFile {
             name: path.file_name()?.to_str()?.to_owned(),
             path: source.to_owned(),
@@ -11092,11 +11094,16 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn offers_direct_file_previews_only_for_supported_absolute_disk_paths() {
         let index = SearchIndex::default();
-        let result = index.results(r#"预览文件: "C:\Reports\配置 示例.YAML""#);
-        assert_eq!(
-            result.selected_text_file(0),
-            Some(r"C:\Reports\配置 示例.YAML")
-        );
+        for query in [
+            r#"预览文件: "C:\Reports\配置 示例.YAML""#,
+            r#""C:\Reports\配置 示例.YAML""#,
+            r"C:\Reports\配置 示例.YAML",
+        ] {
+            assert_eq!(
+                index.results(query).selected_text_file(0),
+                Some(r"C:\Reports\配置 示例.YAML")
+            );
+        }
         for path in [
             r"reports\demo.yaml",
             r"C:demo.yaml",
@@ -11105,6 +11112,7 @@ mod tests {
             r"C:\Reports\demo.yaml:alternate",
             r"C:\Reports\demo.exe",
         ] {
+            assert_eq!(index.results(path).selected_text_file(0), None);
             assert_eq!(
                 index
                     .results(&format!("预览文件: {path}"))

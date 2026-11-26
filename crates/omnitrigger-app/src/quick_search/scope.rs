@@ -94,7 +94,10 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         return Some((Scope::Bookmarks, term.trim()));
     }
     if let Some((prefix, term)) = query.split_once([':', '：']) {
-        let scope = parse_scope(prefix)?;
+        let Some(scope) = parse_scope(prefix) else {
+            return super::direct_file_preview_path(query)
+                .map(|path| (Scope::DirectFilePreview, path));
+        };
         let term = term.trim_start();
         let keep_trailing = scope == Scope::Csv
             || (matches!(scope, Scope::Json | Scope::Toml)
