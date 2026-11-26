@@ -1699,6 +1699,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 立体对照 圆柱 3,5\n球 1/2",
     },
     Example {
+        icon: Icon::Layers,
+        title: "逐行计算纸张像素、出血尺寸和缩放比例",
+        query: "批量换算: 纸张对照 A4 @ 300 dpi\n出血 A4 @ 3 mm\nA4 to A5",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "逐行换算波长与频率并导出 CSV",
         query: "批量换算: 波长对照 1 MHz\n34.3 cm @ 343 m/s to kHz",
@@ -8048,6 +8053,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "节拍对照",
                     "分贝对照",
                     "立体对照",
+                    "纸张",
+                    "纸张对照",
                     "波长对照",
                     "网段",
                     "网段对照",
