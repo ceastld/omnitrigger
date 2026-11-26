@@ -4361,6 +4361,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把搜索收藏导出为可复制的 CSV",
+        query: "收藏: 输出=CSV",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "选择换算目标单位",
         query: "10 km to",
     },

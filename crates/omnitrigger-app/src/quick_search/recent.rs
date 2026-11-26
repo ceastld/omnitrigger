@@ -9,9 +9,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use super::{
+    csv_tools::csv_cell,
     examples::{matching_examples, search_key},
-    Destination, InputSuggestion, SearchTrigger, DESTINATION_PAGE_SIZE, INPUT_CHARACTER_LIMIT,
-    PAGES,
+    Destination, InputSuggestion, Results, SearchTrigger, DESTINATION_PAGE_SIZE,
+    INPUT_CHARACTER_LIMIT, PAGES,
 };
 use crate::Page;
 
@@ -156,6 +157,25 @@ impl QueryBookmarks {
         store.items = items;
         store.load_error = None;
         Ok(outcome)
+    }
+
+    pub(super) fn results(&self, query: &str) -> Results {
+        if let Some(error) = self.load_error() {
+            return Results::BookmarksUnavailable(error);
+        }
+        let (first, filter) = query.split_once(char::is_whitespace).unwrap_or((query, ""));
+        if !matches!(search_key(first).as_str(), "输出=csv" | "output=csv") {
+            return Results::Bookmarks(self.matching(query));
+        }
+        let mut csv = String::from("名称,查询");
+        for item in self.matching(filter) {
+            csv.push_str(&format!(
+                "\r\n{},{}",
+                csv_cell(&item.result),
+                csv_cell(&item.expression),
+            ));
+        }
+        Results::table_value(Ok(csv))
     }
 
     pub(super) fn matching(&self, filter: &str) -> Vec<InputSuggestion> {

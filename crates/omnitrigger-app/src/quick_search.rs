@@ -924,10 +924,7 @@ impl Results {
                     Self::table_value(Ok(shortcut_help::shortcut_table(term)))
                 }
                 Scope::ExampleHistory => Self::Help(recent.examples.matching(term)),
-                Scope::Bookmarks => recent.bookmarks.load_error().map_or_else(
-                    || Self::Bookmarks(recent.bookmarks.matching(term)),
-                    Self::BookmarksUnavailable,
-                ),
+                Scope::Bookmarks => recent.bookmarks.results(term),
                 Scope::Triggers(filter) => search_triggers(triggers, query, term, filter),
                 Scope::Wheels => Self::Destinations(
                     matching_wheels(wheels, term)
@@ -13169,6 +13166,39 @@ mod tests {
         ] {
             assert_eq!(index.results(url).suggested_input(0), None, "{url}");
         }
+    }
+
+    #[test]
+    fn exports_filtered_bookmarks_with_exact_queries_and_names() {
+        let index = SearchIndex::default();
+        let multiline = "文本: 原文\n第一行, 含引号\"";
+        assert!(index.recent.bookmarks.toggle(multiline).unwrap());
+        index
+            .recent
+            .bookmarks
+            .rename(multiline, "周报,草稿")
+            .unwrap();
+        assert!(index.recent.bookmarks.toggle("2**10").unwrap());
+        assert_eq!(
+            index.results("收藏: 输出=CSV").refillable_text(),
+            Some("名称,查询\r\n\"\",2**10\r\n\"周报,草稿\",\"文本: 原文\n第一行, 含引号\"\"\"")
+        );
+        assert_eq!(
+            index
+                .results("收藏: ＯＵＴＰＵＴ＝ＣＳＶ 周报 原文")
+                .refillable_text(),
+            Some("名称,查询\r\n\"周报,草稿\",\"文本: 原文\n第一行, 含引号\"\"\"")
+        );
+        assert_eq!(
+            index
+                .results("收藏: 输出=CSV 未收藏的内容")
+                .refillable_text(),
+            Some("名称,查询")
+        );
+        assert_eq!(
+            index.results("收藏: 周报 原文").suggested_input(0),
+            Some(multiline)
+        );
     }
 
     #[test]
