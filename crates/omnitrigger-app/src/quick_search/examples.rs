@@ -2515,6 +2515,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "用精确分数计算理想传输耗时",
+        query: "下载: 精确耗时 1 GiB 按 100 Mbps",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用传输量和耗时求平均速率",
         query: "下载: 600 MB 用时 2分钟",
     },

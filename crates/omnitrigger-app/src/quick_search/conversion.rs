@@ -1,6 +1,6 @@
 use std::f64::consts::{LN_10, PI, TAU};
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
@@ -682,20 +682,13 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
         return Err(ConversionError::TooLong);
     }
     let input = normalize(query).replace(char::is_whitespace, " ");
+    if let Some(arguments) = batch_arguments(input.trim_start(), "精确耗时", "exact-time") {
+        return exact_transfer_time(arguments);
+    }
     if let Some((quantity, elapsed)) = input.split_once("用时") {
         return estimate_transfer_by_elapsed(quantity.trim(), elapsed.trim());
     }
-    let (data, rate) = input
-        .split_once('按')
-        .or_else(|| {
-            let index = input.to_ascii_lowercase().find(" at ")?;
-            Some((&input[..index], &input[index + 4..]))
-        })
-        .ok_or(ConversionError::Incomplete)?;
-    let (data, rate) = (data.trim(), rate.trim());
-    if data.is_empty() || rate.is_empty() {
-        return Err(ConversionError::Incomplete);
-    }
+    let (data, rate) = transfer_rate_arguments(&input)?;
     let (size, size_unit) = parse_quantity(data)?;
     let (speed, speed_unit) = parse_quantity(rate)?;
     if size_unit.dimension != Dimension::Data
@@ -710,6 +703,37 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
         return Err(ConversionError::OutOfRange);
     }
     convert_duration(&format!("{seconds:.3}s")).map_err(|_| ConversionError::OutOfRange)
+}
+
+fn transfer_rate_arguments(input: &str) -> Result<(&str, &str), ConversionError> {
+    let (data, rate) = input
+        .split_once('按')
+        .or_else(|| {
+            let index = input.to_ascii_lowercase().find(" at ")?;
+            Some((&input[..index], &input[index + 4..]))
+        })
+        .ok_or(ConversionError::Incomplete)?;
+    let (data, rate) = (data.trim(), rate.trim());
+    if data.is_empty() || rate.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    Ok((data, rate))
+}
+
+fn exact_transfer_time(input: &str) -> Result<String, ConversionError> {
+    let (data, rate) = transfer_rate_arguments(input)?;
+    let (bits, size_dimension) = exact_data_source(data)?;
+    let (bits_per_second, rate_dimension) = exact_data_source(rate)?;
+    if size_dimension != Dimension::Data
+        || rate_dimension != Dimension::DataRate
+        || bits.numer().sign() == Sign::Minus
+        || bits_per_second.numer().sign() != Sign::Plus
+    {
+        return Err(ConversionError::InvalidTransfer);
+    }
+    let seconds = bits / bits_per_second;
+    ensure_exact_size(&seconds).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{seconds} s"))
 }
 
 fn estimate_transfer_by_elapsed(quantity: &str, elapsed: &str) -> Result<String, ConversionError> {
@@ -2834,6 +2858,32 @@ mod tests {
         let items = suggested_targets("1 m转y").unwrap();
         assert_eq!(items[0].expression, "1 m转 yd");
         assert!(suggested_targets("10 km to nonexistent").is_none());
+    }
+
+    #[test]
+    fn keeps_transfer_time_as_exact_seconds_even_for_a_fractional_nanosecond() {
+        assert_eq!(
+            estimate_transfer("精确耗时 1 GiB 按 100 Mbps").as_deref(),
+            Ok("33554432/390625 s")
+        );
+        assert_eq!(
+            estimate_transfer("exact-time 1 b AT 3 b/s").as_deref(),
+            Ok("1/3 s")
+        );
+        assert_eq!(
+            estimate_transfer("精确耗时 1/3 b 按 1 Gb/s").as_deref(),
+            Ok("1/3000000000 s")
+        );
+        for query in [
+            "精确耗时 1 b 按 0 b/s",
+            "精确耗时 -1 b 按 2 b/s",
+            "精确耗时 1 b/s 按 2 b/s",
+        ] {
+            assert_eq!(
+                estimate_transfer(query),
+                Err(ConversionError::InvalidTransfer)
+            );
+        }
     }
 
     #[test]
