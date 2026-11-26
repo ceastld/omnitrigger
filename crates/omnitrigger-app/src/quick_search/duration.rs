@@ -13,6 +13,7 @@ use super::ratio_allocation::{allocate_shares, split_allocation, RatioAllocation
 use super::statistics::{
     interpolate_ordered_quantile, parse_probability, unweighted_box_fences, variance_unweighted,
 };
+use super::text_tools::logical_newline_pattern;
 
 pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
 pub(super) const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
@@ -23,6 +24,7 @@ const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
 const MAX_DURATION_STAT_TERMS: usize = 128;
 const MAX_DURATION_QUANTILE_LEVELS: usize = 16;
 const MAX_DURATION_UNIT_TARGETS: usize = 16;
+const MAX_CLOCK_SPANS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DurationError {
@@ -30,6 +32,7 @@ pub(super) enum DurationError {
     Invalid,
     InvalidClockTime,
     InvalidOverlapArguments,
+    InvalidClockSpans,
     InvalidBreakArguments,
     BreakOutOfRange,
     InvalidUnit,
@@ -57,6 +60,7 @@ impl DurationError {
             Self::InvalidOverlapArguments => {
                 "用竖线分隔两个时刻区间，例如 23:00 到 01:00 | 00:30 到 02:00"
             }
+            Self::InvalidClockSpans => "用分号或换行填写 1 至 32 个时刻区间，例如 23:00 到 01:00",
             Self::InvalidBreakArguments => {
                 "用竖线分隔时刻区间和休息时长，例如 23:45 到 01:15 | 30分钟"
             }
@@ -133,6 +137,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     if matches!(operation, "离群值csv" | "outliers-csv") {
         return duration_outliers_csv(values, output.unwrap_or("s"));
     }
+    if matches!(operation, "合并时段csv" | "clock-union-csv") {
+        return clock_union_csv(values, output);
+    }
     let dispersion = match operation {
         "方差" | "样本方差" | "sample-variance" => Some((true, false)),
         "总体方差" | "population-variance" => Some((false, false)),
@@ -154,6 +161,13 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         "频数中位数" | "frequency-median" => (median_duration_list(values, true)?, false),
         "扣除休息" | "subtract-break" => (elapsed_after_break(values)?, false),
         "重叠" | "overlap" => (clock_overlap(values)?, false),
+        "时段覆盖" | "clock-coverage" => {
+            let covered: u128 = merged_clock_spans(values)?
+                .into_iter()
+                .map(|(start, end)| end - start)
+                .sum();
+            (covered as i128, false)
+        }
         "中位数" | "median" => (median_duration_list(values, false)?, false),
         "分位数" | "quantile" => (quantile_duration_list(values)?, false),
         "最短" | "min" => (duration_extremes(values)?.0, false),
@@ -238,6 +252,63 @@ fn split_clock_spans(input: &str) -> Result<[(u128, u128); 2], DurationError> {
     } else {
         [(start, NANOS_PER_DAY), (0, end)]
     })
+}
+
+fn merged_clock_spans(input: &str) -> Result<Vec<(u128, u128)>, DurationError> {
+    if input.trim().is_empty() {
+        return Err(DurationError::Incomplete);
+    }
+    let terms = logical_newline_pattern()
+        .split(input.trim())
+        .flat_map(|line| line.split(';'))
+        .take(MAX_CLOCK_SPANS + 1)
+        .collect::<Vec<_>>();
+    if terms.len() > MAX_CLOCK_SPANS {
+        return Err(DurationError::InvalidClockSpans);
+    }
+    let mut spans = Vec::new();
+    for term in terms {
+        let parts = split_clock_spans(term).map_err(|error| match error {
+            DurationError::InvalidOverlapArguments => DurationError::InvalidClockSpans,
+            _ => error,
+        })?;
+        spans.extend(parts.into_iter().filter(|(start, end)| start != end));
+    }
+    spans.sort_unstable();
+    let mut merged = Vec::<(u128, u128)>::new();
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some((_, previous_end)) if start <= *previous_end => {
+                *previous_end = (*previous_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    Ok(merged)
+}
+
+fn clock_union_csv(input: &str, unit: Option<&str>) -> Result<String, DurationError> {
+    let target = unit
+        .map(|unit| numeric_duration_unit(unit).ok_or(DurationError::ExactUnitArguments))
+        .transpose()?;
+    let header = target.map_or_else(
+        || "时长".to_owned(),
+        |(symbol, _, _)| format!("时长 ({symbol})"),
+    );
+    let mut rows = vec![["起始时刻".to_owned(), "截止时刻".to_owned(), header]];
+    for (start, end) in merged_clock_spans(input)? {
+        let elapsed = end - start;
+        let duration = match target {
+            Some((_, divisor, _)) => exact_duration_number(elapsed as i128, divisor).to_string(),
+            None => format_clock_duration(elapsed, ""),
+        };
+        rows.push([
+            format_clock_duration(start, ""),
+            format_clock_duration(end, ""),
+            duration,
+        ]);
+    }
+    Ok(write_rows(&rows, ','))
 }
 
 fn duration_terms(input: &str) -> impl Iterator<Item = &str> {
@@ -565,6 +636,8 @@ pub(super) fn is_duration_report(query: &str) -> bool {
                 | "summary-csv"
                 | "离群值csv"
                 | "outliers-csv"
+                | "合并时段csv"
+                | "clock-union-csv"
         )
     })
 }
@@ -1125,6 +1198,32 @@ mod tests {
         assert_eq!(
             convert_duration("重叠 23:00 到 01:00 | 24:00 到 02:00"),
             Err(DurationError::InvalidClockTime),
+        );
+    }
+
+    #[test]
+    fn merges_clock_ranges_across_midnight_and_does_not_double_count_shared_time() {
+        let ranges = "23:00 到 01:00；00:30 到 02:00\u{2028}02:00 到 03:00";
+        assert_eq!(
+            convert_duration(&format!("时段覆盖 {ranges}")).as_deref(),
+            Ok("04:00:00")
+        );
+        let report = format!("合并时段CSV {ranges} to min");
+        assert_eq!(
+            convert_duration(&report).as_deref(),
+            Ok(concat!(
+                "起始时刻,截止时刻,时长 (min)",
+                "\r\n00:00:00,03:00:00,180\r\n23:00:00,24:00:00,60",
+            ))
+        );
+        assert!(is_duration_report(&report));
+        assert_eq!(
+            convert_duration("clock-union-csv 12:00到12:00").as_deref(),
+            Ok("起始时刻,截止时刻,时长")
+        );
+        assert_eq!(
+            convert_duration("时段覆盖 08:00 到 09:00; 10:00"),
+            Err(DurationError::InvalidClockSpans)
         );
     }
 

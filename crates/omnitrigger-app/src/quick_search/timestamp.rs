@@ -384,6 +384,7 @@ fn convert_timestamp_with_local(
             DurationError::Invalid
             | DurationError::InvalidClockTime
             | DurationError::InvalidOverlapArguments
+            | DurationError::InvalidClockSpans
             | DurationError::InvalidBreakArguments
             | DurationError::BreakOutOfRange
             | DurationError::InvalidUnit

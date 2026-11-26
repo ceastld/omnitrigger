@@ -2400,6 +2400,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "合并含跨午夜情况的时刻区间",
+        query: "时长: 合并时段CSV 23:00 到 01:00; 00:30 到 02:00; 02:00 到 03:00 to min",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "计算多个时段合计覆盖的时长",
+        query: "时长: 时段覆盖 23:00 到 01:00; 00:30 到 02:00",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按精确分数缩放时长",
         query: "时长: 缩放 01:30:00 @ 2/3",
     },
@@ -8181,6 +8191,8 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "频数中位数",
             "扣除休息",
             "重叠",
+            "合并时段CSV",
+            "时段覆盖",
             "比率",
             "缩放",
             "分摊",
