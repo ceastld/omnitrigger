@@ -15,7 +15,7 @@ use super::linear_fit::{
     calculate_correlation, calculate_covariance, calculate_kendall_correlation,
     calculate_rank_correlation, LinearFitError,
 };
-use super::matrix::{format_matrix, parse_matrix, MatrixError};
+use super::matrix::{format_matrix, parse_matrix, Matrix, MatrixError};
 use super::operators::split_top_level_commas;
 use super::scatter_plot::ScatterPlot;
 
@@ -67,6 +67,7 @@ pub(super) enum StatisticsError {
     HypergeometricTableRows,
     InvalidContingencyTable,
     BinaryClassificationArguments,
+    ClassificationReportArguments,
     ZeroContingencyMargin,
     ContingencyInput(MatrixError),
     InvalidWindowWidth,
@@ -156,6 +157,7 @@ impl StatisticsError {
             }
             Self::InvalidContingencyTable => "填写至少两行两列非负整数，用分号或换行分隔各行",
             Self::BinaryClassificationArguments => "填写两行两列的非负整数，顺序为 TN,FP; FN,TP",
+            Self::ClassificationReportArguments => "填写 2 至 8 类的非负整数方阵，按实际类别分行、预测类别分列",
             Self::ZeroContingencyMargin => "列联表每行和每列的合计须大于零",
             Self::ContingencyInput(error) => error.message(),
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
@@ -418,6 +420,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "期望频数" | "expected-counts" => return contingency_table(values, true),
         "二分类指标csv" | "binary-classification-csv" => {
             return binary_classification_csv(values)
+        }
+        "分类报告csv" | "classification-report-csv" => {
+            return classification_report_csv(values)
         }
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
@@ -1000,6 +1005,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
                 | "hypergeometric-table"
                 | "二分类指标csv"
                 | "binary-classification-csv"
+                | "分类报告csv"
+                | "classification-report-csv"
                 | "累计分布"
                 | "cumulative-distribution"
                 | "ecdf"
@@ -2410,8 +2417,33 @@ fn hypergeometric_quantile(input: &str) -> Result<String, StatisticsError> {
     .to_string())
 }
 
-fn binary_classification_csv(input: &str) -> Result<String, StatisticsError> {
+fn classification_counts(input: &str, invalid: StatisticsError) -> Result<Matrix, StatisticsError> {
     let matrix = parse_matrix(input).map_err(StatisticsError::ContingencyInput)?;
+    if matrix.len() < 2
+        || matrix[0].len() != matrix.len()
+        || matrix
+            .iter()
+            .flatten()
+            .any(|count| !count.is_integer() || count.numer().sign() == Sign::Minus)
+    {
+        return Err(invalid);
+    }
+    Ok(matrix)
+}
+
+fn classification_fraction(
+    numerator: BigInt,
+    denominator: BigInt,
+) -> Result<String, StatisticsError> {
+    if denominator.sign() == Sign::NoSign {
+        Ok(String::new())
+    } else {
+        Ok(bounded(BigRational::new(numerator, denominator))?.to_string())
+    }
+}
+
+fn binary_classification_csv(input: &str) -> Result<String, StatisticsError> {
+    let matrix = classification_counts(input, StatisticsError::BinaryClassificationArguments)?;
     let [negative, positive] = matrix.as_slice() else {
         return Err(StatisticsError::BinaryClassificationArguments);
     };
@@ -2420,13 +2452,6 @@ fn binary_classification_csv(input: &str) -> Result<String, StatisticsError> {
     else {
         return Err(StatisticsError::BinaryClassificationArguments);
     };
-    if matrix
-        .iter()
-        .flatten()
-        .any(|count| !count.is_integer() || count.numer().sign() == Sign::Minus)
-    {
-        return Err(StatisticsError::BinaryClassificationArguments);
-    }
     let (true_negative, false_positive) = (true_negative.numer(), false_positive.numer());
     let (false_negative, true_positive) = (false_negative.numer(), true_positive.numer());
     let actual_negative = true_negative + false_positive;
@@ -2453,14 +2478,34 @@ fn binary_classification_csv(input: &str) -> Result<String, StatisticsError> {
     ];
     let mut csv = String::from("指标,值");
     for (metric, numerator, denominator) in metrics {
-        let value = if denominator.sign() == Sign::NoSign {
-            String::new()
-        } else {
-            bounded(BigRational::new(numerator, denominator))?.to_string()
-        };
+        let value = classification_fraction(numerator, denominator)?;
         append_bounded_csv_row(
             &mut csv,
             [metric, value.as_str()].into_iter(),
+            StatisticsError::ProbabilityTableTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn classification_report_csv(input: &str) -> Result<String, StatisticsError> {
+    let matrix = classification_counts(input, StatisticsError::ClassificationReportArguments)?;
+    let mut csv = String::from("类别,样本数,精确率,召回率,F1");
+    for (index, row) in matrix.iter().enumerate() {
+        let support: BigInt = row.iter().map(BigRational::numer).sum();
+        let predictions: BigInt = matrix.iter().map(|row| row[index].numer()).sum();
+        let correct = row[index].numer();
+        let combined = &support + &predictions;
+        let fields = [
+            (index + 1).to_string(),
+            support.to_string(),
+            classification_fraction(correct.clone(), predictions)?,
+            classification_fraction(correct.clone(), support)?,
+            classification_fraction(correct + correct, combined)?,
+        ];
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
             StatisticsError::ProbabilityTableTooLarge,
         )?;
     }
@@ -2860,6 +2905,26 @@ mod tests {
                 "{input}",
             );
         }
+    }
+
+    #[test]
+    fn reports_exact_per_class_classification_metrics() {
+        let input = "分类报告CSV 8,2,0; 1,7,2; 0,1,9";
+        let expected =
+            "类别,样本数,精确率,召回率,F1\r\n1,10,8/9,4/5,16/19\r\n2,10,7/10,7/10,7/10\r\n3,10,9/11,9/10,6/7";
+        assert_eq!(calculate_statistics(input).as_deref(), Ok(expected));
+        assert_eq!(
+            statistics_csv_report(input).unwrap().as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            calculate_statistics("classification-report-csv 1,0; 0,0").as_deref(),
+            Ok("类别,样本数,精确率,召回率,F1\r\n1,1,1,1,1\r\n2,0,\"\",\"\",\"\""),
+        );
+        assert_eq!(
+            calculate_statistics("分类报告CSV 1,0,2; 0,1,0"),
+            Err(StatisticsError::ClassificationReportArguments)
+        );
     }
 
     #[test]

@@ -1155,6 +1155,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "查看每个类别的精确率、召回率和 F1",
+        query: "统计: 分类报告CSV 8,2,0; 1,7,2; 0,1,9",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "保留分数和根式的均方根",
         query: "统计: 均方根 1/2,3/2",
     },
@@ -7906,6 +7911,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
         Scope::Color => &["色差"],
         Scope::Statistics => &[
             "二分类指标CSV",
+            "分类报告CSV",
             "频数CSV",
             "分位表",
             "加权平均",
@@ -8189,6 +8195,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "独立性卡方",
                     "期望频数",
                     "二分类指标CSV",
+                    "分类报告CSV",
                     "箱线摘要",
                     "箱线图",
                     "分箱图",
