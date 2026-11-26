@@ -68,6 +68,7 @@ pub(super) enum StatisticsError {
     InvalidContingencyTable,
     BinaryClassificationArguments,
     ClassificationReportArguments,
+    NormalizedConfusionArguments,
     ZeroContingencyMargin,
     ContingencyInput(MatrixError),
     InvalidWindowWidth,
@@ -158,6 +159,9 @@ impl StatisticsError {
             Self::InvalidContingencyTable => "填写至少两行两列非负整数，用分号或换行分隔各行",
             Self::BinaryClassificationArguments => "填写两行两列的非负整数，顺序为 TN,FP; FN,TP",
             Self::ClassificationReportArguments => "填写 2 至 8 类的非负整数方阵，按实际类别分行、预测类别分列",
+            Self::NormalizedConfusionArguments => {
+                "填写 2 至 8 类的非负整数方阵，可用 @ 行、@ 列或 @ 全部指定比例"
+            }
             Self::ZeroContingencyMargin => "列联表每行和每列的合计须大于零",
             Self::ContingencyInput(error) => error.message(),
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
@@ -424,6 +428,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "分类报告csv" | "classification-report-csv" => {
             return classification_report_csv(values)
         }
+        "混淆比例csv" | "confusion-proportions-csv" => return normalized_confusion_csv(values),
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
@@ -1007,6 +1012,8 @@ pub(super) fn statistics_csv_report(query: &str) -> Option<Result<String, Statis
                 | "binary-classification-csv"
                 | "分类报告csv"
                 | "classification-report-csv"
+                | "混淆比例csv"
+                | "confusion-proportions-csv"
                 | "累计分布"
                 | "cumulative-distribution"
                 | "ecdf"
@@ -2512,6 +2519,60 @@ fn classification_report_csv(input: &str) -> Result<String, StatisticsError> {
     Ok(csv)
 }
 
+enum ConfusionNormalization {
+    Row,
+    Column,
+    All,
+}
+
+fn normalized_confusion_csv(input: &str) -> Result<String, StatisticsError> {
+    let (counts, axis) = input.split_once('@').unwrap_or((input, "行"));
+    let axis = match axis.trim().to_ascii_lowercase().as_str() {
+        "行" | "row" | "true" => ConfusionNormalization::Row,
+        "列" | "column" | "pred" => ConfusionNormalization::Column,
+        "全部" | "all" => ConfusionNormalization::All,
+        _ => return Err(StatisticsError::NormalizedConfusionArguments),
+    };
+    let matrix = classification_counts(counts, StatisticsError::NormalizedConfusionArguments)?;
+    let denominators: Vec<BigInt> = match axis {
+        ConfusionNormalization::Row => matrix
+            .iter()
+            .map(|row| row.iter().map(BigRational::numer).sum())
+            .collect(),
+        ConfusionNormalization::Column => (0..matrix.len())
+            .map(|index| matrix.iter().map(|row| row[index].numer()).sum())
+            .collect(),
+        ConfusionNormalization::All => {
+            vec![matrix.iter().flatten().map(BigRational::numer).sum()]
+        }
+    };
+    let mut csv = String::from("实际/预测");
+    for class in 1..=matrix.len() {
+        csv.push(',');
+        csv.push_str(&class.to_string());
+    }
+    for (row_index, row) in matrix.iter().enumerate() {
+        let mut fields = vec![(row_index + 1).to_string()];
+        for (column_index, count) in row.iter().enumerate() {
+            let denominator_index = match axis {
+                ConfusionNormalization::Row => row_index,
+                ConfusionNormalization::Column => column_index,
+                ConfusionNormalization::All => 0,
+            };
+            fields.push(classification_fraction(
+                count.numer().clone(),
+                denominators[denominator_index].clone(),
+            )?);
+        }
+        append_bounded_csv_row(
+            &mut csv,
+            fields.iter().map(String::as_str),
+            StatisticsError::ProbabilityTableTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
 fn contingency_table(input: &str, show_expected: bool) -> Result<String, StatisticsError> {
     let table = parse_matrix(input).map_err(StatisticsError::ContingencyInput)?;
     let rows = table.len();
@@ -2924,6 +2985,37 @@ mod tests {
         assert_eq!(
             calculate_statistics("分类报告CSV 1,0,2; 0,1,0"),
             Err(StatisticsError::ClassificationReportArguments)
+        );
+    }
+
+    #[test]
+    fn normalizes_confusion_counts_by_row_column_or_total() {
+        let row = "实际/预测,1,2\r\n1,4/5,1/5\r\n2,1/10,9/10";
+        assert_eq!(
+            calculate_statistics("混淆比例CSV 8,2; 1,9").as_deref(),
+            Ok(row)
+        );
+        assert_eq!(
+            statistics_csv_report("混淆比例CSV 8,2; 1,9 @ 行")
+                .unwrap()
+                .as_deref(),
+            Ok(row)
+        );
+        assert_eq!(
+            calculate_statistics("confusion-proportions-csv 8,2; 1,9 @ pred").as_deref(),
+            Ok("实际/预测,1,2\r\n1,8/9,2/11\r\n2,1/9,9/11")
+        );
+        assert_eq!(
+            calculate_statistics("混淆比例CSV 8,2; 1,9 @ 全部").as_deref(),
+            Ok("实际/预测,1,2\r\n1,2/5,1/10\r\n2,1/20,9/20")
+        );
+        assert_eq!(
+            calculate_statistics("混淆比例CSV 3,0; 1,0 @ 列").as_deref(),
+            Ok("实际/预测,1,2\r\n1,3/4,\"\"\r\n2,1/4,\"\"")
+        );
+        assert_eq!(
+            calculate_statistics("混淆比例CSV 8,2; 1,9 @ 百分比"),
+            Err(StatisticsError::NormalizedConfusionArguments)
         );
     }
 

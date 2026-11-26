@@ -593,6 +593,7 @@
 - 输入 `统计: 独立性卡方 1,2; 3,4` 得到皮尔逊卡方统计量 `5/63` 和自由度 `1`。用 `期望频数` 可查看按独立性假设计算的各格频数。表格支持 2 至 8 行、2 至 8 列的非负整数，各行和各列的合计须大于零。 [NIST 列联表卡方定义](https://itl.nist.gov/div898/software/dataplot/refman1/auxillar/chistest.htm)
 - 用 `统计: 二分类指标CSV 50,10; 5,35` 可从二分类混淆矩阵求准确率、精确率、召回率、特异度和 F1。实际类别分行，预测类别分列，负类在前。四格依次填写 `TN,FP; FN,TP`。结果为精确分数，分母为零的指标留空。 [混淆矩阵顺序](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.confusion_matrix.html) · [指标公式](https://scikit-learn.org/stable/modules/model_evaluation.html#binary-classification)
 - 用 `统计: 分类报告CSV 8,2,0; 1,7,2; 0,1,9` 可查看每个类别的样本数、精确率、召回率和 F1。矩阵支持 2 至 8 类，实际类别分行，预测类别分列，两边类别顺序一致。结果按原矩阵从 1 编号，指标保留精确分数，分母为零时留空。 [分类报告的指标](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.classification_report.html)
+- 输入 `统计: 混淆比例CSV 8,2; 1,9 @ 行`，可查看每个实际类别被预测为各类别的比例。`@ 列` 按预测类别分别求比例，`@ 全部` 按总样本数求比例。默认按行，输出精确分数，分母为零的格子留空。 [混淆矩阵归一化](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.confusion_matrix.html)
 - 输入 `统计: 差分 3/2,1,5/2` 依次得到 `-1/2` 和 `3/2`。用 `统计: 变化率 20,15,45` 得到 `-1/4` 和 `2`，每个结果为后项减前项再除以前项。输入至少两个数值，变化率要求每对的前项非零。
 - 输入 `统计: 均方根 1/2,3/2` 得到 `√(5/4)`。也可用频数组，例如 `统计: 均方根 频数 0@2,6@1,-8@1` 得到 `5`。
 - 输入 `统计: 调和平均 36,72` 得到 `48`，可用于按相同路程求两段的平均速度。数值须大于零，支持分数与 `频数` 数据，结果保留精确分数。 [调和平均定义](https://docs.python.org/3/library/statistics.html#statistics.harmonic_mean)
