@@ -50,6 +50,8 @@ impl Example {
                     | "unique-jsonl-by-pointers"
                     | "行路径去重留末"
                     | "last-jsonl-by-pointers"
+                    | "行重复位置csv"
+                    | "jsonl-duplicate-positions-csv"
                     | "多路径去重留末"
                     | "last-by-pointers"
                     | "多条件筛选"
@@ -86,7 +88,9 @@ impl Example {
                 | "行路径去重"
                 | "unique-jsonl-by-pointers"
                 | "行路径去重留末"
-                | "last-jsonl-by-pointers" => {
+                | "last-jsonl-by-pointers"
+                | "行重复位置csv"
+                | "jsonl-duplicate-positions-csv" => {
                     read_json_lines(data).is_ok_and(|rows| !rows.is_empty())
                 }
                 _ => serde_json::from_str::<&serde_json::value::RawValue>(data).is_ok(),
@@ -5147,6 +5151,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "保留每组 JSONL 的最后一条",
         query: "JSON: 行路径去重留末 [\"/编号\"]\n{\"编号\":\"001\",\"金额\":1.00}\n{\"编号\":\"002\",\"金额\":9}\n{\"编号\":\"001\",\"金额\":1.20}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "定位字段组合重复的 JSONL 记录",
+        query: "JSON: 行重复位置CSV [\"/编号\",\"/件数\"]\n{\"编号\":\"001\",\"件数\":1.00}\n\n{\"编号\":\"001\",\"件数\":\"1\"}\n{\"件数\":1e0,\"编号\":\"001\"}",
     },
     Example {
         icon: Icon::Terminal,

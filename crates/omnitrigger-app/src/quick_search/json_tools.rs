@@ -204,6 +204,7 @@ enum JsonCsvOperation {
     LineGroupCounts,
     LineGroupSummaries,
     LineGroupMedians,
+    LineDuplicates,
     ValidateLines,
     Differences,
     DuplicateKeys,
@@ -224,6 +225,7 @@ impl JsonCsvOperation {
             "行分组计数csv" | "jsonl-group-counts-csv" => Some(Self::LineGroupCounts),
             "行分组统计csv" | "jsonl-group-statistics-csv" => Some(Self::LineGroupSummaries),
             "行分组中位数csv" | "jsonl-group-median-csv" => Some(Self::LineGroupMedians),
+            "行重复位置csv" | "jsonl-duplicate-positions-csv" => Some(Self::LineDuplicates),
             "校验行csv" | "validate-jsonl-csv" => Some(Self::ValidateLines),
             "对比csv" | "diff-csv" => Some(Self::Differences),
             "重复键csv" | "duplicate-keys-csv" => Some(Self::DuplicateKeys),
@@ -247,6 +249,7 @@ impl JsonCsvOperation {
             | Self::LineGroupCounts
             | Self::LineGroupSummaries
             | Self::LineGroupMedians
+            | Self::LineDuplicates
             | Self::ValidateLines
             | Self::Differences
             | Self::DuplicateKeys
@@ -271,6 +274,7 @@ impl JsonCsvOperation {
             Self::LineGroupCounts => count_json_line_groups_csv(source),
             Self::LineGroupSummaries => summarize_json_line_groups_csv(source),
             Self::LineGroupMedians => median_json_line_groups_csv(source),
+            Self::LineDuplicates => duplicate_json_line_positions(source),
             Self::ValidateLines => validate_json_lines_csv(source).map(|report| report.csv),
             Self::Differences => compare_json_values(source, ComparisonOutput::Csv),
             Self::DuplicateKeys => report_duplicate_json_keys(source, true),
@@ -1422,6 +1426,32 @@ fn deduplicate_json_lines(query: &str) -> Result<String, JsonError> {
         }
     }
     Ok(retained.join("\n"))
+}
+
+fn duplicate_json_line_positions(query: &str) -> Result<String, JsonError> {
+    let (paths, source) = distinct_json_paths_and_source(query, 1, JsonError::LineUniquePaths)?;
+    let records = json_lines(source)
+        .map(|(line, text)| {
+            let item = parse_json_line(text)?;
+            Ok((line, item.get(), json_scalar_key(item, &paths)?))
+        })
+        .collect::<Result<Vec<_>, JsonError>>()?;
+    let mut counts = HashMap::new();
+    for (_, _, key) in &records {
+        *counts.entry(key).or_insert(0usize) += 1;
+    }
+    let mut csv = String::from("行号,出现次数,原始JSON");
+    for (line, item, key) in &records {
+        let count = counts[key];
+        if count > 1 {
+            append_bounded_csv_row(
+                &mut csv,
+                [line.to_string().as_str(), count.to_string().as_str(), *item].into_iter(),
+                JsonError::CsvOutputTooLarge,
+            )?;
+        }
+    }
+    Ok(csv)
 }
 
 fn retain_last_json_by_paths(query: &str, json_lines: bool) -> Result<String, JsonError> {
@@ -4296,6 +4326,33 @@ mod tests {
         assert_eq!(
             transform_json(&format!("{query}\n{{\"订单\":{{\"id\":\"003\"}}}}")),
             Err(JsonError::MissingValue)
+        );
+    }
+
+    #[test]
+    fn lists_all_duplicate_json_line_positions_in_original_order() {
+        let first = r#"{"编号":"001","件数":1.00}"#;
+        let single = r#"{"编号":"001","件数":"1"}"#;
+        let last = r#"{"件数":1e0,"编号":"001"}"#;
+        let options = r#"["/编号","/件数"]"#;
+        let query = format!("行重复位置CSV {options}\r\n{first}\r\n\r\n{single}\r\n{last}");
+        let expected = format!(
+            "行号,出现次数,原始JSON\r\n1,2,{}\r\n4,2,{}",
+            super::super::csv_tools::csv_cell(first),
+            super::super::csv_tools::csv_cell(last),
+        );
+        assert_eq!(transform_json(&query).as_deref(), Ok(expected.as_str()));
+        assert_eq!(
+            json_csv_report(&query).unwrap().as_deref(),
+            Ok(expected.as_str())
+        );
+        assert_eq!(
+            transform_json(&format!("jsonl-duplicate-positions-csv {options} {single}")).as_deref(),
+            Ok("行号,出现次数,原始JSON"),
+        );
+        assert_eq!(
+            transform_json(&format!("{query}\n{{\"编号\":\"003\"}}")),
+            Err(JsonError::MissingValue),
         );
     }
 
