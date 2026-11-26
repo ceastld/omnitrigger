@@ -321,6 +321,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "搜索任一csv" | "search-any-lines-csv" => {
             Some(search_text_lines_csv(text, TextWordMatch::Any))
         }
+        "排除关键词csv" | "exclude-keyword-lines-csv" => {
+            Some(search_text_lines_csv(text, TextWordMatch::Exclude))
+        }
         "正则保留行csv" | "keep-regex-lines-csv" => {
             Some(filter_regex_lines(text, true, LineOutput::Csv))
         }
@@ -408,6 +411,9 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
         "搜索行" | "search-lines" => return search_text_lines(text, TextWordMatch::All),
         "搜索任一" | "search-any-lines" => return search_text_lines(text, TextWordMatch::Any),
+        "排除关键词" | "exclude-keyword-lines" => {
+            return search_text_lines(text, TextWordMatch::Exclude)
+        }
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "匹配上下文" | "context-lines" => {
@@ -2259,6 +2265,7 @@ fn split_lines(input: &str) -> Result<String, TextError> {
 pub(super) enum TextWordMatch {
     All,
     Any,
+    Exclude,
 }
 
 impl TextWordMatch {
@@ -2271,6 +2278,7 @@ impl TextWordMatch {
         match self {
             Self::All => words.iter().all(contains),
             Self::Any => words.iter().any(contains),
+            Self::Exclude => !words.iter().any(contains),
         }
     }
 }
@@ -5259,6 +5267,29 @@ mod tests {
         assert_eq!(
             transform_text("正则保留行CSV \"^WARN\" 恢复").as_deref(),
             Ok("原行号,原文")
+        );
+    }
+
+    #[test]
+    fn excludes_lines_containing_any_normalized_keyword() {
+        let source = "ok\r\nＷＡＲＮ 网关\u{2028}恢复,完成\r错误,重试";
+        let query = r#""warn 错误""#;
+        let expected = "原行号,原文\r\n1,ok\r\n3,\"恢复,完成\"";
+        assert_eq!(
+            transform_text(&format!("排除关键词 {query} {source}")).as_deref(),
+            Ok("ok\n恢复,完成")
+        );
+        assert_eq!(
+            transform_text(&format!("排除关键词CSV {query} {source}")).as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            search_result_text_csv(query, source, TextWordMatch::Exclude).as_deref(),
+            Ok(expected)
+        );
+        assert_eq!(
+            search_result_text(r#""""#, source, TextWordMatch::Exclude).as_deref(),
+            Ok(source)
         );
     }
 

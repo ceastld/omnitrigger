@@ -2093,26 +2093,35 @@ struct TextSearchCommand {
 
 impl TextSearchCommand {
     fn parse(query: &str) -> Option<(Self, &str)> {
-        use text_tools::TextWordMatch::{All, Any};
+        use text_tools::TextWordMatch::{All, Any, Exclude};
 
-        [(All, false), (All, true), (Any, false), (Any, true)]
-            .into_iter()
-            .find_map(|(words, table)| {
-                let search = Self { words, table };
-                query
-                    .strip_prefix(search.prefix())
-                    .map(|arguments| (search, arguments))
-            })
+        [
+            (All, false),
+            (All, true),
+            (Any, false),
+            (Any, true),
+            (Exclude, false),
+            (Exclude, true),
+        ]
+        .into_iter()
+        .find_map(|(words, table)| {
+            let search = Self { words, table };
+            query
+                .strip_prefix(search.prefix())
+                .map(|arguments| (search, arguments))
+        })
     }
 
     fn prefix(self) -> &'static str {
-        use text_tools::TextWordMatch::{All, Any};
+        use text_tools::TextWordMatch::{All, Any, Exclude};
 
         match (self.words, self.table) {
             (All, false) => TEXT_SEARCH_COMMAND,
             (All, true) => "文本: 搜索行CSV ",
             (Any, false) => "文本: 搜索任一 ",
             (Any, true) => "文本: 搜索任一CSV ",
+            (Exclude, false) => "文本: 排除关键词 ",
+            (Exclude, true) => "文本: 排除关键词CSV ",
         }
     }
 }
@@ -4144,7 +4153,7 @@ impl QuickSearch {
         query: &str,
         change: TextSearchChange,
     ) -> Option<(TextSearchCommand, TextSearchCommand)> {
-        use text_tools::TextWordMatch::{All, Any};
+        use text_tools::TextWordMatch::{All, Any, Exclude};
 
         let draft = self.input_before_result_search.as_ref()?;
         let (current, arguments) = draft.text_search(query)?;
@@ -4156,7 +4165,8 @@ impl QuickSearch {
             TextSearchChange::Words => TextSearchCommand {
                 words: match current.words {
                     All => Any,
-                    Any => All,
+                    Any => Exclude,
+                    Exclude => All,
                 },
                 ..current
             },
@@ -4201,7 +4211,8 @@ impl QuickSearch {
         if let Some((current, next)) = self.text_search_change(query, TextSearchChange::Words) {
             let (label, hint) = match current.words {
                 text_tools::TextWordMatch::All => ("全部词", "Alt+M 改为匹配任一关键词"),
-                text_tools::TextWordMatch::Any => ("任一词", "Alt+M 改为匹配全部关键词"),
+                text_tools::TextWordMatch::Any => ("任一词", "Alt+M 改为排除关键词"),
+                text_tools::TextWordMatch::Exclude => ("排除词", "Alt+M 改为匹配全部关键词"),
             };
             return Some(SearchWordSwitch {
                 current: current.prefix(),

@@ -4791,6 +4791,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "排除含任一关键词的原文行并保留行号",
+        query: "文本: 排除关键词CSV \"warn 错误\" ok\nＷＡＲＮ 网关\n恢复,完成\n错误,重试",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按正则提取匹配行及前后的文本",
         query: "文本: 正则上下文 [\"^WARN\",0,1] INFO 开始\nWARN 重试\n请求完成\nINFO 结束",
     },
