@@ -4019,8 +4019,21 @@ fn column_number(input: &str) -> Result<usize, CsvError> {
 fn pick_csv_cell(input: &str) -> Result<String, CsvError> {
     let invalid = CsvError::CellArguments;
     let ((row, column), data) = json_argument_and_data::<(i128, ColumnReference)>(input, invalid)?;
+    csv_cell_from_records(row, column, data)
+}
+
+pub(super) fn read_result_table_cell(arguments: &str, data: &str) -> Result<String, CsvError> {
+    let (row, column) = serde_json::from_str(arguments).map_err(|_| CsvError::CellArguments)?;
+    csv_cell_from_records(row, column, data)
+}
+
+fn csv_cell_from_records(
+    row: i128,
+    column: ColumnReference,
+    data: &str,
+) -> Result<String, CsvError> {
     if row == 0 {
-        return Err(invalid);
+        return Err(CsvError::CellArguments);
     }
     let mut rows = read_table_for_preview(data, ',')?;
     Ok(std::mem::take(csv_cell_mut(&mut rows, row, column)?))
@@ -12803,6 +12816,23 @@ B,乙
         ] {
             assert_eq!(transform_csv(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn reads_a_result_table_cell_with_coordinates_separate_from_its_data() {
+        let table = "编号,备注\r\n001,甲\r\n002,\" 梨,\n\"\"茶\"\" \"";
+        assert_eq!(
+            read_result_table_cell(r#"[-1,"备注"]"#, table).as_deref(),
+            Ok(" 梨,\n\"茶\" ")
+        );
+        assert_eq!(
+            read_result_table_cell("[0,1]", table),
+            Err(CsvError::CellArguments)
+        );
+        assert_eq!(
+            read_result_table_cell("[2,1] 其他,数据", table),
+            Err(CsvError::CellArguments)
+        );
     }
 
     #[test]

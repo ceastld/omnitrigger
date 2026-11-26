@@ -3457,13 +3457,17 @@ impl QuickSearch {
             || matches!(self.input_file_load, InputFileLoadState::InProgress)
     }
 
+    fn can_load_input_file(&self, query: &str) -> bool {
+        self.attached_table_query(query).is_none() && accepts_input_file(query)
+    }
+
     fn load_input_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = self.input.read(cx);
         let query = input.text();
         if self.file_operation_in_progress()
             || self.bookmark_name_edit.is_some()
             || input.is_composing()
-            || !accepts_input_file(&query)
+            || !self.can_load_input_file(&query)
         {
             return;
         }
@@ -3896,6 +3900,11 @@ impl QuickSearch {
         {
             return Some(Results::Value(Err(ValueError::InputTooLong)));
         }
+        if draft.command == TABLE_CELL_COMMAND {
+            return Some(Results::text_value(
+                csv_tools::read_result_table_cell(arguments, table).map_err(ValueError::Csv),
+            ));
+        }
         Some(Results::csv_preview_value(csv_tools::search_result_table(
             arguments, table,
         )))
@@ -4004,7 +4013,7 @@ impl QuickSearch {
             .is_some_and(|draft| draft.command == TABLE_CELL_COMMAND)
     }
 
-    fn table_cell_source(&self, position: Option<(usize, usize)>) -> Option<(&str, String)> {
+    fn table_cell_source(&self, position: Option<(usize, usize)>) -> Option<(&str, String, bool)> {
         if self.input_before_result_search.is_some() || self.expanded_value_pages.is_some() {
             return None;
         }
@@ -4021,8 +4030,12 @@ impl QuickSearch {
         let coordinates = format!("{row},{column}");
         let available =
             INPUT_CHARACTER_LIMIT - TABLE_CELL_COMMAND.chars().count() - coordinates.len() - 3;
-        (text.chars().take(available + 1).count() <= available)
-            .then_some((text.as_str(), coordinates))
+        let needs_attachment = text.chars().take(available + 1).count() > available;
+        (!needs_attachment || text.len() <= MAX_RESULT_TABLE_SEARCH_BYTES).then_some((
+            text.as_str(),
+            coordinates,
+            needs_attachment,
+        ))
     }
 
     fn toggle_table_cell(
@@ -4036,11 +4049,23 @@ impl QuickSearch {
         }
         if self.is_table_cell_lookup() {
             self.toggle_result_search(window, cx);
-        } else if let Some((text, coordinates)) = self.table_cell_source(position) {
-            let query = format!("{TABLE_CELL_COMMAND}[{coordinates}] {text}");
+        } else if let Some((text, coordinates, needs_attachment)) = self.table_cell_source(position)
+        {
+            let query = if needs_attachment {
+                format!("{TABLE_CELL_COMMAND}[{coordinates}]")
+            } else {
+                format!("{TABLE_CELL_COMMAND}[{coordinates}] {text}")
+            };
             let start = TABLE_CELL_COMMAND.len() + 1;
             let selection = start..start + coordinates.len();
-            self.open_result_tool(TABLE_CELL_COMMAND, query, selection, None, window, cx);
+            self.open_result_tool(
+                TABLE_CELL_COMMAND,
+                query,
+                selection,
+                needs_attachment.then(|| text.to_owned()),
+                window,
+                cx,
+            );
         }
     }
 
@@ -4873,7 +4898,7 @@ impl QuickSearch {
             } else if modifiers == 1
                 && keystroke.modifiers.control
                 && keystroke.key == "o"
-                && accepts_input_file(&self.input.read(cx).text())
+                && self.can_load_input_file(&self.input.read(cx).text())
             {
                 if !event.is_held {
                     self.load_input_file(window, cx);
@@ -6700,7 +6725,7 @@ impl Render for QuickSearch {
                         !naming_bookmark
                             && (selected_text_file
                                 || self.file_preview_path().is_some()
-                                || accepts_input_file(&query)),
+                                || self.can_load_input_file(&query)),
                         |header| {
                             let (label, hint) = match &self.input_file_load {
                                 InputFileLoadState::Ready if selected_text_file => {
@@ -9567,6 +9592,7 @@ mod tests {
         search.toggle_result_search(window, cx);
         let blank = search.input.read(cx).text();
         assert_eq!(blank, "CSV: 搜索行 \"\"");
+        assert!(!search.can_load_input_file(&blank));
         search.refresh_results(&blank, window, cx);
         assert_eq!(search.results.table_preview().unwrap().row_pages(), 43);
 
@@ -9595,6 +9621,21 @@ mod tests {
         assert_eq!(search.input.read(cx).text(), QUERY);
         assert_eq!(search.table_pages.rows, 1);
         assert!(search.input_before_result_search.is_none());
+
+        search.toggle_table_cell(None, window, cx);
+        let cell = search.input.read(cx).text();
+        assert_eq!(cell, "CSV: 取单元格 [7,1]");
+        search.refresh_results(&cell, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("6"));
+
+        let last = r#"CSV: 取单元格 [-1,"二进制"]"#;
+        search.fill_query(last, window, cx);
+        search.refresh_results(last, window, cx);
+        assert_eq!(search.results.refillable_text(), Some("0b0000000011111111"));
+        search.toggle_table_cell(None, window, cx);
+        search.refresh_results(QUERY, window, cx);
+        assert_eq!(search.input.read(cx).text(), QUERY);
+        assert_eq!(search.table_pages.rows, 1);
     }
 
     #[cfg(target_os = "windows")]
