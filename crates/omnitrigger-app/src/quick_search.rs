@@ -1858,7 +1858,7 @@ impl Results {
             return None;
         };
         items.iter().position(
-            |item| matches!(item, Destination::LocalFile { path: current, .. } if current == path),
+            |item| matches!(item, Destination::LocalFile { path: current, .. } if Path::new(current) == Path::new(path)),
         )
     }
 
@@ -3299,6 +3299,36 @@ impl QuickSearch {
         .detach();
     }
 
+    fn use_preview_file_directory(
+        &mut self,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let path = self.file_preview_path().or_else(|| {
+            let (Scope::DirectFilePreview, _) = scoped_query(self.input.read(cx).text_ref())?
+            else {
+                return None;
+            };
+            self.results.selected_text_file(self.selected)
+        });
+        let Some(path) = path else {
+            return false;
+        };
+        let Some(directory) = Path::new(path).parent().and_then(Path::to_str) else {
+            return false;
+        };
+        if !is_held {
+            let query = directory_query(directory);
+            self.file_search_return = Some(FileSearchReturn {
+                query: query.clone(),
+                path: path.to_owned(),
+            });
+            self.fill_query(query, window, cx);
+        }
+        true
+    }
+
     fn load_selected_text_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self
             .results
@@ -4658,6 +4688,10 @@ impl QuickSearch {
                 }
             }
             "tab" => {
+                if self.use_preview_file_directory(event.is_held, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 let suggestion = self
                     .results
                     .suggested_input(self.selected)
@@ -5246,8 +5280,8 @@ impl QuickSearch {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         let scope = scoped_query(self.input.read(cx).text_ref());
         let recent_previews = matches!(scope, Some((Scope::RecentFilePreviews, _)));
-        let preview_destinations =
-            recent_previews || matches!(scope, Some((Scope::DirectFilePreview, _)));
+        let direct_preview = matches!(scope, Some((Scope::DirectFilePreview, _)));
+        let preview_destinations = recent_previews || direct_preview;
         match &self.results {
             Results::Value(Ok(ResultValue {
                 kind: ValueKind::Table(table),
@@ -5810,6 +5844,9 @@ impl QuickSearch {
                                             Destination::LocalFile {
                                                 is_directory: true, ..
                                             } => "Tab 进入 · Enter 复制路径",
+                                            Destination::LocalFile { .. } if direct_preview => {
+                                                "Enter 预览 · Tab 同目录"
+                                            }
                                             Destination::LocalFile { .. }
                                                 if preview_destinations =>
                                             {
