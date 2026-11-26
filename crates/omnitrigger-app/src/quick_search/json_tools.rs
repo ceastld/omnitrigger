@@ -225,6 +225,8 @@ enum JsonCsvOperation {
     ValuePatterns,
     PointerPatterns,
     Types,
+    StructureStats,
+    LineStructureStats,
 }
 
 impl JsonCsvOperation {
@@ -252,6 +254,8 @@ impl JsonCsvOperation {
             "正则找值csv" | "find-value-regex-csv" => Some(Self::ValuePatterns),
             "正则找路径csv" | "find-pointer-regex-csv" => Some(Self::PointerPatterns),
             "找类型csv" | "find-type-csv" => Some(Self::Types),
+            "结构统计csv" | "structure-stats-csv" => Some(Self::StructureStats),
+            "行结构统计csv" | "jsonl-structure-stats-csv" => Some(Self::LineStructureStats),
             _ => None,
         }
     }
@@ -281,7 +285,9 @@ impl JsonCsvOperation {
             | Self::Values
             | Self::ValuePatterns
             | Self::PointerPatterns
-            | Self::Types => true,
+            | Self::Types
+            | Self::StructureStats
+            | Self::LineStructureStats => true,
         }
     }
 
@@ -321,6 +327,8 @@ impl JsonCsvOperation {
                 find_json_pattern(source, PointerOutput::Csv, PatternTarget::Pointer)
             }
             Self::Types => find_json_types(source, PointerOutput::Csv),
+            Self::StructureStats => json_structure_stats_csv(source),
+            Self::LineStructureStats => json_line_structure_stats_csv(source),
         }
     }
 }
@@ -553,7 +561,10 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "多路径排序" | "sort-by-pointers" => return sort_json_by_pointers(source),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
-        "结构统计" | "structure-stats" => return json_structure_stats(source),
+        "结构统计" | "structure-stats" => {
+            return serde_json::to_string_pretty(&json_structure_stats(source)?)
+                .map_err(json_parse_error);
+        }
         "切片" | "slice" => return slice_json_array(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
@@ -3452,7 +3463,36 @@ struct JsonStructureStats {
     fields: usize,
 }
 
-fn json_structure_stats(source: &str) -> Result<String, JsonError> {
+const JSON_STRUCTURE_METRICS: [&str; 9] = [
+    "最大深度",
+    "值总数",
+    "对象",
+    "数组",
+    "字符串",
+    "数字",
+    "布尔",
+    "空值",
+    "对象字段",
+];
+
+impl JsonStructureStats {
+    fn counts(&self) -> [String; 9] {
+        [
+            self.max_depth,
+            self.values,
+            self.objects,
+            self.arrays,
+            self.strings,
+            self.numbers,
+            self.booleans,
+            self.nulls,
+            self.fields,
+        ]
+        .map(|count| count.to_string())
+    }
+}
+
+fn json_structure_stats(source: &str) -> Result<JsonStructureStats, JsonError> {
     serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
     // 校验后按原始字节统计，保留重复键，也无需将数字转换成机器数值。
     let mut stats = JsonStructureStats::default();
@@ -3501,7 +3541,36 @@ fn json_structure_stats(source: &str) -> Result<String, JsonError> {
     // 每个对象字段有一个已计入的键名，把它从字符串和值总数中扣除。
     stats.strings -= stats.fields;
     stats.values -= stats.fields;
-    serde_json::to_string_pretty(&stats).map_err(json_parse_error)
+    Ok(stats)
+}
+
+fn json_structure_stats_csv(source: &str) -> Result<String, JsonError> {
+    let counts = json_structure_stats(source)?.counts();
+    let mut result = String::from("指标,数值");
+    for (metric, count) in JSON_STRUCTURE_METRICS.into_iter().zip(&counts) {
+        append_bounded_csv_row(
+            &mut result,
+            [metric, count.as_str()].into_iter(),
+            JsonError::CsvOutputTooLarge,
+        )?;
+    }
+    Ok(result)
+}
+
+fn json_line_structure_stats_csv(source: &str) -> Result<String, JsonError> {
+    let mut result = format!("行号,{}", JSON_STRUCTURE_METRICS.join(","));
+    for (line, record) in json_lines(source) {
+        let counts = json_structure_stats(record)
+            .map_err(|_| JsonError::InvalidLine)?
+            .counts();
+        let line = line.to_string();
+        append_bounded_csv_row(
+            &mut result,
+            std::iter::once(line.as_str()).chain(counts.iter().map(String::as_str)),
+            JsonError::CsvOutputTooLarge,
+        )?;
+    }
+    Ok(result)
 }
 
 fn decode_pointer_key(token: &str) -> Result<String, JsonError> {
@@ -5167,6 +5236,28 @@ mod tests {
             Ok("1")
         );
         assert_eq!(transform_json("结构统计 [1,]"), Err(JsonError::Invalid));
+    }
+
+    #[test]
+    fn exports_json_structure_metrics_and_preserves_original_jsonl_line_numbers() {
+        let query = r#"结构统计CSV {"x":[-1.2e-999,true,false,null,"a:\"[{}]"],"x":{}}"#;
+        let expected = concat!(
+            "指标,数值\r\n最大深度,2\r\n值总数,8\r\n对象,2\r\n数组,1",
+            "\r\n字符串,1\r\n数字,1\r\n布尔,2\r\n空值,1\r\n对象字段,2",
+        );
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(query).unwrap().as_deref(), Ok(expected));
+        let query = "行结构统计CSV {\"x\":1,\"x\":[null]}\r\n\r\n -1.5e-999";
+        let expected = concat!(
+            "行号,最大深度,值总数,对象,数组,字符串,数字,布尔,空值,对象字段",
+            "\r\n1,2,4,1,1,0,1,0,1,2\r\n3,0,1,0,0,0,1,0,0,0",
+        );
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json("行结构统计CSV {}\n[1,]"),
+            Err(JsonError::InvalidLine)
+        );
     }
 
     #[test]

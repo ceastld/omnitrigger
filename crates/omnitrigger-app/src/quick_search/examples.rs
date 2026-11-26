@@ -5174,6 +5174,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "预览 JSON 文档的结构统计明细",
+        query: r#"JSON: 结构统计CSV {"订单":[{"金额":1},{"金额":null}],"完成":true}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "逐行统计 JSONL 记录的深度和类型",
+        query: "JSON: 行结构统计CSV {\"id\":1,\"tags\":[null]}\n\n{\"id\":2,\"tags\":[]}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "读取 JSON 指针指向的值类型",
         query: r#"JSON: 类型 /订单/0/金额 {"订单":[{"金额":9007199254740993}]}"#,
     },
