@@ -12,6 +12,7 @@ use super::duration::{
 };
 use super::fraction::{
     calculate_fraction, ensure_exact_size, format_significant_digits, parse_fraction_literal,
+    repeating_decimal,
 };
 use super::operators::split_top_level_commas;
 use super::radix::Base;
@@ -36,6 +37,7 @@ pub(super) enum ConversionError {
     InvalidTransferRates,
     InvalidTransferDuration,
     InvalidTransferProgress,
+    InvalidTransferTotal,
     InvalidTransferEstimate,
     InvalidPace,
     InvalidPixelDensity,
@@ -94,6 +96,7 @@ impl ConversionError {
                 "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
             Self::InvalidTransferProgress => "已传数据量须在零和总数据量之间",
+            Self::InvalidTransferTotal => "计算完成比例时，总数据量须大于零",
             Self::InvalidTransferEstimate => "完成比例须大于零且不超过 100%，用时须大于零",
             Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
             Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
@@ -733,12 +736,19 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
 }
 
 pub(super) fn transfer_csv_report(query: &str) -> Option<Result<String, ConversionError>> {
-    let arguments = batch_arguments(query.trim_start(), "耗时对照CSV", "time-comparison-csv")?;
+    let body = query.trim_start();
+    let comparison = batch_arguments(body, "耗时对照CSV", "time-comparison-csv");
+    let progress = batch_arguments(body, "进度CSV", "progress-csv");
+    let arguments = comparison.or(progress)?;
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Some(Err(ConversionError::TooLong));
     }
     let input = normalize(arguments).replace(char::is_whitespace, " ");
-    Some(transfer_time_comparison_csv(&input))
+    Some(if comparison.is_some() {
+        transfer_time_comparison_csv(&input)
+    } else {
+        transfer_progress_csv(&input)
+    })
 }
 
 fn transfer_rate_arguments(input: &str) -> Result<(&str, &str), ConversionError> {
@@ -859,6 +869,50 @@ fn transfer_time_comparison_csv(input: &str) -> Result<String, ConversionError> 
     Ok(write_rows(&rows, ','))
 }
 
+fn transfer_progress_csv(input: &str) -> Result<String, ConversionError> {
+    let (input, target) = split_conversion(input).unwrap_or((input, "B"));
+    let (total, completed) = exact_transfer_progress(input)?;
+    if total.numer().sign() != Sign::Plus {
+        return Err(ConversionError::InvalidTransferTotal);
+    }
+    let target = exact_data_unit(target)?;
+    let remaining = &total - &completed;
+    let fraction = &completed / &total;
+    let percent = &fraction * BigInt::from(100);
+    let percentage = repeating_decimal(&percent).unwrap_or_else(|_| percent.to_string());
+    let mut rows = vec![vec![
+        "条目".to_owned(),
+        "数值".to_owned(),
+        "单位".to_owned(),
+    ]];
+    for (label, amount) in [("总量", &total), ("已传", &completed), ("剩余", &remaining)] {
+        let value = exact_data_target_amount(amount, &Dimension::Data, &target)?;
+        rows.push(vec![
+            label.to_owned(),
+            value.to_string(),
+            target.symbol.to_owned(),
+        ]);
+    }
+    rows.push(vec![
+        "完成比例".to_owned(),
+        fraction.to_string(),
+        String::new(),
+    ]);
+    rows.push(vec!["完成百分比".to_owned(), percentage, "%".to_owned()]);
+    Ok(write_rows(&rows, ','))
+}
+
+fn exact_transfer_progress(input: &str) -> Result<(BigRational, BigRational), ConversionError> {
+    let (total, completed) =
+        transfer_progress_arguments(input)?.ok_or(ConversionError::Incomplete)?;
+    let (total, dimension) = exact_data_source(total)?;
+    if dimension != Dimension::Data || total.numer().sign() == Sign::Minus {
+        return Err(ConversionError::InvalidTransferProgress);
+    }
+    let completed = exact_transferred_bits(&total, completed)?;
+    Ok((total, completed))
+}
+
 fn required_transfer_rate(input: &str) -> Result<String, ConversionError> {
     let (input, targets) = split_conversion(input).unwrap_or((input, "b/s"));
     let (progress, deadline) = input
@@ -869,13 +923,7 @@ fn required_transfer_rate(input: &str) -> Result<String, ConversionError> {
             Some((&input[..index], &input[index + SEPARATOR.len()..]))
         })
         .ok_or(ConversionError::Incomplete)?;
-    let (total, completed) =
-        transfer_progress_arguments(progress)?.ok_or(ConversionError::Incomplete)?;
-    let (total, dimension) = exact_data_source(total)?;
-    if dimension != Dimension::Data || total.numer().sign() == Sign::Minus {
-        return Err(ConversionError::InvalidTransferProgress);
-    }
-    let completed = exact_transferred_bits(&total, completed)?;
+    let (total, completed) = exact_transfer_progress(progress)?;
     let seconds = exact_transfer_elapsed_seconds(deadline.trim())?;
     if seconds.numer().sign() != Sign::Plus {
         return Err(ConversionError::InvalidTransferDuration);
@@ -3240,6 +3288,22 @@ mod tests {
         assert_eq!(
             estimate_transfer("所需速率 1 GiB 已传 25% 限时"),
             Err(ConversionError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn reports_exact_download_progress_in_consistent_data_units() {
+        assert_eq!(
+            transfer_csv_report("进度CSV 1 GiB 已传 640 MiB to MiB").unwrap().as_deref(),
+            Ok("条目,数值,单位\r\n总量,1024,MiB\r\n已传,640,MiB\r\n剩余,384,MiB\r\n完成比例,5/8,\"\"\r\n完成百分比,62.5,%")
+        );
+        assert_eq!(
+            transfer_csv_report("progress-csv 3 b completed 1 b to b").unwrap().as_deref(),
+            Ok("条目,数值,单位\r\n总量,3,b\r\n已传,1,b\r\n剩余,2,b\r\n完成比例,1/3,\"\"\r\n完成百分比,33.(3),%")
+        );
+        assert_eq!(
+            transfer_csv_report("进度CSV 0 B 已传 0%"),
+            Some(Err(ConversionError::InvalidTransferTotal))
         );
     }
 

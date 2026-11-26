@@ -2535,6 +2535,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "汇总下载的已传量、剩余量和完成比例",
+        query: "下载: 进度CSV 1 GiB 已传 640 MiB to MiB",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用完成比例和已经过的时间估算剩余时间",
         query: "下载: 预计剩余 25% 用时 8秒",
     },
