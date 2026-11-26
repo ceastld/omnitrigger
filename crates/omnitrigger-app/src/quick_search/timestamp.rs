@@ -390,6 +390,7 @@ fn convert_timestamp_with_local(
             | DurationError::ExactUnitArguments
             | DurationError::InvalidFrequency
             | DurationError::InvalidQuantileArguments
+            | DurationError::InvalidDispersionArguments
             | DurationError::InvalidQuantileTableArguments
             | DurationError::InvalidUnitTableArguments
             | DurationError::InvalidScaleFactor

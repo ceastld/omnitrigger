@@ -7,10 +7,10 @@ use serde_json::value::RawValue;
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 use super::csv_tools::write_rows;
-use super::fraction::calculate_fraction;
+use super::fraction::{calculate_fraction, format_square_root};
 use super::operators::json_argument_and_tail;
 use super::ratio_allocation::{allocate_shares, split_allocation, RatioAllocationError};
-use super::statistics::{interpolate_ordered_quantile, parse_probability};
+use super::statistics::{interpolate_ordered_quantile, parse_probability, variance_unweighted};
 
 pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
 pub(super) const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
@@ -18,7 +18,7 @@ const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
 // 去掉末尾的零后，精度由单位纳秒数中的因子 2 和 5 决定。一天含有 16 个因子 2。
 const MAX_FRACTION_DIGITS: usize = 16;
 const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
-const MAX_DURATION_QUANTILE_TERMS: usize = 128;
+const MAX_DURATION_STAT_TERMS: usize = 128;
 const MAX_DURATION_QUANTILE_LEVELS: usize = 16;
 const MAX_DURATION_UNIT_TARGETS: usize = 16;
 
@@ -37,6 +37,7 @@ pub(super) enum DurationError {
     DivisionByZero,
     InvalidFrequency,
     InvalidQuantileArguments,
+    InvalidDispersionArguments,
     InvalidQuantileTableArguments,
     InvalidUnitTableArguments,
     InvalidScaleFactor,
@@ -68,6 +69,9 @@ impl DurationError {
             Self::InvalidFrequency => "按 时长@次数 填写每组，次数须为正整数",
             Self::InvalidQuantileArguments => {
                 "填写 0 至 1 的概率及 1 至 128 个时长，例如 75% 1s,2s,3s,4s"
+            }
+            Self::InvalidDispersionArguments => {
+                "填写 1 至 128 个时长，样本方差和样本标准差至少需要 2 项"
             }
             Self::InvalidQuantileTableArguments => {
                 "填写 1 至 16 个概率的 JSON 数组和时长列表，例如 [\"25%\",0.5,\"3/4\"] 1s,2s,3s,4s"
@@ -120,6 +124,16 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
     if matches!(operation, "分位表" | "quantiles-csv") {
         return duration_quantiles_table(values, output);
+    }
+    let dispersion = match operation {
+        "方差" | "样本方差" | "sample-variance" => Some((true, false)),
+        "总体方差" | "population-variance" => Some((false, false)),
+        "标准差" | "样本标准差" | "sample-stddev" => Some((true, true)),
+        "总体标准差" | "population-stddev" => Some((false, true)),
+        _ => None,
+    };
+    if let Some((sample, deviation)) = dispersion {
+        return duration_dispersion(values, output.unwrap_or("s"), sample, deviation);
     }
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
@@ -443,6 +457,27 @@ fn median_duration_list(input: &str, use_frequencies: bool) -> Result<i128, Dura
     Err(DurationError::Incomplete)
 }
 
+fn duration_dispersion(
+    input: &str,
+    unit: &str,
+    sample: bool,
+    deviation: bool,
+) -> Result<String, DurationError> {
+    let invalid = DurationError::InvalidDispersionArguments;
+    let (symbol, divisor, _) =
+        numeric_duration_unit(unit).ok_or(DurationError::ExactUnitArguments)?;
+    let values = ordered_duration_values(input, invalid)?;
+    let variance = variance_unweighted(values, sample)
+        .map_err(|_| DurationError::OutOfRange)?
+        .ok_or(invalid)?;
+    let converted = variance / BigInt::from(divisor).pow(2);
+    if deviation {
+        Ok(format!("{} {symbol}", format_square_root(&converted)))
+    } else {
+        Ok(format!("{converted} {symbol}²"))
+    }
+}
+
 pub(super) fn is_duration_report(query: &str) -> bool {
     query.split_whitespace().next().is_some_and(|operation| {
         matches!(
@@ -468,10 +503,10 @@ fn ordered_duration_values(
     invalid: DurationError,
 ) -> Result<Vec<BigRational>, DurationError> {
     let mut values = duration_list_values(durations)
-        .take(MAX_DURATION_QUANTILE_TERMS + 1)
+        .take(MAX_DURATION_STAT_TERMS + 1)
         .map(|value| value.map(|nanos| BigRational::from_integer(nanos.into())))
         .collect::<Result<Vec<_>, _>>()?;
-    if !(1..=MAX_DURATION_QUANTILE_TERMS).contains(&values.len()) {
+    if !(1..=MAX_DURATION_STAT_TERMS).contains(&values.len()) {
         return Err(invalid);
     }
     values.sort_unstable();
@@ -1103,6 +1138,25 @@ mod tests {
     }
 
     #[test]
+    fn computes_exact_duration_variance_and_standard_deviation_in_selected_units() {
+        for (query, expected) in [
+            ("样本标准差 80ms,100ms,120ms to ms", "20 ms"),
+            ("总体标准差 80ms,100ms,120ms to ms", "√(800/3) ms"),
+            ("样本方差 80ms,100ms,120ms to ms", "400 ms²"),
+            ("population-variance 1s,3s", "1 s²"),
+            ("population-stddev -1ns,1ns to ns", "1 ns"),
+            ("sample-variance 0ns,1ns to ns", "1/2 ns²"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_duration("样本标准差 1s"),
+            Err(DurationError::InvalidDispersionArguments)
+        );
+        assert_eq!(convert_duration("总体方差 1s").as_deref(), Ok("0 s²"));
+    }
+
+    #[test]
     fn finds_duration_quantiles_with_exact_nanosecond_interpolation() {
         for (query, expected) in [
             ("分位数 75% 3s,1s,2s,4s", "00:00:03.25"),
@@ -1124,7 +1178,7 @@ mod tests {
                 "{query}"
             );
         }
-        let too_many = vec!["1s"; MAX_DURATION_QUANTILE_TERMS + 1].join(",");
+        let too_many = vec!["1s"; MAX_DURATION_STAT_TERMS + 1].join(",");
         assert_eq!(
             convert_duration(&format!("分位数 50% {too_many}")),
             Err(DurationError::InvalidQuantileArguments)
