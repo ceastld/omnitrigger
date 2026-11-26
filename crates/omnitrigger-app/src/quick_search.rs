@@ -3688,6 +3688,21 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
+    fn restore_previous_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.previous_input.query.clone();
+        if query.is_empty() {
+            return;
+        }
+        if let Some(origin) = self.previous_input.preview_origin.clone() {
+            self.result_refill = Some(origin.into_preview(query.clone()));
+        }
+        self.fill_query(query, window, cx);
+        if let Some(selection) = self.previous_input.selection {
+            self.input
+                .update(cx, |input, cx| input.restore_selection(selection, cx));
+        }
+    }
+
     fn has_temporary_query(&self) -> bool {
         self.input_before_help.is_some()
             || self.input_before_calculation_history.is_some()
@@ -4221,16 +4236,8 @@ impl QuickSearch {
                 && keystroke.modifiers.shift
                 && keystroke.key == "r"
             {
-                if !event.is_held && !self.previous_input.query.is_empty() {
-                    if let Some(origin) = self.previous_input.preview_origin.clone() {
-                        self.result_refill =
-                            Some(origin.into_preview(self.previous_input.query.clone()));
-                    }
-                    self.fill_query(self.previous_input.query.clone(), window, cx);
-                    if let Some(selection) = self.previous_input.selection {
-                        self.input
-                            .update(cx, |input, cx| input.restore_selection(selection, cx));
-                    }
+                if !event.is_held {
+                    self.restore_previous_input(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 2
@@ -6141,6 +6148,24 @@ impl Render for QuickSearch {
                                     .mr(px(6.))
                                     .tooltip(theme::text_tooltip(path.to_owned().into()))
                             }),
+                    )
+                    .when(
+                        !naming_bookmark
+                            && query.trim().is_empty()
+                            && !self.previous_input.query.is_empty(),
+                        |header| {
+                            header.child(
+                                button("restore-quick-search-input", "恢复输入", Tone::Ghost, true)
+                                    .h(px(24.))
+                                    .px(px(6.))
+                                    .tooltip(theme::text_tooltip(
+                                        "Ctrl+Shift+R 恢复上一次输入".into(),
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.restore_previous_input(window, cx);
+                                    })),
+                            )
+                        },
                     )
                     .when(!naming_bookmark && query.trim().is_empty(), |header| {
                         header.child(
