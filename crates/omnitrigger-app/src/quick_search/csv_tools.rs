@@ -3884,6 +3884,47 @@ fn report_csv_column_pair_tolerance(input: &str) -> Result<String, CsvError> {
     Ok(output)
 }
 
+pub(super) fn csv_column_pair_report_source_range(
+    query: &str,
+    row: usize,
+    expected_old: &str,
+    expected_new: &str,
+) -> Option<Range<usize>> {
+    let (operation, arguments) = split_argument(query)?;
+    let invalid = CsvError::ColumnPairDifferenceArguments;
+    let (columns, data) = match operation.to_ascii_lowercase().as_str() {
+        "两列差异"
+        | "column-pair-differences"
+        | "两列数值差异"
+        | "numeric-column-pair-differences" => {
+            json_argument_and_data::<[ColumnReference; 2]>(arguments, invalid).ok()?
+        }
+        "两列超差" | "out-of-tolerance-columns" => {
+            let ((columns, _, _), data) =
+                json_argument_and_data::<([ColumnReference; 2], String, String)>(
+                    arguments, invalid,
+                )
+                .ok()?;
+            (columns, data)
+        }
+        _ => return None,
+    };
+    let data = data.strip_prefix('\u{feff}').unwrap_or(data);
+    let mut spans = Vec::new();
+    let rows = read_delimited_rows(data, ',', true, Some(&mut spans)).ok()?;
+    let columns = resolve_distinct_columns(rows.first()?, &columns, invalid).ok()?;
+    let &[left, right] = columns.as_slice() else {
+        return None;
+    };
+    let record = rows.get(row)?;
+    if row == 0 || record[left] != expected_old || record[right] != expected_new {
+        return None;
+    }
+    let offset = data.as_ptr().addr().checked_sub(query.as_ptr().addr())?;
+    let range = spans.get(row)?;
+    Some(offset + range.start..offset + range.end)
+}
+
 fn write_column_comparison_change(
     output: &mut String,
     key: &[&str],
@@ -15799,6 +15840,24 @@ null"#
             transform_csv("两列超差 [[1,2],\"0\",\"0\"] 原值,新值\n1,1\na,2"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn locates_csv_column_pair_reports_in_quoted_multiline_original_records() {
+        let query = concat!(
+            "两列超差 [[\"原值\",3],\"1/100\",\"0.05\"]\r\n",
+            "\u{feff}编号,原值,新值,备注\r\n",
+            "1,100,100.5,\"上一行\n跨行\"\r\n",
+            "2,100,102,\"逗,号\n换行\"\r\n",
+            "3,0,0.1,待确认",
+        );
+        let range = csv_column_pair_report_source_range(query, 2, "100", "102").unwrap();
+        assert_eq!(query.get(range), Some("2,100,102,\"逗,号\n换行\""));
+        assert!(csv_column_pair_report_source_range(query, 2, "100", "0.1").is_none());
+        assert!(csv_column_pair_report_source_range(query, 0, "原值", "新值").is_none());
+        let query = "两列差异 [2,3] 编号,旧,新\n1,相同,相同\n2,\"旧,值\",新";
+        let range = csv_column_pair_report_source_range(query, 2, "旧,值", "新").unwrap();
+        assert_eq!(query.get(range), Some("2,\"旧,值\",新"));
     }
 
     #[test]

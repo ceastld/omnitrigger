@@ -5274,6 +5274,16 @@ impl QuickSearch {
                 .page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
                 .map(|(row, _)| (row, 1))
         })?;
+        if scope == Scope::Csv && column == 1 {
+            let range = csv_tools::csv_column_pair_report_source_range(
+                term,
+                table.data_cell(row, 1)?.parse().ok()?,
+                table.data_cell(row, 2)?,
+                table.data_cell(row, 3)?,
+            )?;
+            let offset = term.as_ptr().addr().checked_sub(query.as_ptr().addr())?;
+            return Some(offset + range.start..offset + range.end);
+        }
         if scope == Scope::Timestamp && matches!(column, 1 | 2) {
             let index = table
                 .data_cell(row, column)?
