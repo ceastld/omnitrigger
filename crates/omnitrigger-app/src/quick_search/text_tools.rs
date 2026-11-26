@@ -1863,12 +1863,16 @@ fn replacement_argument(input: &str) -> Result<(String, &str), TextError> {
     Ok((operand, rest))
 }
 
-fn quoted_text_argument(input: &str) -> Result<(String, &str), TextError> {
-    let (argument, rest) = replacement_argument(input).map_err(|error| match error {
+fn text_operand(input: &str) -> Result<(String, &str), TextError> {
+    replacement_argument(input).map_err(|error| match error {
         TextError::IncompleteReplacement => TextError::IncompleteTextArgument,
         TextError::InvalidReplacementArguments => TextError::InvalidTextArgument,
         _ => error,
-    })?;
+    })
+}
+
+fn quoted_text_argument(input: &str) -> Result<(String, &str), TextError> {
+    let (argument, rest) = text_operand(input)?;
     let text = text_payload(rest).map_err(|error| match error {
         TextError::MissingText => TextError::IncompleteTextArgument,
         _ => error,
@@ -2205,19 +2209,34 @@ fn split_lines(input: &str) -> Result<String, TextError> {
 
 fn search_text_lines(input: &str) -> Result<String, TextError> {
     let (query, text) = quoted_text_argument(input)?;
-    let query = search_key(&query);
+    Ok(filter_result_lines(&query, text))
+}
+
+pub(super) fn search_result_text(arguments: &str, text: &str) -> Result<String, TextError> {
+    let (query, rest) = text_operand(arguments)?;
+    if !rest.trim().is_empty() {
+        return Err(TextError::InvalidTextArgument);
+    }
+    if query.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    Ok(filter_result_lines(&query, text))
+}
+
+fn filter_result_lines(query: &str, text: &str) -> String {
+    let query = search_key(query);
     let words: Vec<_> = query.split_whitespace().collect();
     if words.is_empty() {
-        return Ok(text.to_owned());
+        return text.to_owned();
     }
-    Ok(logical_newline_pattern()
+    logical_newline_pattern()
         .split(text)
         .filter(|line| {
             let key = search_key(line);
             words.iter().all(|word| key.contains(word))
         })
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n")
 }
 
 fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
@@ -4965,6 +4984,20 @@ mod tests {
         assert_eq!(
             transform_text(r#"保留行 "" 内容"#),
             Err(TextError::EmptySearchText)
+        );
+    }
+
+    #[test]
+    fn filters_a_text_result_with_keywords_separate_from_its_lines() {
+        let source = " 北: ＯＫ\r\n南: \"tea\"\u{2028}西: OFF \r";
+        assert_eq!(search_result_text(r#""""#, source).as_deref(), Ok(source));
+        assert_eq!(
+            search_result_text("“北 ok”", source).as_deref(),
+            Ok(" 北: ＯＫ")
+        );
+        assert_eq!(
+            search_result_text(r#""南" 其他文本"#, source),
+            Err(TextError::InvalidTextArgument)
         );
     }
 

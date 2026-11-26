@@ -2026,7 +2026,7 @@ impl TablePages {
 struct ResultSearchDraft {
     original: QueryDraft,
     command: &'static str,
-    table_source: Option<String>,
+    source: Option<String>,
 }
 
 struct QueryDraft {
@@ -2059,7 +2059,7 @@ const INPUT_REPLACE_HEIGHT: f32 = 200.;
 const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
 const TABLE_CELL_COMMAND: &str = "CSV: 取单元格 ";
-const MAX_RESULT_TABLE_SEARCH_BYTES: usize = 1024 * 1024;
+const MAX_RESULT_SEARCH_BYTES: usize = 1024 * 1024;
 
 struct BookmarkNameEdit {
     expression: String,
@@ -2996,7 +2996,7 @@ impl QuickSearch {
         }
         let next = if refilled {
             Results::RefilledInput
-        } else if let Some(result) = self.attached_table_result(query) {
+        } else if let Some(result) = self.attached_search_result(query) {
             result
         } else {
             self.index.results(query)
@@ -3045,7 +3045,7 @@ impl QuickSearch {
             .is_some_and(|draft| {
                 !query.starts_with(draft.command)
                     && !before_help.is_some_and(|previous| previous.starts_with(draft.command))
-                    && !self.retains_attached_table(draft)
+                    && !self.retains_result_source(draft)
             })
         {
             self.input_before_result_search = None;
@@ -3458,7 +3458,7 @@ impl QuickSearch {
     }
 
     fn can_load_input_file(&self, query: &str) -> bool {
-        self.attached_table_query(query).is_none() && accepts_input_file(query)
+        self.attached_result_query(query).is_none() && accepts_input_file(query)
     }
 
     fn load_input_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3891,27 +3891,32 @@ impl QuickSearch {
         true
     }
 
-    fn attached_table_result(&self, query: &str) -> Option<Results> {
+    fn attached_search_result(&self, query: &str) -> Option<Results> {
         let draft = self.input_before_result_search.as_ref()?;
-        let table = draft.table_source.as_deref()?;
+        let source = draft.source.as_deref()?;
         let arguments = query.strip_prefix(draft.command)?;
         if query.len() > INPUT_CHARACTER_LIMIT
             && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
         {
             return Some(Results::Value(Err(ValueError::InputTooLong)));
         }
+        if draft.command == TEXT_SEARCH_COMMAND {
+            return Some(Results::text_value(
+                text_tools::search_result_text(arguments, source).map_err(ValueError::Text),
+            ));
+        }
         if draft.command == TABLE_CELL_COMMAND {
             return Some(Results::text_value(
-                csv_tools::read_result_table_cell(arguments, table).map_err(ValueError::Csv),
+                csv_tools::read_result_table_cell(arguments, source).map_err(ValueError::Csv),
             ));
         }
         Some(Results::csv_preview_value(csv_tools::search_result_table(
-            arguments, table,
+            arguments, source,
         )))
     }
 
-    fn retains_attached_table(&self, draft: &ResultSearchDraft) -> bool {
-        if draft.table_source.is_none() {
+    fn retains_result_source(&self, draft: &ResultSearchDraft) -> bool {
+        if draft.source.is_none() {
             return false;
         }
         [
@@ -3931,17 +3936,16 @@ impl QuickSearch {
         .any(|previous| previous.starts_with(draft.command))
     }
 
-    fn attached_table_query(&self, query: &str) -> Option<&str> {
+    fn attached_result_query(&self, query: &str) -> Option<&str> {
         let draft = self.input_before_result_search.as_ref()?;
-        (draft.table_source.is_some() && query.starts_with(draft.command))
-            .then(|| draft.original.text())
+        (draft.source.is_some() && query.starts_with(draft.command)).then(|| draft.original.text())
     }
 
     fn remember_confirmed_query(&self, query: &str) {
         self.index
             .recent
             .queries
-            .record_exact(self.attached_table_query(query).unwrap_or(query), "");
+            .record_exact(self.attached_result_query(query).unwrap_or(query), "");
     }
 
     fn searchable_result_text(&self) -> Option<(&'static str, &str, bool)> {
@@ -3957,9 +3961,11 @@ impl QuickSearch {
         };
         let available = INPUT_CHARACTER_LIMIT - command.chars().count() - extra;
         let needs_attachment = text.chars().take(available + 1).count() > available;
-        (!needs_attachment
-            || (command == TABLE_SEARCH_COMMAND && text.len() <= MAX_RESULT_TABLE_SEARCH_BYTES))
-            .then_some((command, text.as_str(), needs_attachment))
+        (!needs_attachment || text.len() <= MAX_RESULT_SEARCH_BYTES).then_some((
+            command,
+            text.as_str(),
+            needs_attachment,
+        ))
     }
 
     fn toggle_result_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3993,14 +3999,14 @@ impl QuickSearch {
         command: &'static str,
         query: String,
         selection: Range<usize>,
-        table_source: Option<String>,
+        source: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.input_before_result_search = Some(ResultSearchDraft {
             original: self.query_draft(cx),
             command,
-            table_source,
+            source,
         });
         self.fill_query(query, window, cx);
         self.input
@@ -4031,7 +4037,7 @@ impl QuickSearch {
         let available =
             INPUT_CHARACTER_LIMIT - TABLE_CELL_COMMAND.chars().count() - coordinates.len() - 3;
         let needs_attachment = text.chars().take(available + 1).count() > available;
-        (!needs_attachment || text.len() <= MAX_RESULT_TABLE_SEARCH_BYTES).then_some((
+        (!needs_attachment || text.len() <= MAX_RESULT_SEARCH_BYTES).then_some((
             text.as_str(),
             coordinates,
             needs_attachment,
@@ -4371,7 +4377,7 @@ impl QuickSearch {
             self.toggle_bookmark_browser(window, cx);
             return;
         }
-        if self.attached_table_query(&query).is_some() {
+        if self.attached_result_query(&query).is_some() {
             return;
         }
         let Some(target) = self.results.bookmark_query(&query, self.selected) else {
@@ -6617,7 +6623,7 @@ impl Render for QuickSearch {
         } else {
             None
         };
-        let bookmark_action = if naming_bookmark || self.attached_table_query(&query).is_some() {
+        let bookmark_action = if naming_bookmark || self.attached_result_query(&query).is_some() {
             None
         } else if query.trim().is_empty() {
             Some(("查看收藏 F4", "F4 或 Ctrl+D 查看收藏".to_owned()))
@@ -9668,6 +9674,35 @@ mod tests {
     }
 
     #[cfg(target_os = "windows")]
+    fn verify_large_text_result_search(
+        search: &mut QuickSearch,
+        window: &mut Window,
+        cx: &mut Context<QuickSearch>,
+    ) {
+        const QUERY: &str = "文本: 右填充 [2000,\".\"] 北区: OK\n南区: tea\n西区: 关闭";
+        search.fill_query(QUERY, window, cx);
+        search.refresh_results(QUERY, window, cx);
+        search.toggle_result_search(window, cx);
+        let blank = search.input.read(cx).text();
+        assert_eq!(blank, "文本: 搜索行 \"\"");
+        search.refresh_results(&blank, window, cx);
+        assert!(search.results.refillable_text().is_none());
+
+        let filter = r#"文本: 搜索行 "TEA 南区""#;
+        search.fill_query(filter, window, cx);
+        search.refresh_results(filter, window, cx);
+        let line = search.results.refillable_text().unwrap();
+        assert!(line.starts_with("南区: tea"));
+        assert_eq!(line.chars().count(), 2000);
+        assert_eq!(line.lines().count(), 1);
+
+        search.toggle_result_search(window, cx);
+        search.refresh_results(QUERY, window, cx);
+        assert_eq!(search.input.read(cx).text(), QUERY);
+        assert!(search.input_before_result_search.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
     fn verify_text_result_search(
         search: &mut QuickSearch,
         window: &mut Window,
@@ -10704,6 +10739,7 @@ mod tests {
                     reopened.update(cx, verify_expanded_result_restore).unwrap();
                     reopened.update(cx, verify_example_data_selection).unwrap();
                     reopened.update(cx, verify_text_result_search).unwrap();
+                    reopened.update(cx, verify_large_text_result_search).unwrap();
                     reopened
                         .update(cx, verify_file_preview_origin_survives_result_search)
                         .unwrap();
