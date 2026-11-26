@@ -1069,6 +1069,31 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_log_exponential_differences_without_overflow_or_cancellation() {
+        let large = evaluate("logdiffexp(1000,999)-1000").unwrap();
+        assert!((large - (-(-1.0_f64).exp()).ln_1p()).abs() < 1e-12);
+        let tiny = evaluate("logdiffexp(0,-50)").unwrap();
+        assert!(tiny < 0.);
+        assert!((tiny / -(-50.0_f64).exp() - 1.).abs() < 4. * f64::EPSILON);
+        let near_zero = evaluate("log1mexp(-1e-20)").unwrap();
+        assert!((near_zero - 1e-20_f64.ln()).abs() < 1e-12);
+        assert_eq!(evaluate("logsubexp(1,0)"), evaluate("1+log1mexp(-1)"));
+        for query in [
+            "logdiffexp(2,2)",
+            "logdiffexp(2,3)",
+            "logdiffexp(2)",
+            "log1mexp(0)",
+            "log1mexp(1)",
+        ] {
+            assert_eq!(
+                evaluate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn evaluates_hyperbolic_functions_and_rejects_invalid_inverse_arguments() {
         for (query, expected) in [
             ("sinh(ln(2))", 0.75),

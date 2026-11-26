@@ -450,6 +450,7 @@
 - 用 `logsumexp` 求一组指数值之和的自然对数。输入 `logsumexp(1000,1000)` 得到约 `1000.69314718056`。计算先提出最大的指数项，避免中间结果溢出。 [SciPy 的 logsumexp 定义](https://docs.scipy.org/doc/scipy/reference/generated/scipy.special.logsumexp.html)
 - 用 `sigmoid(ln(3))` 可把对数几率转换成概率 `0.75`，也可写 `expit`。用 `logit(0.75)` 得到约 `1.09861228866811`。`logit` 的概率须严格介于 0 和 1 之间。 [SciPy 的 expit 定义](https://docs.scipy.org/doc/scipy/reference/generated/scipy.special.expit.html) [SciPy 的 logit 定义](https://docs.scipy.org/doc/scipy/reference/generated/scipy.special.logit.html)
 - 用 `softplus(x)` 计算 `ln(1+exp(x))`，用 `logsigmoid(x)` 计算 sigmoid 的自然对数。极端输入也可直接计算，例如 `softplus(1000)` 得到 `1000`，`logsigmoid(-1000)` 得到 `-1000`。
+- 用 `logdiffexp(a,b)` 求 `ln(exp(a)-exp(b))`，要求 `a>b`。例如 `logdiffexp(1000,999)` 得到约 `999.541324854613`。用 `log1mexp(x)` 求负数 `x` 对应的 `ln(1-exp(x))`，可处理靠近零的输入。
 - 用 `fma(a,b,c)` 计算 `a*b+c`。普通计算合并乘法与加法后只舍入一次，`fma(1e308,2,-1e308)` 得到 `1e308`。输入 `分数: 计算 fma(1/3,3/5,-1/10)` 得到精确结果 `1/10`。
 - 用 `ulp(1)` 查看双精度浮点数在 `1` 处的最小进位间隔，得到约 `2.22044604925031e-16`。计算取输入的绝对值并向较大的相邻数取间隔。零返回最小正浮点值，最大有限值取与较小相邻数的间隔。 [Python 的 ULP 定义](https://docs.python.org/3/library/math.html#math.ulp)
 - 用 `remainder(6,4)` 按最近整数商求余数，得到 `-2`。商恰好在两个整数中间时取偶数，因此 `remainder(10,4)` 得到 `2`。用 `分数: 计算 remainder(3/2,1)` 得到精确余数 `-1/2`。 [Python 的 IEEE 余数定义](https://docs.python.org/3/library/math.html#math.remainder)

@@ -1,4 +1,4 @@
-use std::f64::consts::{E, PI};
+use std::f64::consts::{E, LN_2, PI};
 
 use num_bigint::{BigInt, Sign};
 
@@ -40,6 +40,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         }
         "fsum" => return Some(NamedValue::Aggregate(exact_float_sum)),
         "logsumexp" => return Some(NamedValue::Aggregate(log_sum_exp)),
+        "logdiffexp" | "logsubexp" => return Some(NamedValue::Aggregate(log_difference_exp)),
         "prod" | "product" => return Some(NamedValue::Aggregate(|values| values.iter().product())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
@@ -231,6 +232,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "logit" => logit,
         "softplus" => softplus,
         "logsigmoid" | "log_sigmoid" => |value| -softplus(-value),
+        "log1mexp" => log_one_minus_exp,
         "radians" => f64::to_radians,
         "degrees" => f64::to_degrees,
         "percent" => |value| value / 100.,
@@ -582,6 +584,25 @@ fn softplus(value: f64) -> f64 {
     } else {
         value.exp().ln_1p()
     }
+}
+
+fn log_one_minus_exp(value: f64) -> f64 {
+    if value >= 0. {
+        return f64::NAN;
+    }
+    // 接近零时保留 1-exp(x) 的精度，远离零时保留 ln(1-y) 的微小变化。
+    if value > -LN_2 {
+        (-value.exp_m1()).ln()
+    } else {
+        (-value.exp()).ln_1p()
+    }
+}
+
+fn log_difference_exp(values: &[f64]) -> f64 {
+    let &[first, second] = values else {
+        return f64::NAN;
+    };
+    first + log_one_minus_exp(second - first)
 }
 
 fn logit(probability: f64) -> f64 {

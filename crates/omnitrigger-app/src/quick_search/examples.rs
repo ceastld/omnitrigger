@@ -3727,6 +3727,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算两个指数值之差的自然对数",
+        query: "logdiffexp(1000,999)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算一减指数的自然对数",
+        query: "log1mexp(-1e-20)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将乘法与加法合并后进行一次舍入",
         query: "fma(1e308,2,-1e308)",
     },
