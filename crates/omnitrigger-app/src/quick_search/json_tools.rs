@@ -333,23 +333,22 @@ pub(super) fn json_csv_report(query: &str) -> Option<Result<String, JsonError>> 
         .then(|| operation.run(source))
 }
 
-pub(super) fn json_line_filter_source_range(
+pub(super) fn json_line_report_source_range(
     query: &str,
     line_number: usize,
-) -> Option<Range<usize>> {
+) -> Option<(Range<usize>, usize)> {
     let (operation, arguments) = split_json_operation(query)?;
     let operation = JsonCsvOperation::from_name(&operation.to_ascii_lowercase())?;
-    if !matches!(
-        operation,
-        JsonCsvOperation::LineFilter | JsonCsvOperation::LineAnyFilter
-    ) {
-        return None;
-    }
-    let (_, source) = json_value_and_source(arguments, JsonError::FilterConditions).ok()?;
+    let original_column = match operation {
+        JsonCsvOperation::LineFilter | JsonCsvOperation::LineAnyFilter => 2,
+        JsonCsvOperation::LineDuplicates => 3,
+        _ => return None,
+    };
+    let (_, source) = json_value_and_source(arguments, JsonError::Invalid).ok()?;
     let (_, range, _) =
         json_lines_with_spans(source).find(|(number, _, _)| *number == line_number)?;
     let offset = query.len() - source.len();
-    Some(offset + range.start..offset + range.end)
+    Some((offset + range.start..offset + range.end, original_column))
 }
 
 fn split_json_operation(query: &str) -> Option<(&str, &str)> {
@@ -4682,11 +4681,24 @@ mod tests {
                 "\r\n4,\"{\"\"状态\"\":\"\"WARN\"\",\"\"金额\"\":0.5}\"",
             ))
         );
-        let info = json_line_filter_source_range(&any, 3).unwrap();
+        let (info, column) = json_line_report_source_range(&any, 3).unwrap();
+        assert_eq!(column, 2);
         assert_eq!(&any[info], r#"{"状态":"INFO","金额":2e2}"#);
-        assert!(json_line_filter_source_range(&all, 2).is_none());
+        assert!(json_line_report_source_range(&all, 2).is_none());
         let no_match = r#"行筛选CSV [["/金额",">",1]] {"金额":0}"#;
         assert_eq!(transform_json(no_match).as_deref(), Ok("原行号,原文"));
+    }
+
+    #[test]
+    fn locates_original_json_for_a_duplicate_report_with_a_count_column() {
+        let query = concat!(
+            r#"行重复位置CSV ["/金额"] {"金额":1.50}"#,
+            "\r\n\r\n",
+            r#" {"金额":15e-1} "#,
+        );
+        let (range, column) = json_line_report_source_range(query, 3).unwrap();
+        assert_eq!(column, 3);
+        assert_eq!(&query[range], r#" {"金额":15e-1} "#);
     }
 
     #[test]

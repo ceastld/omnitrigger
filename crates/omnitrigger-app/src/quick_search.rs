@@ -5208,8 +5208,8 @@ impl QuickSearch {
                 .map(|(row, _)| row)
         })?;
         let line = table.data_cell(row, 1)?.parse().ok()?;
-        let range = json_tools::json_line_filter_source_range(term, line)?;
-        if term[range.clone()].trim() != table.data_cell(row, 2)? {
+        let (range, original_column) = json_tools::json_line_report_source_range(term, line)?;
+        if term[range.clone()].trim() != table.data_cell(row, original_column)? {
             return None;
         }
         let (_, operand) = query.split_once([':', '：'])?;
