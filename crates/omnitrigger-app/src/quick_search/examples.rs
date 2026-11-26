@@ -2791,6 +2791,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算含出血的纸张尺寸或图像像素",
+        query: "纸张: 出血 A4 @ 3 mm",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算等比缩放到目标纸张的比例",
         query: "纸张: A4 to A5",
     },

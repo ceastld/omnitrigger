@@ -1268,6 +1268,7 @@
 - 输入 `像素密度: 3840×2160 @ 27 in` 得到 `163.18 PPI · 59.77 × 33.62 cm`。尺寸指屏幕对角线，按正方形像素算出屏幕宽和高。也可使用 `按 27英寸` 或输入厘米尺寸。
 - 输入 `比例尺: 1:50000 3.2 cm to km`，可把图上的长度换成实际距离 `1.6 km`。用 `比例尺: 图上 1:50000 1.6 km to cm` 可反向换算。已知两段距离时，输入 `比例尺: 求 3.2 cm = 1.6 km` 得到 `1:50000`。 [美国地质调查局的比例尺说明](https://www.usgs.gov/educational-resources/finding-your-way-map-and-compass)
 - 输入 `纸张: B5` 得到 `176 × 250 mm`，输入 `纸张: A4 @ 300 dpi` 得到 `2480 × 3508 px`。用 `纸张: A4 to A5` 可算出能放入目标纸张的等比缩放比例 `70.47%`，结果向下保留两位小数。纸型默认纵向，可加 `横向`。 [ISO 216 尺寸表](https://preview.sist.si/sist-preview/36631/c0883203ea25445c9992bb09343620c5/ISO-216-2007.pdf) [Letter 与 Legal 尺寸](https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/doxyhtml/print__media_8hpp_source.html#l00084)
+- 输入 `纸张: 出血 A4 @ 3 mm` 可在四边各加 3 毫米，得到 `216 × 303 mm`。继续加 `@ 300 dpi` 可换算成 `2551 × 3579 px`，像素尺寸取最接近的整数。出血量可填零、小数或算式，纸型可加 `横向`。 [Adobe 出血区域说明](https://helpx.adobe.com/indesign/desktop/print/page-set-up-and-printer-marks/print-bleed-and-slug-areas.html)
 - 输入 `网段: 192.0.2.137/26` 可查看网段、掩码、地址范围和地址数。也可用点分十进制掩码或输入 IPv6 前缀，例如 `网段: 2001:db8::/64 包含 2001:db8::1`。 [IPv4 前缀](https://www.rfc-editor.org/rfc/rfc4632.html#section-3.1) [IPv6 前缀](https://www.rfc-editor.org/rfc/rfc4291.html#section-2.3)
 - 用 `网段: 归属CSV ["192.0.2.0/24","192.0.2.128/25"] 192.0.2.190,192.0.2.1` 可同时查询多个地址各自命中的最长前缀。表格按输入顺序保留所有地址，缺少匹配时网段列留空，支持混合填写 IPv4 和 IPv6。 [CIDR 最长前缀匹配](https://www.rfc-editor.org/rfc/rfc4632.html#section-5.1)
 - 也可用 `网段: 归属CSV [["192.0.2.0/24","办公"],["192.0.2.128/25","实验室"]] 192.0.2.190,192.0.2.1` 给候选网段命名，结果新增“名称”列。名称保留原文字形和标点，同一网段填写不同名称时会提示。

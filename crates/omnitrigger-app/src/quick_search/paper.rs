@@ -1,4 +1,5 @@
-use super::calculator::{evaluate, normalize, QUERY_LIMIT};
+use super::batch::batch_arguments;
+use super::calculator::{evaluate, format_result, normalize, QUERY_LIMIT};
 use super::conversion::{split_conversion, INCH_IN_METERS};
 
 const SERIES_A: [(u32, u32); 11] = [
@@ -33,6 +34,7 @@ pub(super) enum PaperError {
     Incomplete,
     UnknownSize,
     InvalidDpi,
+    InvalidBleed,
     OutOfRange,
     TooLong,
 }
@@ -43,6 +45,7 @@ impl PaperError {
             Self::Incomplete => "输入纸型，例如 A4、A4 @ 300 dpi 或 A4 to A5",
             Self::UnknownSize => "可用 ISO A0 至 A10、B0 至 B10、2A0、4A0、Letter 或 Legal",
             Self::InvalidDpi => "输入大于零的分辨率，例如 300 dpi",
+            Self::InvalidBleed => "填写纸型和非负出血量，例如 出血 A4 @ 3 mm",
             Self::OutOfRange => "像素尺寸超出可计算范围",
             Self::TooLong => "纸张计算式过长",
         }
@@ -55,25 +58,12 @@ pub(super) fn calculate_paper(query: &str) -> Result<String, PaperError> {
     }
     let input = normalize(query).to_ascii_lowercase();
     let input = input.trim();
+    if let Some(arguments) = batch_arguments(input, "出血", "bleed") {
+        return paper_bleed(arguments);
+    }
     if let Some((source, density)) = input.split_once(['@', '按']) {
         let (width, height) = paper_dimensions(source)?;
-        let density = density.trim();
-        let density = density
-            .strip_suffix("dpi")
-            .or_else(|| density.strip_suffix("ppi"))
-            .ok_or(PaperError::InvalidDpi)?;
-        let density = evaluate(density).map_err(|_| PaperError::InvalidDpi)?;
-        if density <= 0. {
-            return Err(PaperError::InvalidDpi);
-        }
-        let pixels = |length| {
-            let count = (f64::from(length) / (INCH_IN_METERS * 10_000.) * density).round();
-            if !(1. ..=f64::from(u32::MAX)).contains(&count) {
-                return Err(PaperError::OutOfRange);
-            }
-            Ok(count as u32)
-        };
-        return Ok(format!("{} × {} px", pixels(width)?, pixels(height)?));
+        return paper_pixels(f64::from(width), f64::from(height), density);
     }
     if let Some((source, target)) = split_conversion(input) {
         let (width, height) = paper_dimensions(source)?;
@@ -85,6 +75,56 @@ pub(super) fn calculate_paper(query: &str) -> Result<String, PaperError> {
     let (width, height) = paper_dimensions(input)?;
     let mm = |length| f64::from(length) / 10.;
     Ok(format!("{} × {} mm", mm(width), mm(height)))
+}
+
+fn paper_bleed(input: &str) -> Result<String, PaperError> {
+    let (paper, arguments) = input
+        .split_once(['@', '按'])
+        .ok_or(PaperError::InvalidBleed)?;
+    let (width, height) = paper_dimensions(paper)?;
+    let (margin, density) = arguments
+        .split_once(['@', '按'])
+        .map_or((arguments, None), |(margin, density)| {
+            (margin, Some(density))
+        });
+    let margin = margin.trim();
+    let margin = margin
+        .strip_suffix("mm")
+        .or_else(|| margin.strip_suffix("毫米"))
+        .ok_or(PaperError::InvalidBleed)?;
+    let margin = evaluate(margin).map_err(|_| PaperError::InvalidBleed)?;
+    let added = margin * 20.;
+    if margin < 0. || !added.is_finite() {
+        return Err(PaperError::InvalidBleed);
+    }
+    let width = f64::from(width) + added;
+    let height = f64::from(height) + added;
+    if let Some(density) = density {
+        return paper_pixels(width, height, density);
+    }
+    let width = format_result(width / 10.).map_err(|_| PaperError::InvalidBleed)?;
+    let height = format_result(height / 10.).map_err(|_| PaperError::InvalidBleed)?;
+    Ok(format!("{width} × {height} mm"))
+}
+
+fn paper_pixels(width: f64, height: f64, density: &str) -> Result<String, PaperError> {
+    let density = density.trim();
+    let density = density
+        .strip_suffix("dpi")
+        .or_else(|| density.strip_suffix("ppi"))
+        .ok_or(PaperError::InvalidDpi)?;
+    let density = evaluate(density).map_err(|_| PaperError::InvalidDpi)?;
+    if density <= 0. {
+        return Err(PaperError::InvalidDpi);
+    }
+    let pixels = |length: f64| {
+        let count = (length / (INCH_IN_METERS * 10_000.) * density).round();
+        if !(1. ..=f64::from(u32::MAX)).contains(&count) {
+            return Err(PaperError::OutOfRange);
+        }
+        Ok(count as u32)
+    };
+    Ok(format!("{} × {} px", pixels(width)?, pixels(height)?))
 }
 
 // 以 0.1 mm 表示尺寸，以整数比较纸型的缩放比例。
@@ -128,6 +168,25 @@ fn paper_dimensions(input: &str) -> Result<(u32, u32), PaperError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adds_equal_bleed_to_all_edges_in_millimeters_or_pixels() {
+        for (query, expected) in [
+            ("出血 A4 @ 3 mm", "216 × 303 mm"),
+            ("出血 A4横向 按 3毫米 按 300 ppi", "3579 × 2551 px"),
+            ("bleed letter landscape @ 1/2 mm", "280.4 × 216.9 mm"),
+            ("出血 B5 @ 0 mm", "176 × 250 mm"),
+        ] {
+            assert_eq!(calculate_paper(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("出血 A4 @ -3 mm", PaperError::InvalidBleed),
+            ("出血 A4 @ 3", PaperError::InvalidBleed),
+            ("出血 A4 @ 3 mm @ 0 dpi", PaperError::InvalidDpi),
+        ] {
+            assert_eq!(calculate_paper(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn looks_up_paper_sizes_and_calculates_pixels_and_fitting_scale() {
