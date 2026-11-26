@@ -74,6 +74,7 @@ pub(super) enum FractionError {
     IntegerAggregate,
     PrimeFactorizationDomain,
     PrimeFactorizationRange,
+    DivisorPairOutputTooLarge,
     QuotientRemainderArguments,
     CongruenceArguments,
     BitwiseArguments,
@@ -142,6 +143,7 @@ impl FractionError {
             Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
             Self::PrimeFactorizationDomain => "请填写非零整数",
             Self::PrimeFactorizationRange => "整数的绝对值最多为 1000000000000",
+            Self::DivisorPairOutputTooLarge => "因数配对结果超过 1 MiB",
             Self::QuotientRemainderArguments => "用逗号分开被除数和除数，例如 -7,3",
             Self::CongruenceArguments => "填写 2 至 16 组余数和正模数，例如 2,3; 3,5; 2,7",
             Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
@@ -440,14 +442,17 @@ fn simplify_fraction_using(
     })
 }
 
-fn prime_powers(value: &BigRational) -> Result<Vec<(u64, u32)>, FractionError> {
+fn factorization_magnitude(value: &BigRational) -> Result<u64, FractionError> {
     if !value.is_integer() || value.numer().sign() == Sign::NoSign {
         return Err(FractionError::PrimeFactorizationDomain);
     }
-    let mut remaining = u64::try_from(value.numer().magnitude())
+    u64::try_from(value.numer().magnitude())
         .ok()
         .filter(|&value| value <= MAX_PRIME_FACTORIZATION)
-        .ok_or(FractionError::PrimeFactorizationRange)?;
+        .ok_or(FractionError::PrimeFactorizationRange)
+}
+
+fn prime_powers(mut remaining: u64) -> Vec<(u64, u32)> {
     let mut factors = Vec::new();
     for divisor in std::iter::once(2).chain((3..).step_by(2)) {
         if divisor > remaining / divisor {
@@ -465,11 +470,11 @@ fn prime_powers(value: &BigRational) -> Result<Vec<(u64, u32)>, FractionError> {
     if remaining > 1 {
         factors.push((remaining, 1));
     }
-    Ok(factors)
+    factors
 }
 
 fn prime_factorization(value: &BigRational) -> Result<String, FractionError> {
-    let powers = prime_powers(value)?;
+    let powers = prime_powers(factorization_magnitude(value)?);
     let mut terms = Vec::new();
     if value.numer().sign() == Sign::Minus {
         terms.push("-1".to_owned());
@@ -490,7 +495,7 @@ fn prime_factorization(value: &BigRational) -> Result<String, FractionError> {
 fn positive_divisor_stats(value: &BigRational) -> Result<String, FractionError> {
     let mut count = 1_u64;
     let mut sum = 1_u64;
-    for (prime, exponent) in prime_powers(value)? {
+    for (prime, exponent) in prime_powers(factorization_magnitude(value)?) {
         count *= u64::from(exponent + 1);
         let mut power = 1;
         let mut prime_sum = 1;
@@ -501,6 +506,36 @@ fn positive_divisor_stats(value: &BigRational) -> Result<String, FractionError> 
         sum *= prime_sum;
     }
     Ok(format!("正因数个数 {count}\n正因数之和 {sum}"))
+}
+
+fn positive_divisor_pairs(input: &str) -> Result<String, FractionError> {
+    let magnitude = factorization_magnitude(&calculate_fraction(input)?)?;
+    let maximum = magnitude.isqrt();
+    let mut divisors = vec![1];
+    for (prime, exponent) in prime_powers(magnitude) {
+        let previous_len = divisors.len();
+        let mut power = 1;
+        for _ in 0..exponent {
+            power *= prime;
+            for index in 0..previous_len {
+                let divisor = divisors[index] * power;
+                if divisor <= maximum {
+                    divisors.push(divisor);
+                }
+            }
+        }
+    }
+    divisors.sort_unstable();
+    let mut output = String::from("较小因数,较大因数");
+    for divisor in divisors {
+        let cells = [divisor.to_string(), (magnitude / divisor).to_string()];
+        append_bounded_csv_row(
+            &mut output,
+            cells.iter().map(String::as_str),
+            FractionError::DivisorPairOutputTooLarge,
+        )?;
+    }
+    Ok(output)
 }
 
 fn describe_quotient_and_remainder(input: &str) -> Result<String, FractionError> {
@@ -743,6 +778,10 @@ fn fraction_csv_command(verb: &str, expression: &str) -> Option<Result<String, F
         Some(fraction_samples(expression))
     } else if verb == "取值CSV" || verb.eq_ignore_ascii_case("table-csv") {
         Some(fraction_table(expression, FractionTableFormat::Csv))
+    } else if verb.eq_ignore_ascii_case("因数配对CSV")
+        || verb.eq_ignore_ascii_case("divisor-pairs-csv")
+    {
+        Some(positive_divisor_pairs(expression))
     } else {
         None
     }
@@ -2718,6 +2757,26 @@ mod tests {
         assert_eq!(
             simplify_fraction("因数统计 0"),
             Err(FractionError::PrimeFactorizationDomain)
+        );
+    }
+
+    #[test]
+    fn lists_positive_divisor_pairs_in_order_and_includes_the_square_root_once() {
+        let query = "因数配对CSV -(3**2*4)";
+        let expected = "较小因数,较大因数\r\n1,36\r\n2,18\r\n3,12\r\n4,9\r\n6,6";
+        assert_eq!(simplify_fraction(query).as_deref(), Ok(expected));
+        assert_eq!(fraction_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            simplify_fraction("divisor-pairs-csv 1").as_deref(),
+            Ok("较小因数,较大因数\r\n1,1"),
+        );
+        assert_eq!(
+            simplify_fraction("因数配对CSV 2/3"),
+            Err(FractionError::PrimeFactorizationDomain),
+        );
+        assert_eq!(
+            simplify_fraction("因数配对CSV 10**12+1"),
+            Err(FractionError::PrimeFactorizationRange),
         );
     }
 

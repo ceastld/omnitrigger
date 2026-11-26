@@ -7373,6 +7373,11 @@ README"#,
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看乘积等于给定整数的正因数配对",
+        query: "分数: 因数配对CSV 36",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "同时得到向下取整的商和精确余数",
         query: "分数: 商和余数 -7,3",
     },
