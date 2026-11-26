@@ -5114,6 +5114,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "比较两份 TOML 配置的类型和值",
+        query: r#"TOML: 对比CSV ["[server]\nport = 8000\nenabled = true","[server]\nport = 8001\nname = 'api'"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "压缩 JSON",
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },

@@ -781,6 +781,9 @@ impl ValueError {
             Self::Toml(TomlError::Invalid { line, column, .. }) => {
                 return toml_tools::syntax_error_message(line, column).into();
             }
+            Self::Toml(error @ TomlError::ComparisonInvalid { line, column, .. }) => {
+                return format!("{} · 第 {line} 行第 {column} 列", error.message()).into();
+            }
             Self::Toml(error) => error.message(),
             Self::Csv(error) => error.message(),
             Self::Fraction(error) => error.message(),

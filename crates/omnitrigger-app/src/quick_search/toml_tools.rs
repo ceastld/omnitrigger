@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Number, Value};
 
 use super::{
@@ -26,6 +28,12 @@ pub(super) enum TomlError {
     InvalidPointer,
     RegexPattern,
     TypeSearchArguments,
+    ComparisonArguments,
+    ComparisonInvalid {
+        after: bool,
+        line: usize,
+        column: usize,
+    },
     MissingPointer,
     Serialization,
     Json(JsonError),
@@ -43,7 +51,7 @@ impl TomlError {
         match self {
             Self::Incomplete => "输入 TOML 内容，例如 TOML: 校验 port = 8000",
             Self::UnknownOperation => {
-                "用 校验、取值、取多路径、转JSON、从JSON、叶子CSV、正则叶子CSV、正则字符串CSV 或 找类型CSV 处理 TOML"
+                "用 校验、取值、取多路径、转JSON、从JSON、叶子CSV、正则叶子CSV、正则字符串CSV、找类型CSV 或 对比CSV 处理 TOML"
             }
             Self::Invalid { .. } => "请检查 TOML 语法",
             Self::NonFiniteFloat => "JSON 无法表示 TOML 中的 inf 或 nan",
@@ -52,6 +60,9 @@ impl TomlError {
             Self::TypeSearchArguments => {
                 "输入字符串或数组指定类型，可用 string、integer、float、boolean、datetime、array、table"
             }
+            Self::ComparisonArguments => "输入两个 TOML 字符串组成的 JSON 数组",
+            Self::ComparisonInvalid { after: false, .. } => "原 TOML 配置语法有误",
+            Self::ComparisonInvalid { after: true, .. } => "新 TOML 配置语法有误",
             Self::MissingPointer => "TOML 没有该路径，数组下标从 0 开始",
             Self::Serialization => "无法生成 JSON",
             Self::Json(error) => error.message(),
@@ -78,6 +89,7 @@ enum TomlOperation {
     RegexLeavesCsv,
     RegexStringsCsv,
     FindTypesCsv,
+    DiffCsv,
     Select,
     SelectPaths,
 }
@@ -94,6 +106,7 @@ impl TomlOperation {
             "正则叶子csv" | "regex-leaves-csv" => Ok(Self::RegexLeavesCsv),
             "正则字符串csv" | "regex-strings-csv" => Ok(Self::RegexStringsCsv),
             "找类型csv" | "find-type-csv" => Ok(Self::FindTypesCsv),
+            "对比csv" | "diff-csv" => Ok(Self::DiffCsv),
             "取值" | "get" => Ok(Self::Select),
             "取多路径" | "get-paths" => Ok(Self::SelectPaths),
             "" => Err(TomlError::Incomplete),
@@ -162,6 +175,7 @@ pub(super) fn toml_csv_report(input: &str) -> Option<Result<String, TomlError>> 
             | TomlOperation::RegexLeavesCsv
             | TomlOperation::RegexStringsCsv
             | TomlOperation::FindTypesCsv
+            | TomlOperation::DiffCsv
     )
     .then(|| run_toml_operation(operation, source))
 }
@@ -237,6 +251,7 @@ fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, Tom
                 types.iter().any(|item| item == kind)
             })
         }
+        TomlOperation::DiffCsv => compare_toml_leaves(source),
         TomlOperation::Json => write_toml_json(&toml::Value::Table(parse_toml_table(source)?)),
         TomlOperation::Select => select_toml_value(source),
         TomlOperation::SelectPaths => select_toml_paths(source),
@@ -374,9 +389,29 @@ fn toml_leaves_csv(
     table: toml::Table,
     include: impl Fn(&str, &str, &str) -> bool,
 ) -> Result<String, TomlError> {
+    let mut output = String::from("路径,类型,值");
+    visit_toml_leaves(table, |path, kind, value| {
+        if !include(path, kind, &value) {
+            return Ok(());
+        }
+        if path.contains('\0') || value.contains('\0') {
+            return Err(TomlError::CsvNullCharacter);
+        }
+        append_bounded_csv_row(
+            &mut output,
+            [path, kind, value.as_str()].into_iter(),
+            TomlError::TooLarge,
+        )
+    })?;
+    Ok(output)
+}
+
+fn visit_toml_leaves(
+    table: toml::Table,
+    mut visit: impl FnMut(&str, &'static str, String) -> Result<(), TomlError>,
+) -> Result<(), TomlError> {
     use toml::Value as TomlValue;
 
-    let mut output = String::from("路径,类型,值");
     let mut path = String::new();
     let mut pending = vec![(TomlValue::Table(table), None::<(usize, String)>)];
     while let Some((value, key)) = pending.pop() {
@@ -415,15 +450,68 @@ fn toml_leaves_csv(
             TomlValue::Array(_) => ("array", "[]".into()),
             TomlValue::Table(_) => ("table", "{}".into()),
         };
-        if !include(&path, kind, &value) {
+        visit(&path, kind, value)?;
+    }
+    Ok(())
+}
+
+type TomlLeafCell = (&'static str, String);
+
+fn compare_toml_leaves(source: &str) -> Result<String, TomlError> {
+    let documents =
+        serde_json::from_str::<[String; 2]>(source).map_err(|_| TomlError::ComparisonArguments)?;
+    let mut changes = BTreeMap::<String, [Option<TomlLeafCell>; 2]>::new();
+    let mut leaf_bytes = 0;
+    for (side, document) in documents.into_iter().enumerate() {
+        let table = parse_toml_table(&document).map_err(|error| match error {
+            TomlError::Invalid { line, column, .. } => TomlError::ComparisonInvalid {
+                after: side == 1,
+                line,
+                column,
+            },
+            _ => error,
+        })?;
+        visit_toml_leaves(table, |path, kind, value| {
+            if path.is_empty() {
+                return Ok(());
+            }
+            leaf_bytes += path.len() + kind.len() + value.len();
+            if leaf_bytes > MAX_TOML_BYTES {
+                return Err(TomlError::TooLarge);
+            }
+            changes.entry(path.to_owned()).or_default()[side] = Some((kind, value));
+            Ok(())
+        })?;
+    }
+    let mut output = String::from("路径,变更,原类型,原值,新类型,新值");
+    for (path, [before, after]) in changes {
+        if before == after {
             continue;
         }
-        if path.contains('\0') || value.contains('\0') {
+        let change = match (&before, &after) {
+            (None, _) => "新增",
+            (_, None) => "删除",
+            _ => "修改",
+        };
+        let (old_kind, old_value) = before.unwrap_or_default();
+        let (new_kind, new_value) = after.unwrap_or_default();
+        if [&path, &old_value, &new_value]
+            .iter()
+            .any(|value| value.contains('\0'))
+        {
             return Err(TomlError::CsvNullCharacter);
         }
         append_bounded_csv_row(
             &mut output,
-            [path.as_str(), kind, value.as_str()].into_iter(),
+            [
+                path.as_str(),
+                change,
+                old_kind,
+                old_value.as_str(),
+                new_kind,
+                new_value.as_str(),
+            ]
+            .into_iter(),
             TomlError::TooLarge,
         )?;
     }
@@ -670,6 +758,35 @@ mod tests {
                 Err(TomlError::TypeSearchArguments)
             );
         }
+    }
+
+    #[test]
+    fn compares_toml_values_and_types_by_escaped_leaf_path() {
+        let before = "gone = '旧,值'\nsame = 1.0\nswitch = 2\n[\"a/b\"]\n\"x~y\" = true";
+        let after = "new = 2024-02-29\nsame = 1e0\nswitch = '2'\n[\"a/b\"]\n\"x~y\" = false";
+        let source = serde_json::to_string(&[before, after]).unwrap();
+        let query = format!("对比CSV {source}");
+        let expected = concat!(
+            "路径,变更,原类型,原值,新类型,新值",
+            "\r\n/a~1b/x~0y,修改,boolean,true,boolean,false",
+            "\r\n/gone,删除,string,\"旧,值\",\"\",\"\"",
+            "\r\n/new,新增,\"\",\"\",datetime,2024-02-29",
+            "\r\n/switch,修改,integer,2,string,2",
+        );
+        assert_eq!(transform_toml(&query).as_deref(), Ok(expected));
+        assert_eq!(toml_csv_report(&query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_toml(r#"diff-csv ["","a = 1"]"#).as_deref(),
+            Ok("路径,变更,原类型,原值,新类型,新值\r\n/a,新增,\"\",\"\",integer,1"),
+        );
+        assert_eq!(
+            transform_toml(r#"对比CSV ["a = 1","a ="]"#),
+            Err(TomlError::ComparisonInvalid {
+                after: true,
+                line: 1,
+                column: 4
+            }),
+        );
     }
 
     #[test]
