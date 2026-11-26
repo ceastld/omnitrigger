@@ -41,7 +41,7 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、子矩阵、横向拼接、纵向拼接、协方差矩阵、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、克罗内克积、乘方、数乘、F范数、1范数、无穷范数、条件数、正定性、行列式、迹、特征值、特征空间、转置、子矩阵、横向拼接、纵向拼接、协方差矩阵、表格CSV、求解、通解、最小二乘、求逆、秩、行最简形、零空间、左零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
@@ -70,6 +70,17 @@ impl MatrixError {
     }
 }
 
+fn is_table_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("表格CSV") || operation.eq_ignore_ascii_case("table-csv")
+}
+
+pub(super) fn is_matrix_report(query: &str) -> bool {
+    normalize(query)
+        .split_whitespace()
+        .next()
+        .is_some_and(is_table_operation)
+}
+
 pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
     let normalized = normalize(query);
     let (operation, input) = normalized
@@ -78,6 +89,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         .ok_or(MatrixError::Incomplete)?;
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
+        operation if is_table_operation(operation) => parse_matrix(input).map(matrix_csv),
         "行列式" | "det" => determinant(parse_matrix(input)?).map(|value| value.to_string()),
         "迹" | "trace" => trace(&parse_matrix(input)?).map(|value| value.to_string()),
         "特征值" | "eigenvalues" => eigenvalues(&parse_matrix(input)?),
@@ -268,6 +280,21 @@ fn covariance_matrix(input: &str, sample: bool) -> Result<String, MatrixError> {
         ensure_exact_size(value).map_err(MatrixError::Evaluation)?;
     }
     Ok(format_matrix(covariance))
+}
+
+fn matrix_csv(matrix: Matrix) -> String {
+    let mut rows = Vec::with_capacity(matrix.len() + 1);
+    rows.push(
+        (1..=matrix[0].len())
+            .map(|column| format!("列{column}"))
+            .collect::<Vec<_>>(),
+    );
+    rows.extend(
+        matrix
+            .into_iter()
+            .map(|row| row.iter().map(ToString::to_string).collect()),
+    );
+    super::csv_tools::write_rows(&rows, ',')
 }
 
 fn parse_pair(input: &str) -> Result<(Matrix, Matrix), MatrixError> {
@@ -1021,6 +1048,18 @@ mod tests {
         assert_eq!(
             calculate_matrix("population-covariance-matrix 1,2").as_deref(),
             Ok("0, 0\n0, 0")
+        );
+    }
+
+    #[test]
+    fn exports_a_matrix_with_column_headers_and_exact_values() {
+        let query = "表格CSV 1/2,2; 3,4";
+        assert!(is_matrix_report(query));
+        assert!(is_matrix_report("table-csv 1"));
+        assert!(!is_matrix_report("行列式 1"));
+        assert_eq!(
+            calculate_matrix(query).as_deref(),
+            Ok("列1,列2\r\n1/2,2\r\n3,4")
         );
     }
 

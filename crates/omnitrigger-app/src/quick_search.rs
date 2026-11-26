@@ -132,7 +132,7 @@ use linear_fit::{calculate_linear_fit, LinearFitError};
 use local_files::{
     directory_query, DirectoryLoad, LocalFilesIndex, RecentFilePreviews, FOLDER_DEBOUNCE,
 };
-use matrix::{calculate_matrix, MatrixError};
+use matrix::{calculate_matrix, is_matrix_report, MatrixError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
@@ -1499,7 +1499,12 @@ impl Results {
                     Self::text_value(calculate_vector(term).map_err(ValueError::Vector))
                 }
                 Scope::Matrix => {
-                    Self::text_value(calculate_matrix(term).map_err(ValueError::Matrix))
+                    let result = calculate_matrix(term).map_err(ValueError::Matrix);
+                    if is_matrix_report(term) {
+                        Self::table_value(result)
+                    } else {
+                        Self::text_value(result)
+                    }
                 }
                 Scope::Path => match path_csv_report(term) {
                     Some(report) => Self::table_value(report.map_err(ValueError::Path)),

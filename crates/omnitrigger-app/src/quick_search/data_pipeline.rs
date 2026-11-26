@@ -27,7 +27,7 @@ use super::{
         transform_json, JsonError,
     },
     linear_fit::{calculate_linear_fit, calculate_plot, plot_request},
-    matrix::calculate_matrix,
+    matrix::{calculate_matrix, is_matrix_report},
     operators::json_argument_and_tail,
     path_tools::{path_component, path_csv_report},
     percentage::compare_percentages,
@@ -603,6 +603,10 @@ fn prepare_pipeline_preview(
         }),
         Scope::Timestamp if is_timestamp_report(query) => {
             let report = convert_timestamp(query, now.to_utc()).map_err(|cause| cause.message());
+            Some(report_preview(report, error, csv_error))
+        }
+        Scope::Matrix if is_matrix_report(query) => {
+            let report = calculate_matrix(query).map_err(|cause| cause.message());
             Some(report_preview(report, error, csv_error))
         }
         Scope::Duration if is_duration_report(query) => {
