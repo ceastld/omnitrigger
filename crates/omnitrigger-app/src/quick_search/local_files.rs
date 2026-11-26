@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
@@ -308,6 +309,12 @@ impl LocalFilesIndex {
         } else {
             query.filter.to_lowercase()
         };
+        let keywords = file_name_keywords(&filter);
+        let rank_filter = if filter.contains('"') {
+            Cow::Owned(filter.replace('"', ""))
+        } else {
+            Cow::Borrowed(filter.as_str())
+        };
         let extensions = extension_set(query.extensions);
         let excluded_extensions = extension_set(query.excluded_extensions);
         let any_names = name_fragments(query.any_names);
@@ -332,15 +339,13 @@ impl LocalFilesIndex {
             })
             .filter_map(|entry| {
                 let name = entry.name.to_lowercase();
-                let matches_name = filter
-                    .split_whitespace()
-                    .all(|keyword| name.contains(keyword))
+                let matches_name = keywords.iter().all(|&keyword| name.contains(keyword))
                     && (any_names.is_empty()
                         || any_names.iter().any(|term| name.contains(term.as_str())));
                 let excluded = excluded_names
                     .iter()
                     .any(|keyword| name.contains(keyword.as_str()));
-                (matches_name && !excluded).then(|| (title_rank(&name, &filter), entry))
+                (matches_name && !excluded).then(|| (title_rank(&name, &rank_filter), entry))
             })
             .collect();
         if query.order == DirectoryOrder::Name
@@ -1035,7 +1040,24 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
 }
 
 fn wildcard_pattern(filter: &str) -> Option<&str> {
+    let filter = super::path_tools::strip_path_quotes(filter);
     filter.contains(['*', '?']).then_some(filter)
+}
+
+fn file_name_keywords(filter: &str) -> Vec<&str> {
+    let mut keywords = Vec::new();
+    let mut quoted = false;
+    for part in filter.split('"') {
+        if quoted {
+            if !part.is_empty() {
+                keywords.push(part);
+            }
+        } else {
+            keywords.extend(part.split_whitespace());
+        }
+        quoted = !quoted;
+    }
+    keywords
 }
 
 pub(super) fn directory_query(directory: &str) -> String {
@@ -2140,6 +2162,30 @@ mod tests {
         for invalid in ["任一名称=", "任一名称=a，，b", "任一名称=a any-name=b"] {
             assert!(split_query(&format!("{original} | {invalid}")).is_none());
         }
+    }
+
+    #[test]
+    fn treats_quoted_file_name_phrases_as_contiguous_text() {
+        let mut index = LocalFilesIndex::default();
+        let phrase = r#"C:\Work | 2026 "报告 初稿""#;
+        let words = r"C:\Work | 2026 报告 初稿";
+        let load = index.request(Some(phrase)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("2026 报告 初稿.docx", "file"),
+                entry("2026 报告-初稿.docx", "file"),
+                entry("2025 报告 初稿.docx", "file"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(phrase),
+            Results::Destinations(items)
+                if matches!(items.as_slice(), [Destination::LocalFile { name, .. }] if name == "2026 报告 初稿.docx")
+        ));
+        assert!(index.request(Some(words)).is_none());
+        assert_eq!(index.results(words).selectable_count(), 2);
+        assert_eq!(wildcard_pattern(r#""报告 *.pdf""#), Some("报告 *.pdf"));
     }
 
     #[test]
