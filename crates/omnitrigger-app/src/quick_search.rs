@@ -2159,6 +2159,7 @@ enum FilePreviewFormat {
     Raw,
     Head,
     Tail,
+    Table,
 }
 
 struct FileSearchReturn {
@@ -2276,9 +2277,11 @@ fn direct_file_preview_parts(query: &str) -> (FilePreviewFormat, &str) {
         "原文" => FilePreviewFormat::Raw,
         "开头" => FilePreviewFormat::Head,
         "末尾" => FilePreviewFormat::Tail,
+        "表格" => FilePreviewFormat::Table,
         mode if mode.eq_ignore_ascii_case("raw") => FilePreviewFormat::Raw,
         mode if mode.eq_ignore_ascii_case("head") => FilePreviewFormat::Head,
         mode if mode.eq_ignore_ascii_case("tail") => FilePreviewFormat::Tail,
+        mode if mode.eq_ignore_ascii_case("table") => FilePreviewFormat::Table,
         _ => return (FilePreviewFormat::Automatic, query),
     };
     (format, path.trim_start())
@@ -2452,13 +2455,26 @@ fn decode_file_tail(
     Ok(text.to_owned())
 }
 
-fn read_selected_text_query(path: &str, format: FilePreviewFormat) -> Result<String, String> {
-    let prefix = match format {
-        FilePreviewFormat::Automatic => input_file_query_prefix(Path::new(path)),
+fn selected_file_query_prefix(
+    path: &Path,
+    format: FilePreviewFormat,
+) -> Result<&'static str, String> {
+    Ok(match format {
+        FilePreviewFormat::Automatic => input_file_query_prefix(path),
         FilePreviewFormat::Raw | FilePreviewFormat::Head | FilePreviewFormat::Tail => {
             RAW_TEXT_FILE_PREFIX
         }
-    };
+        FilePreviewFormat::Table => match input_file_extension(path).as_deref() {
+            Some("csv" | "tsv") => input_file_query_prefix(path),
+            Some("json") => "JSON: 转CSV ",
+            Some("jsonl" | "ndjson") => "JSON: 行转CSV ",
+            _ => return Err("表格预览支持 CSV、TSV、JSON、JSONL 和 NDJSON 文件".into()),
+        },
+    })
+}
+
+fn read_selected_text_query(path: &str, format: FilePreviewFormat) -> Result<String, String> {
+    let prefix = selected_file_query_prefix(Path::new(path), format)?;
     let character_limit = INPUT_CHARACTER_LIMIT - prefix.chars().count();
     let byte_limit = input_file_byte_limit(character_limit) + 1;
     let text = if format == FilePreviewFormat::Tail {
@@ -11449,6 +11465,28 @@ mod tests {
             matches.selected_text_file(0),
             Some(r"C:\Reports\Batch-13.csv")
         );
+    }
+
+    #[test]
+    fn uses_csv_queries_for_structured_file_table_previews() {
+        for (name, expected) in [
+            ("记录.JSONL", "JSON: 行转CSV "),
+            ("记录.NDJSON", "JSON: 行转CSV "),
+            ("表格.JSON", "JSON: 转CSV "),
+            ("表格.CSV", "CSV: 表格预览 "),
+            ("表格.TSV", "CSV: 从TSV "),
+        ] {
+            assert_eq!(
+                selected_file_query_prefix(Path::new(name), FilePreviewFormat::Table).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert!(
+            selected_file_query_prefix(Path::new("日志.log"), FilePreviewFormat::Table).is_err()
+        );
+        let (format, path) = direct_file_preview_parts(r#"表格 "C:\工作\表格.json""#);
+        assert!(matches!(format, FilePreviewFormat::Table));
+        assert_eq!(path, r#""C:\工作\表格.json""#);
     }
 
     #[test]
