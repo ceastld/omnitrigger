@@ -2525,6 +2525,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "计算限时完成下载所需的平均速率",
+        query: "下载: 所需速率 1 GiB 已传 25% 限时 24秒 to MiB/s",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用完成比例和已经过的时间估算剩余时间",
         query: "下载: 预计剩余 25% 用时 8秒",
     },

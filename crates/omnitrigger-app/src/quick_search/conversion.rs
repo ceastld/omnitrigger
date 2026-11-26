@@ -696,6 +696,9 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
     if let Some(arguments) = batch_arguments(input.trim_start(), "剩余耗时", "remaining-time") {
         return exact_transfer_time(arguments, true);
     }
+    if let Some(arguments) = batch_arguments(input.trim_start(), "所需速率", "required-rate") {
+        return required_transfer_rate(arguments);
+    }
     if let Some(arguments) = batch_arguments(input.trim_start(), "预计剩余", "estimate-remaining")
     {
         return estimate_remaining_from_progress(arguments);
@@ -806,6 +809,31 @@ fn exact_transfer_time(input: &str, use_progress: bool) -> Result<String, Conver
     format_exact_transfer_time(&(bits / bits_per_second), targets)
 }
 
+fn required_transfer_rate(input: &str) -> Result<String, ConversionError> {
+    let (input, targets) = split_conversion(input).unwrap_or((input, "b/s"));
+    let (progress, deadline) = input
+        .split_once("限时")
+        .or_else(|| {
+            const SEPARATOR: &str = " within ";
+            let index = input.to_ascii_lowercase().find(SEPARATOR)?;
+            Some((&input[..index], &input[index + SEPARATOR.len()..]))
+        })
+        .ok_or(ConversionError::Incomplete)?;
+    let (total, completed) =
+        transfer_progress_arguments(progress)?.ok_or(ConversionError::Incomplete)?;
+    let (total, dimension) = exact_data_source(total)?;
+    if dimension != Dimension::Data || total.numer().sign() == Sign::Minus {
+        return Err(ConversionError::InvalidTransferProgress);
+    }
+    let completed = exact_transferred_bits(&total, completed)?;
+    let seconds = exact_transfer_elapsed_seconds(deadline.trim())?;
+    if seconds.numer().sign() != Sign::Plus {
+        return Err(ConversionError::InvalidTransferDuration);
+    }
+    let required = (total - completed) / seconds;
+    format_exact_transfer_data(&required, &Dimension::DataRate, targets)
+}
+
 fn estimate_remaining_from_progress(input: &str) -> Result<String, ConversionError> {
     let (input, targets) = split_conversion(input).unwrap_or((input, "s"));
     let (completed, elapsed) = input
@@ -870,9 +898,17 @@ fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, C
         (false, Dimension::DataRate) => (value * seconds, Dimension::Data),
         _ => return Err(ConversionError::InvalidTransferDuration),
     };
-    format_targets(target, |target| {
+    format_exact_transfer_data(&result, &dimension, target)
+}
+
+fn format_exact_transfer_data(
+    result: &BigRational,
+    dimension: &Dimension,
+    targets: &str,
+) -> Result<String, ConversionError> {
+    format_targets(targets, |target| {
         let target = exact_data_unit(target)?;
-        let value = exact_data_target_amount(&result, &dimension, &target)?;
+        let value = exact_data_target_amount(result, dimension, &target)?;
         Ok(format_with_unit(value, &target))
     })
 }
@@ -3115,6 +3151,36 @@ mod tests {
         }
         assert_eq!(
             estimate_transfer("剩余耗时 1 B 已传 按 2 b/s"),
+            Err(ConversionError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn finds_the_exact_required_rate_before_a_transfer_deadline() {
+        for (input, expected) in [
+            (
+                "所需速率 1 GiB 已传 25% 限时 24秒 to [MiB/s,KiB/s]",
+                "32 MiB/s\n32768 KiB/s",
+            ),
+            (
+                "required-rate 450 MB completed 150 MB within 30s to MB/s",
+                "10 MB/s",
+            ),
+            ("所需速率 1 b 已传 25% 限时 1/2秒", "3/2 b/s"),
+            ("所需速率 1 B 已传 100% 限时 30秒", "0 b/s"),
+        ] {
+            assert_eq!(estimate_transfer(input).as_deref(), Ok(expected), "{input}");
+        }
+        assert_eq!(
+            estimate_transfer("所需速率 1 GiB 已传 50% 限时 0秒"),
+            Err(ConversionError::InvalidTransferDuration)
+        );
+        assert_eq!(
+            estimate_transfer("所需速率 1 GiB 已传 125% 限时 24秒"),
+            Err(ConversionError::InvalidTransferProgress)
+        );
+        assert_eq!(
+            estimate_transfer("所需速率 1 GiB 已传 25% 限时"),
             Err(ConversionError::Incomplete)
         );
     }
