@@ -2008,7 +2008,7 @@ enum TableCopy {
     Tsv,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TablePages {
     rows: usize,
     columns: usize,
@@ -2021,6 +2021,13 @@ impl TablePages {
             columns: self.columns.min(table.column_pages().saturating_sub(1)),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FilePreviewPosition {
+    table_pages: Option<TablePages>,
+    expanded_page: Option<usize>,
+    follow_end: bool,
 }
 
 struct ResultSearchDraft {
@@ -3746,10 +3753,33 @@ impl QuickSearch {
                                     let selection = input.selection_position();
                                     match action {
                                         FilePreviewAction::Load => {
+                                            let position = matches!(
+                                                scoped_query(&query),
+                                                Some((Scope::RecentFilePreviews, _))
+                                            )
+                                            .then(|| {
+                                                this.index
+                                                    .recent
+                                                    .file_previews
+                                                    .position_for(&selected_path)
+                                            })
+                                            .flatten();
                                             this.index
                                                 .recent
                                                 .file_previews
                                                 .record(&selected_path, format);
+                                            if let Some(position) = position {
+                                                let mut draft = this.query_draft(cx);
+                                                draft.text.clone_from(&inserted);
+                                                draft.suggestion = None;
+                                                draft.selected =
+                                                    position.expanded_page.unwrap_or_default();
+                                                draft.table_pages = position.table_pages;
+                                                draft.expanded_value =
+                                                    position.expanded_page.is_some();
+                                                draft.follow_value_end = position.follow_end;
+                                                this.query_draft_return = Some(draft);
+                                            }
                                         }
                                         FilePreviewAction::Refresh => {
                                             let mut draft = this.query_draft(cx);
@@ -4356,19 +4386,39 @@ impl QuickSearch {
         }
     }
 
+    fn preview_position(&self) -> FilePreviewPosition {
+        FilePreviewPosition {
+            table_pages: self.results.table_preview().map(|_| self.table_pages),
+            expanded_page: self.expanded_value_pages.as_ref().map(|_| self.selected),
+            follow_end: self.is_tail_file_preview()
+                && self
+                    .expanded_value_pages
+                    .as_ref()
+                    .is_some_and(|pages| self.selected + 1 == pages.len()),
+        }
+    }
+
     fn remember_result_pages(&self, cx: &App) {
         if self.has_temporary_query() {
             return;
         }
+        let position = self.preview_position();
         let mut last = self.index.recent.last_input.borrow_mut();
         if last.query == self.input.read(cx).text_ref() {
-            last.table_pages = self.results.table_preview().map(|_| self.table_pages);
-            last.expanded_value_page = self.expanded_value_pages.as_ref().map(|_| self.selected);
+            last.table_pages = position.table_pages;
+            last.expanded_value_page = position.expanded_page;
+        }
+        if let Some(path) = self.file_preview_path() {
+            self.index
+                .recent
+                .file_previews
+                .remember_position(path, position);
         }
     }
 
     fn query_draft(&self, cx: &Context<Self>) -> QueryDraft {
         let input = self.input.read(cx);
+        let position = self.preview_position();
         QueryDraft {
             text: input.text(),
             selection: input.selection_position(),
@@ -4377,13 +4427,9 @@ impl QuickSearch {
                 .results
                 .suggested_input(self.selected)
                 .map(str::to_owned),
-            table_pages: self.results.table_preview().map(|_| self.table_pages),
-            expanded_value: self.expanded_value_pages.is_some(),
-            follow_value_end: self.is_tail_file_preview()
-                && self
-                    .expanded_value_pages
-                    .as_ref()
-                    .is_some_and(|pages| self.selected + 1 == pages.len()),
+            table_pages: position.table_pages,
+            expanded_value: position.expanded_page.is_some(),
+            follow_value_end: position.follow_end,
             target_original_line: None,
             refill: self.refill_for_query(input.text_ref()),
         }
@@ -4447,8 +4493,8 @@ impl QuickSearch {
                 .and_then(|(text, pages)| value_preview::page_for_original_line(text, pages, line))
         }) {
             self.selected = page;
-            self.remember_result_pages(cx);
         }
+        self.remember_result_pages(cx);
     }
 
     fn toggle_calculation_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {

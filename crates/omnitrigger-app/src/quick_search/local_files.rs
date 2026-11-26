@@ -23,7 +23,8 @@ use super::{
     csv_tools::csv_cell,
     path_tools::file_url,
     text_tools::{compare_natural, compile_regex},
-    title_rank, Destination, FilePreviewFormat, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
+    title_rank, Destination, FilePreviewFormat, FilePreviewPosition, InputSuggestion, Results,
+    INPUT_CHARACTER_LIMIT,
 };
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -75,6 +76,7 @@ pub(super) struct RecentFilePreviews(Rc<RefCell<Vec<RecentFilePreview>>>);
 struct RecentFilePreview {
     path: String,
     format: FilePreviewFormat,
+    position: Option<FilePreviewPosition>,
 }
 
 impl RecentFilePreview {
@@ -95,6 +97,7 @@ impl RecentFilePreviews {
             RecentFilePreview {
                 path: path.to_owned(),
                 format,
+                position: None,
             },
         );
         previews.truncate(MAX_RECENT_PREVIEWS);
@@ -110,6 +113,25 @@ impl RecentFilePreviews {
             .iter()
             .find(|entry| entry.path == path)
             .map(|entry| entry.format)
+    }
+
+    pub(super) fn remember_position(&self, path: &str, position: FilePreviewPosition) {
+        if let Some(entry) = self
+            .0
+            .borrow_mut()
+            .iter_mut()
+            .find(|entry| entry.path == path)
+        {
+            entry.position = Some(position);
+        }
+    }
+
+    pub(super) fn position_for(&self, path: &str) -> Option<FilePreviewPosition> {
+        self.0
+            .borrow()
+            .iter()
+            .find(|entry| entry.path == path)?
+            .position
     }
 
     pub(super) fn results(&self, query: &str) -> Results {
@@ -1210,6 +1232,25 @@ mod tests {
             size_bytes: None,
             metadata: None,
         }
+    }
+
+    #[test]
+    fn remembers_preview_positions_by_path_until_a_file_is_loaded_again() {
+        let previews = RecentFilePreviews::default();
+        let log = r"C:\Work\service.log";
+        let table = r"C:\Work\records.csv";
+        let position = FilePreviewPosition {
+            expanded_page: Some(7),
+            follow_end: true,
+            ..FilePreviewPosition::default()
+        };
+        previews.record(log, FilePreviewFormat::Tail);
+        previews.remember_position(log, position);
+        previews.record(table, FilePreviewFormat::Table);
+        assert_eq!(previews.position_for(log), Some(position));
+        assert_eq!(previews.position_for(table), None);
+        previews.record(log, FilePreviewFormat::Head);
+        assert_eq!(previews.position_for(log), None);
     }
 
     #[test]
