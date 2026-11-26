@@ -475,6 +475,23 @@ pub(super) fn json_keyed_diff_report_source_range(
     expected_raw: &str,
     right: bool,
 ) -> Option<Range<usize>> {
+    let record = json_keyed_diff_input_record(query, position, right)?;
+    if record != expected_raw {
+        return None;
+    }
+    raw_value_span(query, record).ok()
+}
+
+pub(super) fn json_keyed_diff_error_range(
+    query: &str,
+    position: usize,
+    right: bool,
+) -> Option<Range<usize>> {
+    let record = json_keyed_diff_input_record(query, position, right)?;
+    raw_value_span(query, record).ok()
+}
+
+fn json_keyed_diff_input_record(query: &str, position: usize, right: bool) -> Option<&str> {
     let (operation, arguments) = split_json_operation(query)?;
     if !matches!(
         JsonCsvOperation::from_name(&operation.to_ascii_lowercase()),
@@ -490,11 +507,7 @@ pub(super) fn json_keyed_diff_report_source_range(
         left
     };
     let index = position.checked_sub(1)?;
-    let record = read_json_array(root.get()).ok()?.get(index).copied()?.get();
-    if record != expected_raw {
-        return None;
-    }
-    raw_value_span(query, record).ok()
+    Some(read_json_array(root.get()).ok()?.get(index).copied()?.get())
 }
 
 pub(super) fn json_line_pointer_report_source_range(
@@ -5883,6 +5896,15 @@ mod tests {
         assert_eq!(&query[right_range], right);
         assert!(json_keyed_diff_report_source_range(query, 1, right, true).is_none());
         assert!(json_keyed_diff_report_source_range(query, 0, left, false).is_none());
+    }
+
+    #[test]
+    fn locates_a_keyed_comparison_error_even_without_a_report_value() {
+        let query = r#"按键对比CSV /id [{"id":1}] [{"id":1},{"id": 1.0}]"#;
+        let range = json_keyed_diff_error_range(query, 2, true).unwrap();
+        assert_eq!(query.get(range), Some(r#"{"id": 1.0}"#));
+        assert!(json_keyed_diff_error_range(query, 2, false).is_none());
+        assert!(json_keyed_diff_error_range("对比CSV [] []", 1, false).is_none());
     }
 
     #[test]

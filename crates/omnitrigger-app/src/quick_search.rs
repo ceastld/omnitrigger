@@ -5204,6 +5204,24 @@ impl QuickSearch {
         )
     }
 
+    fn keyed_comparison_error_range(&self, cx: &App) -> Option<Range<usize>> {
+        let Results::Value(Err(ValueError::Json(JsonError::KeyedComparisonRecord {
+            position,
+            right,
+            ..
+        }))) = &self.results
+        else {
+            return None;
+        };
+        let query = self.input.read(cx).text_ref();
+        let (Scope::Json, term) = scoped_query(query)? else {
+            return None;
+        };
+        let range = json_tools::json_keyed_diff_error_range(term, *position, *right)?;
+        let offset = term.as_ptr().addr().checked_sub(query.as_ptr().addr())?;
+        Some(offset + range.start..offset + range.end)
+    }
+
     fn validation_error_range(&self, cx: &App) -> Option<Range<usize>> {
         let Results::Value(Ok(ResultValue {
             kind: ValueKind::InputValidationError { scope, range },
@@ -5230,6 +5248,7 @@ impl QuickSearch {
     ) -> bool {
         let Some(range) = self
             .batch_error_range(cx)
+            .or_else(|| self.keyed_comparison_error_range(cx))
             .or_else(|| self.table_input_error_range(cx))
             .or_else(|| self.validation_error_range(cx))
         else {
@@ -6924,6 +6943,7 @@ impl QuickSearch {
             }
             Results::Value(Err(error)) => {
                 let message = error.message();
+                let keyed_error = self.keyed_comparison_error_range(cx).is_some();
                 row.text_color(rgb(if error.is_incomplete() {
                     theme::TEXT_MUTED
                 } else {
@@ -6939,20 +6959,33 @@ impl QuickSearch {
                         .child(message.clone())
                         .tooltip(theme::text_tooltip(message)),
                 )
-                .when(self.batch_error_range(cx).is_some(), |row| {
-                    row.child(
-                        button(
-                            "locate-batch-error",
-                            "定位错误行 Alt+Enter",
-                            Tone::Ghost,
-                            true,
+                .when(
+                    keyed_error || self.batch_error_range(cx).is_some(),
+                    |row| {
+                        row.child(
+                            button(
+                                if keyed_error {
+                                    "locate-keyed-error"
+                                } else {
+                                    "locate-batch-error"
+                                },
+                                if keyed_error {
+                                    "定位记录 Alt+Enter"
+                                } else {
+                                    "定位错误行 Alt+Enter"
+                                },
+                                Tone::Ghost,
+                                true,
+                            )
+                            .flex_none()
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.select_input_error(false, window, cx);
+                                },
+                            )),
                         )
-                        .flex_none()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.select_input_error(false, window, cx);
-                        })),
-                    )
-                })
+                    },
+                )
             }
             Results::RefilledInput => row
                 .text_color(rgb(theme::TEXT_MUTED))

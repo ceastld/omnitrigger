@@ -89,6 +89,7 @@ const SHORTCUTS: &[[&str; 3]] = &[
         "Alt+Enter",
         "选中本页第一条变更对应的原始记录",
     ],
+    ["JSON 按键对比错误", "Alt+Enter", "选中键值无效的原始记录"],
     [
         "JSON 对比CSV",
         "Alt+Enter",
