@@ -125,6 +125,16 @@ impl TablePreview {
         self.row_pages() > 1 || self.column_pages() > 1
     }
 
+    pub(super) fn data_cell(&self, row: usize, column: usize) -> Option<&str> {
+        if row == 0 {
+            return None;
+        }
+        self.rows
+            .get(row)?
+            .get(column.checked_sub(1)?)
+            .map(String::as_str)
+    }
+
     pub(super) fn page_csv(&self, row_page: usize, column_page: usize) -> String {
         write_rows(self.visible_rows(row_page, column_page), ',')
     }

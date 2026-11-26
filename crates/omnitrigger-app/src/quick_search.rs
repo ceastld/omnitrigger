@@ -2054,6 +2054,7 @@ struct QueryDraft {
     table_pages: Option<TablePages>,
     expanded_value: bool,
     follow_value_end: bool,
+    target_original_line: Option<usize>,
     refill: Option<ResultRefill>,
 }
 
@@ -4032,6 +4033,44 @@ impl QuickSearch {
         }
     }
 
+    fn text_match_original_line(&self, row: Option<usize>, cx: &App) -> Option<usize> {
+        if self.expanded_value_pages.is_some() {
+            return None;
+        }
+        let draft = self.input_before_result_search.as_ref()?;
+        let (command, _) = draft.command_arguments(self.input.read(cx).text_ref())?;
+        if command != TEXT_SEARCH_CSV_COMMAND {
+            return None;
+        }
+        let table = self.results.table_preview()?;
+        let row = row.or_else(|| {
+            table
+                .page_first_data_cell(self.table_pages.rows, self.table_pages.columns)
+                .map(|(row, _)| row)
+        })?;
+        table.data_cell(row, 1)?.parse().ok()
+    }
+
+    fn show_text_match_original_line(
+        &mut self,
+        row: Option<usize>,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(line) = self.text_match_original_line(row, cx) else {
+            return false;
+        };
+        if !is_held && !self.input.read(cx).is_composing() && !self.file_operation_in_progress() {
+            let mut draft = self.input_before_result_search.take().unwrap().original;
+            draft.expanded_value = true;
+            draft.follow_value_end = false;
+            draft.target_original_line = Some(line);
+            self.restore_query_draft(draft, window, cx);
+        }
+        true
+    }
+
     fn searchable_result_text(&self) -> Option<(&'static str, &str, bool)> {
         let Results::Value(Ok(ResultValue { text, kind })) = &self.results else {
             return None;
@@ -4238,6 +4277,7 @@ impl QuickSearch {
                     table_pages,
                     expanded_value: expanded_page.is_some(),
                     follow_value_end: false,
+                    target_original_line: None,
                     refill: self.previous_input.refill.clone(),
                 },
                 window,
@@ -4309,6 +4349,7 @@ impl QuickSearch {
                     .expanded_value_pages
                     .as_ref()
                     .is_some_and(|pages| self.selected + 1 == pages.len()),
+            target_original_line: None,
             refill: self.refill_for_query(input.text_ref()),
         }
     }
@@ -4365,6 +4406,13 @@ impl QuickSearch {
         };
         if let (Some(pages), Some(table)) = (draft.table_pages, self.results.table_preview()) {
             self.table_pages = pages.clamped_to(table);
+        }
+        if let Some(page) = draft.target_original_line.and_then(|line| {
+            self.paged_original_text()
+                .and_then(|(text, pages)| value_preview::page_for_original_line(text, pages, line))
+        }) {
+            self.selected = page;
+            self.remember_result_pages(cx);
         }
     }
 
@@ -5097,6 +5145,7 @@ impl QuickSearch {
                     window,
                     cx,
                 ) || self.select_input_error(event.is_held, window, cx)
+                    || self.show_text_match_original_line(None, event.is_held, window, cx)
                     || (!event.is_held && self.reveal_selected_file(window, cx))
                 {
                     cx.stop_propagation();
@@ -5792,6 +5841,22 @@ impl QuickSearch {
                         })),
                 )
             })
+            .when(
+                self.text_match_original_line(None, cx).is_some(),
+                |footer| {
+                    footer.child(
+                        button("goto-match-source-line", "到原文", Tone::Ghost, true)
+                            .h(px(TABLE_PAGER_HEIGHT))
+                            .px(px(8.))
+                            .tooltip(theme::text_tooltip(
+                                "Alt+Enter 跳到本页首条命中行的原文".into(),
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_text_match_original_line(None, false, window, cx);
+                            })),
+                    )
+                },
+            )
             .when(!table.input_errors().is_empty(), |footer| {
                 footer.child(
                     button("locate-input-table-error", "定位错误", Tone::Ghost, true)
@@ -5866,9 +5931,18 @@ impl QuickSearch {
                 table.render(
                     self.table_pages.rows,
                     self.table_pages.columns,
-                    self.table_cell_source(None).is_some().then(|| {
+                    (self.table_cell_source(None).is_some()
+                        || self.text_match_original_line(None, cx).is_some())
+                    .then(|| {
                         cx.listener(|this, position: &(usize, usize), window, cx| {
-                            this.toggle_table_cell(Some(*position), window, cx);
+                            if !this.show_text_match_original_line(
+                                Some(position.0),
+                                false,
+                                window,
+                                cx,
+                            ) {
+                                this.toggle_table_cell(Some(*position), window, cx);
+                            }
                         })
                     }),
                 ),
@@ -9933,10 +10007,16 @@ mod tests {
             .unwrap()
             .starts_with("南区: tea"));
 
-        search.toggle_result_search(window, cx);
+        search.switch_text_search_view(window, cx);
+        search.refresh_results(&report_query, window, cx);
+        assert!(search.show_text_match_original_line(Some(1), false, window, cx));
         search.refresh_results(QUERY, window, cx);
         assert_eq!(search.input.read(cx).text(), QUERY);
         assert!(search.input_before_result_search.is_none());
+        let (text, pages) = search.paged_original_text().unwrap();
+        assert!(value_preview::page_text(text, pages, search.selected)
+            .unwrap()
+            .contains("南区: tea"));
     }
 
     #[cfg(target_os = "windows")]
