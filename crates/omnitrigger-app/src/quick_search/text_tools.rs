@@ -317,6 +317,12 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "搜索任一csv" | "search-any-lines-csv" => {
             Some(search_text_lines_csv(text, TextWordMatch::Any))
         }
+        "正则保留行csv" | "keep-regex-lines-csv" => {
+            Some(filter_regex_lines(text, true, LineOutput::Csv))
+        }
+        "正则排除行csv" | "exclude-regex-lines-csv" => {
+            Some(filter_regex_lines(text, false, LineOutput::Csv))
+        }
         "连续计数csv" | "count-consecutive-lines-csv" => {
             Some(count_consecutive_lines_csv(text))
         }
@@ -425,8 +431,12 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行比较" | "diff-lines" => return diff_lines(text, LineOutput::Text, None),
         "编辑距离" | "edit-distance" | "levenshtein" => return edit_distance(text),
         "公共片段" | "common-substring" => return common_substring(text),
-        "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
-        "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
+        "正则保留行" | "keep-regex-lines" => {
+            return filter_regex_lines(text, true, LineOutput::Text);
+        }
+        "正则排除行" | "exclude-regex-lines" => {
+            return filter_regex_lines(text, false, LineOutput::Text);
+        }
         "正则计数" | "regex-count" => {
             let (pattern, text) = regex_text_argument(text)?;
             return Ok(format!("{} 处匹配", pattern.find_iter(text).count()));
@@ -2316,9 +2326,13 @@ fn filter_result_lines_csv(
 ) -> Result<String, TextError> {
     let query = search_key(query);
     let words: Vec<_> = query.split_whitespace().collect();
+    numbered_line_report(text, |line| mode.matches(line, &words))
+}
+
+fn numbered_line_report(text: &str, matches: impl Fn(&str) -> bool) -> Result<String, TextError> {
     let mut csv = String::from("原行号,原文");
     for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
-        if !mode.matches(line, &words) {
+        if !matches(line) {
             continue;
         }
         let number = (index + 1).to_string();
@@ -2341,11 +2355,20 @@ fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
     }))
 }
 
-fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
+fn filter_regex_lines(
+    input: &str,
+    keep_matches: bool,
+    format: LineOutput,
+) -> Result<String, TextError> {
     let (pattern, text) = regex_text_argument(input)?;
-    Ok(select_lines(text, |line| {
-        pattern.is_match(line) == keep_matches
-    }))
+    let matches = |line: &str| pattern.is_match(line) == keep_matches;
+    match format {
+        LineOutput::Text => Ok(numbered_text_lines(text, logical_newline_pattern())
+            .filter_map(|(_, line)| matches(line).then_some(line))
+            .collect::<Vec<_>>()
+            .join("\n")),
+        LineOutput::Csv => numbered_line_report(text, matches),
+    }
 }
 
 enum LineOutput {
@@ -5135,6 +5158,32 @@ mod tests {
         );
         assert_eq!(
             transform_text("search-lines-csv \"茶\" north").as_deref(),
+            Ok("原行号,原文")
+        );
+    }
+
+    #[test]
+    fn reports_regex_filtered_lines_with_original_numbers_and_quoted_text() {
+        let source = "ok\r\nWARN,网关\u{2028}warn\rWARN 重试";
+        let keep = format!("正则保留行CSV \"^WARN\" {source}");
+        let exclude = format!("正则排除行CSV \"^WARN\" {source}");
+        let expected = "原行号,原文\r\n2,\"WARN,网关\"\r\n4,WARN 重试";
+        assert_eq!(text_csv_report(&keep).unwrap().as_deref(), Ok(expected));
+        assert_eq!(transform_text(&keep).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text(&exclude).as_deref(),
+            Ok("原行号,原文\r\n1,ok\r\n3,warn")
+        );
+        assert_eq!(
+            transform_text(&format!("正则保留行 \"^WARN\" {source}")).as_deref(),
+            Ok("WARN,网关\nWARN 重试")
+        );
+        assert_eq!(
+            transform_text(&format!("正则排除行 \"^WARN\" {source}")).as_deref(),
+            Ok("ok\nwarn")
+        );
+        assert_eq!(
+            transform_text("正则保留行CSV \"^WARN\" 恢复").as_deref(),
             Ok("原行号,原文")
         );
     }

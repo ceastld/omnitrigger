@@ -4746,6 +4746,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "导出正则命中行及其原行号",
+        query: "文本: 正则保留行CSV \"^WARN\" ok\nWARN,网关\nwarn\nWARN 重试",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查找包含全部关键词的文本行",
         query: "文本: 搜索行 \"ok 北\" 北区: OK\n南区: OK\nOK: 北站\n北站待定",
     },
@@ -4773,6 +4778,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "排除符合正则表达式的行",
         query: "文本: 正则排除行 \"^[0-9]+$\" 42\nA3\n007",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "导出正则未命中行及其原行号",
+        query: "文本: 正则排除行CSV \"^WARN\" ok\nWARN,网关\nwarn\nWARN 重试",
     },
     Example {
         icon: Icon::Terminal,
