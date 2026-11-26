@@ -4287,6 +4287,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把行首制表符换成等宽空格",
+        query: "文本: 缩进转空格 4\n\t编号\n\t  子项\t备注",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "对照缩进列宽与原来的空格和制表符",
         query: "文本: 缩进列宽CSV 4\n  第一行\n\t第二行\n \t  第三行",
     },

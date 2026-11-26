@@ -256,6 +256,8 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
         || operation.eq_ignore_ascii_case("expand-tabs")
         || operation.eq_ignore_ascii_case("缩进转制表符")
         || operation.eq_ignore_ascii_case("unexpand-indent")
+        || operation.eq_ignore_ascii_case("缩进转空格")
+        || operation.eq_ignore_ascii_case("expand-indent")
         || operation.eq_ignore_ascii_case("按显示宽度展开制表符")
         || operation.eq_ignore_ascii_case("expand-display-tabs")
 }
@@ -333,7 +335,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "展开制表符" | "expand-tabs" => {
             return expand_text_tabs(text, |run| run.chars().count())
         }
-        "缩进转制表符" | "unexpand-indent" => return unexpand_line_indent(text),
+        "缩进转制表符" | "unexpand-indent" => return convert_line_indent(text, true),
+        "缩进转空格" | "expand-indent" => return convert_line_indent(text, false),
         "按显示宽度展开制表符" | "expand-display-tabs" => {
             return expand_text_tabs(text, UnicodeWidthStr::width)
         }
@@ -920,9 +923,9 @@ fn expand_text_tabs(input: &str, measure: impl Fn(&str) -> usize) -> Result<Stri
     Ok(result)
 }
 
-fn unexpand_line_indent(input: &str) -> Result<String, TextError> {
+fn convert_line_indent(input: &str, use_tabs: bool) -> Result<String, TextError> {
     let (width, text) = tab_width_and_text(input)?;
-    let mut result = String::with_capacity(text.len());
+    let mut result = String::with_capacity(text.len().min(MAX_EXPANDED_TEXT_BYTES));
     let mut start = 0;
     let endings = logical_newline_pattern()
         .find_iter(text)
@@ -932,10 +935,19 @@ fn unexpand_line_indent(input: &str) -> Result<String, TextError> {
         let line = &text[start..line_end];
         let indent = leading_ascii_indent(line);
         let (tabs, spaces) = tab_stops_in_indent(indent, width);
+        let rest = &text[start + indent.len()..next];
+        let (tabs, spaces) = if use_tabs {
+            (tabs, spaces)
+        } else {
+            let columns = indent_columns(tabs, spaces, width)?;
+            if columns.saturating_add(rest.len()) > MAX_EXPANDED_TEXT_BYTES - result.len() {
+                return Err(TextError::ResultTooLarge);
+            }
+            (0, columns)
+        };
         result.extend(std::iter::repeat_n('\t', tabs));
         result.extend(std::iter::repeat_n(' ', spaces));
-        result.push_str(&line[indent.len()..]);
-        result.push_str(&text[line_end..next]);
+        result.push_str(rest);
         start = next;
     }
     Ok(result)
@@ -958,6 +970,13 @@ fn tab_stops_in_indent(indent: &str, width: usize) -> (usize, usize) {
         }
     }
     (tabs, spaces)
+}
+
+fn indent_columns(stops: usize, tail: usize, width: usize) -> Result<usize, TextError> {
+    stops
+        .checked_mul(width)
+        .and_then(|columns| columns.checked_add(tail))
+        .ok_or(TextError::ResultTooLarge)
 }
 
 fn common_line_affix(text: &str, suffix: bool) -> String {
@@ -1341,10 +1360,7 @@ fn indent_width_csv(input: &str) -> Result<String, TextError> {
     for (index, line) in numbered_text_lines(text, logical_newline_pattern()) {
         let indent = leading_ascii_indent(line);
         let (stops, tail) = tab_stops_in_indent(indent, width);
-        let columns = stops
-            .checked_mul(width)
-            .and_then(|columns| columns.checked_add(tail))
-            .ok_or(TextError::ResultTooLarge)?;
+        let columns = indent_columns(stops, tail, width)?;
         let tabs = indent.bytes().filter(|byte| *byte == b'\t').count();
         let fields = [index + 1, columns, indent.len() - tabs, tabs].map(|value| value.to_string());
         append_bounded_csv_row(
@@ -3335,6 +3351,22 @@ mod tests {
         assert_eq!(
             transform_text("unexpand-indent 4  \u{a0} A").as_deref(),
             Ok(" \u{a0} A")
+        );
+    }
+
+    #[test]
+    fn expands_only_leading_tabs_without_rewriting_original_line_endings() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 缩进转空格 4\r\n \t  中\tX \r\n\tY\t\n\t \u{2029} \u{a0}Z\t",
+        )
+        .unwrap();
+        assert_eq!(
+            transform_text(query).as_deref(),
+            Ok("      中\tX \r\n    Y\t\n     \u{2029} \u{a0}Z\t"),
+        );
+        assert_eq!(
+            transform_text(&format!("expand-indent {} \t\tX", usize::MAX)),
+            Err(TextError::ResultTooLarge),
         );
     }
 
