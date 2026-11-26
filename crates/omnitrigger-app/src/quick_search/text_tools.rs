@@ -302,6 +302,7 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         "逐行比较csv" | "diff-lines-csv" => Some(diff_lines(text, LineOutput::Csv, None)),
         "差异上下文csv" | "diff-context-csv" => Some(diff_context_csv(text)),
         "差异块csv" | "diff-blocks-csv" => Some(diff_blocks_csv(text)),
+        "首处差异csv" | "first-difference-csv" => Some(first_difference_csv(text)),
         "正则取表" | "regex-to-csv" => Some(regex_captures_to_csv(text, false)),
         "正则定位取表" | "regex-positions-to-csv" => Some(regex_captures_to_csv(text, true)),
         "正则替换明细csv" | "regex-replacement-csv" => Some(regex_replacement_csv(text)),
@@ -1455,20 +1456,23 @@ fn indent_width_csv(input: &str) -> Result<String, TextError> {
     Ok(csv)
 }
 
+fn report_character(character: char) -> String {
+    if character.is_whitespace() {
+        show_whitespace(character.encode_utf8(&mut [0; 4]))
+    } else {
+        character.escape_debug().to_string()
+    }
+}
+
 fn codepoint_table(text: &str) -> Result<String, TextError> {
     let mut result = "序号,字节位置,字符,码位,UTF-8,UTF-16".to_owned();
     for (index, (offset, character)) in text.char_indices().enumerate() {
         let mut bytes = [0; 4];
         let scalar = character.encode_utf8(&mut bytes);
-        let display = if character.is_whitespace() {
-            show_whitespace(scalar)
-        } else {
-            character.escape_debug().to_string()
-        };
         let fields = [
             (index + 1).to_string(),
             (offset + 1).to_string(),
-            display,
+            report_character(character),
             encode_code_points(scalar),
             encode_hex_units(scalar.bytes(), 2),
             encode_hex_units(scalar.encode_utf16(), 4),
@@ -2795,6 +2799,44 @@ fn diff_context_csv(input: &str) -> Result<String, TextError> {
     let (context, pair) =
         json_argument_and_tail::<(usize, usize)>(input).ok_or(TextError::DiffContextArguments)?;
     diff_lines(pair, LineOutput::Csv, Some(context))
+}
+
+fn first_difference_csv(input: &str) -> Result<String, TextError> {
+    let (before, after) = read_text_pair(input)?;
+    let left = before.chars().map(Some).chain([None]);
+    let right = after.chars().map(Some).chain([None]);
+    let mut result = String::from("码位位置,字节位置,原码位,原字符,新码位,新字符");
+    let mut offset = 1;
+    for (index, (old, new)) in left.zip(right).enumerate() {
+        if old == new {
+            offset += old.map_or(0, char::len_utf8);
+            continue;
+        }
+        let describe = |value: Option<char>| match value {
+            Some(character) => [
+                format!("U+{:04X}", u32::from(character)),
+                report_character(character),
+            ],
+            None => [String::new(), "末尾".to_owned()],
+        };
+        let [old_code, old_character] = describe(old);
+        let [new_code, new_character] = describe(new);
+        let fields = [
+            (index + 1).to_string(),
+            offset.to_string(),
+            old_code,
+            old_character,
+            new_code,
+            new_character,
+        ];
+        append_bounded_csv_row(
+            &mut result,
+            fields.iter().map(String::as_str),
+            TextError::ResultTooLarge,
+        )?;
+        break;
+    }
+    Ok(result)
 }
 
 fn diff_blocks_csv(input: &str) -> Result<String, TextError> {
@@ -4767,6 +4809,33 @@ mod tests {
                 Err(TextError::FixedWidthColumns),
             );
         }
+    }
+
+    #[test]
+    fn locates_the_first_text_difference_even_when_it_is_invisible() {
+        const HEADER: &str = "码位位置,字节位置,原码位,原字符,新码位,新字符";
+        for (query, row) in [
+            (
+                r#"首处差异CSV "茶😀\u00a0叶" "茶😀 叶""#,
+                "3,8,U+00A0,<U+00A0>,U+0020,␠",
+            ),
+            (r#"首处差异CSV "A\r\nB" "A\nB""#, "2,2,U+000D,␍,U+000A,␊"),
+            (
+                r#"first-difference-csv "茶" "茶叶""#,
+                "2,4,\"\",末尾,U+53F6,叶",
+            ),
+            (r#"首处差异CSV "茶叶" "茶""#, "2,4,U+53F6,叶,\"\",末尾"),
+        ] {
+            assert_eq!(
+                transform_text(query).as_deref(),
+                Ok(format!("{HEADER}\r\n{row}").as_str()),
+                "{query}",
+            );
+        }
+        assert_eq!(
+            transform_text(r#"首处差异CSV "茶" "茶""#).as_deref(),
+            Ok(HEADER)
+        );
     }
 
     #[test]

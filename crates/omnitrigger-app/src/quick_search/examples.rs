@@ -4576,6 +4576,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"文本: 差异块CSV "表头\n旧值\n保留\n删掉" "新增\n表头\n新值\n保留""#,
     },
     Example {
+        icon: Icon::Layers,
+        title: "定位两段文字中第一个不同的码位",
+        query: r#"文本: 首处差异CSV "茶\u00a0叶" "茶 叶""#,
+    },
+    Example {
         icon: Icon::Terminal,
         title: "计算两段文字在字素簇层面的编辑距离",
         query: r#"文本: 编辑距离 "猫👩‍💻" "猫🧑‍💻""#,
