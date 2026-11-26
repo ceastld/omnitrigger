@@ -57,6 +57,7 @@ pub(super) enum JsonError {
     PointerListTooLarge,
     KeySearchArguments,
     SearchPatternArguments,
+    TypeSearchArguments,
     ValueSearchArguments,
     DuplicateKeyReportTooLarge,
     DuplicateKeyPolicy,
@@ -137,6 +138,9 @@ impl JsonError {
                 "先输入带双引号的键名，再输入 JSON，例如 \"编号\" {\"编号\":1}"
             }
             Self::SearchPatternArguments => "用双引号括起有效的正则表达式，再输入 JSON",
+            Self::TypeSearchArguments => {
+                "填写一个类型或类型数组，可选 object、array、string、number、boolean 和 null"
+            }
             Self::ValueSearchArguments => "先输入要查找的 JSON 标量，再输入文档，例如 1.5 [1,1.50]",
             Self::DuplicateKeyReportTooLarge => "重复键报告超过 1 MiB，请缩小数据范围",
             Self::DuplicateKeyPolicy => "在 JSON 前填写留首或留末，指定保留哪次出现的键",
@@ -216,6 +220,7 @@ enum JsonCsvOperation {
     Values,
     ValuePatterns,
     PointerPatterns,
+    Types,
 }
 
 impl JsonCsvOperation {
@@ -240,6 +245,7 @@ impl JsonCsvOperation {
             "找值csv" | "find-value-csv" => Some(Self::Values),
             "正则找值csv" | "find-value-regex-csv" => Some(Self::ValuePatterns),
             "正则找路径csv" | "find-pointer-regex-csv" => Some(Self::PointerPatterns),
+            "找类型csv" | "find-type-csv" => Some(Self::Types),
             _ => None,
         }
     }
@@ -266,7 +272,8 @@ impl JsonCsvOperation {
             | Self::KeyPatterns
             | Self::Values
             | Self::ValuePatterns
-            | Self::PointerPatterns => true,
+            | Self::PointerPatterns
+            | Self::Types => true,
         }
     }
 
@@ -301,6 +308,7 @@ impl JsonCsvOperation {
             Self::PointerPatterns => {
                 find_json_pattern(source, PointerOutput::Csv, PatternTarget::Pointer)
             }
+            Self::Types => find_json_types(source, PointerOutput::Csv),
         }
     }
 }
@@ -540,6 +548,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "正则找路径" | "find-pointer-regex" => {
             return find_json_pattern(source, PointerOutput::Paths, PatternTarget::Pointer)
         }
+        "找类型" | "find-type" => return find_json_types(source, PointerOutput::Paths),
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source, false),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
         "展平" | "flatten" => {
@@ -2829,6 +2838,27 @@ fn find_json_pattern(
     write_json_pointer_results(source, selection, output)
 }
 
+fn find_json_types(query: &str, output: PointerOutput) -> Result<String, JsonError> {
+    let invalid = JsonError::TypeSearchArguments;
+    let (types, source) = json_value_and_source(query, invalid)?;
+    let types: Vec<String> = if types.get().starts_with('"') {
+        vec![serde_json::from_str(types.get()).map_err(|_| invalid)?]
+    } else {
+        serde_json::from_str(types.get()).map_err(|_| invalid)?
+    };
+    if !(1..=6).contains(&types.len())
+        || types.iter().any(|kind| {
+            !matches!(
+                kind.as_str(),
+                "object" | "array" | "string" | "number" | "boolean" | "null"
+            )
+        })
+    {
+        return Err(invalid);
+    }
+    write_json_pointer_results(source, PointerSelection::Types(&types), output)
+}
+
 fn find_json_values(query: &str, output: PointerOutput) -> Result<String, JsonError> {
     let (value, source) = json_value_and_source(query, JsonError::ValueSearchArguments)?;
     let scalar = json_scalar(value)?.ok_or(JsonError::ValueSearchArguments)?;
@@ -2843,6 +2873,7 @@ enum PointerSelection<'a> {
     Value(&'a JsonScalar),
     ValuePattern(&'a regex::Regex),
     PathPattern(&'a regex::Regex),
+    Types(&'a [String]),
 }
 
 #[derive(Clone, Copy)]
@@ -2893,6 +2924,10 @@ fn write_json_pointer_results(
             }
             PointerSelection::ValuePattern(_) => false,
             PointerSelection::PathPattern(regex) => regex.is_match(&path),
+            PointerSelection::Types(kinds) => {
+                let kind = json_type_name(value);
+                kinds.iter().any(|candidate| candidate.as_str() == kind)
+            }
         };
         for (key, child) in children.into_iter().rev() {
             let matches_key = kind == b'{'
@@ -4013,6 +4048,22 @@ mod tests {
         assert_eq!(
             transform_json(r#"正则找路径 "^$" {"订单":[1]}"#).as_deref(),
             Ok(r#"[""]"#)
+        );
+    }
+
+    #[test]
+    fn searches_multiple_json_value_types_and_includes_the_root_when_selected() {
+        let query = r#"找类型CSV ["number","null"] {"数量":1.50,"状态":[null,"1.5",true]}"#;
+        let expected = "指针,类型,原值\r\n/数量,number,1.50\r\n/状态/0,null,null";
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json(r#"find-type "array" [[],{"嵌套":[1]}]"#).as_deref(),
+            Ok(r#"["","/0","/1/嵌套"]"#)
+        );
+        assert_eq!(
+            transform_json(r#"找类型 ["float"] [1.5]"#),
+            Err(JsonError::TypeSearchArguments)
         );
     }
 
