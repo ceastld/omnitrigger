@@ -1,6 +1,6 @@
 use std::{
-    fs::OpenOptions,
-    io::Read,
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
     os::windows::{
         fs::{MetadataExt, OpenOptionsExt},
         io::AsRawHandle,
@@ -26,6 +26,46 @@ pub fn read_local_preview_file(
     byte_limit: usize,
     check: impl Fn() -> Result<(), LocalStatError>,
 ) -> Result<Vec<u8>, LocalStatError> {
+    with_local_preview_file(path, check, |file| {
+        let mut bytes = Vec::new();
+        file.take(byte_limit as u64).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct LocalPreviewFileTail {
+    pub offset: u64,
+    pub prefix: Vec<u8>,
+    pub bytes: Vec<u8>,
+}
+
+/// 读取本地文件头部最多三个字节及有界末尾，以便调用方识别编码和字符边界。
+pub fn read_local_preview_file_tail(
+    path: &str,
+    byte_limit: usize,
+    check: impl Fn() -> Result<(), LocalStatError>,
+) -> Result<LocalPreviewFileTail, LocalStatError> {
+    with_local_preview_file(path, check, |mut file| {
+        let offset = file.metadata()?.len().saturating_sub(byte_limit as u64);
+        let mut prefix = Vec::new();
+        (&mut file).take(3).read_to_end(&mut prefix)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        file.take(byte_limit as u64).read_to_end(&mut bytes)?;
+        Ok(LocalPreviewFileTail {
+            offset,
+            prefix,
+            bytes,
+        })
+    })
+}
+
+fn with_local_preview_file<T>(
+    path: &str,
+    check: impl Fn() -> Result<(), LocalStatError>,
+    read: impl FnOnce(&File) -> std::io::Result<T>,
+) -> Result<T, LocalStatError> {
     require_file(stat_local_path(path, &check)?)?;
     let native_path = format!("\\\\?\\{}", path.replace('/', "\\"));
     let file = system_step(&check, || {
@@ -43,16 +83,10 @@ pub fn read_local_preview_file(
     verify_opened_path(handle, path, &check)?;
     require_file(stat_local_path(path, &check)?)?;
 
-    let mut bytes = Vec::new();
-    system_step(&check, || {
-        (&file)
-            .take(byte_limit as u64)
-            .read_to_end(&mut bytes)
-            .map_err(read_error)
-    })??;
+    let preview = system_step(&check, || read(&file).map_err(read_error))??;
     verify_opened_path(handle, path, &check)?;
     require_file(stat_local_path(path, &check)?)?;
-    Ok(bytes)
+    Ok(preview)
 }
 
 fn read_error(error: std::io::Error) -> LocalStatError {

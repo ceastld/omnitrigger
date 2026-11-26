@@ -1995,7 +1995,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
-        title: "按路径预览文件，可加「原文」或「开头」",
+        title: "按路径预览原文、开头或末尾",
         query: "预览文件:",
     },
     Example {

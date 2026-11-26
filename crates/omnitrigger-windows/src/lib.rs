@@ -32,12 +32,14 @@ mod logical_path_sort;
 pub use logical_path_sort::sort_logical_paths;
 
 mod local_path_stat;
-#[cfg(windows)]
-pub use local_path_stat::read_local_preview_file;
 pub use local_path_stat::{
     read_local_directory, read_local_directory_with_options, stat_local_path, DirectoryEntryType,
     DirectoryOrder, LocalDirectoryEntry, LocalDirectoryMetadata, LocalDirectoryOptions,
     LocalPathKind, LocalStatError, MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
+};
+#[cfg(windows)]
+pub use local_path_stat::{
+    read_local_preview_file, read_local_preview_file_tail, LocalPreviewFileTail,
 };
 
 mod automation_basics;

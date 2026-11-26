@@ -814,6 +814,14 @@ mod tests {
                 Ok("甲乙".as_bytes().to_vec())
             );
             assert_eq!(
+                read_local_preview_file_tail(file.to_str().unwrap(), 3, || Ok(())),
+                Ok(LocalPreviewFileTail {
+                    offset: 6,
+                    prefix: "甲".as_bytes().to_vec(),
+                    bytes: b"abc".to_vec(),
+                }),
+            );
+            assert_eq!(
                 read_local_preview_file(fixture.root.to_str().unwrap(), 6, || Ok(()))
                     .unwrap_err()
                     .code,
@@ -874,4 +882,6 @@ pub use directory::{
 #[cfg(windows)]
 mod preview_file;
 #[cfg(windows)]
-pub use preview_file::read_local_preview_file;
+pub use preview_file::{
+    read_local_preview_file, read_local_preview_file_tail, LocalPreviewFileTail,
+};
