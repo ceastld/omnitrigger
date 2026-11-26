@@ -646,11 +646,8 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(mix_prefix))
     {
         (mix_color(&input[mix_prefix.len()..])?, ColorFormat::Hex)
-    } else if let Some((front, backdrop)) = color_pair(input, "叠加", " over ") {
-        (
-            Channels::parse(front.trim())?.over(Channels::parse(backdrop.trim())?),
-            ColorFormat::Hex,
-        )
+    } else if let Some(channels) = composed_srgb(input) {
+        (channels?, ColorFormat::Hex)
     } else {
         let default = if input.starts_with('#') {
             ColorFormat::Rgb
@@ -735,6 +732,13 @@ fn color_pair<'a>(input: &'a str, local: &str, english: &str) -> Option<(&'a str
     })
 }
 
+fn composed_srgb(input: &str) -> Option<Result<Channels, ColorError>> {
+    let (front, backdrop) = color_pair(input, "叠加", " over ")?;
+    Some(Channels::parse(front.trim()).and_then(|front| {
+        Channels::parse(backdrop.trim()).map(|background| front.over(background))
+    }))
+}
+
 fn opaque_color_pair(
     input: &str,
     incomplete: ColorError,
@@ -742,8 +746,12 @@ fn opaque_color_pair(
 ) -> Result<[Channels; 2], ColorError> {
     let input = normalize(input);
     let (first, second) = color_pair(&input, "对比", " vs ").ok_or(incomplete)?;
-    let first = Channels::parse(first.trim())?;
-    let second = Channels::parse(second.trim())?;
+    let parse = |input: &str| {
+        let input = input.trim();
+        composed_srgb(input).unwrap_or_else(|| Channels::parse(input))
+    };
+    let first = parse(first)?;
+    let second = parse(second)?;
     if first.alpha.unwrap_or(255) != 255 || second.alpha.unwrap_or(255) != 255 {
         return Err(transparent);
     }
@@ -784,6 +792,27 @@ pub(super) fn calculate_color_difference(input: &str) -> Result<ColorComparison,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composites_each_color_before_measuring_contrast_or_difference() {
+        let contrast = calculate_contrast("#0008 叠加 #fff vs #fff").unwrap();
+        let ratio = contrast
+            .output
+            .strip_suffix(":1")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!((ratio - 4.478089453577214).abs() < 1e-12);
+        assert_eq!(contrast.swatches, [0x777777ff, 0xffffffff]);
+
+        let comparison = calculate_color_difference("#777 vs #0008 over white").unwrap();
+        assert_eq!(comparison.output, "0");
+        assert_eq!(comparison.swatches, [0x777777ff; 2]);
+        assert_eq!(
+            calculate_contrast("#0008 over #fff8 vs white"),
+            Err(ColorError::TransparentContrast),
+        );
+    }
 
     #[test]
     fn compares_opaque_srgb_colors_by_oklab_distance() {

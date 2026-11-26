@@ -679,6 +679,7 @@
 - 输入 `对比度: #fff vs #000` 会预览两个不透明颜色，并显示 `21:1`。计算采用 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)。
 - 输入 `颜色: 色差 red vs lime` 可比较两个不透明 sRGB 颜色，显示两个色样和约 `0.5198` 的 ΔEOK。计算使用两色在 OKLab 空间中的欧氏距离，相同色值的结果为 0。 [CSS Color 4 的 ΔEOK 公式](https://www.w3.org/TR/css-color-4/#color-difference)
 - 输入 `颜色: #0080FF80 叠加 #fff` 得到 `#7FBFFF`。前一种颜色覆盖在后一种颜色上，也可用 `over`，按 sRGB 通道计算 [透明度叠加](https://www.w3.org/TR/compositing-1/#simplealphacompositing)。
+- 对比度和色差的任一侧也可先叠加到底色。例如 `对比度: #0008 叠加 #fff vs #fff` 会预览合成后的 `#777777` 与白色，得到约 `4.478:1`。两侧合成后的颜色须为不透明。 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)
 - 输入 `颜色: color-mix(in srgb, #fff 25%, #000)` 得到 `#404040`。搜索框按 8 位 sRGB 通道混合两个颜色，支持在色值前后指定百分比。两个比例都省略时各占 50%，都指定且总和低于 100% 时会保留相应的透明度。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: color-mix(in srgb-linear, white, black)` 得到 `#BCBCBC`。该模式先将 sRGB 通道转为线性光强，按权重与透明度混合，再转回 sRGB。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: color-mix(in oklab, #000, #fff)` 得到 `#636363`。可用 `颜色: OKLab色阶 #000 到 #fff @ 3` 在同一空间等间隔取色。混合色超出 sRGB 色域时，搜索框会提示。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
