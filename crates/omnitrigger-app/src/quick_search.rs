@@ -455,6 +455,7 @@ struct RememberedSearchInput {
     selection: Option<MessageSelection>,
     refill: Option<ResultRefill>,
     table_pages: Option<TablePages>,
+    expanded_value_page: Option<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -2796,7 +2797,7 @@ impl QuickSearch {
                         TableAxis::Rows => self.table_pages.rows = page,
                         TableAxis::Columns => self.table_pages.columns = page,
                     }
-                    self.remember_table_pages(cx);
+                    self.remember_result_pages(cx);
                 }
                 LineJumpTarget::ExpandedPreview => {
                     if self
@@ -2807,6 +2808,7 @@ impl QuickSearch {
                         return;
                     }
                     self.selected = number - 1;
+                    self.remember_result_pages(cx);
                 }
             }
         }
@@ -2952,6 +2954,7 @@ impl QuickSearch {
             .as_ref()
             .filter(|_| self.is_tail_file_preview())
             .map_or(0, |pages| pages.len().saturating_sub(1));
+        self.remember_result_pages(cx);
         window.resize(size(
             px(WIDTH),
             px(self.results.height(self.value_line_limit())),
@@ -4004,18 +4007,21 @@ impl QuickSearch {
         if query.is_empty() {
             return;
         }
-        if let (Some(selection), Some(pages)) = (
-            self.previous_input.selection,
-            self.previous_input.table_pages,
-        ) {
+        let table_pages = self.previous_input.table_pages;
+        let expanded_page = self.previous_input.expanded_value_page;
+        if let Some(selection) = self
+            .previous_input
+            .selection
+            .filter(|_| table_pages.is_some() || expanded_page.is_some())
+        {
             self.restore_query_draft(
                 QueryDraft {
                     text: query,
                     selection,
-                    selected: 0,
+                    selected: expanded_page.unwrap_or_default(),
                     suggestion: None,
-                    table_pages: Some(pages),
-                    expanded_value: false,
+                    table_pages,
+                    expanded_value: expanded_page.is_some(),
                     follow_value_end: false,
                     refill: self.previous_input.refill.clone(),
                 },
@@ -4055,17 +4061,19 @@ impl QuickSearch {
                 selection: Some(selection),
                 refill,
                 table_pages: self.results.table_preview().map(|_| self.table_pages),
+                expanded_value_page: self.expanded_value_pages.as_ref().map(|_| self.selected),
             };
         }
     }
 
-    fn remember_table_pages(&self, cx: &App) {
+    fn remember_result_pages(&self, cx: &App) {
         if self.has_temporary_query() {
             return;
         }
         let mut last = self.index.recent.last_input.borrow_mut();
         if last.query == self.input.read(cx).text_ref() {
-            last.table_pages = Some(self.table_pages);
+            last.table_pages = self.results.table_preview().map(|_| self.table_pages);
+            last.expanded_value_page = self.expanded_value_pages.as_ref().map(|_| self.selected);
         }
     }
 
@@ -5090,6 +5098,9 @@ impl QuickSearch {
         let next = movement.target(page, last_page);
         if next != page {
             self.selected = next * page_size;
+            if self.expanded_value_pages.is_some() {
+                self.remember_result_pages(cx);
+            }
             cx.notify();
         }
         true
@@ -5121,7 +5132,7 @@ impl QuickSearch {
         let next = movement.target(*page, count - 1);
         if next != *page {
             *page = next;
-            self.remember_table_pages(cx);
+            self.remember_result_pages(cx);
             cx.notify();
         }
         true
@@ -9592,6 +9603,7 @@ mod tests {
             keystroke: gpui::Keystroke::parse(name).unwrap(),
             is_held,
         };
+        search.remember_search_input(query.clone(), search.input.read(cx).selection_position());
         search.key_down(&key("ctrl-shift-g", false), window, cx);
         assert!(search.line_jump.is_none());
         search.key_down(&key("f2", false), window, cx);
@@ -9614,6 +9626,20 @@ mod tests {
         search.key_down(&key("ctrl-shift-g", false), window, cx);
         search.key_down(&key("escape", false), window, cx);
         assert_eq!(search.selected, 2);
+        search.key_down(&key("pageup", false), window, cx);
+        assert_eq!(search.selected, 1);
+        let remembered = search.index.recent.last_input.borrow().clone();
+        assert_eq!(remembered.expanded_value_page, Some(1));
+        let previous = std::mem::replace(&mut search.previous_input, remembered);
+        search.fill_query("", window, cx);
+        search.refresh_results("", window, cx);
+        assert!(search.expanded_value_pages.is_none());
+        search.restore_previous_input(window, cx);
+        search.refresh_results(&query, window, cx);
+        assert_eq!(search.input.read(cx).text_ref(), query);
+        assert_eq!(search.expanded_value_pages.as_ref().map(Vec::len), Some(3));
+        assert_eq!(search.selected, 1);
+        search.previous_input = previous;
     }
 
     #[cfg(target_os = "windows")]
