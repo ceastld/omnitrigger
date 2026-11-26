@@ -6135,6 +6135,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 查重复 [\"编号\",2] 编号,地区,备注\n001,北,首条\n001,南,独有\n001,北,再次",
     },
     Example {
+        icon: Icon::Layers,
+        title: "定位表格中重复组合的原始行",
+        query: "CSV: 重复位置 [\"编号\",2]\n编号,班次,备注\n001,早,首条\n001,晚,独有\n001,早,再次",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按精确数值对 CSV 数据行去重",
         query: "CSV: 数值去重 [\"金额\"] 编号,金额\n001,1.50\n002,3/2\n003,1.5e0\n004,5/4",
