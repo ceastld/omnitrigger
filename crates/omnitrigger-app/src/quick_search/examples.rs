@@ -2525,6 +2525,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "用完成比例和已经过的时间估算剩余时间",
+        query: "下载: 预计剩余 25% 用时 8秒",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用精确数据量和耗时求平均速率",
         query: "下载: 精确速率 1 GiB 用时 60秒 to MiB/s",
     },

@@ -35,6 +35,7 @@ pub(super) enum ConversionError {
     InvalidTransferTimeUnit,
     InvalidTransferDuration,
     InvalidTransferProgress,
+    InvalidTransferEstimate,
     InvalidPace,
     InvalidPixelDensity,
     ScaleArguments,
@@ -91,6 +92,7 @@ impl ConversionError {
                 "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
             Self::InvalidTransferProgress => "已传数据量须在零和总数据量之间",
+            Self::InvalidTransferEstimate => "完成比例须大于零且不超过 100%，用时须大于零",
             Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
             Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
             Self::ScaleArguments => "输入比例和距离，例如 1:50000 3.2 cm to km",
@@ -694,6 +696,10 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
     if let Some(arguments) = batch_arguments(input.trim_start(), "剩余耗时", "remaining-time") {
         return exact_transfer_time(arguments, true);
     }
+    if let Some(arguments) = batch_arguments(input.trim_start(), "预计剩余", "estimate-remaining")
+    {
+        return estimate_remaining_from_progress(arguments);
+    }
     if let Some(arguments) = batch_arguments(input.trim_start(), "精确速率", "exact-rate") {
         return exact_transfer_by_elapsed(arguments, true);
     }
@@ -797,11 +803,36 @@ fn exact_transfer_time(input: &str, use_progress: bool) -> Result<String, Conver
     } else {
         bits
     };
-    let seconds = bits / bits_per_second;
+    format_exact_transfer_time(&(bits / bits_per_second), targets)
+}
+
+fn estimate_remaining_from_progress(input: &str) -> Result<String, ConversionError> {
+    let (input, targets) = split_conversion(input).unwrap_or((input, "s"));
+    let (completed, elapsed) = input
+        .split_once("用时")
+        .ok_or(ConversionError::Incomplete)?;
+    let (completed, elapsed) = (completed.trim(), elapsed.trim());
+    if completed.is_empty() || elapsed.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let completed =
+        parse_probability(completed).map_err(|_| ConversionError::InvalidTransferEstimate)?;
+    let elapsed = exact_transfer_elapsed_seconds(elapsed)?;
+    if completed.numer().sign() != Sign::Plus || elapsed.numer().sign() != Sign::Plus {
+        return Err(ConversionError::InvalidTransferEstimate);
+    }
+    let remaining = &elapsed / completed - elapsed;
+    format_exact_transfer_time(&remaining, targets)
+}
+
+fn format_exact_transfer_time(
+    seconds: &BigRational,
+    targets: &str,
+) -> Result<String, ConversionError> {
     format_targets(targets, |target| {
         let (symbol, divisor, _) = numeric_duration_unit(&target.to_ascii_lowercase())
             .ok_or(ConversionError::InvalidTransferTimeUnit)?;
-        let amount = &seconds * BigRational::new(NANOS_PER_SECOND.into(), divisor.into());
+        let amount = seconds * BigRational::new(NANOS_PER_SECOND.into(), divisor.into());
         ensure_exact_size(&amount).map_err(|_| ConversionError::OutOfRange)?;
         Ok(format!("{amount} {symbol}"))
     })
@@ -3030,6 +3061,31 @@ mod tests {
         assert_eq!(
             estimate_transfer("精确耗时 1 B 按 1 B/s to B"),
             Err(ConversionError::InvalidTransferTimeUnit)
+        );
+    }
+
+    #[test]
+    fn estimates_remaining_transfer_time_from_elapsed_progress() {
+        for (input, expected) in [
+            ("预计剩余 25% 用时 8秒 to [s, min]", "24 s\n2/5 min"),
+            ("预计剩余 2/3 用时 1/3秒 to ms", "500/3 ms"),
+            ("预计剩余 100% 用时 90秒", "0 s"),
+        ] {
+            assert_eq!(estimate_transfer(input).as_deref(), Ok(expected), "{input}");
+        }
+        for input in [
+            "预计剩余 0% 用时 8秒",
+            "预计剩余 125% 用时 8秒",
+            "预计剩余 1/2 用时 0秒",
+        ] {
+            assert_eq!(
+                estimate_transfer(input),
+                Err(ConversionError::InvalidTransferEstimate)
+            );
+        }
+        assert_eq!(
+            estimate_transfer("预计剩余 25% 用时"),
+            Err(ConversionError::Incomplete)
         );
     }
 
