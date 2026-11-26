@@ -143,6 +143,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     if matches!(operation, "空档时段csv" | "clock-gaps-csv") {
         return clock_spans_csv(clock_span_gaps(merged_clock_spans(values)?), output);
     }
+    if matches!(operation, "时段冲突csv" | "clock-overlaps-csv") {
+        return clock_overlaps_csv(values, output);
+    }
     let dispersion = match operation {
         "方差" | "样本方差" | "sample-variance" => Some((true, false)),
         "总体方差" | "population-variance" => Some((false, false)),
@@ -238,6 +241,12 @@ fn clock_overlap(input: &str) -> Result<i128, DurationError> {
         .ok_or(DurationError::InvalidOverlapArguments)?;
     let first = split_clock_spans(first)?;
     let second = split_clock_spans(second)?;
+    Ok(clock_overlap_nanos(first, second) as i128)
+}
+
+type DaySegments = [(u128, u128); 2];
+
+fn clock_overlap_nanos(first: DaySegments, second: DaySegments) -> u128 {
     let mut total = 0;
     for (left_start, left_end) in first {
         for (right_start, right_end) in second {
@@ -246,10 +255,10 @@ fn clock_overlap(input: &str) -> Result<i128, DurationError> {
                 .saturating_sub(left_start.max(right_start));
         }
     }
-    Ok(total as i128)
+    total
 }
 
-fn split_clock_spans(input: &str) -> Result<[(u128, u128); 2], DurationError> {
+fn split_clock_spans(input: &str) -> Result<DaySegments, DurationError> {
     let (start, end) = input
         .split_once(['到', '至'])
         .ok_or(DurationError::InvalidOverlapArguments)?;
@@ -262,7 +271,7 @@ fn split_clock_spans(input: &str) -> Result<[(u128, u128); 2], DurationError> {
     })
 }
 
-fn merged_clock_spans(input: &str) -> Result<Vec<(u128, u128)>, DurationError> {
+fn clock_span_inputs(input: &str) -> Result<Vec<DaySegments>, DurationError> {
     if input.trim().is_empty() {
         return Err(DurationError::Incomplete);
     }
@@ -274,14 +283,23 @@ fn merged_clock_spans(input: &str) -> Result<Vec<(u128, u128)>, DurationError> {
     if terms.len() > MAX_CLOCK_SPANS {
         return Err(DurationError::InvalidClockSpans);
     }
-    let mut spans = Vec::new();
-    for term in terms {
-        let parts = split_clock_spans(term).map_err(|error| match error {
-            DurationError::InvalidOverlapArguments => DurationError::InvalidClockSpans,
-            _ => error,
-        })?;
-        spans.extend(parts.into_iter().filter(|(start, end)| start != end));
-    }
+    terms
+        .into_iter()
+        .map(|term| {
+            split_clock_spans(term).map_err(|error| match error {
+                DurationError::InvalidOverlapArguments => DurationError::InvalidClockSpans,
+                _ => error,
+            })
+        })
+        .collect()
+}
+
+fn merged_clock_spans(input: &str) -> Result<Vec<(u128, u128)>, DurationError> {
+    let mut spans = clock_span_inputs(input)?
+        .into_iter()
+        .flatten()
+        .filter(|(start, end)| start != end)
+        .collect::<Vec<_>>();
     spans.sort_unstable();
     let mut merged = Vec::<(u128, u128)>::new();
     for (start, end) in spans {
@@ -310,26 +328,52 @@ fn clock_span_gaps(spans: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
     gaps
 }
 
-fn clock_spans_csv(spans: Vec<(u128, u128)>, unit: Option<&str>) -> Result<String, DurationError> {
+fn clock_report_duration_column(
+    label: &str,
+    unit: Option<&str>,
+) -> Result<(String, impl Fn(u128) -> String), DurationError> {
     let target = unit
         .map(|unit| numeric_duration_unit(unit).ok_or(DurationError::ExactUnitArguments))
         .transpose()?;
     let header = target.map_or_else(
-        || "时长".to_owned(),
-        |(symbol, _, _)| format!("时长 ({symbol})"),
+        || label.to_owned(),
+        |(symbol, _, _)| format!("{label} ({symbol})"),
     );
+    let format_duration = move |elapsed| match target {
+        Some((_, divisor, _)) => exact_duration_number(elapsed as i128, divisor).to_string(),
+        None => format_clock_duration(elapsed, ""),
+    };
+    Ok((header, format_duration))
+}
+
+fn clock_spans_csv(spans: Vec<(u128, u128)>, unit: Option<&str>) -> Result<String, DurationError> {
+    let (header, format_duration) = clock_report_duration_column("时长", unit)?;
     let mut rows = vec![["起始时刻".to_owned(), "截止时刻".to_owned(), header]];
     for (start, end) in spans {
-        let elapsed = end - start;
-        let duration = match target {
-            Some((_, divisor, _)) => exact_duration_number(elapsed as i128, divisor).to_string(),
-            None => format_clock_duration(elapsed, ""),
-        };
         rows.push([
             format_clock_duration(start, ""),
             format_clock_duration(end, ""),
-            duration,
+            format_duration(end - start),
         ]);
+    }
+    Ok(write_rows(&rows, ','))
+}
+
+fn clock_overlaps_csv(input: &str, unit: Option<&str>) -> Result<String, DurationError> {
+    let ranges = clock_span_inputs(input)?;
+    let (header, format_duration) = clock_report_duration_column("重叠时长", unit)?;
+    let mut rows = vec![["第一段".to_owned(), "第二段".to_owned(), header]];
+    for (first, &left) in ranges.iter().enumerate() {
+        for (second, &right) in ranges.iter().enumerate().skip(first + 1) {
+            let overlap = clock_overlap_nanos(left, right);
+            if overlap > 0 {
+                rows.push([
+                    (first + 1).to_string(),
+                    (second + 1).to_string(),
+                    format_duration(overlap),
+                ]);
+            }
+        }
     }
     Ok(write_rows(&rows, ','))
 }
@@ -663,6 +707,8 @@ pub(super) fn is_duration_report(query: &str) -> bool {
                 | "clock-union-csv"
                 | "空档时段csv"
                 | "clock-gaps-csv"
+                | "时段冲突csv"
+                | "clock-overlaps-csv"
         )
     })
 }
@@ -1275,6 +1321,28 @@ mod tests {
         assert_eq!(
             convert_duration("clock-gaps-csv 00:00到12:00; 12:00到00:00").as_deref(),
             Ok("起始时刻,截止时刻,时长")
+        );
+    }
+
+    #[test]
+    fn reports_each_clock_range_pair_that_overlaps_on_the_daily_cycle() {
+        let query =
+            "时段冲突CSV 22:00 到 02:00;01:00 到 23:00;10:00 到 11:00;23:00 到 23:00 to min";
+        assert_eq!(
+            convert_duration(query).as_deref(),
+            Ok("第一段,第二段,重叠时长 (min)\r\n1,2,120\r\n2,3,60")
+        );
+        assert!(is_duration_report(query));
+        assert_eq!(
+            convert_duration("clock-overlaps-csv 08:00到09:00;09:00到10:00").as_deref(),
+            Ok("第一段,第二段,重叠时长")
+        );
+        assert_eq!(
+            convert_duration(
+                "时段冲突CSV 10:00:00.000000001 到 10:00:01; 10:00 到 10:00:00.000000002 to ns"
+            )
+            .as_deref(),
+            Ok("第一段,第二段,重叠时长 (ns)\r\n1,2,1")
         );
     }
 
