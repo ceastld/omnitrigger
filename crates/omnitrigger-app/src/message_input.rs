@@ -972,30 +972,18 @@ impl Element for MessageLine {
                 None,
             )
         });
-        let caret = line.x_for_index(input.head);
         let viewport = if bounds.size.width > px(3.) {
             bounds.size.width - px(3.)
         } else {
             px(0.)
         };
-        let mut scroll_x = input.scroll_x;
-        if caret < scroll_x {
-            scroll_x = caret;
-        }
-        if caret > scroll_x + viewport {
-            scroll_x = caret - viewport;
-        }
-        let maximum = if line.shaped.width > viewport {
-            line.shaped.width - viewport
-        } else {
-            px(0.)
-        };
-        if scroll_x > maximum {
-            scroll_x = maximum;
-        }
-        if scroll_x < px(0.) {
-            scroll_x = px(0.);
-        }
+        let scroll_x = selection_scroll_x(
+            input.scroll_x,
+            line.x_for_index(input.head),
+            line.x_for_index(input.anchor),
+            viewport,
+            line.shaped.width,
+        );
         LinePaint {
             line,
             placeholder,
@@ -1062,6 +1050,25 @@ impl Element for MessageLine {
             input.scroll_x = paint.scroll_x;
         });
     }
+}
+
+fn selection_scroll_x(
+    previous: Pixels,
+    head: Pixels,
+    anchor: Pixels,
+    viewport: Pixels,
+    width: Pixels,
+) -> Pixels {
+    let head = f32::from(head);
+    let viewport = f32::from(viewport);
+    let anchor = f32::from(anchor).clamp(head - viewport, head + viewport);
+    let left = head.min(anchor);
+    let right = head.max(anchor);
+    let maximum = (f32::from(width) - viewport).max(0.);
+    px(f32::from(previous)
+        .max(right - viewport)
+        .min(left)
+        .clamp(0., maximum))
 }
 
 #[derive(Clone, Default)]
@@ -1298,6 +1305,28 @@ fn to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shows_both_ends_of_a_selection_when_they_fit_in_the_input() {
+        let width = px(300.);
+        let viewport = px(100.);
+        for (scroll, head, anchor, expected) in [
+            (0., 75., 115., 15.),
+            (190., 130., 70., 70.),
+            (0., 160., 300., 160.),
+            (0., 300., 150., 200.),
+            (80., 100., 100., 80.),
+        ] {
+            assert_eq!(
+                selection_scroll_x(px(scroll), px(head), px(anchor), viewport, width),
+                px(expected),
+            );
+        }
+        assert_eq!(
+            selection_scroll_x(px(70.), px(55.), px(20.), viewport, px(70.)),
+            px(0.),
+        );
+    }
 
     #[test]
     fn reports_the_active_line_and_total_with_blank_and_mixed_lines() {
