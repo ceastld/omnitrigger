@@ -1049,6 +1049,7 @@ enum Operation {
     },
     DuplicatesByColumns(Vec<ColumnReference>),
     DuplicatePositions(Vec<ColumnReference>),
+    NumericDuplicatePositions(Vec<ColumnReference>),
     DuplicatesByNumbers(Vec<ColumnReference>),
     CountByColumns(Vec<ColumnReference>),
     FrequencyByColumns(Vec<ColumnReference>),
@@ -2640,11 +2641,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 Operation::DuplicatesByColumns(columns)
             }
         }
-        "重复位置" | "duplicate-positions" => {
+        "重复位置" | "duplicate-positions" | "数值重复位置" | "numeric-duplicate-positions" =>
+        {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            Operation::DuplicatePositions(columns)
+            if matches!(
+                operation.as_str(),
+                "数值重复位置" | "numeric-duplicate-positions"
+            ) {
+                Operation::NumericDuplicatePositions(columns)
+            } else {
+                Operation::DuplicatePositions(columns)
+            }
         }
         "分组计数" | "group-count" => {
             let (columns, data) = column_reference_arguments(input, CsvError::GroupingColumns)?;
@@ -3252,7 +3261,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::DuplicatesByNumbers(columns) => {
             find_duplicate_columns(&rows, &columns, numeric_column_key)
         }
-        Operation::DuplicatePositions(columns) => duplicate_positions(&rows, &columns),
+        Operation::DuplicatePositions(columns) => {
+            duplicate_positions(&rows, &columns, |row, columns| Ok(column_key(row, columns)))
+        }
+        Operation::NumericDuplicatePositions(columns) => {
+            duplicate_positions(&rows, &columns, numeric_column_key)
+        }
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
         Operation::FrequencyByColumns(columns) => group_frequencies(&rows, &columns)?.csv(),
         Operation::AggregateByColumns {
@@ -6458,13 +6472,21 @@ fn resolve_distinct_columns(
     Ok(columns)
 }
 
-fn duplicate_positions(
-    rows: &[Vec<String>],
+fn duplicate_positions<'a, Key: Eq + Hash>(
+    rows: &'a [Vec<String>],
     columns: &[ColumnReference],
+    key: impl Fn(&'a [String], &[usize]) -> Result<Key, CsvError>,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
-    let groups = group_counts(records, &columns);
+    let keys = records
+        .iter()
+        .map(|row| key(row, &columns))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut counts = HashMap::new();
+    for key in &keys {
+        *counts.entry(key).or_insert(0usize) += 1;
+    }
     let labels: Vec<_> = (1..=columns.len())
         .map(|index| format!("键{index}"))
         .collect();
@@ -6476,9 +6498,8 @@ fn duplicate_positions(
             .chain(labels.iter().map(String::as_str)),
         CsvError::ColumnComparisonTooLarge,
     )?;
-    for (index, row) in records.iter().enumerate() {
-        let key = column_key(row, &columns);
-        let count = groups[&key].1;
+    for (index, (row, key)) in records.iter().zip(&keys).enumerate() {
+        let count = counts[key];
         if count < 2 {
             continue;
         }
@@ -6486,7 +6507,9 @@ fn duplicate_positions(
         let count = count.to_string();
         append_bounded_csv_row(
             &mut output,
-            [position.as_str(), count.as_str()].into_iter().chain(key),
+            [position.as_str(), count.as_str()]
+                .into_iter()
+                .chain(column_key(row, &columns)),
             CsvError::ColumnComparisonTooLarge,
         )?;
     }
@@ -8390,6 +8413,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-rows"
             | "重复位置"
             | "duplicate-positions"
+            | "数值重复位置"
+            | "numeric-duplicate-positions"
             | "对比列"
             | "compare-column"
             | "两列差异"
@@ -13133,6 +13158,18 @@ B,乙
         assert_eq!(
             transform_csv("duplicate-positions [1] ID,值\n001,茶\n002,咖啡").as_deref(),
             Ok("数据行,出现次数,键1")
+        );
+        assert_eq!(
+            transform_csv(concat!(
+                "数值重复位置 [\"金额\"] 编号,金额\n",
+                "001,1.50\n002,5/4\n003,3/2\n004,1.5e0",
+            ))
+            .as_deref(),
+            Ok("数据行,出现次数,键1\r\n1,3,1.50\r\n3,3,3/2\r\n4,3,1.5e0")
+        );
+        assert_eq!(
+            transform_csv("numeric-duplicate-positions 2 编号,金额\n001,未知"),
+            Err(CsvError::InvalidNumber)
         );
     }
 
