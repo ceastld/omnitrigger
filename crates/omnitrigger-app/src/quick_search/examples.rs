@@ -5199,6 +5199,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按值的 JSON 类型筛选记录",
+        query: r#"JSON: 多条件筛选 [["/金额","类型","number"]] [{"金额":1.50},{"金额":"1.50"},{"金额":null}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "读取 JSON 指针指向的值类型",
         query: r#"JSON: 类型 /订单/0/金额 {"订单":[{"金额":9007199254740993}]}"#,
     },

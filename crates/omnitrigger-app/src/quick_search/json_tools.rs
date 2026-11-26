@@ -27,6 +27,7 @@ const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
 const MAX_UNIQUE_PATHS: usize = 8;
 const MAX_COVERAGE_PATHS: usize = 16;
+const JSON_VALUE_TYPES: [&str; 6] = ["object", "array", "string", "number", "boolean", "null"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JsonError {
@@ -92,6 +93,7 @@ pub(super) enum JsonError {
     NumberFilter,
     FilterConditions,
     FilterRegex,
+    FilterType,
     SortFields,
     UniquePaths,
     LineUniquePaths,
@@ -183,6 +185,7 @@ impl JsonError {
                 "填写 1 至 16 个筛选条件，例如 [[\"/状态\",\"存在\"],[\"/金额\",\">=\",1.5]]"
             }
             Self::FilterRegex => "正则筛选条件须填写有效的 JSON 正则字符串",
+            Self::FilterType => "JSON 类型可填 object、array、string、number、boolean 或 null",
             Self::SortFields => {
                 "填写 1 至 8 个 [路径,排序方式]，方式可为文本升序、文本降序、数值升序或数值降序"
             }
@@ -1382,6 +1385,10 @@ struct JsonCondition {
 
 enum JsonPredicate {
     Presence(bool),
+    Type {
+        name: String,
+        keep_match: bool,
+    },
     Scalar {
         comparison: NumberComparison,
         expected: JsonScalar,
@@ -1416,6 +1423,19 @@ impl JsonPredicate {
                 keep_match,
             });
         }
+        let keep_type = match operator {
+            "类型" | "type" => Some(true),
+            "类型排除" | "not-type" => Some(false),
+            _ => None,
+        };
+        if let Some(keep_match) = keep_type {
+            let name: String =
+                serde_json::from_str(raw.get()).map_err(|_| JsonError::FilterType)?;
+            if !JSON_VALUE_TYPES.contains(&name.as_str()) {
+                return Err(JsonError::FilterType);
+            }
+            return Ok(Self::Type { name, keep_match });
+        }
         let comparison = NumberComparison::parse(operator).ok_or(JsonError::FilterConditions)?;
         let expected = json_scalar(raw)?.ok_or(JsonError::FilterConditions)?;
         if !matches!(
@@ -1437,6 +1457,9 @@ impl JsonCondition {
         let value = optional_pointer_value(item, &self.keys)?;
         Ok(match (&self.predicate, value) {
             (JsonPredicate::Presence(expected), value) => value.is_some() == *expected,
+            (JsonPredicate::Type { name, keep_match }, Some(value)) => {
+                (json_type_name(value) == name.as_str()) == *keep_match
+            }
             (
                 JsonPredicate::Regex {
                     pattern,
@@ -2985,13 +3008,10 @@ fn find_json_types(query: &str, output: PointerOutput) -> Result<String, JsonErr
     } else {
         serde_json::from_str(types.get()).map_err(|_| invalid)?
     };
-    if !(1..=6).contains(&types.len())
-        || types.iter().any(|kind| {
-            !matches!(
-                kind.as_str(),
-                "object" | "array" | "string" | "number" | "boolean" | "null"
-            )
-        })
+    if !(1..=JSON_VALUE_TYPES.len()).contains(&types.len())
+        || types
+            .iter()
+            .any(|kind| !JSON_VALUE_TYPES.contains(&kind.as_str()))
     {
         return Err(invalid);
     }
@@ -5406,6 +5426,27 @@ mod tests {
                 Err(JsonError::FilterConditions)
             );
         }
+    }
+
+    #[test]
+    fn filters_native_json_types_including_arrays_objects_and_explicit_null() {
+        let source = r#"[{},{"k":null},{"k":[]},{"k":{}},{"k":1e999},{"k":"1"}]"#;
+        for (conditions, expected) in [
+            (r#"[["/k","类型","array"]]"#, r#"[{"k":[]}]"#),
+            (r#"[["/k","type","number"]]"#, r#"[{"k":1e999}]"#),
+            (
+                r#"[["/k","类型排除","string"]]"#,
+                r#"[{"k":null},{"k":[]},{"k":{}},{"k":1e999}]"#,
+            ),
+            (r#"[["/k","类型","null"]]"#, r#"[{"k":null}]"#),
+        ] {
+            let query = format!("多条件筛选 {conditions} {source}");
+            assert_eq!(transform_json(&query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            transform_json(&format!(r#"多条件筛选 [["/k","类型","integer"]] {source}"#)),
+            Err(JsonError::FilterType),
+        );
     }
 
     #[test]
