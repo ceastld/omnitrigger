@@ -140,6 +140,7 @@ pub(super) enum CsvError {
     NoComparedColumns,
     DuplicateComparisonKey,
     ColumnComparisonTooLarge,
+    ColumnPairDifferenceArguments,
     FillTooLarge,
     InterpolationColumns,
     ConstantColumnArguments,
@@ -387,6 +388,7 @@ impl CsvError {
             Self::NoComparedColumns => "请至少保留一个用来对比的非键列",
             Self::DuplicateComparisonKey => "对比列需要每张表中的键组合各出现一次",
             Self::ColumnComparisonTooLarge => "表格对比结果超过 1 MiB，请缩小表格范围",
+            Self::ColumnPairDifferenceArguments => "填写两个不同的列名或列号，例如 [\"原备注\",\"新备注\"]",
             Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
             Self::InterpolationColumns => "填写数值列和分组列，例如 [\"金额\",[\"地区\"]]",
             Self::ConstantColumnArguments => {
@@ -1384,6 +1386,10 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "表头对比" | "compare-headers" => return compare_csv_headers(input),
         "对比行" | "compare-rows" => return compare_csv_rows(input),
         "对比列" | "compare-column" => return compare_csv_column(input, ComparisonMode::Text),
+        "两列差异" | "column-pair-differences" => return compare_csv_column_pair(input, false),
+        "两列数值差异" | "numeric-column-pair-differences" => {
+            return compare_csv_column_pair(input, true)
+        }
         "数值对比列" | "compare-numeric-column" => {
             return compare_csv_column(input, ComparisonMode::Numeric)
         }
@@ -3760,6 +3766,38 @@ fn compare_csv_column(input: &str, mode: ComparisonMode) -> Result<String, CsvEr
             for ((value, _), &label) in values.into_iter().zip(&column_labels) {
                 write_column_comparison_change(&mut output, &key, label, ["新增", "", value])?;
             }
+        }
+    }
+    Ok(output)
+}
+
+fn compare_csv_column_pair(input: &str, numeric: bool) -> Result<String, CsvError> {
+    let invalid = CsvError::ColumnPairDifferenceArguments;
+    let (sources, data) = json_argument_and_data::<[ColumnReference; 2]>(input, invalid)?;
+    let rows = read_rows(data.strip_prefix('\u{feff}').unwrap_or(data), ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let sources = resolve_distinct_columns(header, &sources, invalid)?;
+    let &[left, right] = sources.as_slice() else {
+        return Err(invalid);
+    };
+    let mut output = String::from("数据行,原值,新值");
+    for (index, record) in records.iter().enumerate() {
+        let row = index + 1;
+        let old = record[left].as_str();
+        let new = record[right].as_str();
+        let with_row = |error: CsvError| CsvError::DataRowValue {
+            row,
+            cause: error.message(),
+        };
+        if comparable_column_value(old, numeric).map_err(with_row)?
+            != comparable_column_value(new, numeric).map_err(with_row)?
+        {
+            let row_label = row.to_string();
+            append_bounded_csv_row(
+                &mut output,
+                [row_label.as_str(), old, new].into_iter(),
+                CsvError::ColumnComparisonTooLarge,
+            )?;
         }
     }
     Ok(output)
@@ -8309,6 +8347,10 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "compare-rows"
             | "对比列"
             | "compare-column"
+            | "两列差异"
+            | "column-pair-differences"
+            | "两列数值差异"
+            | "numeric-column-pair-differences"
             | "数值对比列"
             | "compare-numeric-column"
             | "正则提取多列"
@@ -15254,6 +15296,29 @@ null"#
             transform_csv("累计合计列 [\"累计\",1,[]]\n金额\n1\n坏值"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn reports_differing_values_from_two_columns_of_a_single_table() {
+        let text =
+            "两列差异 [\"原备注\",3] 编号,原备注,新备注\n001,相同,相同\n002,旧,\"新,值\"\n003,,茶";
+        assert_eq!(
+            transform_csv(text).as_deref(),
+            Ok("数据行,原值,新值\r\n2,旧,\"新,值\"\r\n3,\"\",茶")
+        );
+        let exact = "两列数值差异 [1,\"新值\"] 原值,新值\n1.50,3/2\n,0\n2,3";
+        assert_eq!(
+            transform_csv(exact).as_deref(),
+            Ok("数据行,原值,新值\r\n2,\"\",0\r\n3,2,3")
+        );
+        assert!(matches!(
+            transform_csv("两列数值差异 [1,2] 原值,新值\n1,1\n坏值,2"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
+        assert_eq!(
+            transform_csv("两列差异 [1,\"原值\"] 原值,新值\n相同,相同"),
+            Err(CsvError::ColumnPairDifferenceArguments)
+        );
     }
 
     #[test]
