@@ -7,7 +7,9 @@ use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
 use super::batch::{batch_arguments, map_batch_csv, map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::csv_tools::{csv_cell, write_rows};
-use super::duration::{convert_duration, elapsed_duration, DurationError};
+use super::duration::{
+    convert_duration, elapsed_duration, numeric_duration_unit, DurationError, NANOS_PER_SECOND,
+};
 use super::fraction::{
     calculate_fraction, ensure_exact_size, format_significant_digits, parse_fraction_literal,
 };
@@ -30,6 +32,7 @@ pub(super) enum ConversionError {
     ExactDataUnit,
     DifferentDimensions,
     InvalidTransfer,
+    InvalidTransferTimeUnit,
     InvalidTransferDuration,
     InvalidPace,
     InvalidPixelDensity,
@@ -82,6 +85,7 @@ impl ConversionError {
             }
             Self::DifferentDimensions => "两个单位不属于同一类型",
             Self::InvalidTransfer => "输入非负的数据量和大于零的数据速率",
+            Self::InvalidTransferTimeUnit => "精确耗时单位可用 ns、µs、ms、s、min、h 或 d",
             Self::InvalidTransferDuration => {
                 "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
@@ -728,6 +732,7 @@ fn transfer_rate_arguments(input: &str) -> Result<(&str, &str), ConversionError>
 }
 
 fn exact_transfer_time(input: &str) -> Result<String, ConversionError> {
+    let (input, targets) = split_conversion(input).unwrap_or((input, "s"));
     let (data, rate) = transfer_rate_arguments(input)?;
     let (bits, size_dimension) = exact_data_source(data)?;
     let (bits_per_second, rate_dimension) = exact_data_source(rate)?;
@@ -739,8 +744,13 @@ fn exact_transfer_time(input: &str) -> Result<String, ConversionError> {
         return Err(ConversionError::InvalidTransfer);
     }
     let seconds = bits / bits_per_second;
-    ensure_exact_size(&seconds).map_err(|_| ConversionError::OutOfRange)?;
-    Ok(format!("{seconds} s"))
+    format_targets(targets, |target| {
+        let (symbol, divisor, _) = numeric_duration_unit(&target.to_ascii_lowercase())
+            .ok_or(ConversionError::InvalidTransferTimeUnit)?;
+        let amount = &seconds * BigRational::new(NANOS_PER_SECOND.into(), divisor.into());
+        ensure_exact_size(&amount).map_err(|_| ConversionError::OutOfRange)?;
+        Ok(format!("{amount} {symbol}"))
+    })
 }
 
 fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, ConversionError> {
@@ -760,7 +770,7 @@ fn exact_transfer_by_elapsed(input: &str, report_rate: bool) -> Result<String, C
     }
     let seconds = BigRational::new(
         BigInt::from(elapsed.as_nanos()),
-        BigInt::from(super::duration::NANOS_PER_SECOND),
+        BigInt::from(NANOS_PER_SECOND),
     );
     let (result, dimension) = match (report_rate, dimension) {
         (true, Dimension::Data) if seconds.numer().sign() == Sign::Plus => {
@@ -2924,6 +2934,22 @@ mod tests {
                 Err(ConversionError::InvalidTransfer)
             );
         }
+    }
+
+    #[test]
+    fn reports_exact_transfer_time_in_one_or_more_numeric_units() {
+        assert_eq!(
+            estimate_transfer("精确耗时 1/3 b 按 1 Gb/s to [ns, 秒]").as_deref(),
+            Ok("1/3 ns\n1/3000000000 s")
+        );
+        assert_eq!(
+            estimate_transfer("exact-time 300 MB at 100 Mbps TO MIN").as_deref(),
+            Ok("2/5 min")
+        );
+        assert_eq!(
+            estimate_transfer("精确耗时 1 B 按 1 B/s to B"),
+            Err(ConversionError::InvalidTransferTimeUnit)
+        );
     }
 
     #[test]

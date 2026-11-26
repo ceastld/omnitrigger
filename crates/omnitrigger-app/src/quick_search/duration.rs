@@ -622,7 +622,7 @@ pub(super) fn format_duration_unit(
     Ok(format!("{sign}{amount} {symbol}"))
 }
 
-fn numeric_duration_unit(output: &str) -> Option<(&'static str, u128, Option<usize>)> {
+pub(super) fn numeric_duration_unit(output: &str) -> Option<(&'static str, u128, Option<usize>)> {
     Some(match output.trim() {
         "s" | "秒" => ("s", NANOS_PER_SECOND, Some(9)),
         "ms" | "毫秒" => ("ms", 1_000_000, Some(6)),
