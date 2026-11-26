@@ -107,7 +107,7 @@ use conversion::{
     convert_exact_data, convert_map_scale, convert_period, convert_wave, estimate_transfer,
     exact_data_csv_report, suggested_targets, ConversionError,
 };
-use csv_tools::{transform_csv, CsvError};
+use csv_tools::{transform_csv, CsvError, CsvKeywordMatch};
 use data_pipeline::{transform_data_pipeline, DataPipelineError, PipelinePreview};
 use decibel::{convert_decibels, DecibelError};
 use duration::{
@@ -2043,6 +2043,23 @@ struct TextMatchSearchReturn {
 }
 
 impl ResultSearchDraft {
+    fn table_search<'query>(&self, query: &'query str) -> Option<(CsvKeywordMatch, &'query str)> {
+        if self.command != TABLE_SEARCH_COMMAND {
+            return None;
+        }
+        [
+            CsvKeywordMatch::All,
+            CsvKeywordMatch::Any,
+            CsvKeywordMatch::None,
+        ]
+        .into_iter()
+        .find_map(|mode| {
+            query
+                .strip_prefix(mode.result_search_prefix())
+                .map(|arguments| (mode, arguments))
+        })
+    }
+
     fn text_search<'query>(&self, query: &'query str) -> Option<(TextSearchCommand, &'query str)> {
         if self.command == TEXT_SEARCH_COMMAND {
             TextSearchCommand::parse(query)
@@ -2052,7 +2069,9 @@ impl ResultSearchDraft {
     }
 
     fn matches_query(&self, query: &str) -> bool {
-        query.starts_with(self.command) || self.text_search(query).is_some()
+        query.starts_with(self.command)
+            || self.text_search(query).is_some()
+            || self.table_search(query).is_some()
     }
 }
 
@@ -2094,6 +2113,13 @@ enum TextSearchChange {
     Words,
 }
 
+struct SearchWordSwitch {
+    current: &'static str,
+    next: &'static str,
+    label: &'static str,
+    hint: &'static str,
+}
+
 struct QueryDraft {
     text: String,
     selection: MessageSelection,
@@ -2122,7 +2148,7 @@ enum ApplicationRefresh {
 const SEARCH_PLACEHOLDER: &str = "搜索页面、触发器，或输入算式";
 const INPUT_PROMPT_HEIGHT: f32 = 148.;
 const INPUT_REPLACE_HEIGHT: f32 = 200.;
-const TABLE_SEARCH_COMMAND: &str = "CSV: 搜索行 ";
+const TABLE_SEARCH_COMMAND: &str = CsvKeywordMatch::All.result_search_prefix();
 const TEXT_SEARCH_COMMAND: &str = "文本: 搜索行 ";
 const TEXT_LINES_COMMAND: &str = "文本: 取行 ";
 const TABLE_CELL_COMMAND: &str = "CSV: 取单元格 ";
@@ -4022,8 +4048,10 @@ impl QuickSearch {
         let draft = self.input_before_result_search.as_ref()?;
         let source = draft.source.as_deref()?;
         let text_search = draft.text_search(query);
+        let table_search = draft.table_search(query);
         let arguments = text_search
             .map(|(_, arguments)| arguments)
+            .or_else(|| table_search.map(|(_, arguments)| arguments))
             .or_else(|| query.strip_prefix(draft.command))?;
         if query.len() > INPUT_CHARACTER_LIMIT
             && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
@@ -4053,8 +4081,9 @@ impl QuickSearch {
                 csv_tools::read_result_table_cell(arguments, source).map_err(ValueError::Csv),
             ));
         }
+        let (mode, _) = table_search?;
         Some(Results::csv_preview_value(csv_tools::search_result_table(
-            arguments, source,
+            arguments, source, mode,
         )))
     }
 
@@ -4130,6 +4159,50 @@ impl QuickSearch {
         if let Some((current, next)) = self.text_search_change(input.text_ref(), change) {
             self.input.update(cx, |input, cx| {
                 input.replace_leading_text(current.prefix(), next.prefix(), window, cx);
+            });
+        }
+    }
+
+    fn search_word_switch(&self, query: &str) -> Option<SearchWordSwitch> {
+        if let Some((current, next)) = self.text_search_change(query, TextSearchChange::Words) {
+            let (label, hint) = match current.words {
+                text_tools::TextWordMatch::All => ("全部词", "Alt+M 改为匹配任一关键词"),
+                text_tools::TextWordMatch::Any => ("任一词", "Alt+M 改为匹配全部关键词"),
+            };
+            return Some(SearchWordSwitch {
+                current: current.prefix(),
+                next: next.prefix(),
+                label,
+                hint,
+            });
+        }
+        let (current, arguments) = self
+            .input_before_result_search
+            .as_ref()?
+            .table_search(query)?;
+        let (next, label, hint) = match current {
+            CsvKeywordMatch::All => (CsvKeywordMatch::Any, "全部词", "Alt+M 改为匹配任一关键词"),
+            CsvKeywordMatch::Any => (CsvKeywordMatch::None, "任一词", "Alt+M 改为排除关键词"),
+            CsvKeywordMatch::None => (CsvKeywordMatch::All, "排除词", "Alt+M 改为匹配全部关键词"),
+        };
+        let next = next.result_search_prefix();
+        let available = INPUT_CHARACTER_LIMIT - next.chars().count();
+        (arguments.chars().take(available + 1).count() <= available).then_some(SearchWordSwitch {
+            current: current.result_search_prefix(),
+            next,
+            label,
+            hint,
+        })
+    }
+
+    fn switch_search_words(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        if input.is_composing() || self.file_operation_in_progress() {
+            return;
+        }
+        if let Some(change) = self.search_word_switch(input.text_ref()) {
+            self.input.update(cx, |input, cx| {
+                input.replace_leading_text(change.current, change.next, window, cx);
             });
         }
     }
@@ -5196,11 +5269,11 @@ impl QuickSearch {
                 && keystroke.modifiers.alt
                 && keystroke.key == "m"
                 && self
-                    .text_search_change(self.input.read(cx).text_ref(), TextSearchChange::Words)
+                    .search_word_switch(self.input.read(cx).text_ref())
                     .is_some()
             {
                 if !event.is_held {
-                    self.switch_text_search(TextSearchChange::Words, window, cx);
+                    self.switch_search_words(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
@@ -6994,16 +7067,13 @@ impl Render for QuickSearch {
         let text_search_view = self
             .text_search_change(&query, TextSearchChange::View)
             .filter(|_| !naming_bookmark);
-        let text_search_words = self
-            .text_search_change(&query, TextSearchChange::Words)
-            .filter(|_| !naming_bookmark);
-        let action_padding = px(
-            if preview_path.is_some() || text_search_view.is_some() || text_search_words.is_some() {
-                4.
-            } else {
-                10.
-            },
-        );
+        let search_words = self.search_word_switch(&query).filter(|_| !naming_bookmark);
+        let result_search_actions = text_search_view.is_some() || search_words.is_some();
+        let action_padding = px(if preview_path.is_some() || result_search_actions {
+            4.
+        } else {
+            10.
+        });
         let title = if naming_bookmark {
             "命名收藏"
         } else {
@@ -7019,7 +7089,13 @@ impl Render for QuickSearch {
                 RefillKind::File { .. } => "回到文件 F3",
             })
         } else {
-            self.results.refillable_text().map(|_| "填回结果 F3")
+            self.results.refillable_text().map(|_| {
+                if result_search_actions {
+                    "填回 F3"
+                } else {
+                    "填回结果 F3"
+                }
+            })
         };
         let help_action = if naming_bookmark || query.trim().is_empty() {
             None
@@ -7228,23 +7304,22 @@ impl Render for QuickSearch {
                                 })),
                         )
                     })
-                    .when_some(text_search_words, |header, (current, _)| {
-                        let (label, hint) = match current.words {
-                            text_tools::TextWordMatch::All => {
-                                ("全部词", "Alt+M 改为匹配任一关键词")
-                            }
-                            text_tools::TextWordMatch::Any => {
-                                ("任一词", "Alt+M 改为匹配全部关键词")
-                            }
-                        };
+                    .when_some(search_words, |header, change| {
                         header.child(
-                            button("switch-text-search-word-mode", label, Tone::Ghost, true)
-                                .h(px(24.))
-                                .px(action_padding)
-                                .tooltip(theme::text_tooltip(hint.into()))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.switch_text_search(TextSearchChange::Words, window, cx);
-                                })),
+                            button(
+                                "switch-result-search-word-mode",
+                                change.label,
+                                Tone::Ghost,
+                                true,
+                            )
+                            .h(px(24.))
+                            .px(action_padding)
+                            .tooltip(theme::text_tooltip(change.hint.into()))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.switch_search_words(window, cx);
+                                },
+                            )),
                         )
                     })
                     .when_some(
@@ -7297,7 +7372,15 @@ impl Render for QuickSearch {
                     )
                     .when(matches!(&self.results, Results::Value(Ok(_))), |header| {
                         let (label, hint, enabled) = match &self.result_save {
-                            ResultSaveState::Ready => ("保存 Ctrl+S", "选择结果文件".into(), true),
+                            ResultSaveState::Ready => (
+                                if result_search_actions {
+                                    "保存"
+                                } else {
+                                    "保存 Ctrl+S"
+                                },
+                                "Ctrl+S 选择结果文件".into(),
+                                true,
+                            ),
                             ResultSaveState::InProgress => {
                                 ("正在保存", "正在选择位置或写入文件".into(), false)
                             }
@@ -10080,6 +10163,30 @@ mod tests {
             search.index.results("查询历史:").suggested_input(0),
             Some(QUERY)
         );
+
+        let mixed =
+            r#"CSV: 搜索行 {"词":["0b0000000000000000","0b0000000011111111"],"列":["二进制"]}"#;
+        search.fill_query(mixed, window, cx);
+        search.refresh_results(mixed, window, cx);
+        assert_eq!(search.results.table_preview().unwrap().row_pages(), 0);
+        search.switch_search_words(window, cx);
+        let any = search.input.read(cx).text();
+        assert_eq!(any, mixed.replacen("搜索行", "搜索任一", 1));
+        search.refresh_results(&any, window, cx);
+        let result = search.results.refillable_text().unwrap();
+        assert_eq!(result.lines().count(), 3);
+        assert!(result.contains("\r\n0,"));
+        assert!(result.contains("\r\n170,"));
+        search.switch_search_words(window, cx);
+        let excluded = search.input.read(cx).text();
+        assert_eq!(excluded, mixed.replacen("搜索行", "排除关键词", 1));
+        search.refresh_results(&excluded, window, cx);
+        let table = search.results.table_preview().unwrap();
+        assert_eq!(table.page_row_position(0), Some((1, 254)));
+        assert_eq!(table.data_cell(1, 1), Some("1"));
+        search.switch_search_words(window, cx);
+        assert_eq!(search.input.read(cx).text(), mixed);
+        search.refresh_results(mixed, window, cx);
 
         search.toggle_result_search(window, cx);
         search.refresh_results(QUERY, window, cx);

@@ -8762,13 +8762,22 @@ fn csv_keyword_key(text: &str) -> String {
         .collect()
 }
 
-enum CsvKeywordMatch {
+#[derive(Clone, Copy)]
+pub(super) enum CsvKeywordMatch {
     All,
     Any,
     None,
 }
 
 impl CsvKeywordMatch {
+    pub(super) const fn result_search_prefix(self) -> &'static str {
+        match self {
+            Self::All => "CSV: 搜索行 ",
+            Self::Any => "CSV: 搜索任一 ",
+            Self::None => "CSV: 排除关键词 ",
+        }
+    }
+
     fn from_operation(operation: &str) -> Option<Self> {
         match operation.to_ascii_lowercase().as_str() {
             "搜索行" | "search-rows" => Some(Self::All),
@@ -8793,10 +8802,11 @@ fn csv_keyword_preview(matches: CsvRowMatches) -> (String, TablePreview) {
 pub(super) fn search_result_table(
     arguments: &str,
     data: &str,
+    mode: CsvKeywordMatch,
 ) -> Result<(String, TablePreview), CsvError> {
     let argument = serde_json::from_str(arguments).map_err(|_| CsvError::SearchRowKeywords)?;
     let query = csv_keywords(argument, data)?;
-    search_csv_records(query, CsvKeywordMatch::All, true).map(csv_keyword_preview)
+    search_csv_records(query, mode, true).map(csv_keyword_preview)
 }
 
 fn search_csv_rows(
@@ -13437,16 +13447,22 @@ B,乙
     #[test]
     fn searches_a_result_table_with_keywords_separate_from_the_data() {
         let table = "\u{feff}编号,地区,备注\r\n001,北,ＮＯＲＴＨ\r\n002,南,\"北\n茶\"";
-        let (filtered, preview) =
-            search_result_table(r#"{"词":["north"],"列":["备注"]}"#, table).unwrap();
+        let (filtered, preview) = search_result_table(
+            r#"{"词":["north"],"列":["备注"]}"#,
+            table,
+            CsvKeywordMatch::All,
+        )
+        .unwrap();
         assert_eq!(filtered, "编号,地区,备注\r\n001,北,ＮＯＲＴＨ");
         assert!(preview.is_cell_highlighted(1, 2));
         assert_eq!(
-            search_result_table(r#""""#, table).unwrap().0,
+            search_result_table(r#""""#, table, CsvKeywordMatch::All)
+                .unwrap()
+                .0,
             table.trim_start_matches('\u{feff}')
         );
         assert!(matches!(
-            search_result_table(r#""北" 其他,数据"#, table),
+            search_result_table(r#""北" 其他,数据"#, table, CsvKeywordMatch::All),
             Err(CsvError::SearchRowKeywords)
         ));
     }
