@@ -248,6 +248,7 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
         || is_trim_line_ends_operation(operation)
         || is_line_end_whitespace_csv_operation(operation)
         || is_line_break_positions_csv_operation(operation)
+        || is_paragraphs_csv_operation(operation)
         || is_fixed_width_csv_operation(operation)
         || is_line_lengths_csv_operation(operation)
         || is_display_width_csv_operation(operation)
@@ -278,6 +279,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     if is_line_break_positions_csv_operation(operation) {
         return Some(line_break_positions_csv(text));
+    }
+    if is_paragraphs_csv_operation(operation) {
+        return Some(paragraphs_csv(text));
     }
     if is_display_width_csv_operation(operation) {
         return Some(display_width_csv(text));
@@ -1260,6 +1264,57 @@ fn count_consecutive_lines_csv(input: &str) -> Result<String, TextError> {
         append_bounded_csv_row(
             &mut csv,
             [start.as_str(), count.as_str(), line].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
+    }
+    Ok(csv)
+}
+
+fn is_paragraphs_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("空行分段CSV")
+        || operation.eq_ignore_ascii_case("paragraphs-csv")
+}
+
+fn paragraphs_csv(text: &str) -> Result<String, TextError> {
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    if text.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    let mut lines = logical_newline_pattern()
+        .find_iter(text)
+        .map(|newline| (newline.start(), newline.end()))
+        .chain(std::iter::once((text.len(), text.len())))
+        .scan(0, |start, (end, next)| {
+            let range = *start..end;
+            *start = next;
+            Some(range)
+        })
+        .enumerate()
+        .peekable();
+    let mut csv = String::from("段号,起始行,结束行,原文");
+    let mut paragraph = 0;
+    while let Some((first, range)) = lines.next() {
+        if text[range.clone()].trim().is_empty() {
+            continue;
+        }
+        let mut last = first;
+        let mut end = range.end;
+        while let Some((index, line)) =
+            lines.next_if(|(_, line)| !text[line.clone()].trim().is_empty())
+        {
+            last = index;
+            end = line.end;
+        }
+        paragraph += 1;
+        let fields = [paragraph, first + 1, last + 1].map(|number| number.to_string());
+        append_bounded_csv_row(
+            &mut csv,
+            fields
+                .iter()
+                .map(String::as_str)
+                .chain([&text[range.start..end]]),
             TextError::ResultTooLarge,
         )?;
     }
@@ -4566,6 +4621,21 @@ mod tests {
                 Err(TextError::CsvColumnCount)
             );
         }
+    }
+
+    #[test]
+    fn splits_paragraphs_on_blank_lines_and_keeps_original_positions_and_breaks() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 空行分段CSV\r\n\r\n 甲\r\n乙\t\u{2028}\t \r第三\n四\u{2029}\u{2029}",
+        )
+        .unwrap();
+        let expected = "段号,起始行,结束行,原文\r\n1,2,3,\" 甲\r\n乙\t\"\r\n2,5,6,\"第三\n四\"";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("paragraphs-csv \r\n \r\n\t").as_deref(),
+            Ok("段号,起始行,结束行,原文"),
+        );
     }
 
     #[test]

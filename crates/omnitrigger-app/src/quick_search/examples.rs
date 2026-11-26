@@ -4292,6 +4292,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用空行分段并保留原文行号",
+        query: "文本: 空行分段CSV 第一段\n正文\n\n第二段\n补充说明",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "对照缩进列宽与原来的空格和制表符",
         query: "文本: 缩进列宽CSV 4\n  第一行\n\t第二行\n \t  第三行",
     },
