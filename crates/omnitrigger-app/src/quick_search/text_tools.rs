@@ -247,6 +247,7 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
     is_raw_text_operation(operation)
         || is_trim_line_ends_operation(operation)
         || is_line_end_whitespace_csv_operation(operation)
+        || is_unusual_whitespace_csv_operation(operation)
         || is_line_break_positions_csv_operation(operation)
         || is_paragraphs_csv_operation(operation)
         || is_fixed_width_csv_operation(operation)
@@ -276,6 +277,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     if is_line_end_whitespace_csv_operation(operation) {
         return Some(line_end_whitespace_csv(text));
+    }
+    if is_unusual_whitespace_csv_operation(operation) {
+        return Some(unusual_whitespace_csv(text));
     }
     if is_line_break_positions_csv_operation(operation) {
         return Some(line_break_positions_csv(text));
@@ -1317,6 +1321,36 @@ fn paragraphs_csv(text: &str) -> Result<String, TextError> {
                 .chain([&text[range.start..end]]),
             TextError::ResultTooLarge,
         )?;
+    }
+    Ok(csv)
+}
+
+fn is_unusual_whitespace_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("特殊空白CSV")
+        || operation.eq_ignore_ascii_case("unusual-whitespace-csv")
+}
+
+fn unusual_whitespace_csv(text: &str) -> Result<String, TextError> {
+    if text.is_empty() {
+        return Err(TextError::MissingText);
+    }
+    let mut csv = String::from("行号,列号,空白码位");
+    for (line_index, line) in numbered_text_lines(text, logical_newline_pattern()) {
+        for (column_index, character) in line.chars().enumerate() {
+            if !character.is_whitespace() || matches!(character, ' ' | '\t') {
+                continue;
+            }
+            let fields = [
+                (line_index + 1).to_string(),
+                (column_index + 1).to_string(),
+                format!("U+{:04X}", u32::from(character)),
+            ];
+            append_bounded_csv_row(
+                &mut csv,
+                fields.iter().map(String::as_str),
+                TextError::ResultTooLarge,
+            )?;
+        }
     }
     Ok(csv)
 }
@@ -4635,6 +4669,21 @@ mod tests {
         assert_eq!(
             transform_text("paragraphs-csv \r\n \r\n\t").as_deref(),
             Ok("段号,起始行,结束行,原文"),
+        );
+    }
+
+    #[test]
+    fn locates_unusual_whitespace_by_unicode_column() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 特殊空白CSV\r\n甲\u{a0}乙\t \r\n e\u{301}\u{202f}丁\u{2028}\u{3000}",
+        )
+        .unwrap();
+        let expected = "行号,列号,空白码位\r\n1,2,U+00A0\r\n2,4,U+202F\r\n3,1,U+3000";
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("unusual-whitespace-csv A\tB \r\nC").as_deref(),
+            Ok("行号,列号,空白码位"),
         );
     }
 

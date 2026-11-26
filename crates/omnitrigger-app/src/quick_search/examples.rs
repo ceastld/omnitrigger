@@ -4142,6 +4142,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位不换行空格与全角空格",
+        query: "文本: 特殊空白CSV 茶\u{00A0}椅\n\u{3000}咖啡",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看字符的码位、字节位置和编码",
         query: "文本: 码位表 \"北\u{200b}😀\"",
     },
