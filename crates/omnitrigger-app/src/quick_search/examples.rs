@@ -3066,6 +3066,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "求两个实际时刻的中点",
+        query: "时间戳: 中点 0 到 15 to UTC+8",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "把时间戳向下对齐到固定时长的边界",
         query: "时间戳: 向下对齐 15分钟 @ 1970-01-01T00:17:30Z",
     },
@@ -7891,6 +7896,7 @@ fn replaceable_tool_operations(scope: Scope) -> &'static [&'static str] {
             "降序",
         ],
         Scope::Pitch => &["MIDI", "转调", "音程", "音分差", "音分移调"],
+        Scope::Timestamp => &["中点"],
         Scope::Paper => &["出血"],
         Scope::Color => &["色差"],
         Scope::Statistics => &[
@@ -8082,6 +8088,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "向下对齐",
                     "向上对齐",
                     "就近对齐",
+                    "中点",
                     "时区CSV",
                     "时区候选",
                     "日区间",

@@ -350,6 +350,18 @@ fn convert_timestamp_with_local(
         let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
         return display_time(time, unit.date_format());
     }
+    if operation == "中点" || operation.eq_ignore_ascii_case("midpoint") {
+        let (start, end) = interval_nanos(
+            input[operation.len()..].trim_start(),
+            now,
+            TimestampError::IntervalEndpoints,
+        )?;
+        let sum = start + end;
+        let nanos = sum.div_euclid(2) + sum.rem_euclid(2);
+        let time = timestamp_from_unix_units(nanos, TimestampUnit::Nanoseconds)?;
+        let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
+        return display_time(time, unit.date_format());
+    }
     if let Some((sign, input)) = lower
         .strip_prefix("now")
         .or_else(|| lower.strip_prefix("现在"))
@@ -1351,6 +1363,31 @@ mod tests {
         assert_eq!(
             convert_timestamp("偏移变更 26 UTC", now),
             Err(TimestampError::OffsetChangesArguments),
+        );
+    }
+
+    #[test]
+    fn finds_timestamp_midpoints_and_rounds_half_nanoseconds_toward_the_later_time() {
+        let now = DateTime::from_timestamp(10, 0).unwrap();
+        for (query, expected) in [
+            (
+                "中点 2026-11-20T12:00:00+08:00 到 2026-11-20T08:00:00Z to +08:00",
+                "2026-11-20T14:00:00+08:00",
+            ),
+            ("midpoint -2ns 到 -1ns to ns", "-1 ns"),
+            ("中点 -1ns 至 -2ns to ns", "-1 ns"),
+            ("中点 -1ns 到 0ns", "1970-01-01T00:00:00Z"),
+            ("中点 现在 到 0s", "1970-01-01T00:00:05Z"),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_timestamp("中点 1s 到", now),
+            Err(TimestampError::IntervalEndpoints),
         );
     }
 
