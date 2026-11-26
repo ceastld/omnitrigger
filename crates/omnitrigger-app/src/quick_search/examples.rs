@@ -5209,6 +5209,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行找到 JSONL 中的数字和空值",
+        query: "JSON: 行找类型CSV [\"number\",\"null\"]\n{\"金额\":1.50}\n\n{\"金额\":null}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "逐行列出 JSONL 的标量和空容器",
+        query: "JSON: 行叶子CSV {\"订单\":[{\"金额\":1.50}]}\n\n{\"订单\":[]}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "筛选缺少字段的 JSON 记录",
         query: r#"JSON: 多条件筛选 [["/状态","缺失"],["/金额",">=",1]] [{"金额":2},{"金额":2,"状态":null},{"金额":0}]"#,
     },
