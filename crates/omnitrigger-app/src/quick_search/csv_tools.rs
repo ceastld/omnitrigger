@@ -1401,6 +1401,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             return report_csv_column_pair_tolerance(input)
         }
         "容差标记列" | "tolerance-marker-column" => return append_csv_tolerance_marker(input),
+        "两列偏差摘要" | "column-pair-error-summary" => {
+            return summarize_csv_column_pair_errors(input)
+        }
         "数值对比列" | "compare-numeric-column" => {
             return compare_csv_column(input, ComparisonMode::Numeric)
         }
@@ -3883,18 +3886,10 @@ fn report_csv_column_pair_tolerance(input: &str) -> Result<String, CsvError> {
     let mut output = String::from("数据行,原值,新值,新值减原值,容差");
     for (index, record) in records.iter().enumerate() {
         let (left_text, right_text) = (record[old].as_str(), record[new].as_str());
-        if left_text.trim().is_empty() || right_text.trim().is_empty() {
-            continue;
-        }
         let row = index + 1;
-        let parse = |text| {
-            parse_fraction_literal(text).map_err(|_| CsvError::DataRowValue {
-                row,
-                cause: CsvError::InvalidNumber.message(),
-            })
+        let Some((left, right)) = parse_csv_exact_pair(left_text, right_text, row)? else {
+            continue;
         };
-        let left = parse(left_text)?;
-        let right = parse(right_text)?;
         let limit = exact_tolerance_limit(&left, &right, &relative, &absolute);
         let difference = right - left;
         if difference > limit || difference < -&limit {
@@ -3914,6 +3909,82 @@ fn report_csv_column_pair_tolerance(input: &str) -> Result<String, CsvError> {
                 CsvError::ColumnComparisonTooLarge,
             )?;
         }
+    }
+    Ok(output)
+}
+
+fn parse_csv_exact_pair(
+    left: &str,
+    right: &str,
+    row: usize,
+) -> Result<Option<(BigRational, BigRational)>, CsvError> {
+    if left.trim().is_empty() || right.trim().is_empty() {
+        return Ok(None);
+    }
+    let parse = |value| {
+        parse_fraction_literal(value).map_err(|_| CsvError::DataRowValue {
+            row,
+            cause: CsvError::InvalidNumber.message(),
+        })
+    };
+    Ok(Some((parse(left)?, parse(right)?)))
+}
+
+fn summarize_csv_column_pair_errors(input: &str) -> Result<String, CsvError> {
+    let invalid = CsvError::ColumnPairDifferenceArguments;
+    let (columns, data) = json_argument_and_data::<[ColumnReference; 2]>(input, invalid)?;
+    let rows = read_rows(data.strip_prefix('\u{feff}').unwrap_or(data), ',')?;
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let sources = resolve_distinct_columns(header, &columns, invalid)?;
+    let &[old, new] = sources.as_slice() else {
+        return Err(invalid);
+    };
+    let mut count = 0;
+    let mut signed = RunningTotals::default();
+    let mut absolute = RunningTotals::default();
+    let mut squared = RunningTotals::default();
+    let mut maximum: Option<(usize, BigRational)> = None;
+    for (index, record) in records.iter().enumerate() {
+        let row = index + 1;
+        let Some((left, right)) = parse_csv_exact_pair(&record[old], &record[new], row)? else {
+            continue;
+        };
+        let difference = right - left;
+        let magnitude = if difference.numer().sign() == Sign::Minus {
+            -&difference
+        } else {
+            difference.clone()
+        };
+        squared
+            .push(&difference * &difference)
+            .map_err(CsvError::Statistics)?;
+        signed.push(difference).map_err(CsvError::Statistics)?;
+        absolute
+            .push(magnitude.clone())
+            .map_err(CsvError::Statistics)?;
+        if maximum.as_ref().is_none_or(|(_, max)| magnitude > *max) {
+            maximum = Some((row, magnitude));
+        }
+        count += 1;
+    }
+    let (maximum_row, maximum_value) = maximum
+        .map(|(row, value)| (row.to_string(), value.to_string()))
+        .unwrap_or_default();
+    let average = |totals: &RunningTotals| totals.format(true).map_err(CsvError::Statistics);
+    let mut output = String::from("统计项,结果,数据行");
+    for (label, value, row) in [
+        ("有效配对", count.to_string(), ""),
+        ("缺值行数", (records.len() - count).to_string(), ""),
+        ("平均差值", average(&signed)?, ""),
+        ("平均绝对差", average(&absolute)?, ""),
+        ("均方误差", average(&squared)?, ""),
+        ("最大绝对差", maximum_value, maximum_row.as_str()),
+    ] {
+        append_bounded_csv_row(
+            &mut output,
+            [label, value.as_str(), row].into_iter(),
+            CsvError::ColumnComparisonTooLarge,
+        )?;
     }
     Ok(output)
 }
@@ -8567,6 +8638,8 @@ pub(super) fn csv_table_preview(query: &str) -> Option<Result<(String, TablePrev
             | "out-of-tolerance-columns"
             | "容差标记列"
             | "tolerance-marker-column"
+            | "两列偏差摘要"
+            | "column-pair-error-summary"
             | "数值对比列"
             | "compare-numeric-column"
             | "正则提取多列"
@@ -15874,6 +15947,25 @@ null"#
             transform_csv("容差标记列 [\"核对\",[1,2],\"0\",\"0\"] 基准,实测\n1,1\na,2"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn summarizes_csv_pair_errors_exactly_and_uses_the_first_largest_error() {
+        let query = "两列偏差摘要 [\"基准\",2] 基准,实测\n1,2\n3,1\n2,4\n,5";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok(concat!(
+                "统计项,结果,数据行\r\n有效配对,3,\"\"\r\n缺值行数,1,\"\"\r\n平均差值,1/3,\"\"",
+                "\r\n平均绝对差,5/3,\"\"\r\n均方误差,3,\"\"\r\n最大绝对差,2,2",
+            ))
+        );
+        assert_eq!(
+            transform_csv("两列偏差摘要 [1,2] 基准,实测\n,5").as_deref(),
+            Ok(concat!(
+                "统计项,结果,数据行\r\n有效配对,0,\"\"\r\n缺值行数,1,\"\"\r\n平均差值,\"\",\"\"",
+                "\r\n平均绝对差,\"\",\"\"\r\n均方误差,\"\",\"\"\r\n最大绝对差,\"\",\"\"",
+            ))
+        );
     }
 
     #[test]

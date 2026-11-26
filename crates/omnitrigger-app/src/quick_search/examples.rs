@@ -6939,6 +6939,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 容差标记列 [\"核对\",[1,2],\"1/100\",\"0.05\"]\n基准,实测\n100,100.5\n100,102\n0,0.1",
     },
     Example {
+        icon: Icon::Layers,
+        title: "汇总两列的平均差值和最大偏差",
+        query: "CSV: 两列偏差摘要 [1,2]\n基准,实测\n1,2\n3,1\n2,4\n,5",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按精确数值比较两张表中的金额",
         query: r#"CSV: 数值对比列 [["编号"],"金额"] ["编号,金额\n001,1.50\n002,2\n003,","金额,编号\n3/2,001\n5/2,002\n0,003"]"#,
