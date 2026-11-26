@@ -2207,6 +2207,11 @@ fn supports_text_file_preview(path: &Path) -> bool {
                 | "ini"
                 | "cfg"
                 | "conf"
+                | "xml"
+                | "html"
+                | "htm"
+                | "css"
+                | "sql"
         )
     )
 }
@@ -11129,9 +11134,11 @@ mod tests {
     }
 
     #[test]
-    fn previews_common_text_configuration_extensions_as_raw_text() {
+    fn previews_common_configuration_and_source_extensions_as_raw_text() {
         let index = SearchIndex::default();
-        for extension in ["YAML", "yml", "ini", "cfg", "CONF", "Markdown"] {
+        for extension in [
+            "YAML", "yml", "ini", "cfg", "CONF", "Markdown", "XML", "html", "htm", "CSS", "SQL",
+        ] {
             let path = format!("C:/Settings/project.{extension}");
             index.recent.file_previews.record(&path);
             assert_eq!(
