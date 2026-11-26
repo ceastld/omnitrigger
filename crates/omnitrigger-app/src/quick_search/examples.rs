@@ -2259,6 +2259,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "最近预览:",
     },
     Example {
+        icon: Icon::Layers,
+        title: "导出最近预览的路径和打开方式",
+        query: "最近预览: 输出=CSV 日志",
+    },
+    Example {
         icon: Icon::Keyboard,
         title: "搜索已启用的触发器",
         query: "已启用触发器: ",

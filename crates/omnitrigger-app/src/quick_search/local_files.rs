@@ -77,6 +77,15 @@ struct RecentFilePreview {
     format: FilePreviewFormat,
 }
 
+impl RecentFilePreview {
+    fn name(&self) -> &str {
+        Path::new(&self.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.path)
+    }
+}
+
 impl RecentFilePreviews {
     pub(super) fn record(&self, path: &str, format: FilePreviewFormat) {
         let mut previews = self.0.borrow_mut();
@@ -105,19 +114,41 @@ impl RecentFilePreviews {
 
     pub(super) fn results(&self, query: &str) -> Results {
         let query = query.trim().to_lowercase();
+        let (first, rest) = query
+            .split_once(char::is_whitespace)
+            .unwrap_or((&query, ""));
+        let export = matches!(first, "输出=csv" | "output=csv");
+        let filter = if export { rest.trim_start() } else { &query };
+        let recent = self.0.borrow();
+        let matches = recent
+            .iter()
+            .filter(|entry| filter.is_empty() || entry.path.to_lowercase().contains(filter));
+        if export {
+            let mut csv = String::from("文件名,预览方式,路径");
+            for entry in matches {
+                let mode = match entry.format {
+                    FilePreviewFormat::Automatic => "自动",
+                    FilePreviewFormat::Raw => "原文",
+                    FilePreviewFormat::Head => "开头",
+                    FilePreviewFormat::Tail => "末尾",
+                    FilePreviewFormat::Table => "表格",
+                    FilePreviewFormat::TailTable => "末尾表格",
+                };
+                write!(
+                    csv,
+                    "\r\n{},{mode},{}",
+                    csv_cell(entry.name()),
+                    csv_cell(&entry.path),
+                )
+                .expect("写入字符串不会失败");
+            }
+            return Results::table_value(Ok(csv));
+        }
         Results::Destinations(
-            self.0
-                .borrow()
-                .iter()
-                .map(|entry| &entry.path)
-                .filter(|path| query.is_empty() || path.to_lowercase().contains(&query))
-                .map(|path| Destination::LocalFile {
-                    name: Path::new(path)
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or(path)
-                        .to_owned(),
-                    path: path.clone(),
+            matches
+                .map(|entry| Destination::LocalFile {
+                    name: entry.name().to_owned(),
+                    path: entry.path.clone(),
                     is_directory: false,
                     size_bytes: None,
                 })
@@ -1201,6 +1232,26 @@ mod tests {
             if matches!(items.as_slice(), [Destination::LocalFile { path, .. }, Destination::LocalFile { .. }] if path == log)));
         previews.remove(log);
         assert!(previews.format_for(log).is_none());
+    }
+
+    #[test]
+    fn exports_recent_preview_paths_and_formats_in_matching_order() {
+        let recent = RecentFilePreviews::default();
+        recent.record(r"C:/Work/日志,1.LOG", FilePreviewFormat::Tail);
+        recent.record(r"C:/Work/文档.txt", FilePreviewFormat::Raw);
+        recent.record(r"C:/Work/日志2.NDJSON", FilePreviewFormat::TailTable);
+        assert_eq!(
+            recent.results("输出=CSV 日志").refillable_text(),
+            Some(concat!(
+                "文件名,预览方式,路径",
+                "\r\n日志2.NDJSON,末尾表格,C:/Work/日志2.NDJSON",
+                "\r\n\"日志,1.LOG\",末尾,\"C:/Work/日志,1.LOG\"",
+            ))
+        );
+        assert_eq!(
+            recent.results("output=csv 无匹配").refillable_text(),
+            Some("文件名,预览方式,路径")
+        );
     }
 
     #[test]
