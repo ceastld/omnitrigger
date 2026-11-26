@@ -952,6 +952,7 @@ enum DateRangeOperation {
     Subtract,
     Coverage,
     Gaps,
+    Overlaps,
 }
 
 fn combine_date_ranges(
@@ -965,6 +966,9 @@ fn combine_date_ranges(
     ) {
         let (ranges, exceptions) = split_workday_exceptions(input);
         (1, DateError::DateCoverageArguments, ranges, exceptions)
+    } else if matches!(operation, DateRangeOperation::Overlaps) {
+        let (ranges, exceptions) = split_workday_exceptions(input);
+        (2, DateError::InvalidDateRanges, ranges, exceptions)
     } else {
         (2, DateError::InvalidDateRanges, input, None)
     };
@@ -1004,6 +1008,10 @@ fn combine_date_ranges(
         DateRangeOperation::Subtract => {
             let (base, exclusions) = ranges.split_at_mut(1);
             return Ok(subtract_date_ranges(base[0], exclusions));
+        }
+        DateRangeOperation::Overlaps => {
+            let exceptions = parse_workday_exceptions(exceptions)?;
+            return Ok(date_range_overlaps_csv(&ranges, &exceptions));
         }
         DateRangeOperation::Merge | DateRangeOperation::Coverage | DateRangeOperation::Gaps => {}
     }
@@ -1048,6 +1056,33 @@ fn combine_date_ranges(
         .map(display_date_range)
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn date_range_overlaps_csv(
+    ranges: &[(NaiveDate, NaiveDate)],
+    exceptions: &HashMap<NaiveDate, bool>,
+) -> String {
+    let mut report = String::from("第一段,第二段,起始日期,截止日期,天数,工作日");
+    for (first, &(first_start, first_end)) in ranges.iter().enumerate() {
+        for (second, &(second_start, second_end)) in ranges.iter().enumerate().skip(first + 1) {
+            let start = first_start.max(second_start);
+            let end = first_end.min(second_end);
+            if start > end {
+                continue;
+            }
+            let days = end.signed_duration_since(start).num_days() + 1;
+            let workdays =
+                inclusive_workdays(start, end) + workday_adjustment(exceptions, start..=end);
+            write!(
+                report,
+                "\r\n{},{},{start},{end},{days},{workdays}",
+                first + 1,
+                second + 1
+            )
+            .expect("写入 String 不会出错");
+        }
+    }
+    report
 }
 
 fn subtract_date_ranges(
@@ -1098,6 +1133,7 @@ enum DateReport {
     Split(DateRangeSplit),
     WeekdayCounts,
     RangeGaps,
+    RangeOverlaps,
 }
 
 impl DateReport {
@@ -1113,6 +1149,7 @@ impl DateReport {
             "逐日csv" | "days-csv" => DateRangeSplit::DaysCsv,
             "星期统计" | "weekday-counts" => return Some(Self::WeekdayCounts),
             "区间空档csv" | "range-gaps-csv" => return Some(Self::RangeGaps),
+            "区间冲突csv" | "range-overlaps-csv" => return Some(Self::RangeOverlaps),
             _ => return None,
         };
         Some(Self::Split(split))
@@ -1820,6 +1857,9 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             DateReport::Split(split) => split_date_range(rest, today, split),
             DateReport::WeekdayCounts => count_weekdays_csv(rest, today),
             DateReport::RangeGaps => combine_date_ranges(rest, today, DateRangeOperation::Gaps),
+            DateReport::RangeOverlaps => {
+                combine_date_ranges(rest, today, DateRangeOperation::Overlaps)
+            }
         };
     }
     match operation.to_ascii_lowercase().as_str() {
@@ -2517,6 +2557,34 @@ mod tests {
         assert_eq!(
             calculate_date(&excessive, today),
             Err(DateError::DateCoverageArguments)
+        );
+    }
+
+    #[test]
+    fn reports_each_overlapping_date_pair_with_inclusive_days_and_exceptions() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        let query = concat!(
+            "区间冲突CSV 昨天至2024-03-02; 今天至2024-03-04\n",
+            "2024-03-02至2024-03-02; 2024-03-05至2024-03-07",
+            r#" 例外 [["2024-03-01"],["2024-03-02"]]"#,
+        );
+        assert_eq!(
+            calculate_date(query, today).as_deref(),
+            Ok(concat!(
+                "第一段,第二段,起始日期,截止日期,天数,工作日",
+                "\r\n1,2,2024-02-29,2024-03-02,3,2",
+                "\r\n1,3,2024-03-02,2024-03-02,1,1",
+                "\r\n2,3,2024-03-02,2024-03-02,1,1",
+            ))
+        );
+        assert!(is_date_report(query));
+        assert_eq!(
+            calculate_date("range-overlaps-csv 昨天至今天; 明天至明天", today).as_deref(),
+            Ok("第一段,第二段,起始日期,截止日期,天数,工作日")
+        );
+        assert_eq!(
+            calculate_date("区间冲突CSV 今天至明天", today),
+            Err(DateError::InvalidDateRanges)
         );
     }
 
