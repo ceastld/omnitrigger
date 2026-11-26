@@ -230,6 +230,7 @@ enum JsonCsvOperation {
     Values,
     ValuePatterns,
     PointerPatterns,
+    LinePointerPatterns,
     Types,
     StructureStats,
     LineStructureStats,
@@ -261,6 +262,9 @@ impl JsonCsvOperation {
             "找值csv" | "find-value-csv" => Some(Self::Values),
             "正则找值csv" | "find-value-regex-csv" => Some(Self::ValuePatterns),
             "正则找路径csv" | "find-pointer-regex-csv" => Some(Self::PointerPatterns),
+            "行正则找路径csv" | "jsonl-find-pointer-regex-csv" => {
+                Some(Self::LinePointerPatterns)
+            }
             "找类型csv" | "find-type-csv" => Some(Self::Types),
             "结构统计csv" | "structure-stats-csv" => Some(Self::StructureStats),
             "行结构统计csv" | "jsonl-structure-stats-csv" => Some(Self::LineStructureStats),
@@ -295,6 +299,7 @@ impl JsonCsvOperation {
             | Self::Values
             | Self::ValuePatterns
             | Self::PointerPatterns
+            | Self::LinePointerPatterns
             | Self::Types
             | Self::StructureStats
             | Self::LineStructureStats
@@ -338,6 +343,7 @@ impl JsonCsvOperation {
             Self::PointerPatterns => {
                 find_json_pattern(source, PointerOutput::Csv, PatternTarget::Pointer)
             }
+            Self::LinePointerPatterns => find_json_line_pointer_pattern(source),
             Self::Types => find_json_types(source, PointerOutput::Csv),
             Self::StructureStats => json_structure_stats_csv(source),
             Self::LineStructureStats => json_line_structure_stats_csv(source),
@@ -3041,16 +3047,45 @@ fn find_json_pattern(
     output: PointerOutput,
     target: PatternTarget,
 ) -> Result<String, JsonError> {
-    let invalid = JsonError::SearchPatternArguments;
-    let (pattern, source) = json_value_and_source(query, invalid)?;
-    let pattern = serde_json::from_str::<String>(pattern.get()).map_err(|_| invalid)?;
-    let regex = super::text_tools::compile_regex(&pattern).map_err(|_| invalid)?;
+    let (regex, source) = compile_json_search_pattern(query)?;
     let selection = match target {
         PatternTarget::Key => PointerSelection::KeyPattern(&regex),
         PatternTarget::Value => PointerSelection::ValuePattern(&regex),
         PatternTarget::Pointer => PointerSelection::PathPattern(&regex),
     };
     write_json_pointer_results(source, selection, output)
+}
+
+fn compile_json_search_pattern(query: &str) -> Result<(regex::Regex, &str), JsonError> {
+    let invalid = JsonError::SearchPatternArguments;
+    let (pattern, source) = json_value_and_source(query, invalid)?;
+    let pattern = serde_json::from_str::<String>(pattern.get()).map_err(|_| invalid)?;
+    let regex = super::text_tools::compile_regex(&pattern).map_err(|_| invalid)?;
+    Ok((regex, source))
+}
+
+fn find_json_line_pointer_pattern(query: &str) -> Result<String, JsonError> {
+    let (regex, source) = compile_json_search_pattern(query)?;
+    let mut output = String::from("原行号,指针,类型,原值");
+    for (line, record) in json_lines(source) {
+        let record = parse_json_line(record)?;
+        let line = line.to_string();
+        visit_json_pointer_matches(
+            record,
+            PointerSelection::PathPattern(&regex),
+            |path, value| {
+                if path.contains('\0') {
+                    return Err(JsonError::CsvNullCharacter);
+                }
+                append_bounded_csv_row(
+                    &mut output,
+                    [line.as_str(), path, json_type_name(value), value.get()].into_iter(),
+                    JsonError::CsvOutputTooLarge,
+                )
+            },
+        )?;
+    }
+    Ok(output)
 }
 
 fn find_json_types(query: &str, output: PointerOutput) -> Result<String, JsonError> {
@@ -3107,9 +3142,50 @@ fn write_json_pointer_results(
         PointerOutput::Paths => ("[", Some(']'), JsonError::PointerListTooLarge),
     };
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut result = String::from(opening);
+    visit_json_pointer_matches(root, selection, |path, value| {
+        let raw = value.get();
+        if matches!(output, PointerOutput::Csv) {
+            if path.contains('\0') {
+                return Err(JsonError::CsvNullCharacter);
+            }
+            return append_bounded_csv_row(
+                &mut result,
+                [path, json_type_name(value), raw].into_iter(),
+                size_error,
+            );
+        }
+        let encoded = serde_json::to_string(path).map_err(json_parse_error)?;
+        let has_previous = result.len() > 1;
+        let value_length = if include_values { 1 + raw.len() } else { 0 };
+        if result.len() + encoded.len() + value_length + usize::from(has_previous) + 1
+            > MAX_PRETTY_BYTES
+        {
+            return Err(size_error);
+        }
+        if has_previous {
+            result.push(',');
+        }
+        result.push_str(&encoded);
+        if include_values {
+            result.push(':');
+            result.push_str(raw);
+        }
+        Ok(())
+    })?;
+    if let Some(closing) = closing {
+        result.push(closing);
+    }
+    Ok(result)
+}
+
+fn visit_json_pointer_matches(
+    root: &RawValue,
+    selection: PointerSelection<'_>,
+    mut emit_match: impl FnMut(&str, &RawValue) -> Result<(), JsonError>,
+) -> Result<(), JsonError> {
     let mut pending = vec![(root, None::<(usize, String)>, false)];
     let mut path = String::new();
-    let mut result = String::from(opening);
     while let Some((value, key, matches_key)) = pending.pop() {
         if let Some((parent_length, key)) = key {
             path.truncate(parent_length);
@@ -3150,41 +3226,11 @@ fn write_json_pointer_results(
                 };
             pending.push((child, Some((path.len(), key)), matches_key));
         }
-        if !emit {
-            continue;
-        }
-        if matches!(output, PointerOutput::Csv) {
-            if path.contains('\0') {
-                return Err(JsonError::CsvNullCharacter);
-            }
-            append_bounded_csv_row(
-                &mut result,
-                [path.as_str(), json_type_name(value), raw].into_iter(),
-                size_error,
-            )?;
-            continue;
-        }
-        let encoded = serde_json::to_string(&path).map_err(json_parse_error)?;
-        let has_previous = result.len() > 1;
-        let value_length = if include_values { 1 + raw.len() } else { 0 };
-        if result.len() + encoded.len() + value_length + usize::from(has_previous) + 1
-            > MAX_PRETTY_BYTES
-        {
-            return Err(size_error);
-        }
-        if has_previous {
-            result.push(',');
-        }
-        result.push_str(&encoded);
-        if include_values {
-            result.push(':');
-            result.push_str(raw);
+        if emit {
+            emit_match(&path, value)?;
         }
     }
-    if let Some(closing) = closing {
-        result.push(closing);
-    }
-    Ok(result)
+    Ok(())
 }
 
 fn report_duplicate_json_keys(source: &str, csv: bool) -> Result<String, JsonError> {
@@ -5553,6 +5599,34 @@ mod tests {
         assert!(json_diff_report_source_range(query, "/new", "", false).is_none());
         assert!(json_diff_report_source_range(query, "/gone", "", true).is_none());
         assert!(json_diff_report_source_range(query, "/a~1b", "2e2", false).is_none());
+    }
+
+    #[test]
+    fn searches_escaped_pointers_in_jsonl_with_original_line_numbers_and_values() {
+        let query = concat!(
+            "行正则找路径CSV \"^/a~1b/(金额|列表/[0-9]+)$\"\r\n",
+            r#"{"a/b":{"金额":1.50,"列表":[true,null],"忽略":3}}"#,
+            "\r\n\r\n{}",
+            "\r\n",
+            r#"{"a/b":{"金额":2e2}}"#,
+        );
+        let expected = concat!(
+            "原行号,指针,类型,原值",
+            "\r\n1,/a~1b/金额,number,1.50",
+            "\r\n1,/a~1b/列表/0,boolean,true",
+            "\r\n1,/a~1b/列表/1,null,null",
+            "\r\n4,/a~1b/金额,number,2e2",
+        );
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(json_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json("jsonl-find-pointer-regex-csv \"^$\" 1e999").as_deref(),
+            Ok("原行号,指针,类型,原值\r\n1,\"\",number,1e999")
+        );
+        assert_eq!(
+            transform_json("行正则找路径CSV \"^/x$\" {}\n[1,]"),
+            Err(JsonError::InvalidLine)
+        );
     }
 
     #[test]
