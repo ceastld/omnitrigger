@@ -5119,6 +5119,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计 TOML 配置的叶子类型数量",
+        query: "TOML: 类型统计CSV ports = [8000, 8001]\nlabels = ['api', 'web']\n[server]\nenabled = true",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "压缩 JSON",
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },

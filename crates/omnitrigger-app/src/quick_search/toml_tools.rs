@@ -14,6 +14,9 @@ use super::{
 
 const MAX_TOML_BYTES: usize = 1024 * 1024;
 const MAX_JSON_DEPTH: usize = 128;
+const TOML_LEAF_TYPES: [&str; 7] = [
+    "array", "boolean", "datetime", "float", "integer", "string", "table",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TomlError {
@@ -51,7 +54,7 @@ impl TomlError {
         match self {
             Self::Incomplete => "输入 TOML 内容，例如 TOML: 校验 port = 8000",
             Self::UnknownOperation => {
-                "用 校验、取值、取多路径、转JSON、从JSON、叶子CSV、正则叶子CSV、正则字符串CSV、找类型CSV 或 对比CSV 处理 TOML"
+                "用 F1 查看 TOML 操作，例如 校验、取值 或 叶子CSV"
             }
             Self::Invalid { .. } => "请检查 TOML 语法",
             Self::NonFiniteFloat => "JSON 无法表示 TOML 中的 inf 或 nan",
@@ -90,6 +93,7 @@ enum TomlOperation {
     RegexStringsCsv,
     FindTypesCsv,
     DiffCsv,
+    TypeCountsCsv,
     Select,
     SelectPaths,
 }
@@ -107,6 +111,7 @@ impl TomlOperation {
             "正则字符串csv" | "regex-strings-csv" => Ok(Self::RegexStringsCsv),
             "找类型csv" | "find-type-csv" => Ok(Self::FindTypesCsv),
             "对比csv" | "diff-csv" => Ok(Self::DiffCsv),
+            "类型统计csv" | "type-counts-csv" => Ok(Self::TypeCountsCsv),
             "取值" | "get" => Ok(Self::Select),
             "取多路径" | "get-paths" => Ok(Self::SelectPaths),
             "" => Err(TomlError::Incomplete),
@@ -176,6 +181,7 @@ pub(super) fn toml_csv_report(input: &str) -> Option<Result<String, TomlError>> 
             | TomlOperation::RegexStringsCsv
             | TomlOperation::FindTypesCsv
             | TomlOperation::DiffCsv
+            | TomlOperation::TypeCountsCsv
     )
     .then(|| run_toml_operation(operation, source))
 }
@@ -237,13 +243,10 @@ fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, Tom
                 TypeArgument::One(kind) => vec![kind],
                 TypeArgument::Many(kinds) => kinds,
             };
-            if !(1..=7).contains(&types.len())
-                || types.iter().any(|kind| {
-                    !matches!(
-                        kind.as_str(),
-                        "string" | "integer" | "float" | "boolean" | "datetime" | "array" | "table"
-                    )
-                })
+            if !(1..=TOML_LEAF_TYPES.len()).contains(&types.len())
+                || types
+                    .iter()
+                    .any(|kind| !TOML_LEAF_TYPES.contains(&kind.as_str()))
             {
                 return Err(TomlError::TypeSearchArguments);
             }
@@ -252,6 +255,7 @@ fn run_toml_source(operation: TomlOperation, source: &str) -> Result<String, Tom
             })
         }
         TomlOperation::DiffCsv => compare_toml_leaves(source),
+        TomlOperation::TypeCountsCsv => count_toml_leaf_types(parse_toml_table(source)?),
         TomlOperation::Json => write_toml_json(&toml::Value::Table(parse_toml_table(source)?)),
         TomlOperation::Select => select_toml_value(source),
         TomlOperation::SelectPaths => select_toml_paths(source),
@@ -453,6 +457,25 @@ fn visit_toml_leaves(
         visit(&path, kind, value)?;
     }
     Ok(())
+}
+
+fn count_toml_leaf_types(table: toml::Table) -> Result<String, TomlError> {
+    let mut counts = BTreeMap::<&str, usize>::new();
+    visit_toml_leaves(table, |path, kind, _| {
+        if !path.is_empty() {
+            *counts.entry(kind).or_default() += 1;
+        }
+        Ok(())
+    })?;
+    let mut output = String::from("类型,数量");
+    for (kind, count) in counts {
+        append_bounded_csv_row(
+            &mut output,
+            [kind, &count.to_string()].into_iter(),
+            TomlError::TooLarge,
+        )?;
+    }
+    Ok(output)
 }
 
 type TomlLeafCell = (&'static str, String);
@@ -786,6 +809,27 @@ mod tests {
                 line: 1,
                 column: 4
             }),
+        );
+    }
+
+    #[test]
+    fn counts_toml_leaf_types_without_counting_populated_containers() {
+        let query = concat!(
+            "类型统计CSV\n",
+            "port = 8000\nports = [8001, 8002]\nlabels = ['甲', '乙']\n",
+            "empty_array = []\n",
+            "[zone]\nactive = true\n",
+            "[empty_table]\n",
+        );
+        let expected = concat!(
+            "类型,数量\r\narray,1\r\nboolean,1\r\ninteger,3",
+            "\r\nstring,2\r\ntable,1",
+        );
+        assert_eq!(transform_toml(query).as_deref(), Ok(expected));
+        assert_eq!(toml_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_toml("type-counts-csv # only a comment").as_deref(),
+            Ok("类型,数量")
         );
     }
 
