@@ -2086,42 +2086,45 @@ impl ResultSearchDraft {
 }
 
 #[derive(Clone, Copy)]
+enum TextSearchPattern {
+    Keywords(text_tools::TextWordMatch),
+    Regex,
+}
+
+#[derive(Clone, Copy)]
 struct TextSearchCommand {
-    words: text_tools::TextWordMatch,
+    pattern: TextSearchPattern,
     table: bool,
 }
 
 impl TextSearchCommand {
     fn parse(query: &str) -> Option<(Self, &str)> {
         use text_tools::TextWordMatch::{All, Any, Exclude};
+        use TextSearchPattern::{Keywords, Regex};
 
-        [
-            (All, false),
-            (All, true),
-            (Any, false),
-            (Any, true),
-            (Exclude, false),
-            (Exclude, true),
-        ]
-        .into_iter()
-        .find_map(|(words, table)| {
-            let search = Self { words, table };
-            query
-                .strip_prefix(search.prefix())
-                .map(|arguments| (search, arguments))
-        })
+        [Keywords(All), Keywords(Any), Keywords(Exclude), Regex]
+            .into_iter()
+            .flat_map(|pattern| [false, true].map(|table| Self { pattern, table }))
+            .find_map(|search| {
+                query
+                    .strip_prefix(search.prefix())
+                    .map(|arguments| (search, arguments))
+            })
     }
 
     fn prefix(self) -> &'static str {
         use text_tools::TextWordMatch::{All, Any, Exclude};
+        use TextSearchPattern::{Keywords, Regex};
 
-        match (self.words, self.table) {
-            (All, false) => TEXT_SEARCH_COMMAND,
-            (All, true) => "文本: 搜索行CSV ",
-            (Any, false) => "文本: 搜索任一 ",
-            (Any, true) => "文本: 搜索任一CSV ",
-            (Exclude, false) => "文本: 排除关键词 ",
-            (Exclude, true) => "文本: 排除关键词CSV ",
+        match (self.pattern, self.table) {
+            (Keywords(All), false) => TEXT_SEARCH_COMMAND,
+            (Keywords(All), true) => "文本: 搜索行CSV ",
+            (Keywords(Any), false) => "文本: 搜索任一 ",
+            (Keywords(Any), true) => "文本: 搜索任一CSV ",
+            (Keywords(Exclude), false) => "文本: 排除关键词 ",
+            (Keywords(Exclude), true) => "文本: 排除关键词CSV ",
+            (Regex, false) => "文本: 正则保留行 ",
+            (Regex, true) => "文本: 正则保留行CSV ",
         }
     }
 }
@@ -2130,6 +2133,7 @@ impl TextSearchCommand {
 enum TextSearchChange {
     View,
     Words,
+    Regex,
 }
 
 struct SearchWordSwitch {
@@ -4092,16 +4096,22 @@ impl QuickSearch {
             ));
         }
         if let Some((search, _)) = text_search {
+            let result = match (search.pattern, search.table) {
+                (TextSearchPattern::Keywords(words), false) => {
+                    text_tools::search_result_text(arguments, source, words)
+                }
+                (TextSearchPattern::Keywords(words), true) => {
+                    text_tools::search_result_text_csv(arguments, source, words)
+                }
+                (TextSearchPattern::Regex, table) => {
+                    text_tools::search_result_regex_lines(arguments, source, table)
+                }
+            }
+            .map_err(ValueError::Text);
             return Some(if search.table {
-                Results::table_value(
-                    text_tools::search_result_text_csv(arguments, source, search.words)
-                        .map_err(ValueError::Text),
-                )
+                Results::table_value(result)
             } else {
-                Results::text_value(
-                    text_tools::search_result_text(arguments, source, search.words)
-                        .map_err(ValueError::Text),
-                )
+                Results::text_value(result)
             });
         }
         if draft.command == TABLE_CELL_COMMAND {
@@ -4154,6 +4164,7 @@ impl QuickSearch {
         change: TextSearchChange,
     ) -> Option<(TextSearchCommand, TextSearchCommand)> {
         use text_tools::TextWordMatch::{All, Any, Exclude};
+        use TextSearchPattern::{Keywords, Regex};
 
         let draft = self.input_before_result_search.as_ref()?;
         let (current, arguments) = draft.text_search(query)?;
@@ -4162,11 +4173,23 @@ impl QuickSearch {
                 table: !current.table,
                 ..current
             },
-            TextSearchChange::Words => TextSearchCommand {
-                words: match current.words {
-                    All => Any,
-                    Any => Exclude,
-                    Exclude => All,
+            TextSearchChange::Words => {
+                let Keywords(words) = current.pattern else {
+                    return None;
+                };
+                TextSearchCommand {
+                    pattern: Keywords(match words {
+                        All => Any,
+                        Any => Exclude,
+                        Exclude => All,
+                    }),
+                    ..current
+                }
+            }
+            TextSearchChange::Regex => TextSearchCommand {
+                pattern: match current.pattern {
+                    Keywords(_) => Regex,
+                    Regex => Keywords(All),
                 },
                 ..current
             },
@@ -4209,7 +4232,10 @@ impl QuickSearch {
 
     fn search_word_switch(&self, query: &str) -> Option<SearchWordSwitch> {
         if let Some((current, next)) = self.text_search_change(query, TextSearchChange::Words) {
-            let (label, hint) = match current.words {
+            let TextSearchPattern::Keywords(words) = current.pattern else {
+                return None;
+            };
+            let (label, hint) = match words {
                 text_tools::TextWordMatch::All => ("全部词", "Alt+M 改为匹配任一关键词"),
                 text_tools::TextWordMatch::Any => ("任一词", "Alt+M 改为排除关键词"),
                 text_tools::TextWordMatch::Exclude => ("排除词", "Alt+M 改为匹配全部关键词"),
@@ -4248,6 +4274,20 @@ impl QuickSearch {
         if let Some(change) = self.search_word_switch(input.text_ref()) {
             self.input.update(cx, |input, cx| {
                 input.replace_leading_text(change.current, change.next, window, cx);
+            });
+        }
+    }
+
+    fn switch_result_regex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.read(cx);
+        if input.is_composing() || self.file_operation_in_progress() {
+            return;
+        }
+        if let Some((current, next)) =
+            self.text_search_change(input.text_ref(), TextSearchChange::Regex)
+        {
+            self.input.update(cx, |input, cx| {
+                input.replace_leading_text(current.prefix(), next.prefix(), window, cx);
             });
         }
     }
@@ -4295,8 +4335,13 @@ impl QuickSearch {
                         .table_preview()
                         .and_then(|table| table.data_cell(row, 2)),
                 )
-                .and_then(|((_, arguments), text)| {
-                    text_tools::first_result_keyword_byte(arguments, text)
+                .and_then(|((search, arguments), text)| match search.pattern {
+                    TextSearchPattern::Keywords(_) => {
+                        text_tools::first_result_keyword_byte(arguments, text)
+                    }
+                    TextSearchPattern::Regex => {
+                        text_tools::first_result_regex_byte(arguments, text)
+                    }
                 })
                 .unwrap_or_default();
             let filter = self.query_draft(cx);
@@ -5354,6 +5399,17 @@ impl QuickSearch {
             {
                 if !event.is_held {
                     self.switch_text_result_view(window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1
+                && keystroke.modifiers.alt
+                && keystroke.key == "r"
+                && self
+                    .text_search_change(self.input.read(cx).text_ref(), TextSearchChange::Regex)
+                    .is_some()
+            {
+                if !event.is_held {
+                    self.switch_result_regex(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
@@ -7154,10 +7210,16 @@ impl Render for QuickSearch {
         let selected_text_file = self.results.selected_text_file(self.selected).is_some();
         let preview_path = self.file_preview_path();
         let text_search_view = self.text_result_view(&query).filter(|_| !naming_bookmark);
+        let text_search_regex = self
+            .text_search_change(&query, TextSearchChange::Regex)
+            .filter(|_| !naming_bookmark)
+            .map(|(current, _)| matches!(current.pattern, TextSearchPattern::Regex));
         let search_words = self.search_word_switch(&query).filter(|_| !naming_bookmark);
         let text_search_action = self.text_search_action(&query).filter(|_| !naming_bookmark);
-        let result_search_actions =
-            text_search_view.is_some() || search_words.is_some() || text_search_action.is_some();
+        let result_search_actions = text_search_view.is_some()
+            || text_search_regex.is_some()
+            || search_words.is_some()
+            || text_search_action.is_some();
         let action_padding = px(if preview_path.is_some() || result_search_actions {
             4.
         } else {
@@ -7401,6 +7463,22 @@ impl Render for QuickSearch {
                                 .tooltip(theme::text_tooltip("Ctrl+Alt+F 切换文本和行号表".into()))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.switch_text_result_view(window, cx);
+                                })),
+                        )
+                    })
+                    .when_some(text_search_regex, |header, enabled| {
+                        let (tone, hint) = if enabled {
+                            (Tone::Primary, "Alt+R 返回关键词查找")
+                        } else {
+                            (Tone::Ghost, "Alt+R 使用正则表达式逐行查找")
+                        };
+                        header.child(
+                            button("switch-result-regex", "正则", tone, true)
+                                .h(px(24.))
+                                .px(action_padding)
+                                .tooltip(theme::text_tooltip(hint.into()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.switch_result_regex(window, cx);
                                 })),
                         )
                     })

@@ -2348,6 +2348,28 @@ fn result_search_words(arguments: &str) -> Result<String, TextError> {
     Ok(query)
 }
 
+pub(super) fn search_result_regex_lines(
+    arguments: &str,
+    text: &str,
+    table: bool,
+) -> Result<String, TextError> {
+    let pattern = compile_regex(&result_search_words(arguments)?)?;
+    let format = if table {
+        LineOutput::Csv
+    } else {
+        LineOutput::Text
+    };
+    filter_compiled_regex_lines(&pattern, text, true, format)
+}
+
+pub(super) fn first_result_regex_byte(arguments: &str, line: &str) -> Option<usize> {
+    let (pattern, _) = text_operand(arguments).ok()?;
+    compile_regex(&pattern)
+        .ok()?
+        .find(line)
+        .map(|found| found.start())
+}
+
 pub(super) fn first_result_keyword_byte(arguments: &str, line: &str) -> Option<usize> {
     let (query, _) = text_operand(arguments).ok()?;
     let key = search_key(line);
@@ -2436,6 +2458,15 @@ fn filter_regex_lines(
     format: LineOutput,
 ) -> Result<String, TextError> {
     let (pattern, text) = regex_text_argument(input)?;
+    filter_compiled_regex_lines(&pattern, text, keep_matches, format)
+}
+
+fn filter_compiled_regex_lines(
+    pattern: &Regex,
+    text: &str,
+    keep_matches: bool,
+    format: LineOutput,
+) -> Result<String, TextError> {
     let matches = |line: &str| pattern.is_match(line) == keep_matches;
     match format {
         LineOutput::Text => Ok(numbered_text_lines(text, logical_newline_pattern())
@@ -5298,6 +5329,29 @@ mod tests {
         assert_eq!(
             transform_text("正则保留行CSV \"^WARN\" 恢复").as_deref(),
             Ok("原行号,原文")
+        );
+    }
+
+    #[test]
+    fn searches_attached_original_lines_with_one_regex_and_reports_match_offset() {
+        let source = "ok\r\n前缀 WARN,网关\u{2028}warn\rWARN 重试";
+        let arguments = r#""WARN""#;
+        assert_eq!(
+            search_result_regex_lines(arguments, source, false).as_deref(),
+            Ok("前缀 WARN,网关\nWARN 重试")
+        );
+        assert_eq!(
+            search_result_regex_lines(arguments, source, true).as_deref(),
+            Ok("原行号,原文\r\n2,\"前缀 WARN,网关\"\r\n4,WARN 重试")
+        );
+        assert_eq!(
+            first_result_regex_byte(arguments, "前缀 WARN,网关"),
+            Some("前缀 ".len())
+        );
+        assert_eq!(first_result_regex_byte(arguments, "warn"), None);
+        assert_eq!(
+            search_result_regex_lines(r#""[""#, source, true),
+            Err(TextError::InvalidRegex)
         );
     }
 
