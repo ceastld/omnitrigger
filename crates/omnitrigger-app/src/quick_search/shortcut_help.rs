@@ -77,6 +77,7 @@ const SHORTCUTS: &[[&str; 3]] = &[
         "Alt+Enter",
         "选中本页第一条记录的原文",
     ],
+    ["JSON 叶子CSV", "Alt+Enter", "选中本页第一项的原值"],
     ["展开的原文", "Ctrl+Shift+C", "复制当前页对应的原文"],
     ["展开的原文", "PageUp", "向上翻原文页"],
     ["展开的原文", "PageDown", "向下翻原文页"],
