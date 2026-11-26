@@ -4325,6 +4325,24 @@ impl QuickSearch {
         }
     }
 
+    fn can_resume_text_matches(&self, query: &str) -> bool {
+        self.text_match_search_return
+            .as_ref()
+            .is_some_and(|search| search.source_query == query)
+    }
+
+    fn text_search_action(&self, query: &str) -> Option<(&'static str, &'static str)> {
+        if self.input_before_result_search.is_some() {
+            return None;
+        }
+        if self.can_resume_text_matches(query) {
+            return Some(("命中表", "Ctrl+F 返回刚才的命中表"));
+        }
+        self.searchable_result_text()
+            .filter(|(command, _, _)| *command == TEXT_SEARCH_COMMAND)
+            .map(|_| ("查找", "Ctrl+F 筛选多行原文"))
+    }
+
     fn open_result_tool(
         &mut self,
         command: &'static str,
@@ -5295,6 +5313,7 @@ impl QuickSearch {
                 && keystroke.modifiers.control
                 && keystroke.key == "f"
                 && (self.input_before_result_search.is_some()
+                    || self.can_resume_text_matches(self.input.read(cx).text_ref())
                     || self.searchable_result_text().is_some())
             {
                 if !event.is_held {
@@ -7080,7 +7099,9 @@ impl Render for QuickSearch {
             .text_search_change(&query, TextSearchChange::View)
             .filter(|_| !naming_bookmark);
         let search_words = self.search_word_switch(&query).filter(|_| !naming_bookmark);
-        let result_search_actions = text_search_view.is_some() || search_words.is_some();
+        let text_search_action = self.text_search_action(&query).filter(|_| !naming_bookmark);
+        let result_search_actions =
+            text_search_view.is_some() || search_words.is_some() || text_search_action.is_some();
         let action_padding = px(if preview_path.is_some() || result_search_actions {
             4.
         } else {
@@ -7304,6 +7325,17 @@ impl Render for QuickSearch {
                             )
                         },
                     )
+                    .when_some(text_search_action, |header, (label, hint)| {
+                        header.child(
+                            button("open-text-result-search", label, Tone::Ghost, true)
+                                .h(px(24.))
+                                .px(action_padding)
+                                .tooltip(theme::text_tooltip(hint.into()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_result_search(window, cx);
+                                })),
+                        )
+                    })
                     .when_some(text_search_view, |header, (_, next)| {
                         let label = if next.table { "行号表" } else { "文本行" };
                         header.child(
@@ -10260,9 +10292,11 @@ mod tests {
         const QUERY: &str = "文本: 右填充 [2000,\".\"] 北区: OK\n南区: tea\n西区: 关闭";
         search.fill_query(QUERY, window, cx);
         search.refresh_results(QUERY, window, cx);
+        assert_eq!(search.text_search_action(QUERY).unwrap().0, "查找");
         search.toggle_result_search(window, cx);
         let blank = search.input.read(cx).text();
         assert_eq!(blank, "文本: 搜索行 \"\"");
+        assert!(search.text_search_action(&blank).is_none());
         search.refresh_results(&blank, window, cx);
         assert!(search.results.refillable_text().is_none());
 
@@ -10324,6 +10358,7 @@ mod tests {
         search.refresh_results(QUERY, window, cx);
         assert_eq!(search.input.read(cx).text(), QUERY);
         assert!(search.input_before_result_search.is_none());
+        assert_eq!(search.text_search_action(QUERY).unwrap().0, "命中表");
         let (text, pages) = search.paged_original_text().unwrap();
         assert!(value_preview::page_text(text, pages, search.selected)
             .unwrap()
