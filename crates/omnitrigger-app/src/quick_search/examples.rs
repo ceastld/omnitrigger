@@ -4746,6 +4746,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看重复文本的原行号和出现次数",
+        query: "文本: 重复位置CSV 甲,乙\n单独\n甲,乙\n恢复\n甲,乙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "导出正则命中行及其原行号",
         query: "文本: 正则保留行CSV \"^WARN\" ok\nWARN,网关\nwarn\nWARN 重试",
     },

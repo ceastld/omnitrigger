@@ -311,6 +311,9 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
     }
     match operation.to_ascii_lowercase().as_str() {
         "编号csv" | "number-lines-csv" => Some(number_lines_csv(text)),
+        "重复位置csv" | "duplicate-line-positions-csv" => {
+            Some(duplicate_line_positions_csv(text))
+        }
         "搜索行csv" | "search-lines-csv" => {
             Some(search_text_lines_csv(text, TextWordMatch::All))
         }
@@ -1272,6 +1275,33 @@ fn number_lines_csv(input: &str) -> Result<String, TextError> {
             [number.as_str(), line].into_iter(),
             TextError::ResultTooLarge,
         )?;
+    }
+    Ok(csv)
+}
+
+fn duplicate_line_positions_csv(input: &str) -> Result<String, TextError> {
+    let text = text_payload(input)?;
+    let newlines = logical_newline_pattern();
+    let mut counts = HashMap::new();
+    for (_, line) in numbered_text_lines(text, newlines) {
+        if line.contains('\0') {
+            return Err(TextError::NullCharacter);
+        }
+        *counts.entry(line).or_insert(0usize) += 1;
+    }
+
+    let mut csv = String::from("原行号,次数,原文");
+    for (index, line) in numbered_text_lines(text, newlines) {
+        let count = counts[line];
+        if count > 1 {
+            let number = (index + 1).to_string();
+            let count = count.to_string();
+            append_bounded_csv_row(
+                &mut csv,
+                [number.as_str(), count.as_str(), line].into_iter(),
+                TextError::ResultTooLarge,
+            )?;
+        }
     }
     Ok(csv)
 }
@@ -5285,6 +5315,23 @@ mod tests {
         }
         let entire = format!("context-lines [\"x\",{0},{0}] a\nx\nz", usize::MAX);
         assert_eq!(transform_text(&entire).as_deref(), Ok("a\nx\nz"));
+    }
+
+    #[test]
+    fn reports_all_duplicate_line_positions_in_source_order() {
+        let source = "开头\r\n甲,乙\u{2028}单独\r甲,乙\r\n甲,乙 \n甲,乙\n";
+        let input = format!("重复位置CSV {source}");
+        let expected = "原行号,次数,原文\r\n2,3,\"甲,乙\"\r\n4,3,\"甲,乙\"\r\n6,3,\"甲,乙\"";
+        assert_eq!(text_csv_report(&input).unwrap().as_deref(), Ok(expected));
+        assert_eq!(transform_text(&input).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("重复位置CSV A\na").as_deref(),
+            Ok("原行号,次数,原文")
+        );
+        assert_eq!(
+            transform_text("重复位置CSV a\n\nb\n\nc").as_deref(),
+            Ok("原行号,次数,原文\r\n2,2,\"\"\r\n4,2,\"\"")
+        );
     }
 
     #[test]
