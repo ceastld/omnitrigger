@@ -4187,6 +4187,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位零宽空格、连字控制符与变体选择符",
+        query: "文本: 默认忽略字符CSV 茶\u{200B}👩\u{200D}💻\n☕\u{FE0F}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "查看字符的码位、字节位置和编码",
         query: "文本: 码位表 \"北\u{200b}😀\"",
     },

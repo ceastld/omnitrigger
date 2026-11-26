@@ -248,6 +248,7 @@ pub(super) fn preserves_operand_trailing_whitespace(operation: &str) -> bool {
         || line_whitespace_trimmer(operation).is_some()
         || is_line_end_whitespace_csv_operation(operation)
         || is_unusual_whitespace_csv_operation(operation)
+        || is_default_ignorable_csv_operation(operation)
         || is_line_break_positions_csv_operation(operation)
         || is_paragraphs_csv_operation(operation)
         || is_fixed_width_csv_operation(operation)
@@ -279,7 +280,22 @@ pub(super) fn text_csv_report(input: &str) -> Option<Result<String, TextError>> 
         return Some(line_end_whitespace_csv(text));
     }
     if is_unusual_whitespace_csv_operation(operation) {
-        return Some(unusual_whitespace_csv(text));
+        return Some(character_positions_csv(
+            text,
+            "行号,列号,空白码位",
+            |ch| ch.is_whitespace() && !matches!(ch, ' ' | '\t'),
+        ));
+    }
+    if is_default_ignorable_csv_operation(operation) {
+        static DEFAULT_IGNORABLE: OnceLock<Regex> = OnceLock::new();
+        let pattern = DEFAULT_IGNORABLE.get_or_init(|| {
+            Regex::new(r"\p{Default_Ignorable_Code_Point}").expect("Unicode 默认忽略属性")
+        });
+        return Some(character_positions_csv(
+            text,
+            "行号,列号,默认忽略码位",
+            |ch| pattern.is_match(ch.encode_utf8(&mut [0; 4])),
+        ));
     }
     if is_line_break_positions_csv_operation(operation) {
         return Some(line_break_positions_csv(text));
@@ -1325,14 +1341,23 @@ fn is_unusual_whitespace_csv_operation(operation: &str) -> bool {
         || operation.eq_ignore_ascii_case("unusual-whitespace-csv")
 }
 
-fn unusual_whitespace_csv(text: &str) -> Result<String, TextError> {
+fn is_default_ignorable_csv_operation(operation: &str) -> bool {
+    operation.eq_ignore_ascii_case("默认忽略字符CSV")
+        || operation.eq_ignore_ascii_case("default-ignorable-csv")
+}
+
+fn character_positions_csv(
+    text: &str,
+    header: &str,
+    matches: impl Fn(char) -> bool,
+) -> Result<String, TextError> {
     if text.is_empty() {
         return Err(TextError::MissingText);
     }
-    let mut csv = String::from("行号,列号,空白码位");
+    let mut csv = String::from(header);
     for (line_index, line) in numbered_text_lines(text, logical_newline_pattern()) {
         for (column_index, character) in line.chars().enumerate() {
-            if !character.is_whitespace() || matches!(character, ' ' | '\t') {
+            if !matches(character) {
                 continue;
             }
             let fields = [
@@ -4753,6 +4778,25 @@ mod tests {
         assert_eq!(
             transform_text("unusual-whitespace-csv A\tB \r\nC").as_deref(),
             Ok("行号,列号,空白码位"),
+        );
+    }
+
+    #[test]
+    fn locates_default_ignorable_code_points_including_emoji_controls() {
+        let (_, query) = super::super::scope::scoped_query(
+            "文本: 默认忽略字符CSV\r\n前\u{200b}👩\u{200d}💻\r\ne\u{301}\u{202e}例\u{ad}\u{a0}\u{2028}☕\u{fe0f}",
+        )
+        .unwrap();
+        let expected = concat!(
+            "行号,列号,默认忽略码位",
+            "\r\n1,2,U+200B\r\n1,4,U+200D",
+            "\r\n2,3,U+202E\r\n2,5,U+00AD\r\n3,2,U+FE0F",
+        );
+        assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        assert_eq!(text_csv_report(query).unwrap().as_deref(), Ok(expected));
+        assert_eq!(
+            transform_text("default-ignorable-csv e\u{301}\u{a0} \t").as_deref(),
+            Ok("行号,列号,默认忽略码位"),
         );
     }
 
