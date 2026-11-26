@@ -2160,6 +2160,7 @@ enum FilePreviewFormat {
     Head,
     Tail,
     Table,
+    TailTable,
 }
 
 struct FileSearchReturn {
@@ -2278,10 +2279,12 @@ fn direct_file_preview_parts(query: &str) -> (FilePreviewFormat, &str) {
         "开头" => FilePreviewFormat::Head,
         "末尾" => FilePreviewFormat::Tail,
         "表格" => FilePreviewFormat::Table,
+        "末尾表格" => FilePreviewFormat::TailTable,
         mode if mode.eq_ignore_ascii_case("raw") => FilePreviewFormat::Raw,
         mode if mode.eq_ignore_ascii_case("head") => FilePreviewFormat::Head,
         mode if mode.eq_ignore_ascii_case("tail") => FilePreviewFormat::Tail,
         mode if mode.eq_ignore_ascii_case("table") => FilePreviewFormat::Table,
+        mode if mode.eq_ignore_ascii_case("tail-table") => FilePreviewFormat::TailTable,
         _ => return (FilePreviewFormat::Automatic, query),
     };
     (format, path.trim_start())
@@ -2392,7 +2395,13 @@ fn decode_input_file(bytes: &[u8], character_limit: usize) -> Result<String, Str
 fn decode_file_tail(
     tail: &omnitrigger_windows::LocalPreviewFileTail,
     character_limit: usize,
+    format: FilePreviewFormat,
 ) -> Result<String, String> {
+    let bom_bytes = match tail.prefix.as_slice() {
+        [0xff, 0xfe, ..] | [0xfe, 0xff, ..] => 2,
+        [0xef, 0xbb, 0xbf, ..] => 3,
+        _ => 0,
+    };
     let decoded = match tail.prefix.as_slice() {
         [0xff, 0xfe, ..] | [0xfe, 0xff, ..] => {
             let skip = if tail.offset < 2 {
@@ -2452,6 +2461,25 @@ fn decode_file_tail(
     if text.contains('\0') {
         return Err(input_file_encoding_error());
     }
+    if format == FilePreviewFormat::TailTable {
+        let clipped = (start > 0 || tail.offset > bom_bytes) && !decoded[..start].ends_with('\n');
+        let complete = if clipped {
+            text.split_once('\n').map_or("", |(_, rest)| rest)
+        } else {
+            text
+        };
+        let mut rows: Vec<_> = complete
+            .lines()
+            .rev()
+            .filter(|row| !row.trim().is_empty())
+            .take(table_preview::MAX_DATA_ROWS)
+            .collect();
+        if rows.is_empty() {
+            return Err("文件末尾没有能完整预览的 JSON 行".into());
+        }
+        rows.reverse();
+        return Ok(rows.join("\n"));
+    }
     Ok(text.to_owned())
 }
 
@@ -2470,6 +2498,10 @@ fn selected_file_query_prefix(
             Some("jsonl" | "ndjson") => "JSON: 行转CSV ",
             _ => return Err("表格预览支持 CSV、TSV、JSON、JSONL 和 NDJSON 文件".into()),
         },
+        FilePreviewFormat::TailTable => match input_file_extension(path).as_deref() {
+            Some("jsonl" | "ndjson") => "JSON: 行转CSV ",
+            _ => return Err("末尾表格支持 JSONL 和 NDJSON 文件".into()),
+        },
     })
 }
 
@@ -2477,10 +2509,13 @@ fn read_selected_text_query(path: &str, format: FilePreviewFormat) -> Result<Str
     let prefix = selected_file_query_prefix(Path::new(path), format)?;
     let character_limit = INPUT_CHARACTER_LIMIT - prefix.chars().count();
     let byte_limit = input_file_byte_limit(character_limit) + 1;
-    let text = if format == FilePreviewFormat::Tail {
+    let text = if matches!(
+        format,
+        FilePreviewFormat::Tail | FilePreviewFormat::TailTable
+    ) {
         let tail = omnitrigger_windows::read_local_preview_file_tail(path, byte_limit, || Ok(()))
             .map_err(|error| error.message)?;
-        decode_file_tail(&tail, character_limit)?
+        decode_file_tail(&tail, character_limit, format)?
     } else {
         let bytes = omnitrigger_windows::read_local_preview_file(path, byte_limit, || Ok(()))
             .map_err(|error| error.message)?;
@@ -11206,9 +11241,12 @@ mod tests {
             prefix: vec![0xef, 0xbb, 0xbf],
             bytes: [vec![0x9f, 0x98, 0x80], "甲😀尾".as_bytes().to_vec()].concat(),
         };
-        assert_eq!(decode_file_tail(&utf8, 2).as_deref(), Ok("😀尾"));
+        assert_eq!(
+            decode_file_tail(&utf8, 2, FilePreviewFormat::Tail).as_deref(),
+            Ok("😀尾")
+        );
         utf8.bytes.push(0xff);
-        assert!(decode_file_tail(&utf8, 2).is_err());
+        assert!(decode_file_tail(&utf8, 2, FilePreviewFormat::Tail).is_err());
 
         for little_endian in [false, true] {
             let prefix = if little_endian {
@@ -11228,10 +11266,45 @@ mod tests {
                     unit.to_be_bytes()
                 });
             }
-            assert_eq!(decode_file_tail(&utf16, 2).as_deref(), Ok("😀尾"));
+            assert_eq!(
+                decode_file_tail(&utf16, 2, FilePreviewFormat::Tail).as_deref(),
+                Ok("😀尾")
+            );
             utf16.bytes.push(0);
-            assert!(decode_file_tail(&utf16, 2).is_err());
+            assert!(decode_file_tail(&utf16, 2, FilePreviewFormat::Tail).is_err());
         }
+    }
+
+    #[test]
+    fn tail_tables_keep_complete_recent_json_records() {
+        use omnitrigger_windows::LocalPreviewFileTail;
+
+        let log = LocalPreviewFileTail {
+            offset: 99,
+            prefix: b"{\"x".to_vec(),
+            bytes: b"}\r\n{\"x\":1}\r\n\r\n{\"x\":2}".to_vec(),
+        };
+        assert_eq!(
+            decode_file_tail(&log, 64, FilePreviewFormat::TailTable).as_deref(),
+            Ok("{\"x\":1}\n{\"x\":2}")
+        );
+        assert_eq!(
+            decode_file_tail(&log, 7, FilePreviewFormat::TailTable).as_deref(),
+            Ok("{\"x\":2}")
+        );
+        assert!(decode_file_tail(&log, 6, FilePreviewFormat::TailTable).is_err());
+        let source = (1..=8)
+            .map(|row| format!("{{\"x\":{row}}}"))
+            .collect::<Vec<_>>();
+        let log = LocalPreviewFileTail {
+            offset: 0,
+            prefix: b"{\"x".to_vec(),
+            bytes: source.join("\n").into_bytes(),
+        };
+        assert_eq!(
+            decode_file_tail(&log, 128, FilePreviewFormat::TailTable).unwrap(),
+            source[2..].join("\n")
+        );
     }
 
     #[test]

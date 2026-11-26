@@ -6,7 +6,7 @@ use crate::theme::{self, rgb};
 
 use super::csv_tools::write_rows;
 
-const MAX_DATA_ROWS: usize = 6;
+pub(super) const MAX_DATA_ROWS: usize = 6;
 pub(super) const MAX_VISIBLE_COLUMNS: usize = 6;
 const MAX_VISIBLE_CELL_CHARACTERS: usize = 128;
 const MAX_COLUMN_WIDTH_UNITS: usize = 26;
