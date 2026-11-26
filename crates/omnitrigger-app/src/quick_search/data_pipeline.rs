@@ -9,7 +9,10 @@ use super::{
     calendar::{calculate_date, is_date_report},
     cidr::{calculate_cidr, cidr_csv_report},
     complex::calculate_complex,
-    conversion::{calculate_circuit, convert_exact_data, convert_wave, exact_data_csv_report},
+    conversion::{
+        calculate_circuit, convert_exact_data, convert_wave, estimate_transfer,
+        exact_data_csv_report,
+    },
     correlation_plot::CorrelationPlot,
     csv_tools::{
         append_bounded_csv_row, append_transformed_csv_column, build_column_box_plot,
@@ -52,7 +55,7 @@ use super::{
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_PIPELINE_OUTPUT_BYTES: usize = 1024 * 1024;
 const STEP_SYNTAX: &str =
-    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、网段、时长、数据换算、进制、音高、节拍、分贝、立体、波长、电路、方程、联立、分数或统计命令";
+    "每一步填写带前缀的文本、CSV、JSON、TOML、URL、路径、日期、时间戳、网段、时长、下载、数据换算、进制、音高、节拍、分贝、立体、波长、电路、方程、联立、分数或统计命令";
 const STEP_RESULT_SLOT: &str = "{结果}";
 const STEP_TEMPLATE_SYNTAX: &str = "模板的工具前缀之后须正好有一个 {结果}";
 
@@ -476,6 +479,7 @@ fn run_pipeline_steps(
                     | Scope::Timestamp
                     | Scope::Cidr
                     | Scope::Duration
+                    | Scope::TransferTime
                     | Scope::ExactData
                     | Scope::Radix
                     | Scope::Semver
@@ -526,6 +530,7 @@ fn run_pipeline_steps(
                 }
                 Scope::Cidr => calculate_cidr(&query).map_err(|cause| cause.message()),
                 Scope::Duration => convert_duration(&query).map_err(|cause| cause.message()),
+                Scope::TransferTime => estimate_transfer(&query).map_err(|cause| cause.message()),
                 Scope::ExactData => exact_data_csv_report(&query)
                     .unwrap_or_else(|| convert_exact_data(&query))
                     .map_err(|cause| cause.message()),
@@ -1234,6 +1239,33 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn calculates_transfer_estimates_per_source_row() {
+        assert_eq!(
+            run_pipeline(concat!(
+                r#"逐行CSV [{"模板":"下载: 精确耗时 {结果} 按 100 Mbps"}]"#,
+                "\n300 MB\n600 MB",
+            ))
+            .as_deref(),
+            Ok("输入,结果\r\n300 MB,24 s\r\n600 MB,48 s")
+        );
+        assert_eq!(
+            run_pipeline(
+                r#"["下载: 精确速率",{"模板":"数据换算: {结果} to MB/s"}] 300 MB 用时 24秒"#
+            )
+            .as_deref(),
+            Ok("25/2 MB/s")
+        );
+        assert!(matches!(
+            run_pipeline("逐行 [\"下载: 精确耗时\"]\n1 b 按 3 b/s\n\n1 MB 按 1 MB"),
+            Err(DataPipelineError::RowStep {
+                line: 3,
+                index: 1,
+                ..
+            })
+        ));
     }
 
     #[test]
