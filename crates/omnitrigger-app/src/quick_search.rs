@@ -6140,7 +6140,8 @@ impl Render for QuickSearch {
                             .id("quick-search-title")
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .text_ellipsis()
+                            .line_clamp(1)
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(title.to_owned())
                             .when_some(preview_path, |title, path| {
