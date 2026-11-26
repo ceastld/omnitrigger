@@ -2221,6 +2221,18 @@ fn supports_text_file_preview(path: &Path) -> bool {
                 | "htm"
                 | "css"
                 | "sql"
+                | "rs"
+                | "py"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "ps1"
+                | "psm1"
+                | "psd1"
+                | "sh"
+                | "bat"
+                | "cmd"
         )
     )
 }
@@ -11170,6 +11182,7 @@ mod tests {
         let index = SearchIndex::default();
         for extension in [
             "YAML", "yml", "ini", "cfg", "CONF", "Markdown", "XML", "html", "htm", "CSS", "SQL",
+            "RS", "py", "js", "jsx", "ts", "tsx", "PS1", "psm1", "psd1", "sh", "bat", "cmd",
         ] {
             let path = format!("C:/Settings/project.{extension}");
             index.recent.file_previews.record(&path);
