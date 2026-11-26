@@ -35,6 +35,7 @@ const FILETIME_UNIX_EPOCH_SECONDS: i64 = 11_644_473_600;
 const OPTION_HELP: &[(&str, &str)] = &[
     ("仅文件", "只匹配文件"),
     ("仅文件夹", "只匹配文件夹"),
+    ("仅可预览", "按支持文本预览的扩展名筛选文件"),
     ("最近修改", "按修改时间从新到旧"),
     ("最早修改", "按修改时间从旧到新"),
     ("最近创建", "按创建时间从新到旧"),
@@ -316,6 +317,9 @@ impl LocalFilesIndex {
             .filter(|entry| {
                 matches!(entry.kind, "file" | "directory")
                     && matches_extensions(entry, extensions.as_ref(), excluded_extensions.as_ref())
+                    && (!query.previewable_only
+                        || (entry.kind == "file"
+                            && super::supports_text_file_preview(Path::new(&entry.name))))
                     && query.matches_dates(entry)
                     && name_regex
                         .as_ref()
@@ -703,6 +707,7 @@ struct FileQuery<'a> {
     order: DirectoryOrder,
     name_order: NameOrder,
     entry_type: DirectoryEntryType,
+    previewable_only: bool,
     size_bounds: Option<(u64, u64)>,
     modified: DateBounds,
     created: DateBounds,
@@ -840,6 +845,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
     let mut order = DirectoryOrder::Name;
     let mut name_order = NameOrder::Matching;
     let mut entry_type = DirectoryEntryType::All;
+    let mut previewable_only = false;
     let (mut minimum, mut maximum) = (None, None);
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
     let mut extensions = None;
@@ -881,6 +887,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             "仅文件夹" | "folders" if entry_type == DirectoryEntryType::All => {
                 entry_type = DirectoryEntryType::Directory;
             }
+            "仅可预览" | "previewable" if !previewable_only => previewable_only = true,
             "路径列表" | "paths" if output == FileOutput::Entries => output = FileOutput::Lines,
             "名称列表" | "names" if output == FileOutput::Entries => output = FileOutput::Names,
             "路径json" | "json-paths" if output == FileOutput::Entries => {
@@ -973,6 +980,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             | FileOutput::SizeTotal
     ) || extensions.is_some()
         || excluded_extensions.is_some()
+        || previewable_only
     {
         if entry_type == DirectoryEntryType::Directory {
             return None;
@@ -1012,6 +1020,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             order,
             name_order,
             entry_type,
+            previewable_only,
             size_bounds,
             modified,
             created,
@@ -1566,6 +1575,41 @@ mod tests {
         );
         assert!(split_query(r"C:\Work | | 后缀=pdf,").is_none());
         assert!(split_query(r"C:\Work | | 后缀=pdf 仅文件夹").is_none());
+    }
+
+    #[test]
+    fn filters_previewable_file_names_using_the_same_extensions_as_preview() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | | 仅可预览";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("说明.MD", "file"),
+                entry("配置.YAML", "file"),
+                entry("报告.pdf", "file"),
+                entry("设置.yaml.exe", "file"),
+                entry("旧配置.yaml", "directory"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query),
+            Results::Destinations(items)
+                if items.iter().filter_map(|item| match item {
+                    Destination::LocalFile { name, .. } => Some(name.as_str()),
+                    _ => None,
+                }).eq(["说明.MD", "配置.YAML"])
+        ));
+        let combined = r"C:\Work | | previewable 后缀=yaml";
+        assert!(index.request(Some(combined)).is_none());
+        assert!(matches!(
+            index.results(combined),
+            Results::Destinations(items)
+                if matches!(items.as_slice(), [Destination::LocalFile { name, .. }] if name == "配置.YAML")
+        ));
+        assert!(split_query(r"C:\Work | | 仅可预览 仅文件夹").is_none());
+        assert!(split_query(r"C:\Work | | 仅可预览 previewable").is_none());
     }
 
     #[test]
