@@ -151,6 +151,7 @@ enum Dimension {
     Torque,
     Acceleration,
     Illuminance,
+    Luminance,
     ElectricCurrent,
     Voltage,
     Resistance,
@@ -200,6 +201,7 @@ impl Dimension {
             Self::Torque => &["N·m", "lbf·ft", "lbf·in", "N·cm", "kgf·m", "kN·m"],
             Self::Acceleration => &["m/s²", "g₀", "ft/s²", "cm/s²", "in/s²"],
             Self::Illuminance => &["lx", "fc", "klx", "phot"],
+            Self::Luminance => &["cd/m²", "nit", "fL", "cd/ft²", "sb", "lambert"],
             Self::ElectricCurrent => &["A", "mA", "μA", "nA", "kA", "MA"],
             Self::Voltage => &["V", "mV", "kV", "μV", "MV"],
             Self::Resistance => &["Ω", "kΩ", "MΩ", "mΩ", "GΩ"],
@@ -458,6 +460,20 @@ impl Unit {
                 Self::linear("fc", Illuminance, 1. / (FOOT_IN_METERS * FOOT_IN_METERS))
             }
             "phot" => Self::linear("phot", Illuminance, 10_000.),
+            "cd/m²" | "cd/m^2" | "cd/m2" | "坎德拉每平方米" => {
+                Self::linear("cd/m²", Luminance, 1.)
+            }
+            "nit" | "nits" | "nt" | "尼特" => Self::linear("nit", Luminance, 1.),
+            "cd/ft²" | "cd/ft^2" | "cd/ft2" => {
+                Self::linear("cd/ft²", Luminance, 1. / (FOOT_IN_METERS * FOOT_IN_METERS))
+            }
+            "fl" | "footlambert" | "foot-lambert" | "英尺朗伯" => Self::linear(
+                "fL",
+                Luminance,
+                1. / (PI * (FOOT_IN_METERS * FOOT_IN_METERS)),
+            ),
+            "sb" | "stilb" => Self::linear("sb", Luminance, 10_000.),
+            "lambert" | "朗伯" => Self::linear("lambert", Luminance, 10_000. / PI),
             "a" | "amp" | "ampere" | "安" | "安培" => Self::linear("A", ElectricCurrent, 1.),
             "纳安" | "纳安培" => Self::linear("nA", ElectricCurrent, 1e-9),
             "微安" | "微安培" => Self::linear("μA", ElectricCurrent, 1e-6),
@@ -2684,6 +2700,30 @@ mod tests {
         let targets = suggested_targets("100 lx to").unwrap();
         assert_eq!(targets.len(), 3);
         assert_eq!(targets[0].expression, "100 lx to fc");
+    }
+
+    #[test]
+    fn converts_luminance_and_keeps_illuminance_a_separate_dimension() {
+        for (query, expected) in [
+            ("100 nit to fL", "29.1863507960159 fL"),
+            ("1 foot-lambert to cd/m²", "3.42625909963539 cd/m²"),
+            ("1 cd/ft^2 to 尼特", "10.7639104167097 nit"),
+            ("500 尼特 to cd/m2", "500 cd/m²"),
+            ("1 sb to nt", "10000 nit"),
+            ("1 lambert to cd/m²", "3183.09886183791 cd/m²"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        assert_eq!(
+            convert("100 nit to lx"),
+            Some(Err(ConversionError::DifferentDimensions)),
+        );
+        let targets = suggested_targets("100 nit to").unwrap();
+        assert_eq!(targets.len(), 5);
+        assert_eq!(targets[0].expression, "100 nit to cd/m²");
+        assert!(targets
+            .iter()
+            .any(|target| target.expression == "100 nit to fL"));
     }
 
     #[test]

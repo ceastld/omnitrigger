@@ -4002,6 +4002,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "在尼特与英尺朗伯之间换算亮度",
+        query: "100 nit to fL",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算加速度",
         query: "1 g0 to m/s²",
     },
