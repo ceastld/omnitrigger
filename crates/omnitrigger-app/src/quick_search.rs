@@ -2147,6 +2147,13 @@ enum FilePreviewAction {
     Refresh,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilePreviewFormat {
+    Automatic,
+    Raw,
+    Head,
+}
+
 struct FileSearchReturn {
     query: String,
     path: String,
@@ -2254,13 +2261,22 @@ fn direct_file_preview_destination(query: &str) -> Option<Destination> {
     })
 }
 
-fn raw_file_preview_path(query: &str) -> Option<&str> {
-    let (mode, path) = query.split_once(char::is_whitespace)?;
-    (mode == "原文" || mode.eq_ignore_ascii_case("raw")).then_some(path.trim_start())
+fn direct_file_preview_parts(query: &str) -> (FilePreviewFormat, &str) {
+    let Some((mode, path)) = query.split_once(char::is_whitespace) else {
+        return (FilePreviewFormat::Automatic, query);
+    };
+    let format = match mode {
+        "原文" => FilePreviewFormat::Raw,
+        "开头" => FilePreviewFormat::Head,
+        mode if mode.eq_ignore_ascii_case("raw") => FilePreviewFormat::Raw,
+        mode if mode.eq_ignore_ascii_case("head") => FilePreviewFormat::Head,
+        _ => return (FilePreviewFormat::Automatic, query),
+    };
+    (format, path.trim_start())
 }
 
 fn direct_file_preview_results(query: &str) -> Results {
-    let path = raw_file_preview_path(query).unwrap_or(query);
+    let (_, path) = direct_file_preview_parts(query);
     Results::Destinations(direct_file_preview_destination(path).into_iter().collect())
 }
 
@@ -2282,6 +2298,50 @@ fn input_file_byte_limit(character_limit: usize) -> usize {
     character_limit * 4 + "\u{feff}".len()
 }
 
+fn utf16_file_units(payload: &[u8], little_endian: bool) -> impl Iterator<Item = u16> + '_ {
+    payload.chunks_exact(2).map(move |unit| {
+        let encoded = [unit[0], unit[1]];
+        if little_endian {
+            u16::from_le_bytes(encoded)
+        } else {
+            u16::from_be_bytes(encoded)
+        }
+    })
+}
+
+fn file_head_bytes(bytes: &[u8], character_limit: usize) -> &[u8] {
+    match bytes {
+        [0xff, 0xfe, payload @ ..] | [0xfe, 0xff, payload @ ..] => {
+            let mut end = 2;
+            let mut characters = char::decode_utf16(utf16_file_units(payload, bytes[0] == 0xff));
+            for _ in 0..character_limit {
+                let Some(Ok(character)) = characters.next() else {
+                    return bytes;
+                };
+                end += 2 * character.len_utf16();
+            }
+            &bytes[..end]
+        }
+        _ => {
+            let payload = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes);
+            let valid = match std::str::from_utf8(payload) {
+                Ok(text) => text,
+                Err(error) => std::str::from_utf8(&payload[..error.valid_up_to()])
+                    .expect("UTF-8 错误位置前的前缀已通过校验"),
+            };
+            let mut end = bytes.len() - payload.len();
+            let mut characters = valid.chars();
+            for _ in 0..character_limit {
+                let Some(character) = characters.next() else {
+                    return bytes;
+                };
+                end += character.len_utf8();
+            }
+            &bytes[..end]
+        }
+    }
+}
+
 fn decode_input_file(bytes: &[u8], character_limit: usize) -> Result<String, String> {
     let too_long = || format!("文件内容超过可插入的 {character_limit} 字符");
     if bytes.len() > input_file_byte_limit(character_limit) {
@@ -2290,19 +2350,10 @@ fn decode_input_file(bytes: &[u8], character_limit: usize) -> Result<String, Str
     let encoding_error = || "文件须为 UTF-8 文本或带 BOM 的 UTF-16 文本".to_owned();
     let text = match bytes {
         [0xff, 0xfe, payload @ ..] | [0xfe, 0xff, payload @ ..] => {
-            let units = payload.chunks_exact(2);
-            if !units.remainder().is_empty() {
+            if !payload.len().is_multiple_of(2) {
                 return Err(encoding_error());
             }
-            let little_endian = bytes[0] == 0xff;
-            let units = units.map(|unit| {
-                let encoded = [unit[0], unit[1]];
-                if little_endian {
-                    u16::from_le_bytes(encoded)
-                } else {
-                    u16::from_be_bytes(encoded)
-                }
-            });
+            let units = utf16_file_units(payload, bytes[0] == 0xff);
             char::decode_utf16(units)
                 .collect::<Result<String, _>>()
                 .map_err(|_| encoding_error())?
@@ -2323,11 +2374,10 @@ fn decode_input_file(bytes: &[u8], character_limit: usize) -> Result<String, Str
     Ok(text)
 }
 
-fn read_selected_text_query(path: &str, raw: bool) -> Result<String, String> {
-    let prefix = if raw {
-        RAW_TEXT_FILE_PREFIX
-    } else {
-        input_file_query_prefix(Path::new(path))
+fn read_selected_text_query(path: &str, format: FilePreviewFormat) -> Result<String, String> {
+    let prefix = match format {
+        FilePreviewFormat::Automatic => input_file_query_prefix(Path::new(path)),
+        FilePreviewFormat::Raw | FilePreviewFormat::Head => RAW_TEXT_FILE_PREFIX,
     };
     let character_limit = INPUT_CHARACTER_LIMIT - prefix.chars().count();
     let bytes = omnitrigger_windows::read_local_preview_file(
@@ -2336,7 +2386,12 @@ fn read_selected_text_query(path: &str, raw: bool) -> Result<String, String> {
         || Ok(()),
     )
     .map_err(|error| error.message)?;
-    let text = decode_input_file(&bytes, character_limit)?;
+    let preview = if format == FilePreviewFormat::Head {
+        file_head_bytes(&bytes, character_limit)
+    } else {
+        bytes.as_slice()
+    };
+    let text = decode_input_file(preview, character_limit)?;
     Ok(format!("{prefix}{text}"))
 }
 
@@ -3412,17 +3467,17 @@ impl QuickSearch {
                 &refill.original
             }
         };
-        let raw = matches!(
-            scoped_query(source),
-            Some((Scope::DirectFilePreview, term)) if raw_file_preview_path(term).is_some()
-        );
+        let format = match scoped_query(source) {
+            Some((Scope::DirectFilePreview, term)) => direct_file_preview_parts(term).0,
+            _ => FilePreviewFormat::Automatic,
+        };
         self.input_file_load = InputFileLoadState::InProgress;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let selected_path = path.clone();
             let loaded = cx
                 .background_executor()
-                .spawn(async move { read_selected_text_query(&path, raw) })
+                .spawn(async move { read_selected_text_query(&path, format) })
                 .await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |this, cx| {
@@ -10932,7 +10987,8 @@ mod tests {
         let path = dir.path().join("记录.JSONL");
         let payload = "{\"编号\":\"001\",\"金额\":1.50}\r\n{\"编号\":\"002\",\"备注\":\"茶,咖啡\"}";
         std::fs::write(&path, payload).unwrap();
-        let result = read_selected_text_query(path.to_str().unwrap(), false).unwrap();
+        let result =
+            read_selected_text_query(path.to_str().unwrap(), FilePreviewFormat::Automatic).unwrap();
         assert_eq!(result, format!("JSON: 合并行 {payload}"));
         assert_eq!(
             for_query(&result, &[]).refillable_text(),
@@ -10940,14 +10996,53 @@ mod tests {
         );
         let raw_payload = "  {\"编号\":\"001\"}\r\n  未完成\t\n";
         std::fs::write(&path, raw_payload).unwrap();
-        let raw = read_selected_text_query(path.to_str().unwrap(), true).unwrap();
+        let raw = read_selected_text_query(path.to_str().unwrap(), FilePreviewFormat::Raw).unwrap();
         assert_eq!(raw, format!("文本: 原文 {raw_payload}"));
         assert_eq!(for_query(&raw, &[]).refillable_text(), Some(raw_payload));
         std::fs::write(&path, "甲".repeat(INPUT_CHARACTER_LIMIT)).unwrap();
-        for raw in [false, true] {
-            assert!(read_selected_text_query(path.to_str().unwrap(), raw)
+        for format in [FilePreviewFormat::Automatic, FilePreviewFormat::Raw] {
+            assert!(read_selected_text_query(path.to_str().unwrap(), format)
                 .unwrap_err()
                 .contains("字符"));
+        }
+        let head =
+            read_selected_text_query(path.to_str().unwrap(), FilePreviewFormat::Head).unwrap();
+        assert_eq!(head.chars().count(), INPUT_CHARACTER_LIMIT);
+        assert!(head.starts_with("文本: 原文 甲"));
+    }
+
+    #[test]
+    fn reads_only_complete_utf8_or_utf16_characters_in_a_file_head() {
+        let mut utf8 = "\u{feff}茶😀".as_bytes().to_vec();
+        utf8.extend([0xf0, 0x9f]);
+        assert_eq!(
+            decode_input_file(file_head_bytes(&utf8, 2), 2).as_deref(),
+            Ok("茶😀")
+        );
+        assert!(decode_input_file(file_head_bytes(&utf8, 3), 3).is_err());
+        assert_eq!(
+            decode_input_file(file_head_bytes(b"short", 8), 8).as_deref(),
+            Ok("short")
+        );
+
+        for little_endian in [false, true] {
+            let mut utf16 = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in "茶😀".encode_utf16().chain([0xd800]) {
+                utf16.extend(if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            assert_eq!(
+                decode_input_file(file_head_bytes(&utf16, 2), 2).as_deref(),
+                Ok("茶😀"),
+            );
+            assert!(decode_input_file(file_head_bytes(&utf16, 3), 3).is_err());
         }
     }
 
@@ -11207,6 +11302,7 @@ mod tests {
         for query in [
             r#"预览文件: "C:\Reports\配置 示例.YAML""#,
             r#"预览文件: 原文 "C:\Reports\配置 示例.YAML""#,
+            r#"预览文件: 开头 "C:\Reports\配置 示例.YAML""#,
             r#""C:\Reports\配置 示例.YAML""#,
             r"C:\Reports\配置 示例.YAML",
         ] {
